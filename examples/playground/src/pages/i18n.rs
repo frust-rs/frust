@@ -49,7 +49,7 @@
 use frust::{
     Axis, ButtonStyle, Color, Component, CrossAxisAlignment, EdgeInsets, FlexView, Get, Padding,
     RwSignal, Set, SizedBox, Theme, View, button, column, component, inflexible, row, text,
-    use_context,
+    text_input, use_context,
 };
 use frust_i18n::fmt::{
     self, Calendar, CivilDate, CivilTime, CompactStyle, DateLength, DateTimeOptions, ListLength,
@@ -228,6 +228,8 @@ impl Component for I18nDemoPage {
             .child(SizedBox(None, Some(SECTION_GAP)))
             .child(section_heading("Formatting (new)"))
             .child(new_formatting_table(&format_locale, muted))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(component(ScriptSamples))
             .child(SizedBox(None, Some(SECTION_GAP)))
             .child(section_heading("Material strings"))
             .child(text(
@@ -559,6 +561,101 @@ impl Component for MaterialStringsSample {
     }
 }
 
+/// The script paragraphs' column width, in logical px: a fixed measure
+/// narrower than the page, so each sample has to wrap inside it.
+const SCRIPT_COLUMN_WIDTH: f64 = 240.0;
+
+/// The emoji line's font size, in logical px.
+const EMOJI_SIZE: f32 = 32.0;
+
+/// The script multiline input's visible line count before it scrolls.
+const SCRIPT_INPUT_LINES: usize = 4;
+
+/// The four script samples, each with the BCP 47 tag its paragraph is tagged
+/// with ([`frust::TextView::locale`]). The Thai sample is one unspaced sentence,
+/// so it can only wrap at the line breaker's own break opportunities.
+const SCRIPT_SAMPLES: [(&str, &str); 4] = [
+    (
+        "th",
+        "ภาษาไทยเขียนติดกันโดยไม่เว้นวรรคระหว่างคำ การตัดคำจึงต้องใช้พจนานุกรมและกฎของภาษา\
+         เพื่อขึ้นบรรทัดใหม่อย่างถูกต้องและอ่านง่าย",
+    ),
+    (
+        "vi",
+        "Tiếng Việt dùng chữ Latinh có dấu thanh, và các từ được tách bằng dấu cách nên \
+         văn bản này có thể xuống dòng ở mỗi khoảng trắng.",
+    ),
+    (
+        "ja",
+        "日本語の文章は、句読点「。」で区切られ、小さなかな「ゃ」「ゅ」「ょ」「っ」などを含みます。\
+         行頭禁則の扱いも確認できます。",
+    ),
+    (
+        "zh-Hans",
+        "中文文本没有空格分隔单词，换行时需要依据标点与语言规则进行断行，以确保阅读体验良好。",
+    ),
+];
+
+/// The emoji line: U+1F600, then the regional-indicator pairs for the flags TH
+/// and JP. Rendered by the system emoji fallback, not a bundled emoji face.
+const EMOJI_LINE: &str = "\u{1F600} \u{1F1F9}\u{1F1ED} \u{1F1EF}\u{1F1F5}";
+
+/// The script-samples section: a heading, one fixed-width locale-tagged
+/// paragraph per [`SCRIPT_SAMPLES`] entry, the emoji line and a multiline input
+/// a tester can paste into. A child [`Component`] so the input's text is its own
+/// state, composed into [`I18nDemoPage`]'s build tree.
+struct ScriptSamples;
+
+/// [`ScriptSamples`]'s retained state: the multiline input's current text.
+struct ScriptSamplesState {
+    input: String,
+}
+
+impl Component for ScriptSamples {
+    type State = ScriptSamplesState;
+
+    fn init(&self) -> ScriptSamplesState {
+        ScriptSamplesState {
+            input: String::new(),
+        }
+    }
+
+    fn build(&self, state: &mut ScriptSamplesState) -> impl View<ScriptSamplesState> {
+        let muted = muted();
+        let paragraphs = SCRIPT_SAMPLES
+            .iter()
+            .map(|&(tag, sample)| inflexible(script_paragraph(tag, sample)))
+            .collect();
+        let input = text_input(
+            state.input.clone(),
+            |samples: &mut ScriptSamplesState, typed: String| samples.input = typed,
+        )
+        .placeholder("Type or paste text here")
+        .multiline(SCRIPT_INPUT_LINES);
+
+        column()
+            .child(text("Script samples").size(12.0).color(accent()))
+            .child(
+                text("Each paragraph is tagged with its locale and wraps in a 240 px column.")
+                    .size(10.0)
+                    .color(muted),
+            )
+            .child(FlexView::new(Axis::Vertical, paragraphs).cross_axis(CrossAxisAlignment::Start))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(text(EMOJI_LINE).size(EMOJI_SIZE))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(input)
+            .cross_axis(CrossAxisAlignment::Start)
+    }
+}
+
+/// One script paragraph: `sample` in a [`SCRIPT_COLUMN_WIDTH`]-wide column,
+/// tagged `tag` so font fallback and line breaking follow that language. Its
+/// size is left at the default, so the OS text scale still applies to it.
+fn script_paragraph(tag: &'static str, sample: &'static str) -> impl View<ScriptSamplesState> {
+    SizedBox(Some(SCRIPT_COLUMN_WIDTH), None).child(text(sample).locale(tag))
+}
+
 /// Live-theme accent-text role (`primary`), falling back to the Material
 /// baseline pre-context — the same pattern every other section page uses.
 fn accent() -> Color {
@@ -583,7 +680,7 @@ mod tests {
     use frust::ComponentView;
     use frust_core::RenderRoot;
     use frust_i18n::{I18n, Locale, provide_i18n};
-    use frust_text::TextContext;
+    use frust_text::{TextContext, TextStyle};
     use kurbo::Size;
     use reactive_graph::owner::Owner;
 
@@ -695,5 +792,48 @@ mod tests {
         assert!(has(&ja, &japanese.snackbar_dismiss_a11y), "{ja:?}");
         assert_ne!(english.dialog_cancel, japanese.dialog_cancel);
         assert!(!has(&ja, &english.dialog_cancel), "{ja:?}");
+    }
+
+    /// The Thai sample is one unspaced sentence: laid out at the script
+    /// column's width it must take more than one line, so its height exceeds
+    /// the single-line height at unbounded width.
+    #[test]
+    fn the_thai_script_sample_wraps_in_its_column() {
+        let mut tcx = TextContext::new();
+        let style = TextStyle::default().with_locale(Some("th"));
+        let (tag, thai) = SCRIPT_SAMPLES[0];
+        assert_eq!(tag, "th");
+
+        let one_line = tcx.layout(thai, &style, None).size().height;
+        let wrapped = tcx
+            .layout(thai, &style, Some(SCRIPT_COLUMN_WIDTH as f32))
+            .size()
+            .height;
+        assert!(
+            wrapped > one_line,
+            "Thai sample did not wrap: {wrapped} <= {one_line}"
+        );
+    }
+
+    /// The whole page with the script section lays out at a phone width under
+    /// both a Latin and a Thai message locale.
+    #[test]
+    fn the_script_samples_section_lays_out_in_english_and_thai() {
+        for tag in ["en", "th"] {
+            let owner = Owner::new();
+            owner.set();
+            let engine =
+                frust_i18n::Engine::new(frust_i18n::fmt::with_icu_functions(crate::locale_set()))
+                    .expect("`locales!` validated every embedded source at compile time");
+            provide_i18n(I18n::from_engine(engine, &[locale(tag)]));
+
+            let mut root: RenderRoot<(), ComponentView<I18nDemoPage>> = RenderRoot::new();
+            let mut logic = |_: &mut ()| component(I18nDemoPage);
+            let mut state = ();
+            let mut tcx = TextContext::new();
+            root.rebuild(&mut logic, &mut state);
+            let size = root.layout_with_text(Size::new(390.0, 3000.0), &mut tcx as &mut dyn Any);
+            assert!(size.height > 0.0, "{tag}: page laid out to {size:?}");
+        }
     }
 }
