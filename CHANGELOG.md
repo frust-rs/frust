@@ -13,6 +13,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `frust-ui = { version = "...", default-features = false }` (or `frust-text` likewise); unspaced
   Thai/Lao/Khmer/Myanmar text then overflows a line instead of wrapping, and Chinese/Japanese word
   motion falls back to per-character stops.
+- `TextStyle` `with_<field>` builders for every field (`with_family`, `with_weight`, `with_style`,
+  `with_width`, `with_size`, `with_color`, `with_letter_spacing`, `with_line_height`,
+  `with_align`, `with_overflow_wrap`, `with_locale`, `with_variation(s)`), chained from
+  `TextStyle::new(size, color)` or `Default`.
 - `glass_surface(child)` (`GlassSurfaceView`, flat from `frust`): a baseline widget that paints one
   tier of the theme's glass scale behind its child (shadow cast outside the surface, rounded clip, backdrop blur and washes,
   child, specular hairline). `.tier(GlassTier)` picks `Control`, `Bar` (default) or `Chrome` from the
@@ -303,8 +307,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `AnimatedOpacity` and `card_switcher`) runs for `MotionExtras::reduced_fade` (120 ms by default; 0
   snaps with no frame request) instead of a fixed 120 ms. The `network_image` fade-in therefore
   collapses to that reduced fade under reduce-motion.
-- `TextStyle` gains a public field `overflow_wrap`: an external exhaustive struct literal needs
-  `..Default::default()`. ja/zh text now uses Normal line-break strictness (small kana may start a
+- `TextStyle` gains a public field `overflow_wrap`, and is now `#[non_exhaustive]`: build it with
+  `TextStyle::new` / `Default` plus the new `with_*` builders (struct literals no longer compile
+  outside `frust-text`). ja/zh text now uses Normal line-break strictness (small kana may start a
   line). Release size grows by about 3 MB per app with the segmentation dictionaries (see
   `docs/PERFORMANCE_BASELINES.md`).
 
