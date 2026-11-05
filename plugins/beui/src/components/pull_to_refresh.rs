@@ -566,13 +566,11 @@ const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
 /// The family here is the unthemed base; `layout` shapes in [`LABEL_ROLE`]'s
 /// family.
 fn label_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::MEDIUM,
-        size: LABEL_SIZE as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_weight(FontWeight::MEDIUM)
+        .with_size(LABEL_SIZE as f32)
+        .with_color(color)
 }
 
 impl<State: 'static> View<State> for PullToRefreshView<State> {

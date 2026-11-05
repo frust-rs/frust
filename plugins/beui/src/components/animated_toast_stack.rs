@@ -580,10 +580,8 @@ fn resolve_colors(status: AnimatedToastStackStatus, theme: Option<&Theme>) -> To
 /// The title style (`text-sm font-medium`), in the theme's `label_large`
 /// family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
-    };
+    let style = TextStyle::new(style::TEXT_SM as f32, crate::text::SHAPING_INK)
+        .with_weight(FontWeight::MEDIUM);
     themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 
@@ -596,10 +594,7 @@ fn body_style(theme: Option<&Theme>) -> TextStyle {
 
 /// The action label style (`text-xs font-medium`).
 fn action_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..body_style(theme)
-    }
+    body_style(theme).with_weight(FontWeight::MEDIUM)
 }
 
 /// One retained toast.

@@ -184,10 +184,7 @@ pub fn mono_family() -> FontFamily {
 /// a scale upstream does not author.
 pub fn type_scale(base: &TextStyle) -> TypeScale {
     let scale = TypeScale::neutral(base);
-    let sans = |style: &TextStyle| TextStyle {
-        family: sans_family(),
-        ..style.clone()
-    };
+    let sans = |style: &TextStyle| style.clone().with_family(sans_family());
     TypeScale {
         display_large: sans(&scale.display_large),
         display_medium: sans(&scale.display_medium),

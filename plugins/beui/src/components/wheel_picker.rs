@@ -515,13 +515,11 @@ const ROW_ROLE: ThemeTextType = ThemeTextType::BodyLarge;
 /// A row label's style: `font-medium` at the theme's body size. The family
 /// here is the unthemed base; `layout` shapes in [`ROW_ROLE`]'s family.
 fn row_style(color: Color) -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        weight: FontWeight::MEDIUM,
-        size: style::TEXT_BASE as f32,
-        color,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_weight(FontWeight::MEDIUM)
+        .with_size(style::TEXT_BASE as f32)
+        .with_color(color)
 }
 
 impl<State: 'static> View<State> for WheelPicker<State> {

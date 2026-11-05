@@ -292,14 +292,11 @@ fn resolve_colors(theme: Option<&Theme>) -> TreeColors {
 /// The row name style (`text-sm`; a selected row is `font-medium`), in the
 /// theme's `label_large` family.
 fn name_style(theme: Option<&Theme>, selected: bool) -> TextStyle {
-    let style = TextStyle {
-        weight: if selected {
-            FontWeight::MEDIUM
-        } else {
-            FontWeight::REGULAR
-        },
-        ..TextStyle::new(style::TEXT_SM as f32, Color::BLACK)
-    };
+    let style = TextStyle::new(style::TEXT_SM as f32, Color::BLACK).with_weight(if selected {
+        FontWeight::MEDIUM
+    } else {
+        FontWeight::REGULAR
+    });
     themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 

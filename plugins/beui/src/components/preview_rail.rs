@@ -241,10 +241,8 @@ fn resolve_colors(theme: Option<&Theme>) -> RailColors {
 
 /// The card title style (`font-medium`), in the theme's `label_large` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(style::TEXT_BASE as f32, Color::BLACK)
-    };
+    let style =
+        TextStyle::new(style::TEXT_BASE as f32, Color::BLACK).with_weight(FontWeight::MEDIUM);
     themed_style(style, ThemeTextType::LabelLarge, theme)
 }
 

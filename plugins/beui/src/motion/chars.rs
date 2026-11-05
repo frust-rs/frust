@@ -1108,10 +1108,7 @@ mod tests {
     #[test]
     fn an_explicit_style_family_wins_over_the_theme() {
         // `.style()` names the family, before or after `.themed_family()`.
-        let mono = TextStyle {
-            family: crate::tokens::mono_family(),
-            ..TextStyle::default()
-        };
+        let mono = TextStyle::default().with_family(crate::tokens::mono_family());
         for view in [
             char_cascade::<()>("Ship")
                 .style(mono.clone())

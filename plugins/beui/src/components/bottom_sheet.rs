@@ -535,10 +535,8 @@ impl SheetPanelWidget {
 /// The title's style (`text-base font-semibold`), in the theme's
 /// `title_medium` family.
 fn title_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::SEMI_BOLD,
-        ..TextStyle::new(style::TEXT_BASE as f32, crate::text::SHAPING_INK)
-    };
+    let style = TextStyle::new(style::TEXT_BASE as f32, crate::text::SHAPING_INK)
+        .with_weight(FontWeight::SEMI_BOLD);
     themed_style(style, ThemeTextType::TitleMedium, theme)
 }
 
