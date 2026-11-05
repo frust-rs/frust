@@ -39,8 +39,8 @@ pub use oracle::RenderCapabilities;
 pub use oracle::cache::FontCacheStats;
 pub use shape_cache::ShapeCacheStats;
 pub use style::{
-    FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, TextAlign,
-    TextOverflow, TextStyle,
+    FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, OverflowWrap,
+    TextAlign, TextOverflow, TextStyle,
 };
 
 /// The process-wide count of visible-text glyphs that shaped to glyph 0
