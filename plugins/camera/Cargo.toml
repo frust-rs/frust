@@ -29,8 +29,8 @@ log = { workspace = true }
 # (`docs/CODE_STANDARDS.md` Plugin Conventions).
 frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.5" }
 
-# `frust-api`'s preview-texture bridge (`src/texture.rs`). Literal `path`: the root `frust` entry
-# sets no `default-features`, so a member cannot override it (as in plugins/video-player).
+# `frust-api`'s preview-texture bridge (`src/texture.rs`). `default-features = false`: a library
+# never turns on the facade's defaults (`complex-scripts`); the app decides (as in plugins/i18n).
 # Published as frust-ui, imported as frust (https://github.com/lloydmeta/frunk/issues/258).
 frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.5", default-features = false, optional = true }
 
