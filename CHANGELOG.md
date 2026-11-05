@@ -12,7 +12,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   dictionary line and word segmentation (about 3 MB per app). An app opts out with
   `frust-ui = { version = "...", default-features = false }` (or `frust-text` likewise); unspaced
   Thai/Lao/Khmer/Myanmar text then overflows a line instead of wrapping, and Chinese/Japanese word
-  motion falls back to per-character stops.
+  motion falls back to per-character stops. Cargo unifies features across the graph, so every
+  library in the app's dependency graph must also leave `frust-ui`/`frust-text` default features
+  off; frust's own plugins do.
 - `TextStyle` `with_<field>` builders for every field (`with_family`, `with_weight`, `with_style`,
   `with_width`, `with_size`, `with_color`, `with_letter_spacing`, `with_line_height`,
   `with_align`, `with_overflow_wrap`, `with_locale`, `with_variation(s)`), chained from
@@ -198,7 +200,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   input only while open, semantics only while visible. Reversing a duration ramp is value-continuous
   and a spring value- and velocity-continuous; `on_exited` is delivered on the next frame's
   Housekeeping event, and only once an exit has painted. Under `reduce_motion` it runs a linear reduced fade.
-- Dictionary line and word segmentation (`parley_engine` `complex-scripts`): unspaced
+- With the default-on `complex-scripts` feature, dictionary line and word segmentation
+  (`parley_engine`): unspaced
   Thai/Lao/Khmer/Myanmar text wraps and word-moves at dictionary word boundaries, and the
   Chinese/Japanese word dictionary drives CJ word motion. A line overflows only when a run has no
   break opportunity (one long word, a URL) unless `overflow_wrap` says otherwise.

@@ -26,7 +26,7 @@ unic-langid = { workspace = true }
 # Optional `frust-api` glue. Literal `path`, not `workspace = true`: the root `frust` entry sets no
 # `default-features`, so a member cannot override it.
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.5", optional = true }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.5", default-features = false, optional = true }
 
 # Optional plugin->plugin edge (`persistence`): a facade-tier crate persisting the locale override
 # through the platform plugin that owns key-value storage. Literal path, acyclic, off by default.

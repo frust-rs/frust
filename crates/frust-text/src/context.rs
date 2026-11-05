@@ -395,9 +395,11 @@ impl TextContext {
     /// opportunity wider than `max_width` (one long word, a URL) overflows its
     /// line rather than breaking, unless `style.overflow_wrap` is
     /// [`OverflowWrap::Anywhere`](crate::OverflowWrap::Anywhere), which breaks
-    /// it between characters. Thai, Lao, Khmer and
-    /// Myanmar text without spaces is not such a run: dictionary segmentation
-    /// supplies its break opportunities, so it wraps between words.
+    /// it between characters. With the default-on `complex-scripts` feature,
+    /// Thai, Lao, Khmer and Myanmar text without spaces is not such a run:
+    /// dictionary segmentation supplies its break opportunities, so it wraps
+    /// between words. Without the feature such text overflows like any other
+    /// unbreakable run.
     ///
     /// Shaping goes through the shape cache: the same (text, style) shapes
     /// once, and a width change re-runs only the line layout on the cached
