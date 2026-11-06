@@ -47,7 +47,7 @@ surface-loss transition is legal.
 
 ### Host-dependent tests
 
-A test that needs a host facility (macOS CoreText, a system emoji font) checks its
+A test that needs a host facility (macOS CoreText, a system emoji font; the `apple_raster` emoji tests run on iOS via the simulator runner and are ignored on macOS) checks its
 real precondition, not just the OS, and when it is missing prints one `SKIPPED (n): <missing
 precondition>` line and passes. The macOS oracle tests in `crates/frust-text/src/oracle/apple.rs`
 check that the PingFang collection is present and that CoreText resolves the named face, and a
