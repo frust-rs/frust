@@ -68,6 +68,36 @@
 //! A started cross-axis drag that later travels past the scroll's slop on the
 //! scroll axis is taken over too, and receives its `cancel`.
 //!
+//! # Press state
+//!
+//! [`on_tap_down`](GestureDetectorView::on_tap_down),
+//! [`on_tap_up`](GestureDetectorView::on_tap_up) and
+//! [`on_tap_cancel`](GestureDetectorView::on_tap_cancel) make a still press
+//! observable (a "hold to see" preview, a pressed highlight). The contract:
+//! every `on_tap_down` is followed by **exactly one** `on_tap_up` or
+//! `on_tap_cancel` before the next `on_tap_down`.
+//!
+//! - **Down.** A primary `Down` fires `on_tap_down` at once, with no delay and
+//!   even inside a scroll view, carrying the local position. A second `Down`
+//!   while a press is still active (a missed `Up`/`Cancel`) first delivers the
+//!   `on_tap_cancel` of the old press.
+//! - **Up.** A release of an active press fires `on_tap_up` (before `on_tap`).
+//!   A press held past [`LONG_PRESS_MS`] still ends in `on_tap_up`.
+//! - **Cancel by movement.** A `Move` that passes [`TOUCH_SLOP`] from the
+//!   `Down`, or leaves the detector's bounds, fires `on_tap_cancel` at once;
+//!   the later `Up` then fires no `on_tap_up`. This is stricter than `on_tap`:
+//!   leaving the bounds within the slop cancels the press, yet does not stop a
+//!   later `on_tap`. `on_tap`, long-press, hold-progress and drag recognition
+//!   keep their own rules.
+//! - **Cancel by steal.** A `Cancel` (a scroll view taking the press over, a
+//!   system cancel, a structural rebuild over throwaway state) owes the
+//!   `on_tap_cancel`, like a drag `cancel`: the `Cancel` arm never reaches
+//!   application state, so the callback runs one frame late, from the next
+//!   `Housekeeping` broadcast or the next pointer event, whichever comes
+//!   first.
+//! - **Removal.** A detector torn down mid-press fires nothing, so the
+//!   one-follow-up guarantee does not hold across removal.
+//!
 //! # Long-press firing semantics
 //!
 //! Timing is measured across **paints**, not events: only the paint pass carries
@@ -221,6 +251,26 @@ pub struct DragEndDetails {
     pub velocity: Vec2,
     /// The signed velocity along the drag's axis; `None` for a pan.
     pub primary_velocity: Option<f64>,
+}
+
+/// What an `on_tap_down` callback receives: where the press began.
+///
+/// `#[non_exhaustive]` so fields can be added later; read the public fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct TapDownDetails {
+    /// The pointer position, local to the detector, at the `Down`.
+    pub local_position: Point,
+}
+
+/// What an `on_tap_up` callback receives: where the press was released.
+///
+/// `#[non_exhaustive]` so fields can be added later; read the public fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct TapUpDetails {
+    /// The pointer position, local to the detector, at the `Up`.
+    pub local_position: Point,
 }
 
 /// Which drag recognizer a press is tracking.
@@ -402,6 +452,9 @@ pub struct GestureDetectorView<State: 'static> {
     child: AnyView<State>,
     on_tap: Option<GestureCallback<State>>,
     on_long_press: Option<GestureCallback<State>>,
+    on_tap_down: Option<TypedArgCallback<State, TapDownDetails>>,
+    on_tap_up: Option<TypedArgCallback<State, TapUpDetails>>,
+    on_tap_cancel: Option<GestureCallback<State>>,
     on_hold_progress: Option<crate::authoring::TypedArgCallback<State, f64>>,
     hold_threshold_ms: Option<u64>,
     vertical_drag: DragCallbacks<State>,
@@ -418,6 +471,9 @@ pub fn GestureDetector<State: 'static, V: View<State>>(child: V) -> GestureDetec
         child: any(child),
         on_tap: None,
         on_long_press: None,
+        on_tap_down: None,
+        on_tap_up: None,
+        on_tap_cancel: None,
         on_hold_progress: None,
         hold_threshold_ms: None,
         vertical_drag: DragCallbacks::new(),
@@ -524,6 +580,35 @@ impl<State: 'static> GestureDetectorView<State> {
         self
     }
 
+    /// Call `f` the instant a primary press lands on the detector, with the
+    /// local position. No delay, even inside a scroll view. Exactly one of
+    /// [`on_tap_up`](Self::on_tap_up) or [`on_tap_cancel`](Self::on_tap_cancel)
+    /// follows before the next `on_tap_down`; see the [module
+    /// docs](self#press-state).
+    pub fn on_tap_down<F: Fn(&mut State, TapDownDetails) + 'static>(mut self, f: F) -> Self {
+        self.on_tap_down = Some(Rc::new(f));
+        self
+    }
+
+    /// Call `f` when an active press is released, before
+    /// [`on_tap`](Self::on_tap). A press held past the long-press threshold
+    /// still ends here. See the [module docs](self#press-state).
+    pub fn on_tap_up<F: Fn(&mut State, TapUpDetails) + 'static>(mut self, f: F) -> Self {
+        self.on_tap_up = Some(Rc::new(f));
+        self
+    }
+
+    /// Call `f` when an active press ends without a release: the pointer
+    /// passed [`TOUCH_SLOP`] or left the detector's bounds (immediately), or
+    /// the press was cancelled by a steal or system cancel (one frame late,
+    /// from the next state-bearing pass). Stricter than
+    /// [`on_tap`](Self::on_tap): leaving the bounds within the slop cancels
+    /// the press but not a later tap. See the [module docs](self#press-state).
+    pub fn on_tap_cancel<F: Fn(&mut State) + 'static>(mut self, f: F) -> Self {
+        self.on_tap_cancel = Some(Rc::new(f));
+        self
+    }
+
     /// Observe press-hold progress (`0.0..=1.0` against
     /// [`hold_threshold_ms`](Self::hold_threshold_ms), default [`LONG_PRESS_MS`])
     /// while the child is held — the primitive a charge-up ring or similar hold
@@ -606,6 +691,17 @@ pub struct GestureDetectorWidget {
     state: Recognizer,
     on_tap: Option<crate::authoring::ErasedCallback>,
     on_long_press: Option<crate::authoring::ErasedCallback>,
+    on_tap_down: Option<ErasedArgCallback<TapDownDetails>>,
+    on_tap_up: Option<ErasedArgCallback<TapUpDetails>>,
+    on_tap_cancel: Option<ErasedCallback>,
+    /// A press `on_tap_down` was delivered for, with no `on_tap_up` or
+    /// `on_tap_cancel` yet.
+    press_active: bool,
+    /// Where the active press began, for the tap-cancel slop check.
+    press_origin: Point,
+    /// A `Cancel` ended an active press, whose `on_tap_cancel` is owed to the
+    /// next state-bearing pass (see the [module docs](self#press-state)).
+    owed_tap_cancel: bool,
     on_hold_progress: Option<crate::authoring::ErasedArgCallback<f64>>,
     /// The press timer, firing at the resolved hold threshold —
     /// [`GestureDetectorView::hold_threshold_ms`] if set, else
@@ -682,6 +778,32 @@ impl GestureDetectorWidget {
         self.velocity_y.record(t_ms, position.y);
     }
 
+    /// Whether any press-state callback is wired.
+    fn press_wired(&self) -> bool {
+        self.on_tap_down.is_some() || self.on_tap_up.is_some() || self.on_tap_cancel.is_some()
+    }
+
+    /// End the active press with its `on_tap_cancel`. Only from passes that
+    /// carry real application state.
+    fn fire_tap_cancel(&mut self, ctx: &mut EventCtx) {
+        self.press_active = false;
+        if let Some(cb) = self.on_tap_cancel.as_mut() {
+            cb(ctx);
+            ctx.request_redraw();
+        }
+    }
+
+    /// Run an owed `on_tap_cancel`. Called only from passes that carry real
+    /// application state — never from the `Cancel` arm.
+    fn flush_owed_tap_cancel(&mut self, ctx: &mut EventCtx) {
+        if std::mem::take(&mut self.owed_tap_cancel)
+            && let Some(cb) = self.on_tap_cancel.as_mut()
+        {
+            cb(ctx);
+            ctx.request_redraw();
+        }
+    }
+
     /// Run an owed drag `cancel` callback. Called only from passes that carry
     /// real application state — never from the `Cancel` arm.
     fn flush_owed_cancel(&mut self, ctx: &mut EventCtx) {
@@ -702,6 +824,12 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             child: crate::authoring::build_child(&self.child, ctx),
             state: Recognizer::Idle,
             on_tap: self.on_tap.as_ref().map(crate::authoring::erase_callback),
+            on_tap_down: self.on_tap_down.as_ref().map(erase_callback_arg),
+            on_tap_up: self.on_tap_up.as_ref().map(erase_callback_arg),
+            on_tap_cancel: self.on_tap_cancel.as_ref().map(erase_callback),
+            press_active: false,
+            press_origin: Point::ZERO,
+            owed_tap_cancel: false,
             on_long_press: self
                 .on_long_press
                 .as_ref()
@@ -740,6 +868,9 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             .on_long_press
             .as_ref()
             .map(crate::authoring::erase_callback);
+        element.on_tap_down = self.on_tap_down.as_ref().map(erase_callback_arg);
+        element.on_tap_up = self.on_tap_up.as_ref().map(erase_callback_arg);
+        element.on_tap_cancel = self.on_tap_cancel.as_ref().map(erase_callback);
         element.on_hold_progress = self
             .on_hold_progress
             .as_ref()
@@ -830,6 +961,7 @@ impl Widget for GestureDetectorWidget {
             // any other pointer phase carries real state, so pay it first.
             if p.phase != PointerPhase::Cancel {
                 self.flush_owed_cancel(ctx);
+                self.flush_owed_tap_cancel(ctx);
             }
             match p.phase {
                 PointerPhase::Down => {
@@ -839,6 +971,24 @@ impl Widget for GestureDetectorWidget {
                     // child, whose own context handling (if any) owns it.
                     if !presses(p) {
                         return self.child.event_child(ctx, event);
+                    }
+                    // A press that never saw its `Up`/`Cancel` ends before the
+                    // next one starts.
+                    if self.press_active {
+                        self.fire_tap_cancel(ctx);
+                    }
+                    if self.press_wired() {
+                        self.press_active = true;
+                        self.press_origin = p.position;
+                        if let Some(cb) = self.on_tap_down.as_mut() {
+                            cb(
+                                ctx,
+                                TapDownDetails {
+                                    local_position: p.position,
+                                },
+                            );
+                            ctx.request_redraw();
+                        }
                     }
                     self.state = Recognizer::Pressed {
                         down_pos: p.position,
@@ -855,6 +1005,19 @@ impl Widget for GestureDetectorWidget {
                     return EventResult::Handled;
                 }
                 PointerPhase::Move => {
+                    // The press ends the moment the pointer passes the slop or
+                    // leaves the bounds; `on_tap` and the other recognizers
+                    // below keep their own rules.
+                    if self.press_active {
+                        let size = ctx.size();
+                        let outside = p.position.x < 0.0
+                            || p.position.y < 0.0
+                            || p.position.x > size.width
+                            || p.position.y > size.height;
+                        if outside || (p.position - self.press_origin).hypot() > TOUCH_SLOP {
+                            self.fire_tap_cancel(ctx);
+                        }
+                    }
                     // Feed the release-velocity trackers on every `Move` of a
                     // press a drag recognizer takes part in.
                     let tracking = self.tracks_velocity();
@@ -995,6 +1158,17 @@ impl Widget for GestureDetectorWidget {
                         cb(ctx, progress);
                         ctx.request_redraw();
                     }
+                    if std::mem::take(&mut self.press_active)
+                        && let Some(cb) = self.on_tap_up.as_mut()
+                    {
+                        cb(
+                            ctx,
+                            TapUpDetails {
+                                local_position: p.position,
+                            },
+                        );
+                        ctx.request_redraw();
+                    }
                     // A held-past-threshold press prefers on_long_press, but falls
                     // through to on_tap when no long-press handler is wired — a
                     // tap-only detector must still fire the tap on an in-bounds
@@ -1039,6 +1213,11 @@ impl Widget for GestureDetectorWidget {
                         frust_core::mark_pending_result_flush();
                         ctx.request_redraw();
                     }
+                    if std::mem::take(&mut self.press_active) {
+                        self.owed_tap_cancel = true;
+                        frust_core::mark_pending_result_flush();
+                        ctx.request_redraw();
+                    }
                     self.state = Recognizer::Idle;
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
@@ -1050,6 +1229,7 @@ impl Widget for GestureDetectorWidget {
             // An owed drag `cancel` (see the Cancel arm) rides the first
             // broadcast after it: the Housekeeping pass carries real state.
             self.flush_owed_cancel(ctx);
+            self.flush_owed_tap_cancel(ctx);
             // `InputEvent::Housekeeping` today: the delivery vehicle for a
             // threshold-time long-press latched during an earlier paint (see
             // the module docs' "Long-press firing semantics") — the soonest
@@ -2338,5 +2518,248 @@ mod tests {
             "a press cancelled before its start is silent"
         );
         assert!(log.ends.is_empty());
+    }
+
+    // --- Press state -----------------------------------------------------------
+
+    #[derive(Default)]
+    struct PressLog {
+        events: Vec<String>,
+    }
+
+    type PressView = GestureDetectorView<PressLog>;
+
+    fn press_detector<V: View<PressLog>>(child: V) -> PressView {
+        GestureDetector::<PressLog, _>(child)
+            .on_tap_down(|s: &mut PressLog, d| {
+                s.events.push(format!(
+                    "down {} {}",
+                    d.local_position.x as i32, d.local_position.y as i32
+                ))
+            })
+            .on_tap_up(|s: &mut PressLog, d| {
+                s.events.push(format!(
+                    "up {} {}",
+                    d.local_position.x as i32, d.local_position.y as i32
+                ))
+            })
+            .on_tap_cancel(|s: &mut PressLog| s.events.push("cancel".into()))
+            .on_tap(|s: &mut PressLog| s.events.push("tap".into()))
+            .on_long_press(|s: &mut PressLog| s.events.push("long".into()))
+    }
+
+    fn press_logic(_: &mut PressLog) -> PressView {
+        press_detector(Blank)
+    }
+
+    fn press_root() -> RenderRoot<PressLog, PressView> {
+        let mut root = RenderRoot::new();
+        let mut log = PressLog::default();
+        root.rebuild(&mut { press_logic }, &mut log);
+        root.layout(Size::new(100.0, 100.0));
+        root
+    }
+
+    fn press_widget() -> GestureDetectorWidget {
+        let view = press_logic(&mut PressLog::default());
+        let mut counter = 0u64;
+        View::<PressLog>::build(&view, &mut BuildCtx::new(&mut counter))
+    }
+
+    fn send_sized(
+        w: &mut GestureDetectorWidget,
+        log: &mut PressLog,
+        size: Size,
+        event: &InputEvent,
+    ) {
+        let state_any: &mut dyn Any = log;
+        let mut ctx = EventCtx::new(state_any, Point::ZERO, size);
+        w.event(&mut ctx, event);
+    }
+
+    fn send(w: &mut GestureDetectorWidget, log: &mut PressLog, event: &InputEvent) {
+        send_sized(w, log, Size::new(100.0, 100.0), event);
+    }
+
+    #[test]
+    fn a_still_press_delivers_down_then_up_with_nothing_between() {
+        let mut root = press_root();
+        let mut log = PressLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 20.0));
+        root.rebuild(&mut { press_logic }, &mut log);
+        root.rebuild(&mut { press_logic }, &mut log);
+        assert_eq!(log.events, vec!["down 10 20"], "down fires immediately");
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 20.0));
+        assert_eq!(log.events, vec!["down 10 20", "up 10 20", "tap"]);
+    }
+
+    #[test]
+    fn a_move_past_the_slop_cancels_at_once_and_the_up_delivers_no_tap_up() {
+        let mut root = press_root();
+        let mut log = PressLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 10.0, 29.0));
+        assert_eq!(log.events, vec!["down 10 10", "cancel"]);
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 29.0));
+        assert_eq!(log.events, vec!["down 10 10", "cancel"], "no up, no tap");
+    }
+
+    #[test]
+    fn leaving_the_bounds_within_the_slop_cancels_the_press_but_not_a_later_tap() {
+        let mut w = press_widget();
+        let mut log = PressLog::default();
+        let small = Size::new(20.0, 20.0);
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Down, 10.0, 10.0));
+        // 11 px from the Down: inside the slop, outside the 20 px bounds.
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Move, 21.0, 10.0));
+        assert_eq!(log.events, vec!["down 10 10", "cancel"]);
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Up, 12.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "cancel", "tap"],
+            "the tap rule is untouched"
+        );
+    }
+
+    #[test]
+    fn a_scroll_steal_cancels_the_press_after_the_next_housekeeping() {
+        fn logic(_: &mut PressLog) -> crate::scroll::ScrollView<PressLog> {
+            crate::scroll::scroll_view(press_detector(Tall))
+        }
+        let mut root = RenderRoot::new();
+        let mut log = PressLog::default();
+        root.rebuild(&mut { logic }, &mut log);
+        root.layout(Size::new(100.0, 100.0));
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 80.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 50.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 30.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 50.0, 30.0));
+        root.rebuild(&mut { logic }, &mut log);
+        assert_eq!(log.events.first().map(String::as_str), Some("down 50 80"));
+        assert_eq!(
+            log.events.iter().filter(|e| *e == "cancel").count(),
+            1,
+            "{:?}",
+            log.events
+        );
+        assert!(
+            !log.events.iter().any(|e| e.starts_with("up") || e == "tap"),
+            "a stolen press never releases: {:?}",
+            log.events
+        );
+    }
+
+    #[test]
+    fn a_system_cancel_delivers_the_cancel_via_housekeeping() {
+        let mut root = press_root();
+        let mut log = PressLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Cancel, 10.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec!["down 10 10"],
+            "the Cancel arm is state-free"
+        );
+        root.rebuild(&mut { press_logic }, &mut log);
+        assert_eq!(log.events, vec!["down 10 10", "cancel"]);
+        root.rebuild(&mut { press_logic }, &mut log);
+        assert_eq!(log.events.len(), 2, "the cancel fires once");
+    }
+
+    #[test]
+    fn a_cancel_over_throwaway_state_defers_the_tap_cancel_to_housekeeping() {
+        let mut w = press_widget();
+        let mut log = PressLog::default();
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        let mut unit = ();
+        let mut ctx = EventCtx::new(&mut unit, Point::ZERO, Size::new(100.0, 100.0));
+        w.event(&mut ctx, &ev(PointerPhase::Cancel, 10.0, 10.0));
+        assert!(
+            frust_core::take_pending_result_flush(),
+            "the owed cancel latches the deferred-callback flush"
+        );
+        assert_eq!(log.events, vec!["down 10 10"]);
+        send(&mut w, &mut log, &InputEvent::Housekeeping);
+        assert_eq!(log.events, vec!["down 10 10", "cancel"]);
+    }
+
+    #[test]
+    fn a_second_down_while_pressed_delivers_cancel_then_down() {
+        let mut w = press_widget();
+        let mut log = PressLog::default();
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 30.0, 30.0));
+        assert_eq!(log.events, vec!["down 10 10", "cancel", "down 30 30"]);
+        // An owed cancel is paid before the next down, too.
+        let mut w = press_widget();
+        let mut log = PressLog::default();
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Cancel, 10.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 30.0, 30.0));
+        assert_eq!(log.events, vec!["down 10 10", "cancel", "down 30 30"]);
+    }
+
+    #[test]
+    fn a_long_hold_ends_in_tap_up_after_the_long_press_and_a_tap_orders_up_first() {
+        let mut root = press_root();
+        let mut log = PressLog::default();
+        let mut sink = NullScene;
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(600.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert!(
+            log.events.contains(&"long".to_string()) && log.events.contains(&"up 10 10".into()),
+            "{:?}",
+            log.events
+        );
+        assert!(!log.events.contains(&"tap".to_string()), "{:?}", log.events);
+        assert_eq!(log.events.last().map(String::as_str), Some("long"));
+
+        let mut log = PressLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+    }
+
+    #[test]
+    fn every_tap_down_is_followed_by_exactly_one_up_or_cancel() {
+        // A deterministic generator over the six event kinds.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..200 {
+            let mut w = press_widget();
+            let mut log = PressLog::default();
+            for _ in 0..40 {
+                let event = match next() % 6 {
+                    0 => ev(PointerPhase::Down, 50.0, 50.0),
+                    1 => ev(PointerPhase::Move, 52.0, 52.0),
+                    2 => ev(PointerPhase::Move, 150.0, 50.0),
+                    3 => ev(PointerPhase::Up, 50.0, 50.0),
+                    4 => ev(PointerPhase::Cancel, 50.0, 50.0),
+                    _ => InputEvent::Housekeeping,
+                };
+                send(&mut w, &mut log, &event);
+            }
+            // End any press still held, then let the owed cancel flush.
+            send(&mut w, &mut log, &ev(PointerPhase::Cancel, 50.0, 50.0));
+            send(&mut w, &mut log, &InputEvent::Housekeeping);
+            let mut open = false;
+            for e in &log.events {
+                if e.starts_with("down") {
+                    assert!(!open, "down while open: {:?}", log.events);
+                    open = true;
+                } else if e == "cancel" || e.starts_with("up") {
+                    assert!(open, "up/cancel without a down: {:?}", log.events);
+                    open = false;
+                }
+            }
+            assert!(!open, "a down was left open: {:?}", log.events);
+        }
     }
 }
