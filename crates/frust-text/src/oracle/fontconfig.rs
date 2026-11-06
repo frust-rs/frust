@@ -672,9 +672,22 @@ mod tests {
         names.iter().map(|n| n.to_lowercase()).collect()
     }
 
+    /// Whether the answer's own `cmap` maps every char of `text`.
+    fn face_covers(source: &FaceSource, text: &str) -> bool {
+        use read_fonts::{FontRef, TableProvider};
+        let FaceLocation::Path(path) = &source.location else {
+            panic!("expected a path");
+        };
+        let bytes = std::fs::read(path).expect("the answered file is readable");
+        let font = FontRef::from_index(&bytes, source.index).expect("the answered face parses");
+        let cmap = font.cmap().expect("the answered face has a cmap");
+        text.chars().all(|c| cmap.map_codepoint(c).is_some())
+    }
+
     /// Name fragments of the Han-covering families a Linux host ships (Noto/Source Han CJK,
-    /// Droid Sans Fallback, WenQuanYi, AR PL, IPA, Takao, VL Gothic, Sarasa, ...).
-    const CJK_MARKERS: [&str; 22] = [
+    /// Droid Sans Fallback, WenQuanYi, AR PL, IPA, Takao, VL Gothic, Sarasa, ...), plus
+    /// families named for a CJK language (Droid Sans Japanese, ...).
+    const CJK_MARKERS: [&str; 25] = [
         "cjk",
         "droid sans fallback",
         "droidsansfallback",
@@ -697,6 +710,9 @@ mod tests {
         "vl gothic",
         "sarasa",
         "unifont",
+        "japanese",
+        "chinese",
+        "korean",
     ];
 
     #[test]
@@ -709,12 +725,17 @@ mod tests {
             eprintln!("skipping: no installed face covers U+4E2D");
             return;
         }
-        let mut req = generic("\u{4E2D}\u{6587}");
+        let text = "\u{4E2D}\u{6587}";
+        let mut req = generic(text);
         for locale in ["zh-Hans", "ja"] {
             req.locale = Some(String::from(locale));
             let answer = b
                 .resolve(&req)
                 .unwrap_or_else(|| panic!("{covering} faces cover U+4E2D, yet {locale} missed"));
+            assert!(
+                face_covers(&answer, text),
+                "{locale}: the Han answer does not cover {text}: {answer:?}"
+            );
             let names = face_names(&answer);
             assert!(
                 names
