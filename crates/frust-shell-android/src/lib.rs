@@ -183,17 +183,27 @@ pub mod __jni {
 ///   like `MyState::new`), for a `State` that doesn't implement `Default`. The
 ///   2-arg form delegates to this one.
 ///
+/// Either form may be prefixed with `@pre_init $pre;`, where `$pre` is a
+/// `()`-typed expression the generated `nativeInit` evaluates first, before
+/// `jni_glue::native_init` adopts the GPU device or builds the app — the
+/// earliest point app code runs. `frust::app!`'s `gpu_features = { .. }` key
+/// uses it to request optional device features. A pre-built device lacking a
+/// requested feature its adapter offers is rebuilt (`gpu` feature).
+///
 /// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` that returns any `View<State>`; since a `Component::build` result's opaque type captures the borrows, it must be erased with `AnyView::new` before passing it to the macro (`move |s| frust::AnyView::new(root.build(s))`).
 #[macro_export]
 macro_rules! android_app {
-    ($state_ty:ty, $build:expr $(,)?) => {
+    // `$(@pre_init $pre:expr;)?` is empty for every invocation that does not
+    // name it, so those expand exactly as before the hook existed.
+    ($(@pre_init $pre:expr;)? $state_ty:ty, $build:expr $(,)?) => {
         $crate::android_app!(
+            $(@pre_init $pre;)?
             $state_ty,
             <$state_ty as ::core::default::Default>::default,
             $build
         );
     };
-    ($state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
+    ($(@pre_init $pre:expr;)? $state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
         /// JNI `nativeInit`: create the native handle for one surface.
         ///
         /// `cache_dir` is the app's `context.cacheDir.absolutePath`,
@@ -210,6 +220,7 @@ macro_rules! android_app {
             scale: $crate::__jni::jfloat,
             cache_dir: $crate::__jni::JString<'local>,
         ) -> $crate::__jni::jlong {
+            $(let () = $pre;)?
             $crate::jni_glue::native_init(env, surface, scale, cache_dir, || {
                 $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
             })

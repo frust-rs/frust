@@ -898,6 +898,14 @@ fn spawn_gpu_preinit() {
 /// at worst this blocks for the remainder of work already in flight. The
 /// adopt-vs-fallback decision itself is the host-tested
 /// [`crate::ffi_support::resolve_preinit`].
+///
+/// With the `gpu` feature, a ready pre-built context is also dropped when its
+/// device lacks an optional feature the app requested (through the generated
+/// `nativeInit`'s pre-init hook, which runs before this) and its adapter
+/// offers: the device was created at library load, before any app code could
+/// ask. The fresh `RenderContext` creates its device with the request applied.
+/// An app that requested nothing keeps the pre-built device exactly as before,
+/// and without `gpu` no request is possible, so the context is always kept.
 fn take_preinit_context() -> frust_render::RenderContext {
     let joined: Option<PreInitResult> = GPU_PREINIT
         .get()
@@ -912,7 +920,34 @@ fn take_preinit_context() -> frust_render::RenderContext {
                 None
             }
         });
-    crate::ffi_support::resolve_preinit(joined, frust_render::RenderContext::new)
+    crate::ffi_support::resolve_preinit(
+        joined,
+        preinit_has_requested_features,
+        frust_render::RenderContext::new,
+    )
+}
+
+/// The keep-predicate [`take_preinit_context`] hands
+/// [`crate::ffi_support::resolve_preinit`]: whether the pre-built device
+/// already has every requested optional feature its adapter offers. Logs the
+/// rebuild once (the pre-init context is taken at most once per process).
+#[cfg(feature = "gpu")]
+fn preinit_has_requested_features(render_cx: &frust_render::RenderContext) -> bool {
+    let missing = frust_render::missing_requested_features(render_cx.device_handle());
+    if missing.is_empty() {
+        return true;
+    }
+    log::info!(
+        "frust-shell-android: GPU pre-init device lacks requested features {missing:?}; rebuilding"
+    );
+    false
+}
+
+/// Without the `gpu` feature no optional-feature request can exist, so the
+/// pre-built device is always kept.
+#[cfg(not(feature = "gpu"))]
+fn preinit_has_requested_features(_render_cx: &frust_render::RenderContext) -> bool {
+    true
 }
 
 /// The renderer's first-install timings as the plain-`Duration` steps the
@@ -3422,6 +3457,26 @@ mod macro_expansion_factory {
     }
 
     crate::android_app!(NonDefaultState, make_state, test_logic);
+}
+
+/// Compile-only smoke of [`crate::android_app!`]'s `@pre_init` prefix, through
+/// the 2-arg arm (which forwards it to the 3-arg arm's `nativeInit`). Same
+/// `cfg(test)`, check-only reasoning as [`macro_expansion`].
+#[cfg(test)]
+mod macro_expansion_pre_init {
+    #[derive(Default)]
+    struct TestState {
+        n: u32,
+    }
+
+    fn pre_init_hook() {}
+
+    fn test_logic(state: &mut TestState) -> impl frust_core::view::View<TestState> + use<> {
+        state.n += 1;
+        frust_widgets::text(format!("{}", state.n))
+    }
+
+    crate::android_app!(@pre_init pre_init_hook(); TestState, test_logic);
 }
 
 /// `content_type_wire`/`ime_state_to_json` coverage. Compiled (and would run)
