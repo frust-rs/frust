@@ -8,6 +8,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `GestureDetector` press callbacks `on_tap_down`, `on_tap_up` (before `on_tap`) and `on_tap_cancel`,
+  with `#[non_exhaustive]` `Copy` `TapDownDetails`/`TapUpDetails` (`local_position`) from `frust-ui`.
+  Down fires at once; a slop or bounds exit, a stolen or system cancel, or a second Down cancels.
+  Exactly one up or cancel follows each down; leaving the bounds cancels but a later `on_tap` fires.
 - `complex-scripts` cargo feature on `frust-text` and `frust-ui`, default on: it carries the
   dictionary line and word segmentation (about 3 MB per app). An app opts out with
   `frust-ui = { version = "...", default-features = false }` (or `frust-text` likewise); unspaced

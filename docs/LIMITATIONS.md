@@ -8939,13 +8939,13 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ---
 
-### `gesture-drag-no-cancel-on-removal` — a `GestureDetector` removed mid-drag fires no `cancel`
+### `gesture-drag-no-cancel-on-removal` — a `GestureDetector` removed mid-drag fires no `cancel`, or mid-press no `on_tap_cancel`
 
-**Observed**: a started vertical, horizontal or pan drag owes its `cancel` callback to the next pass that carries application state after a platform `Cancel`. A detector removed from the tree while its drag is in flight (its subtree changing shape, or its page torn down) never reaches that pass, so its `start` and `update` callbacks are not followed by `end` or `cancel`.
+**Observed**: a started vertical, horizontal or pan drag owes its `cancel` callback to the next pass that carries application state after a platform `Cancel`. A detector removed from the tree while its drag is in flight (its subtree changing shape, or its page torn down) never reaches that pass, so its `start` and `update` callbacks are not followed by `end` or `cancel`. The same holds for press state: a detector removed between `on_tap_down` and its release fires no `on_tap_cancel`, so `on_tap_down` is not followed by `on_tap_up` or `on_tap_cancel`.
 
-**Applies to**: apps that pair `on_*_drag_start` with state that `on_*_drag_cancel` or `on_*_drag_end` must release.
+**Applies to**: apps that pair `on_*_drag_start` with state that `on_*_drag_cancel` or `on_*_drag_end` must release, or `on_tap_down` with state that `on_tap_up` or `on_tap_cancel` must clear (a pressed highlight).
 
-**Workaround**: reset the drag's state from the code path that removes the detector, or treat a drag with no `end` or `cancel` as abandoned when the next one starts.
+**Workaround**: reset the drag's state from the code path that removes the detector, or treat a drag with no `end` or `cancel` as abandoned when the next one starts; clear the pressed state on unmount.
 
 **Why accepted**: a torn-down detector has no `&mut State` to call back into, and the teardown path never carries one.
 
