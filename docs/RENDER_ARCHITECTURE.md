@@ -170,8 +170,9 @@ may share a pass without it tolerating re-entry. A pass reads `ExternalFrame::dr
 surfaces and registry drains (one advance per drain that ran a pass); on an explicit headless render
 it counts that renderer's own pass-running renders from 0. A residual race remains in unwinding
 builds only: a panicking pass can record once more on a surface that snapshotted it before
-retirement. `texture_bus` consumes a source's frame on whichever surface drains first, so a second
-surface keeps the view it last bound until the source produces again.
+retirement. `texture_bus` consumes a source's frame on whichever surface drains first, so another
+surface keeps its last bound view until it is itself first to take a fresh frame (LIMITATIONS
+`texture-bus-second-surface-keeps-a-stale-view`).
 
 Headless rendering is deterministic by default: `HeadlessRenderer::render` runs no pass;
 `render_with_passes(scene, spec, &[(SceneTextureId, Arc<dyn ExternalPass>)])` runs exactly those

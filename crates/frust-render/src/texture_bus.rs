@@ -147,8 +147,11 @@
 //! shown until the source yields its next frame. With two engine-tier
 //! surfaces live at once, each clears its own binding on its next frame once
 //! the registration is dropped. A source's frame is consumed by whichever
-//! surface drains first, so a second surface keeps the view it last bound
-//! until the source produces again.
+//! surface drains first, so another surface keeps the view it last bound
+//! until it is itself the first to take a fresh frame — possibly never, and
+//! for a native payload that view outlives the release callback (see
+//! `docs/LIMITATIONS.md`'s `texture-bus-second-surface-keeps-a-stale-view`).
+//! Every shipping shell drives one engine-tier surface.
 //!
 //! # Waking the shell
 //!

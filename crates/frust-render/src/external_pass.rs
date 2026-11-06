@@ -146,9 +146,10 @@
 //!
 //! A registered pass that panics is retired by the first surface to catch
 //! it. A second surface that had already snapshotted the registry before that
-//! retirement still records the pass once more for its in-flight frame, so
-//! the panic can be reported one extra time. Unwinding builds only (release
-//! is `panic = "abort"`); no memory-safety impact.
+//! retirement still records the pass once more for its in-flight frame. If
+//! that record panics too, the second panic is caught but not reported (the
+//! registration is already gone). Unwinding builds only (release is
+//! `panic = "abort"`); no memory-safety impact.
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -177,7 +178,10 @@ use frust_gpu::SceneTextureId;
 /// mutability; state that belongs to one surface is keyed by
 /// [`ExternalFrame::drain_id`]. Unregistering is not a barrier: a `record`
 /// already in flight when [`unregister_external_pass`] runs may complete once
-/// more.
+/// more. `record` must not drive a drain itself (a surface frame or a
+/// `HeadlessRenderer::render_draining_registry`): the turn it holds on its
+/// own registration is not reentrant, so reaching that registration again
+/// from inside `record` deadlocks.
 pub trait ExternalPass: Send + Sync {
     /// Records this pass's work for one frame.
     ///

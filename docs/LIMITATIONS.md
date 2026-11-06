@@ -6950,6 +6950,24 @@ and on Android; iOS needs no new code in the registry, only a run.
 **Trigger for removal**: a windowed desktop run and an iPhone run, each registering and driving a real
 `ExternalPass` through its own frame loop (the playground GPU pass section is the vehicle).
 
+### `texture-bus-second-surface-keeps-a-stale-view` — with two live engine-tier surfaces, only the first to drain takes a texture-bus source's new frame
+
+**Observed** (evidence: `crates/frust-render/src/texture_bus.rs`'s `SourcePass::record` calls the
+source closure once per `record`; `replace_shown` retires a replaced native hold behind one fence and
+then runs its release callback): each engine now clears its own binding when a registration is
+dropped (per-surface `ExternalPassDrain`), but a source's *frame* is still consumed by whichever
+surface drains first. Another surface's `record` sees no new frame and still holds a binding, so it
+keeps sampling the view it last bound until it is itself first to take a fresh frame — with one
+surface always draining first, never. For a native payload that view outlives the release callback,
+so the other engine samples a buffer already handed back to its producer.
+
+**Accepted because**: every shipping shell drives exactly one engine-tier surface
+(`desktop-single-window`; Android and iOS have one surface), so no second drain exists today.
+
+**Trigger for removal**: the first shell that keeps two engine-tier surfaces live at once; the fix is
+per-surface binding of the current shown view keyed by `ExternalFrame::drain_id`, with a native hold
+released only after every surface that bound it has moved on.
+
 ### `external-pass-panic-isolation-dev-only` — a panicking `ExternalPass` is only isolated in a build that unwinds
 
 **Observed** (evidence: root `Cargo.toml`'s `[profile.release]` sets `panic = "abort"` (also recorded
