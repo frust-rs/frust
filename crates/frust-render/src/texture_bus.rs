@@ -157,9 +157,9 @@
 //! and web shells alike, and nowhere a surface is not presenting. A shell that
 //! rebuilds its engine on the same device (a fresh surface) gets the current
 //! view bound again on its first frame; a *device* change drops what was
-//! shown until the source yields its next full frame (`frame_size` reads `None`
-//! meanwhile, and a producer of partial updates must send a full frame then).
-//! With two engine-tier
+//! shown until the source yields its next full frame (`frame_size` reads
+//! `None` from the first frame drawn on the new device, and a producer of
+//! partial updates must send a full frame then). With two engine-tier
 //! surfaces live at once, each clears its own binding on its next frame once
 //! the registration is dropped. A source's frame is consumed by whichever
 //! surface drains first, so another surface keeps the view it last bound
@@ -441,10 +441,13 @@ impl SourceFrame {
     /// A producer sending regions must send a full frame whenever
     /// [`TextureRegistration::frame_size`] is `None` or differs from its
     /// extent, and after any native frame (an imported view cannot be written
-    /// to). A device change (an Activity recreate, a GPU reset), detected by the
-    /// device generation the drain stamps, drops what was shown, so nothing stays on screen after one and `frame_size` reads
-    /// `None` until the next full frame; region frames sent meanwhile are
-    /// refused and released.
+    /// to). A device change (an Activity recreate, a GPU reset), detected by
+    /// the device generation the drain stamps, drops what was shown, so
+    /// nothing stays on screen after one and `frame_size` reads `None` until
+    /// the next full frame. The drop happens on the first frame drawn on the
+    /// new device, so a region frame sent just before it can still be refused
+    /// (and released): re-check `frame_size` after each push and send a full
+    /// frame once it reads `None`.
     #[must_use]
     pub fn with_update_region(mut self, region: UpdateRegion) -> Self {
         self.region = Some(region);
@@ -773,11 +776,13 @@ impl TextureRegistration {
     }
 
     /// The extent of the frame currently shown, `None` before the first one
-    /// and after a device change dropped it.
+    /// and after a device change dropped it (from the first frame drawn on the
+    /// new device; until then it still reports the old extent).
     ///
     /// A producer of [`SourceFrame::with_update_region`] frames must send a
     /// full frame whenever this is `None` or differs from its extent; region
-    /// frames sent while it is `None` are refused and released at once.
+    /// frames that reach a frame with nothing reusable shown are refused and
+    /// released at once.
     /// After a native frame this reports the imported extent, but only a full
     /// CPU frame makes region frames acceptable again.
     ///
