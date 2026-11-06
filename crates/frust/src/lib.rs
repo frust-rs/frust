@@ -1119,22 +1119,30 @@ pub mod authoring {
 /// Everything above builds a *standalone* [`Context`] — useful for a
 /// headless harness, but a second device, not the one the running shell
 /// already created and is presenting frames through. [`with_context`] reaches
-/// that one instead: the shell's render executor installs its
+/// that one instead: the shell's render executor publishes its
 /// [`DeviceHandle`] (the device/queue/adapter pair, cheap to clone since
-/// wgpu's own types are `Arc`-backed) into a process-wide slot the first time
-/// a surface — and so a device — comes up
-/// (`frust_shell_common::gpu::install_gpu_handle`, see that module's docs),
-/// and [`with_context`] reads it back through the identical seam
-/// (`frust_shell_common::gpu::gpu_handle`). It answers `None` before that
-/// first surface exists (desktop's zero-config preview window, a mobile
+/// wgpu's own types are `Arc`-backed) into a process-wide, replaceable slot
+/// each time a surface — and so a device — comes up
+/// (`frust_shell_common::gpu::GpuPublisher`, see that module's docs), and
+/// [`with_context`] reads it back through the identical seam
+/// (`frust_shell_common::gpu::with_gpu_handle`). It answers `None` before
+/// that first surface exists (desktop's zero-config preview window, a mobile
 /// shell before its first frame) — check the `Option`, never assume `Some`.
-/// Never blocks: once installed, the read is a lock-free `OnceLock::get`, so
-/// calling this from the UI thread is always safe.
+/// The slot lock is held only to clone a reference, never while your closure
+/// runs, so calling this from the UI thread is always safe.
 ///
-/// Only the desktop shell installs one today; the two mobile shells forward
-/// the `gpu` feature but do not install yet (an accepted gap — see
-/// `frust-shell-android`/`frust-shell-ios`'s own crate docs), so
-/// `with_context` always answers `None` there for now.
+/// The handle is current only for the duration of the call: never stash
+/// device or queue clones across frames. A shell may drop and recreate its
+/// device, so rebuild any device-owned resources (pipelines, textures,
+/// buffers) whenever [`device_generation`] (or [`DeviceHandle::generation`])
+/// changes, and treat [`DeviceHandle::is_lost`] as the signal that the device
+/// you hold is gone.
+///
+/// Every shell (desktop, Android, iOS) publishes its live device after each
+/// successful surface install and withdraws it when its render owner exits,
+/// so `with_context` answers `Some` once a surface exists and `None` before
+/// the first one or after the owner is gone (on mobile, an Activity or view
+/// teardown). A recreated device publishes under a new generation.
 ///
 /// ```
 /// // No device exists in this doctest process, so `with_context` answers
@@ -1241,9 +1249,8 @@ pub mod authoring {
 /// gate is which frame path drains it: any engine-tier `SurfaceRenderer`
 /// frame, `submit` and `submit_deferred` alike, which is what the Android and
 /// iOS shells call exactly as desktop does — a registered pass is not
-/// desktop-only by construction, unlike [`with_context`], which genuinely
-/// does answer `None` on mobile today (no shell there has installed a
-/// [`DeviceHandle`] yet). Only the desktop headless path has actually been
+/// desktop-only by construction, and [`with_context`] answers on every shell
+/// once a surface exists. Only the desktop headless path has actually been
 /// *exercised* so far (`docs/LIMITATIONS.md`'s
 /// `facade-external-pass-desktop-only`) — mobile is wired and compiles the
 /// seam, but no registered pass has been driven through either shell's own
@@ -1259,6 +1266,16 @@ pub mod gpu {
         CommandBuffer, DeviceHandle, RenderContext as Context, RenderPipelineDesc, RenderTarget,
         SceneTextureId, ShaderLibrary, Texture, TextureDesc,
     };
+    /// Opt into optional device features (`SHADER_F16`,
+    /// `FLOAT32_FILTERABLE`, ...) for every device created from now on, and
+    /// read back what has been asked for. Adapter-conditioned: a feature the
+    /// adapter does not offer is silently left out. A device that already
+    /// exists is unaffected, so an app asks through [`app!`](crate::app)'s
+    /// `gpu_features = { .. }` key, which runs before the shell creates its
+    /// device. The granted set is the device's own:
+    /// `with_context(|h| h.device.features())`, or `frame.device().features()`
+    /// inside an [`ExternalPass`].
+    pub use frust_gpu::{request_optional_features, requested_optional_features};
     /// The pre-scene pass seam (see the module docs' *Rendering your own
     /// texture every frame*), from the renderer that owns the frame the
     /// passes are recorded into rather than from `frust-gpu`: the registry is
@@ -1281,7 +1298,15 @@ pub mod gpu {
     /// second device. `with_context` never creates one; it only reads back
     /// the one the running shell already owns.
     pub fn with_context<R>(f: impl FnOnce(&DeviceHandle) -> R) -> Option<R> {
-        frust_shell_common::gpu::gpu_handle::<DeviceHandle>().map(f)
+        frust_shell_common::gpu::with_gpu_handle::<DeviceHandle, _>(f)
+    }
+
+    /// The generation of the currently published device, or `None` if no
+    /// shell has published one. It changes whenever the shell replaces its
+    /// device; compare it to the value you built your device-owned resources
+    /// against and rebuild on a mismatch.
+    pub fn device_generation() -> Option<u64> {
+        frust_shell_common::gpu::gpu_handle_generation()
     }
 }
 
@@ -3148,6 +3173,40 @@ pub fn __frust_register_hotpatch_anchor(_anchor: extern "C" fn()) {}
 /// Omitting it is exactly today's behavior:
 /// [`DesktopConfig::default()`]'s window, through the same
 /// [`run_with_setup`] call the pre-config macro emitted.
+///
+/// # `gpu_features = { .. }`: ask for optional device features
+///
+/// A block evaluating to a `frust::gpu::wgpu::Features`, written as the
+/// **first** key after the root type and combinable with every form above
+/// (`gpu_features = { .. }` alone, then optionally `setup`, `desktop`, or
+/// both in either order). The macro hands it to
+/// `frust::gpu::request_optional_features` before the shell creates its
+/// device, on every platform: as the desktop `__frust_main`'s first
+/// statement (ahead of the run call, so ahead of `desktop` and `setup`), as
+/// the web state factory's first statement (the state is built before the
+/// browser shell starts), and on Android and iOS through
+/// [`android_app!`]/[`ios_app!`]'s `@pre_init` hook, which runs in the
+/// generated init export before the shell's own init. Android builds its
+/// device in a background thread at library load, before any app code; when
+/// that device lacks a requested feature its adapter offers, the shell drops
+/// it and builds a fresh one, paying the synchronous device build that
+/// launch.
+///
+/// Requests are adapter-conditioned: a feature the adapter does not offer is
+/// silently left out, never an error. Read the granted set back with
+/// `frust::gpu::with_context(|h| h.device.features())`, or inside an
+/// `ExternalPass` with `frame.device().features()`.
+///
+/// The key requires the facade's `gpu` feature: without it the expansion
+/// fails to compile naming `frust::gpu`.
+///
+/// ```ignore
+/// frust::app!(MyApp, gpu_features = {
+///     frust::gpu::wgpu::Features::SHADER_F16
+/// }, setup = {
+///     my_design_system::install();
+/// });
+/// ```
 #[macro_export]
 macro_rules! app {
     // Internal arms, shared by the public forms below. `$($setup:block)?` is
@@ -3162,7 +3221,15 @@ macro_rules! app {
     // for every public form — only the desktop `__frust_main` differs between
     // `@emit` (zero-config) and `@emit_desktop` (config-carrying), and two
     // hand-maintained copies of the JNI/C-ABI bindings would be free to drift.
-    (@emit_mobile $root:ty, $($setup:block)?) => {
+    //
+    // The trailing `$(; gpu = $gpu:block)?` is the `gpu_features = { .. }`
+    // payload, empty for every form that does not name it — so, exactly like
+    // `$($setup:block)?`, a form without the key emits no request tokens and
+    // expands as it did before the key existed. A non-empty one becomes each
+    // platform's pre-shell-init request: the mobile shells' `@pre_init` hook,
+    // the web state factory's first statement, and the desktop
+    // `__frust_main`'s first statement after the hot-patch registration.
+    (@emit_mobile $root:ty, $($setup:block)? $(; gpu = $gpu:block)?) => {
         // The app-owned hot-patch anchor: one fixed, unmangled symbol whose
         // address the patch builder and frust-hotpatch both resolve, so a
         // binary without `main` (an Android cdylib) is anchored too. Emitted in
@@ -3178,6 +3245,7 @@ macro_rules! app {
 
         #[cfg(target_os = "android")]
         $crate::android_app!(
+            $(@pre_init $crate::gpu::request_optional_features($gpu);)?
             <$root as $crate::Component>::State,
             || {
                 #[cfg(all(debug_assertions, not(test)))]
@@ -3195,6 +3263,7 @@ macro_rules! app {
         );
 
         $crate::ios_app!(
+            $(@pre_init $crate::gpu::request_optional_features($gpu);)?
             <$root as $crate::Component>::State,
             || {
                 #[cfg(all(debug_assertions, not(test)))]
@@ -3222,6 +3291,7 @@ macro_rules! app {
         $crate::web_app!(
             <$root as $crate::Component>::State,
             || {
+                $($crate::gpu::request_optional_features($gpu);)?
                 $($setup)?
                 $crate::__install_default_selection_toolbar();
                 $crate::Component::init(&<$root as ::core::default::Default>::default())
@@ -3254,14 +3324,15 @@ macro_rules! app {
         }
     };
     // Zero-config desktop entry: byte-identical to the pre-config macro.
-    (@emit $root:ty, $($setup:block)?) => {
-        $crate::app!(@emit_mobile $root, $($setup)?);
+    (@emit $root:ty, $($setup:block)? $(; gpu = $gpu:block)?) => {
+        $crate::app!(@emit_mobile $root, $($setup)? $(; gpu = $gpu)?);
 
         #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         #[doc(hidden)]
         pub fn __frust_main() {
             #[cfg(all(debug_assertions, not(test)))]
             $crate::__frust_register_hotpatch_anchor(__frust_hotpatch_anchor);
+            $($crate::gpu::request_optional_features($gpu);)?
             let __frust_setup = || { $($setup)? };
             if let Err(e) = $crate::run_with_setup(
                 <$root as ::core::default::Default>::default(),
@@ -3275,14 +3346,15 @@ macro_rules! app {
     // Config-carrying desktop entry. `$config` is emitted only inside this
     // `cfg`-gated function, so it may name desktop-only types (`DesktopConfig`
     // and the menu vocabulary) while the mobile arms above stay untouched.
-    (@emit_desktop $root:ty, $config:expr, $($setup:block)?) => {
-        $crate::app!(@emit_mobile $root, $($setup)?);
+    (@emit_desktop $root:ty, $config:expr, $($setup:block)? $(; gpu = $gpu:block)?) => {
+        $crate::app!(@emit_mobile $root, $($setup)? $(; gpu = $gpu)?);
 
         #[cfg(not(any(target_os = "android", target_os = "ios", target_arch = "wasm32")))]
         #[doc(hidden)]
         pub fn __frust_main() {
             #[cfg(all(debug_assertions, not(test)))]
             $crate::__frust_register_hotpatch_anchor(__frust_hotpatch_anchor);
+            $($crate::gpu::request_optional_features($gpu);)?
             let __frust_setup = || { $($setup)? };
             if let Err(e) = $crate::run_with_setup_and_config(
                 <$root as ::core::default::Default>::default(),
@@ -3310,6 +3382,35 @@ macro_rules! app {
     // first should not meet a macro error over argument order.
     ($root:ty, desktop = $config:expr, setup = $setup:block $(,)?) => {
         $crate::app!(@emit_desktop $root, $config, $setup);
+    };
+    // `gpu_features = { .. }` comes FIRST after the root type and combines
+    // with every form above. Listed after them: a form without it never
+    // reaches these arms, and each arm above fails on a literal key mismatch
+    // (never on a fragment parse), so falling through to here is safe.
+    ($root:ty, gpu_features = $gpu:block $(,)?) => {
+        $crate::app!(@emit $root, ; gpu = $gpu);
+    };
+    ($root:ty, gpu_features = $gpu:block, setup = $setup:block $(,)?) => {
+        $crate::app!(@emit $root, $setup; gpu = $gpu);
+    };
+    ($root:ty, gpu_features = $gpu:block, desktop = $config:expr $(,)?) => {
+        $crate::app!(@emit_desktop $root, $config, ; gpu = $gpu);
+    };
+    (
+        $root:ty,
+        gpu_features = $gpu:block,
+        setup = $setup:block,
+        desktop = $config:expr $(,)?
+    ) => {
+        $crate::app!(@emit_desktop $root, $config, $setup; gpu = $gpu);
+    };
+    (
+        $root:ty,
+        gpu_features = $gpu:block,
+        desktop = $config:expr,
+        setup = $setup:block $(,)?
+    ) => {
+        $crate::app!(@emit_desktop $root, $config, $setup; gpu = $gpu);
     };
 }
 
@@ -3495,6 +3596,99 @@ mod macro_expansion_desktop_config {
             }
         );
     }
+}
+
+/// Compile-only smoke of [`app!`]'s **`gpu_features = { .. }`** forms — the key
+/// alone and combined with every other form (`setup`, `desktop`, and both in
+/// either order), one per submodule because each expansion defines its own
+/// `__frust_main`.
+///
+/// Gated on the facade's `gpu` feature, which the key requires (the expansion
+/// names `frust::gpu`), and host-only for the one-invocation-per-target rule
+/// spelled out on [`macro_expansion`]: the mobile expansion of the key is the
+/// shells' `@pre_init` hook, compile-checked by their own fixtures.
+#[cfg(all(
+    test,
+    feature = "gpu",
+    not(any(target_os = "android", target_os = "ios", target_arch = "wasm32"))
+))]
+mod macro_expansion_gpu_features {
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct TestAppGpu;
+
+    impl crate::Component for TestAppGpu {
+        type State = u32;
+
+        fn init(&self) -> u32 {
+            0
+        }
+
+        fn build(&self, state: &mut u32) -> impl crate::View<u32> {
+            *state += 1;
+            crate::any(crate::text(format!("{state}")))
+        }
+    }
+
+    mod features_only {
+        crate::app!(
+            super::TestAppGpu,
+            gpu_features = { crate::gpu::wgpu::Features::SHADER_F16 }
+        );
+    }
+
+    mod features_then_setup {
+        crate::app!(
+            super::TestAppGpu,
+            gpu_features = { crate::gpu::wgpu::Features::SHADER_F16 },
+            setup = {
+                crate::set_default_theme(crate::Theme::neutral());
+            },
+        );
+    }
+
+    mod features_then_config {
+        crate::app!(
+            super::TestAppGpu,
+            gpu_features = { crate::gpu::wgpu::Features::FLOAT32_FILTERABLE },
+            desktop = { crate::DesktopConfig::new().with_app_name("Fixture") }
+        );
+    }
+
+    mod features_then_setup_then_config {
+        crate::app!(
+            super::TestAppGpu,
+            gpu_features = {
+                crate::gpu::wgpu::Features::SHADER_F16
+                    | crate::gpu::wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+            },
+            setup = {
+                crate::set_default_theme(crate::Theme::neutral());
+            },
+            desktop = { crate::DesktopConfig::new().with_app_name("Fixture") }
+        );
+    }
+
+    mod features_then_config_then_setup {
+        crate::app!(
+            super::TestAppGpu,
+            gpu_features = { crate::gpu::wgpu::Features::empty() },
+            desktop = { crate::DesktopConfig::new().with_app_name("Fixture") },
+            setup = {
+                crate::set_default_theme(crate::Theme::neutral());
+            }
+        );
+    }
+
+    /// Every form above still emits the desktop entry point as a plain
+    /// `fn()`; a form that dropped it fails to compile here.
+    const _: [fn(); 5] = [
+        features_only::__frust_main,
+        features_then_setup::__frust_main,
+        features_then_config::__frust_main,
+        features_then_setup_then_config::__frust_main,
+        features_then_config_then_setup::__frust_main,
+    ];
 }
 
 /// The root drivers' build ([`__frust_root_build`]), with or without the

@@ -346,6 +346,9 @@ pub(crate) struct InlineExecutor {
     /// Set when the last frame was skipped on a transient acquire while the
     /// surface was ready; [`FrameExecutor::take_present_retry`] reads and clears it.
     present_retry: bool,
+    /// Publishes this executor's live device into the process-wide slot after
+    /// each surface install and withdraws it when the executor drops.
+    gpu_publisher: DevicePublisher,
 }
 
 impl InlineExecutor {
@@ -365,6 +368,7 @@ impl InlineExecutor {
             first_frame_recorded: false,
             presented: Arc::new(AtomicU64::new(0)),
             present_retry: false,
+            gpu_publisher: DevicePublisher::new(),
         }
     }
 
@@ -389,7 +393,7 @@ impl InlineExecutor {
             &mut self.renderer_spans_recorded,
             hit,
         );
-        publish_gpu_handle(&self.render_cx);
+        publish_gpu_handle(&mut self.gpu_publisher, &self.render_cx);
         Ok(())
     }
 
@@ -647,6 +651,9 @@ fn render_loop(
     presented: Arc<AtomicU64>,
 ) {
     let mut renderer = SurfaceRenderer::new();
+    // Declared before the loop so it withdraws the published device when the
+    // loop exits (compare-and-clear: it never clears a newer executor's).
+    let mut gpu_publisher = DevicePublisher::new();
     // Kept only for `pre_present_notify` (surface creation/recovery is UI-side).
     // Cleared on `SurfaceDestroyed`.
     let mut window: Option<WindowHandle> = None;
@@ -701,6 +708,7 @@ fn render_loop(
                         return;
                     }
                     note_scale(&mut renderer, size.scale);
+                    publish_gpu_handle(&mut gpu_publisher, &render_cx);
                     window = Some(w);
                 }
                 RenderCommand::SurfaceChanged { size } => {
@@ -882,31 +890,44 @@ fn install_detached(
     ))
     .context("frust: failed to install render surface")?;
     persist_and_record(renderer, startup, renderer_spans_recorded, hit);
-    publish_gpu_handle(render_cx);
     Ok(())
 }
 
-/// Install this render context's live GPU device into the process-wide slot
+/// The device owner's write access to the process-wide GPU-device slot
 /// (`frust_shell_common::gpu`) the facade's `frust::gpu::with_context` reads
-/// through, once — the first time a surface (and so a device) exists. A
-/// no-op past the first successful call from either executor (the slot is
-/// install-once; see its own module docs), and compiled to nothing under a
-/// default (non-`gpu`) build of this crate.
+/// through. A zero-sized stand-in under a default (non-`gpu`) build.
+#[cfg(feature = "gpu")]
+type DevicePublisher = frust_shell_common::gpu::GpuPublisher;
+
+#[cfg(not(feature = "gpu"))]
+struct DevicePublisher;
+
+#[cfg(not(feature = "gpu"))]
+impl DevicePublisher {
+    fn new() -> Self {
+        Self
+    }
+}
+
+/// Publish this render context's live GPU device, tagged with its
+/// generation, after a successful surface install. Republishing an
+/// unchanged generation is a no-op; a rebuilt device replaces the old one.
+/// Compiled to nothing under a default (non-`gpu`) build.
 ///
 /// `device_handle` is panic-free at both call sites
-/// ([`InlineExecutor::ensure_surface`], [`install_detached`]): both run this
-/// strictly after a successful `on_surface_created`/`on_surface_installed`,
+/// ([`InlineExecutor::ensure_surface`] and the render loop's surface-created
+/// arm): both run this strictly after a successful
+/// `on_surface_created`/`on_surface_installed`,
 /// exactly the precondition `RenderContext::device_handle`'s own doc comment
-/// names. Cloning it is cheap — `DeviceHandle`'s wgpu resources are
-/// themselves `Arc`-backed, so this hands the slot another handle to the
-/// same device, never a second one.
+/// names. Cloning it is cheap, since its wgpu resources are `Arc`-backed.
 #[cfg(feature = "gpu")]
-fn publish_gpu_handle(render_cx: &RenderContext) {
-    frust_shell_common::gpu::install_gpu_handle(render_cx.device_handle().clone());
+fn publish_gpu_handle(publisher: &mut DevicePublisher, render_cx: &RenderContext) {
+    let handle = render_cx.device_handle();
+    publisher.publish(handle.generation(), || handle.clone());
 }
 
 #[cfg(not(feature = "gpu"))]
-fn publish_gpu_handle(_render_cx: &RenderContext) {}
+fn publish_gpu_handle(_publisher: &mut DevicePublisher, _render_cx: &RenderContext) {}
 
 /// This surface's most recent real GPU pass timing, folded into the
 /// [`GpuPasses`] shape [`FramePasses::with_gpu`] takes, or `None` when the

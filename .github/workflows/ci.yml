@@ -79,6 +79,15 @@ jobs:
       # job and cache: only the one crate rebuilds with the feature.
       - name: Clippy the facade with test-support
         run: cargo clippy -p frust-ui --features test-support --all-targets --locked -- -D warnings
+      # The `gpu` feature arms (the shared device slot and the shell hand-off)
+      # and beUI's `gpu-effects` are off in the workspace run, so each gets its
+      # own per-package invocation. Same job and cache.
+      - name: Clippy the facade with gpu
+        run: cargo clippy -p frust-ui --features gpu --all-targets --locked -- -D warnings
+      - name: Clippy the desktop shell with gpu
+        run: cargo clippy -p frust-shell-desktop --features gpu --all-targets --locked -- -D warnings
+      - name: Clippy beUI with gpu-effects
+        run: cargo clippy -p frust-beui --features gpu-effects --all-targets --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest
@@ -119,6 +128,12 @@ jobs:
       # slow doctests.
       - name: Facade test-support tests
         run: cargo test -p frust-ui --features test-support --locked --lib
+      # The `gpu` feature arms are not compiled by the workspace run above;
+      # `crates/frust/tests/gpu_seam.rs` only exists with the feature on.
+      - name: Shell-common gpu tests
+        run: cargo test -p frust-shell-common --features gpu --locked
+      - name: Facade gpu tests
+        run: cargo test -p frust-ui --features gpu --locked
       - name: Disk after the build
         if: always()
         run: |

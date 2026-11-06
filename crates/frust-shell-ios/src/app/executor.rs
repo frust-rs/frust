@@ -23,7 +23,7 @@ use frust_shell_common::{
 use objc2::rc::autoreleasepool;
 
 use super::present_sync::PresentHandoff;
-use crate::ffi_glue::FrameOverlays;
+use crate::ffi_glue::{DevicePublisher, FrameOverlays, publish_gpu_handle};
 use crate::ffi_support::OverlayCutSpec;
 
 /// The render thread's **pacing trace**: one diagnostic line per rendered
@@ -417,6 +417,11 @@ pub(crate) struct InlineExecutor {
     /// [`crate::app::IosAppHandle::inline_renderer_mut`] for the FFI layer's
     /// `unsafe` surface recreation.
     pub(super) render_cx: RenderContext,
+    /// Publishes `render_cx`'s live device; dropping it (with this executor)
+    /// withdraws the device from the process-wide slot. The recreate arms in
+    /// the FFI layer cannot reach it, so `submit_frame` republishes (a no-op
+    /// while the generation is unchanged).
+    gpu_publisher: DevicePublisher,
     /// The surface renderer, likewise borrowed out for the inline path's
     /// surface recreation and read for the live surface's phase/resolved alpha.
     pub(super) renderer: SurfaceRenderer,
@@ -443,8 +448,13 @@ impl InlineExecutor {
         renderer: SurfaceRenderer,
         startup_spans: StartupSpans,
     ) -> Self {
+        // The caller installed the surface before handing the context over, so
+        // the device exists: publish it now.
+        let mut gpu_publisher = DevicePublisher::new();
+        publish_gpu_handle(&mut gpu_publisher, &render_cx);
         Self {
             render_cx,
+            gpu_publisher,
             renderer,
             frame_stats: FrameStats::new(),
             startup_spans: Some(startup_spans),
@@ -463,6 +473,9 @@ impl InlineExecutor {
         paint_serial: u64,
         perf_on: bool,
     ) -> Duration {
+        // A recreate (driven from the FFI layer) may have rebuilt the device
+        // since the last frame; republish picks up a new generation.
+        publish_gpu_handle(&mut self.gpu_publisher, &self.render_cx);
         // Named before the encode, so the ledger published once this scene is
         // committed carries it.
         self.renderer.note_scene_serial(paint_serial);

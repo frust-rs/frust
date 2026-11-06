@@ -780,20 +780,33 @@ fn write_in_order(
 /// caller has already flattened the thread-join into:
 ///
 /// - `Some(Some(ctx))` — the pre-init thread finished and produced a ready GPU
-///   context: **adopt it**.
-/// - `Some(None)` — the thread ran but its device init failed: **fall back** to a
-///   freshly built context via `fresh`.
+///   context: **adopt it** if `keep(&ctx)` holds, otherwise drop it and **fall
+///   back** to a freshly built context via `fresh`.
+/// - `Some(None)` — the thread ran but its device init failed: **fall back**.
 /// - `None` — no pre-init was present (`JNI_OnLoad` never ran, or a prior
 ///   `nativeInit` already took the handle) or the thread panicked (the caller
 ///   maps a join panic to `None`): **fall back**.
 ///
+/// `keep` is the adoption veto: the caller passes "the pre-built device has
+/// every optional feature the app requested that its adapter offers" (the
+/// device was created before any app code could ask). It is only consulted for
+/// a ready context; an app that requested nothing always keeps it.
+///
 /// This is the strictly best-effort, single-shot contract the task requires — a
-/// panicked or absent pre-init is never fatal, it just costs this launch the
-/// synchronous GPU-init path it always had.
-pub(crate) fn resolve_preinit<T>(joined: Option<Option<T>>, fresh: impl FnOnce() -> T) -> T {
+/// panicked, absent or vetoed pre-init is never fatal, it just costs this launch
+/// the synchronous GPU-init path it always had. A vetoed context is dropped
+/// before `fresh` runs, so its device is released ahead of the new one.
+pub(crate) fn resolve_preinit<T>(
+    joined: Option<Option<T>>,
+    keep: impl FnOnce(&T) -> bool,
+    fresh: impl FnOnce() -> T,
+) -> T {
     match joined {
-        Some(Some(ctx)) => ctx,
-        _ => fresh(),
+        Some(Some(ctx)) if keep(&ctx) => ctx,
+        rejected => {
+            drop(rejected);
+            fresh()
+        }
     }
 }
 
@@ -1098,7 +1111,7 @@ mod tests {
     #[test]
     fn resolve_preinit_adopts_a_ready_context() {
         // Pre-init succeeded: the pre-built context is adopted, `fresh` unused.
-        let ctx = resolve_preinit(Some(Some(42)), || panic!("fresh must not run"));
+        let ctx = resolve_preinit(Some(Some(42)), |_| true, || panic!("fresh must not run"));
         assert_eq!(ctx, 42);
     }
 
@@ -1106,7 +1119,7 @@ mod tests {
     fn resolve_preinit_falls_back_when_device_init_failed() {
         // `Some(None)`: the thread ran but device init failed on it (the
         // "poisoned result" case) — build fresh synchronously.
-        let ctx = resolve_preinit(Some(None), || 7);
+        let ctx = resolve_preinit(Some(None), |_| panic!("keep must not run"), || 7);
         assert_eq!(ctx, 7);
     }
 
@@ -1114,8 +1127,54 @@ mod tests {
     fn resolve_preinit_falls_back_when_absent_or_panicked() {
         // `None`: no pre-init spawned / already taken, or the thread panicked
         // (mapped to `None` by the caller) — both take the fresh path.
-        let ctx = resolve_preinit(None, || 9);
+        let ctx = resolve_preinit(None, |_| panic!("keep must not run"), || 9);
         assert_eq!(ctx, 9);
+    }
+
+    #[test]
+    fn resolve_preinit_keeps_a_ready_context_the_predicate_accepts() {
+        // The predicate sees the joined context itself and accepts it.
+        let ctx = resolve_preinit(
+            Some(Some(42)),
+            |ctx| *ctx == 42,
+            || panic!("fresh must not run"),
+        );
+        assert_eq!(ctx, 42);
+    }
+
+    #[test]
+    fn resolve_preinit_rebuilds_when_the_predicate_rejects_a_ready_context() {
+        // A ready pre-built context the predicate vetoes (its device lacks a
+        // requested feature) is dropped, and `fresh` builds the replacement.
+        let ctx = resolve_preinit(Some(Some(42)), |_| false, || 11);
+        assert_eq!(ctx, 11);
+    }
+
+    #[test]
+    fn resolve_preinit_drops_a_rejected_context_before_building_fresh() {
+        // The vetoed context (and with it the pre-built device) is released
+        // ahead of the replacement, never alongside it.
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct Tracked(Rc<Cell<bool>>);
+        impl Drop for Tracked {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+
+        let dropped = Rc::new(Cell::new(false));
+        let seen = Rc::clone(&dropped);
+        let ctx = resolve_preinit(
+            Some(Some(Tracked(Rc::clone(&dropped)))),
+            |_| false,
+            move || {
+                assert!(seen.get(), "the rejected context must drop first");
+                Tracked(Rc::new(Cell::new(false)))
+            },
+        );
+        assert!(!ctx.0.get());
     }
 
     #[test]

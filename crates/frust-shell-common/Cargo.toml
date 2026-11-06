@@ -21,7 +21,7 @@ devtools = ["dep:frust-devtools", "dep:frust-devtools-protocol"]
 # Opt-in in-app hot-patch apply over devtools (`ShellBackend`'s three hot-patch calls); never default. Capability-gated at
 # run time by `frust-devtools` (debug build, OS-CSPRNG token); the one `unsafe` call stays inside `frust-hotpatch`.
 hotpatch = ["devtools", "frust-devtools/hotpatch", "dep:base64", "dep:frust-hotpatch", "dep:frust-paths", "dep:libc", "dep:sha2"]
-# Opt-in process-wide GPU-device slot (`install_gpu_handle`/`gpu_handle`); type-erased, so it adds no dependency.
+# Opt-in process-wide replaceable GPU-device slot (`GpuPublisher`/`with_gpu_handle`); type-erased, so it adds no dependency.
 gpu = []
 
 [dependencies]
