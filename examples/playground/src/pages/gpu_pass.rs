@@ -38,6 +38,15 @@
 //!
 //! The readout text is built from the counters when the page is built; the
 //! **Refresh readout** button rebuilds it.
+//!
+//! # Memory pressure
+//!
+//! The page keeps an [`AppLifecycleListener`] with an `on_memory_pressure` hook.
+//! Each event bumps a count and records the last level, which the readout
+//! shows as `memory pressure: N (last: …)`, and logs one `memory pressure:
+//! <level>` line. On [`MemoryPressure::Critical`] the hook also sets the pass's
+//! drop flag; [`SpinningQuad::record`] takes it at its top and clears the
+//! per-drain target map, so every target is rebuilt on the next record.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -51,8 +60,9 @@ use frust::gpu::{
     with_context,
 };
 use frust::{
-    Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView, Padding, SizedBox, Theme,
-    View, button, inflexible, on_cleanup, text, texture_view, use_context,
+    AppLifecycleListener, Axis, ButtonStyle, Color, Component, EdgeInsets, FlexChild, FlexView,
+    Get, MemoryPressure, Padding, RwSignal, SizedBox, Theme, Update, View, button, inflexible,
+    on_cleanup, text, texture_view, use_context,
 };
 
 /// The target's extent in texels (4:3, matching the on-screen box).
@@ -246,6 +256,9 @@ pub struct SpinningQuad {
     targets: Mutex<HashMap<u64, Target>>,
     /// Cleared on teardown; while clear, `record` stops asking for frames.
     live: AtomicBool,
+    /// Set by the page on a `Critical` memory-pressure event; `record` takes it
+    /// and clears `targets`, so every target is rebuilt on the next record.
+    drop_targets: Arc<AtomicBool>,
     /// The last `drain_id` / `frame_index` this pass recorded, and how many
     /// times it has recorded; `0` drain id means "never recorded".
     last_drain: AtomicU64,
@@ -265,6 +278,7 @@ impl SpinningQuad {
         Self {
             targets: Mutex::new(HashMap::new()),
             live: AtomicBool::new(true),
+            drop_targets: Arc::new(AtomicBool::new(false)),
             last_drain: AtomicU64::new(0),
             last_frame: AtomicU64::new(0),
             records: AtomicU64::new(0),
@@ -274,6 +288,11 @@ impl SpinningQuad {
     /// Stops the pass asking for further frames.
     pub fn retire(&self) {
         self.live.store(false, Ordering::Release);
+    }
+
+    /// The flag a memory-pressure hook sets to ask the pass to drop its targets.
+    pub fn drop_targets_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.drop_targets)
     }
 
     /// `(last drain id, last frame index, record count)`.
@@ -294,6 +313,10 @@ impl ExternalPass for SpinningQuad {
         let record_no = self.records.load(Ordering::Relaxed);
 
         let mut targets = self.targets.lock().unwrap_or_else(PoisonError::into_inner);
+        // Memory pressure asked for the targets to go: rebuild them all below.
+        if self.drop_targets.swap(false, Ordering::AcqRel) {
+            targets.clear();
+        }
         let rebuild = targets
             .get(&drain)
             .is_none_or(|t| t.generation != generation || t.extent != EXTENT);
@@ -374,11 +397,25 @@ impl ExternalPass for SpinningQuad {
     }
 }
 
-/// The page's state: the pass, its id, and a counter the readout button bumps.
+/// The page's state: the pass, its id, a counter the readout button bumps, and
+/// the memory-pressure readout (event count, last level) with its listener.
 pub struct GpuPassState {
     id: SceneTextureId,
     pass: Arc<SpinningQuad>,
     refreshes: u32,
+    pressure: RwSignal<(u32, Option<MemoryPressure>)>,
+    _pressure: AppLifecycleListener,
+}
+
+/// Whether a memory-pressure level asks the pass to drop its per-drain targets.
+fn drops_targets(level: MemoryPressure) -> bool {
+    level == MemoryPressure::Critical
+}
+
+/// The memory-pressure readout line: the event count and the last level.
+fn pressure_readout((count, last): (u32, Option<MemoryPressure>)) -> String {
+    let last = last.map_or_else(|| "none".to_owned(), |level| format!("{level:?}"));
+    format!("memory pressure: {count} (last: {last})")
 }
 
 /// The GPU pass page's own [`Component`] (see the [module docs](self)).
@@ -396,15 +433,33 @@ impl Component for GpuPassPage {
             owned.retire();
             unregister_external_pass(id);
         });
+
+        let pressure = RwSignal::new((0, None));
+        let drop_targets = pass.drop_targets_flag();
+        // Dropping the listener (with the state) unregisters the hook.
+        let listener = AppLifecycleListener::new().on_memory_pressure(move |level| {
+            log::info!("memory pressure: {level:?}");
+            if drops_targets(level) {
+                drop_targets.store(true, Ordering::Release);
+            }
+            pressure.update(|(count, last)| {
+                *count += 1;
+                *last = Some(level);
+            });
+        });
+
         GpuPassState {
             id,
             pass,
             refreshes: 0,
+            pressure,
+            _pressure: listener,
         }
     }
 
     fn build(&self, state: &mut GpuPassState) -> impl View<GpuPassState> {
         let (drain, frame, records) = state.pass.counters();
+        let pressure = pressure_readout(state.pressure.get());
         let generation = frust::gpu::device_generation().map_or_else(
             || "none yet".to_owned(),
             |generation| generation.to_string(),
@@ -448,6 +503,7 @@ impl Component for GpuPassPage {
                 ))
                 .size(12.0),
             ),
+            inflexible(text(pressure).size(13.0)),
             inflexible(text(format!("Readout refreshed {} times", state.refreshes)).size(11.0)),
             gap(6.0),
             inflexible(
@@ -479,4 +535,41 @@ fn muted() -> Color {
         .unwrap_or_else(frust_material::baseline)
         .scheme()
         .on_surface_variant
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_critical_drops_the_targets() {
+        assert!(drops_targets(MemoryPressure::Critical));
+        assert!(!drops_targets(MemoryPressure::Moderate));
+    }
+
+    #[test]
+    fn readout_names_the_count_and_last_level() {
+        assert_eq!(
+            pressure_readout((0, None)),
+            "memory pressure: 0 (last: none)"
+        );
+        assert_eq!(
+            pressure_readout((3, Some(MemoryPressure::Moderate))),
+            "memory pressure: 3 (last: Moderate)"
+        );
+        assert_eq!(
+            pressure_readout((4, Some(MemoryPressure::Critical))),
+            "memory pressure: 4 (last: Critical)"
+        );
+    }
+
+    #[test]
+    fn drop_flag_is_taken_once() {
+        let pass = SpinningQuad::new();
+        let flag = pass.drop_targets_flag();
+        assert!(!pass.drop_targets.load(Ordering::Acquire));
+        flag.store(true, Ordering::Release);
+        assert!(pass.drop_targets.swap(false, Ordering::AcqRel));
+        assert!(!pass.drop_targets.swap(false, Ordering::AcqRel));
+    }
 }
