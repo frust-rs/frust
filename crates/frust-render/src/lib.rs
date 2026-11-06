@@ -32,7 +32,8 @@
 //! and [`SurfaceRenderer`] hands it the frame's own device, queue and encoder
 //! ahead of the scene pass so it can render into a target of its own and bind
 //! the result for a `Command::SceneTexture` to composite. See that module's
-//! docs for the contract; `HeadlessRenderer` does not drain that registry.
+//! docs for the contract. `HeadlessRenderer::render` drains nothing; passes are opt-in there, through
+//! `render_with_passes` (an explicit list) or `render_draining_registry`.
 //!
 //! Surface lifecycle is a first-class state machine: see [`SurfaceRenderer`]
 //! and [`SurfacePhase`]/[`FrameOutcome`], whose pure transition tables live in
@@ -106,7 +107,7 @@ pub use external_pass::{
 // the identical path against an engine it holds; hidden for the same reason
 // `external_pass::run_external_passes` is.
 #[doc(hidden)]
-pub use external_pass::{ExternalPassDrain, run_external_passes};
+pub use external_pass::{ExternalPassDrain, run_explicit_external_passes, run_external_passes};
 // A shell with no `/proc/meminfo` (iOS) reports its physical memory here before
 // the first renderer is created, so the glyph-atlas and retained-page tiers can
 // take the large budget — `frust-engine` owns the rule.

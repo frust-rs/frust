@@ -1296,6 +1296,47 @@ pub mod gpu {
     pub use frust_render::{
         ExternalFrame, ExternalPass, register_external_pass, unregister_external_pass,
     };
+    /// Offscreen rendering of a scene through the engine, with no window: the
+    /// harness an app golden-tests a viewport drawn by its own
+    /// [`ExternalPass`] with.
+    ///
+    /// [`render`](headless::HeadlessRenderer::render) runs no pass;
+    /// [`render_with_passes`](headless::HeadlessRenderer::render_with_passes)
+    /// runs exactly the passes it is handed (deterministic, no process-wide
+    /// state); and
+    /// [`render_draining_registry`](headless::HeadlessRenderer::render_draining_registry)
+    /// opts into the registry, whose passes are process-wide.
+    ///
+    /// ```no_run
+    /// use std::sync::Arc;
+    /// use frust::gpu::headless::{HeadlessOptions, HeadlessRenderer, HeadlessSpec};
+    /// use frust::gpu::{ExternalFrame, ExternalPass, SceneTextureId};
+    ///
+    /// struct Viewport;
+    /// impl ExternalPass for Viewport {
+    ///     fn record(&self, _frame: &mut ExternalFrame<'_>) {
+    ///         // Render into a target of your own and `frame.bind_texture(..)`.
+    ///     }
+    /// }
+    ///
+    /// async fn golden(scene: &frust::authoring::scene::Scene) -> anyhow::Result<()> {
+    ///     let mut renderer = HeadlessRenderer::new(HeadlessOptions::default()).await?;
+    ///     let id = SceneTextureId::mint();
+    ///     let passes: Vec<(SceneTextureId, Arc<dyn ExternalPass>)> =
+    ///         vec![(id, Arc::new(Viewport))];
+    ///     let image = renderer
+    ///         .render_with_passes(scene, &HeadlessSpec::new(256, 256), &passes)
+    ///         .await?;
+    ///     assert_eq!(image.rgba8.len(), 256 * 256 * 4);
+    ///     Ok(())
+    /// }
+    /// ```
+    pub mod headless {
+        pub use frust_render::{
+            GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR, HeadlessImage,
+            HeadlessMeta, HeadlessOptions, HeadlessRenderer, HeadlessSpec,
+        };
+    }
     /// The wgpu graphics library, re-exported for plugins that record an
     /// [`ExternalPass`] so they do not need a direct `wgpu` dependency.
     #[cfg(feature = "gpu")]
