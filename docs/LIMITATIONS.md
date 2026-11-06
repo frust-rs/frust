@@ -6598,30 +6598,33 @@ source line, and the parity test pins it.
 use glifo's own), or an automated macOS run of the parity test on every glifo bump (the CI check above
 acknowledges a bump; it does not run the test).
 
-### `engine-bitmap-glyphs-gap` — bitmap-strike (PNG/BGRA/Mask) emoji do not render on the engine tier; COLR emoji do
+### `engine-bitmap-glyphs-gap` — some bitmap-strike emoji records and run shapes do not render on the engine tier
 
-**Observed** (evidence: glifo 0.3.0 `glyph.rs` — `BitmapData::Png` decodes
-only under glifo's `png` feature, `Bgra`/`Mask` return `None` unconditionally;
-`crates/frust-engine/src/text/backend.rs` counts such glyphs in
-`skipped_glyphs`): the engine leaves glifo's `png` feature off because frust
-already ships a PNG decoder (`image` 0.25.10) and a second one is pure
-dependency weight, so a PNG-strike emoji glyph goes missing rather than
-landing wrong; BGRA and Mask strikes are undecoded upstream regardless.
-COLRv1 colour glyphs are the supported emoji path
-(`crates/frust-engine/src/text/color.rs`). Within COLR, a glyph whose paint
-graph needs a shape the engine cannot express exactly — a layer inside an
-isolated blend bracket, or two nested outline clips at once — is dropped
-whole and counted, never half-painted.
+**Observed** (evidence: `crates/frust-engine/tests/text_bitmap_strike.rs`,
+`crates/frust-engine/tests/apple_raster.rs`, and the Mac (sbix), Android (CBDT) and iPhone gates; the
+iOS route is covered by iOS-simulator tests; the iPhone device gate passed):
+bitmap-first faces (`sbix` with `DRAW_OUTLINES` clear, or `CBDT`/`EBDT` with no outlines) bypass
+glifo for `text::bitmap_route`. CoreText draws every `sbix` glyph on iOS; elsewhere the engine
+decodes png, dupe and flip records. Every PNG strike decode is the engine's own and refuses a strike
+over 512 px before decoding (glifo's `png` feature is off). What remains missing, counted in
+`skipped_glyphs` rather than drawn wrong:
 
-**Accepted because**: the bundled and platform emoji fonts frust targets ship
-COLR tables; a wrong-pixels approximation of an inexpressible COLR shape
-would violate the backend's never-wrong-pixels invariant; and decoding PNG
-strikes properly belongs to a routing seam that hands glifo frust's own
-decoder rather than enabling a duplicate one.
+- `emjc` and other non-PNG `sbix` records off iOS; non-PNG `EBDT` strikes; BGRA and Mask strikes.
+- A bitmap run under a non-uniform scale or skew draws only already-resident strikes.
+- A bitmap run past 1024 px.
+- A face with outlines and strikes (`sbix` with `DRAW_OUTLINES` set, `CBDT`/`EBDT` with `glyf`/`CFF`,
+  COLR with strikes) draws its outlines, not its strikes.
 
-**Trigger for removal**: a glifo release taking an external PNG decode hook
-(or decoding BGRA/Mask), or a measured need for a bitmap-strike font on a
-target platform.
+COLRv1 colour glyphs remain drawn by `crates/frust-engine/src/text/color.rs`. Within COLR, a glyph
+whose paint graph needs a shape the engine cannot express exactly — a layer inside an isolated blend
+bracket, or two nested outline clips at once — is dropped whole and counted, never half-painted.
+
+**Accepted because**: a wrong-pixels approximation of an inexpressible shape would violate the
+backend's never-wrong-pixels invariant, and the target platforms' emoji fonts ship PNG strikes,
+CoreText-decodable records on iOS, or COLR.
+
+**Trigger for removal**: an engine decoder for `emjc`/BGRA/Mask records, or a measured need for a
+bitmap-strike font on a skewed or oversized run.
 
 ### `engine-text-hinting-policy` — hinting is desktop-only and vertical-only; the reference oracle never hints
 

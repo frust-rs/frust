@@ -34,7 +34,9 @@
 //! path would be, painted by the run's own brush (see [`crate::text`]); a run
 //! of a face `glifo` cannot read (`hvgl`-only, Apple's PingFang) takes the same
 //! two routes, its atlas glyphs inserted frust-side between the two walks
-//! (see [`crate::text::hvgl_atlas`]).
+//! (see [`crate::text::hvgl_atlas`]), and a run of a bitmap-first face (colour
+//! emoji strikes) is drawn by the frust-side bitmap route, its strikes
+//! inserted as the walk reaches them (see [`crate::text::bitmap_route`]).
 //! Shader quads are recognised
 //! and skipped — the engine grows them in a later pass, and skipping is the
 //! conservative behaviour (a frame draws less, never wrong). A backdrop blur
@@ -112,7 +114,8 @@ use crate::error::EngineError;
 use crate::filters::{
     Backdrop, backdrop_region, backdrop_sigma, clamp_backdrop_cap, max_backdrops_per_frame,
 };
-use crate::text::atlas_policy::Synthesis;
+use crate::text::atlas_policy::{StrikePpems, Synthesis};
+use crate::text::bitmap_route::{self, BitmapRouting};
 use crate::text::hvgl::HvglOutlines;
 use crate::text::hvgl_atlas::{self, CollectedFaces, Measured};
 use crate::text::{
@@ -1152,6 +1155,25 @@ impl SceneCompiler {
         self.glyph_atlas.entry_count()
     }
 
+    /// What the glyph atlas's resident population is charged against its
+    /// texel budget, in texels (see [`Self::glyph_texel_budget`]).
+    ///
+    /// An estimate for the entries `glifo` inserts (each priced at its run's
+    /// size) and exact for the bitmap strikes this crate inserts itself (each
+    /// charged its padded slot); observational, like
+    /// [`Self::glyph_atlas_entries`].
+    #[must_use]
+    pub fn glyph_resident_texels(&self) -> u64 {
+        self.glyph_atlas.resident_texels()
+    }
+
+    /// The texels glyph residency may hold before a run that would insert is
+    /// refused the atlas: half the shared atlas array.
+    #[must_use]
+    pub fn glyph_texel_budget(&self) -> u64 {
+        self.glyph_atlas.texel_budget()
+    }
+
     /// Whether any glyph may be cached at all — `false` under
     /// `FRUST_ENGINE_NO_ATLAS`.
     #[must_use]
@@ -2051,6 +2073,8 @@ impl SceneCompiler {
                     // refused as one.
                     let route = if facts.hvgl && !facts.color {
                         self.classify_hvgl_run(run, transform, solid.is_some(), facts.upem)
+                    } else if facts.bitmap_first && !facts.color {
+                        self.classify_bitmap_run(run, transform, facts)
                     } else {
                         let key = RunKey::for_run_with(
                             run,
@@ -2062,6 +2086,8 @@ impl SceneCompiler {
                             RunBasis {
                                 upem: f32::from(facts.upem),
                                 synthetic_oblique: self.synthetic_oblique,
+                                bitmap_first: false,
+                                strikes: StrikePpems::NONE,
                             },
                         );
                         self.glyph_atlas.classify_run(&key)
@@ -2105,6 +2131,8 @@ impl SceneCompiler {
             RunBasis {
                 upem: f32::from(upem),
                 synthetic_oblique: false,
+                bitmap_first: false,
+                strikes: StrikePpems::NONE,
             },
         );
         key.font_id = face;
@@ -2115,6 +2143,38 @@ impl SceneCompiler {
             self.hvgl_faces.note(face, &run.font);
         }
         route
+    }
+
+    /// The route of a run of a bitmap-first face under the device
+    /// `transform`, decided in the collect walk and drawn by
+    /// [`crate::text::bitmap_route`].
+    ///
+    /// Keyed as that route keys it: unhinted, with no variation coordinates,
+    /// embolden or skew (a strike is pre-rendered; it is drawn upright at its
+    /// own pixels), and with the face's strikes, so the policy prices and
+    /// probes the run at its preferred strike.
+    fn classify_bitmap_run(
+        &mut self,
+        run: &GlyphRun,
+        transform: Affine,
+        facts: crate::text::FaceFacts,
+    ) -> RunRoute {
+        let mut key = RunKey::for_run_with(
+            run,
+            transform,
+            false,
+            false,
+            peniko::color::palette::css::BLACK,
+            &mut self.run_glyph_ids,
+            RunBasis {
+                upem: f32::from(facts.upem),
+                synthetic_oblique: false,
+                bitmap_first: true,
+                strikes: facts.strikes,
+            },
+        );
+        key.synthesis = Some(Synthesis::NONE);
+        self.glyph_atlas.classify_run(&key)
     }
 
     /// Close the collect phase: place every glyph the collect walk claimed
@@ -2273,6 +2333,33 @@ impl SceneCompiler {
                     frame.variation_axes_outline_runs.saturating_add(1);
             }
             _ => {}
+        }
+        // A bitmap-first face never reaches `glifo`: the bitmap route draws
+        // its resident strikes whatever the route, and inserts only on an
+        // atlas route (see [`crate::text::bitmap_route`]).
+        if facts.bitmap_first && !facts.color && !hvgl_face {
+            let insert = matches!(route, Some(RunRoute::Atlas(_)));
+            let atlas = glyph_atlas
+                .is_enabled()
+                .then(|| (glyph_atlas, images.allocator_mut()));
+            let outcome = bitmap_route::lower_run(
+                run,
+                transform,
+                paint,
+                &run.brush,
+                BitmapRouting { atlas, insert },
+                GlyphRunTargets {
+                    generator,
+                    clips,
+                    prep: glyphs,
+                    frame,
+                    depth,
+                    hvgl: hvgl_outlines,
+                },
+            );
+            frame.glyph_draws = frame.glyph_draws.saturating_add(outcome.drawn);
+            frame.skipped_glyphs = frame.skipped_glyphs.saturating_add(outcome.skipped);
+            return;
         }
         let atlas = match route {
             Some(RunRoute::Atlas(_)) => Some((glyph_atlas, images.allocator_mut())),
@@ -3559,6 +3646,16 @@ mod tests {
     use super::*;
 
     use frust_scene::{FillRule, SceneBuilder};
+
+    impl SceneCompiler {
+        /// How many bitmap-strike images the bitmap route has tried to
+        /// produce — the observable that a refused strike is produced once,
+        /// not per frame (see [`crate::text::bitmap_route`]).
+        #[must_use]
+        pub(crate) fn bitmap_productions(&self) -> u64 {
+            self.glyph_atlas.bitmap_productions()
+        }
+    }
 
     #[test]
     fn the_hvgl_unavailable_warning_fires_once_and_names_no_text() {

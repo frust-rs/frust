@@ -587,12 +587,11 @@ A `--release` Android build threads `--define`s into the `cargo ndk` compile via
 
 A `DYLD_LIBRARY_PATH` naming a directory that also holds Homebrew's `libpng`/`libjpeg`/`libtiff`/`libgif` dylibs (e.g. `/opt/homebrew/lib`) makes dyld replace ImageIO's own private PNG/JPEG/TIFF/GIF/JPEG-2000/Radiance codec dylibs by leaf-name match — case-insensitive on APFS — leaving ImageIO's `__cg_*`-prefixed imports unbound; a bare `cargo run` then SIGBUSes at `0xbad4007` on the first image decode (`-[NSImage initWithData:]`/`CGImageSourceCopyPropertiesAtIndex`), no `NSApplication` required to trigger it, and `DYLD_FALLBACK_LIBRARY_PATH` does not help (only consulted when the real path is missing). `frust-native-widgets`' macOS `Image` control checks for the shadow first and degrades to an empty view plus one warning instead of crashing (`plugins/native-widgets/src/controls/image.rs`'s `shadowed_codec`); nothing else in this repo guards against it. A launcher whose dyld prunes `DYLD_*` (`nohup`, `env`, any SIP-protected binary) never reproduces it, which is why the symptom can look intermittent from an interactive shell that exports the variable globally. Fix: do not export `DYLD_LIBRARY_PATH` in a shell profile; scope it per-invocation, or strip it with `env -u DYLD_LIBRARY_PATH <cmd>`.
 
-### Bitmap-strike color emoji do not render on the engine (COLR emoji do)
+### Bitmap-strike color emoji: BGRA/Mask strikes and non-atlas routes
 
-`frust-engine` decodes COLRv1 colour glyphs only; PNG/BGRA/Mask bitmap-strike glyphs (pinned
-upstream in glifo 0.3.0) go missing rather than landing wrong. **Safe** for huddle's desktop emoji
-set (bundled fonts ship COLR); **at-risk**: Android's CBDT-strike system emoji. See
-[LIMITATIONS.md](LIMITATIONS.md)'s `engine-bitmap-glyphs-gap` for evidence and removal trigger.
+`frust-engine` draws sbix/CBDT PNG emoji through the glyph atlas; BGRA/Mask strikes and bitmap
+glyphs on a non-atlas route go missing and are counted. See [LIMITATIONS.md](LIMITATIONS.md)'s
+`engine-bitmap-glyphs-gap`.
 
 ## Website
 

@@ -8,8 +8,8 @@ and the U+1F600 grinning-face emoji), plus the Thai sentence `'สวัสด�
 and U+0E3F-U+0E5B, with the ASCII space U+0020). No system font is consulted by those tests —
 these are the *only* fonts registered into their `TextContext`.
 
-Total bundle size: 96 KB (`du -sh testing/fonts` on this checkout; the five font files total
-61 KB of bytes), far under the 4 MB cap.
+Total bundle size: 104 KB (`du -sh testing/fonts` on this checkout; the six font files total
+67 KB of bytes), far under the 4 MB cap.
 
 ## Files
 
@@ -19,6 +19,7 @@ Total bundle size: 96 KB (`du -sh testing/fonts` on this checkout; the five font
 | `NotoSansArabic-Subset.ttf` | Arabic RTL + joining (`مرحبا`) | https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf | `7b32dd87900309cb7dfd1360f4c1341b8f32b789ce56b460db426dae3d94db16` |
 | `NotoSansJP-Subset.otf` | CJK (`日本語`) | https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf | `6e575a05281f779b88658bc8dae06364dffb1aa1ae63175ce660325654bed660` |
 | `NotoEmoji-COLRv1-Subset.ttf` | COLRv1 colour emoji (`😀`, U+1F600) | https://raw.githubusercontent.com/googlefonts/color-fonts/main/fonts/noto_noflags-glyf_colr_1.ttf | `7badb39593ac1871c57a54de53e73a862e9497f61ddd343dc9b5b333e0d716e6` |
+| `NotoColorEmoji-CBDT-Subset.ttf` | CBDT/CBLC PNG bitmap-strike emoji (`😀`, U+1F600); used only by `frust-engine`'s `text_bitmap_strike` test | https://github.com/googlefonts/noto-emoji/raw/f3ae03f5e9b3b8516fa151f7168159ca1a3e7515/fonts/NotoColorEmoji.ttf | `ea85da8ea4feac8a843471834bef606fc1a79b604e2e5d3c77e0170f9ccdb431` |
 | `NotoSansThai-Subset.ttf` | Thai (`สวัสดีครับไก่ต้มยำ`) | https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf | `bc4e89b8a72aac6e3617f0a3bcea495d63abbdfbe345d9367afd6489a1c54ce3` |
 
 Upstream (pre-subset) file identity, for provenance/reproducibility of the subset commands
@@ -30,6 +31,7 @@ below:
 | `NotoSansArabic-Regular.ttf` | `bdff3e5659d67e67def05b33f749683b9376ae819d65d3dd62ac4640b3aaef48` |
 | `NotoSansJP-Regular.otf` | `dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073` |
 | `noto_noflags-glyf_colr_1.ttf` | `d4080b4e69f9d7b3fc71b418eb4eb7afae69eaec04b98bfd46477ec4fdc02829` |
+| `NotoColorEmoji.ttf` (googlefonts/noto-emoji `f3ae03f`, v2.051, `noto-emoji:20250818:e92753bf`) | `72a635cb3d2f3524c51620cdde406b217204e8a6a06c6a096ff8ed4b5fd6e27b` |
 | `NotoSansThai-Regular.ttf` | `61cf814eec46b294d6ea4401ac295d0cecd5207bd2331dcc5a15e7301d30ee44` |
 
 ## Subset commands
@@ -70,6 +72,18 @@ pyftsubset NotoSansThai-Regular.ttf --output-file=NotoSansThai-Subset.ttf \
   --name-IDs='*' --name-legacy --name-languages='*'
 ```
 
+```bash
+pyftsubset NotoColorEmoji.ttf --output-file=NotoColorEmoji-CBDT-Subset.ttf \
+  --unicodes=1F600 \
+  --layout-features='*' --glyph-names --notdef-glyph --notdef-outline \
+  --recommended-glyphs --name-IDs='*' --name-legacy --name-languages='*'
+```
+
+The CBDT subset is Noto Color Emoji's canonical bitmap build (tables `CBDT`, `CBLC`, `GSUB`,
+`cmap`, no `COLR`/`SVG `): one strike glyph, U+1F600 at glyph id 1, with its embedded PNG
+unmodified and its `name` table the upstream one. It is deliberately not registered in
+`frust-testing`'s `test_fonts`, so no golden changes.
+
 The Thai subset keeps the upstream family name (`Noto Sans Thai`) unchanged: it is a pure
 codepoint subset of the OFL face with no renaming, so its `name` table and GSUB/GPOS
 (`--layout-features='*'`, needed for Thai mark placement) are the upstream ones.
@@ -100,13 +114,14 @@ f.save("NotoEmoji-COLRv1-Subset.ttf")
 
 ## Copyright and license text
 
-### `NotoSans-Subset.ttf`, `NotoSansArabic-Subset.ttf`, `NotoSansJP-Subset.otf`, `NotoSansThai-Subset.ttf`
+### `NotoSans-Subset.ttf`, `NotoSansArabic-Subset.ttf`, `NotoSansJP-Subset.otf`, `NotoSansThai-Subset.ttf`, `NotoColorEmoji-CBDT-Subset.ttf`
 
-Copyright 2022 The Noto Project Authors (Latin: https://github.com/notofonts/latin-greek-cyrillic;
+Copyright 2013 Google LLC (`NotoColorEmoji-CBDT-Subset.ttf`, https://github.com/googlefonts/noto-emoji,
+SIL OFL 1.1); copyright 2022 The Noto Project Authors (Latin: https://github.com/notofonts/latin-greek-cyrillic;
 Arabic: https://github.com/notofonts/arabic; Thai: https://github.com/notofonts/thai); Noto
 Sans JP additionally carries `© 2014-2021 Adobe (http://www.adobe.com/)` in its embedded
 `name` table (Source Han Sans lineage, distributed as Noto Sans CJK/JP by the Noto Project —
-see https://github.com/notofonts/noto-cjk). All four are licensed under the SIL Open Font
+see https://github.com/notofonts/noto-cjk). All five are licensed under the SIL Open Font
 License, Version 1.1, full text below.
 
 ```

@@ -136,13 +136,30 @@
 //! resident population from the outside, once per frame — are both behind
 //! `#[cfg(all(debug_assertions, feature = "std"))]` and simply do not exist in
 //! a release build. What is observable is the entry *count*, so the total is
-//! maintained incrementally instead: entries appearing between two run
-//! boundaries are charged at the size of the run that was admitted
-//! ([`AtlasPolicy::charge_admissions`]), and an eviction pass discharges the
-//! total in proportion to the entries it reaped
-//! ([`AtlasPolicy::discharge_evictions`]) — which holds the *mean* charge per
-//! entry across a reap, and takes the total to exactly zero when the map
-//! empties, so the estimate cannot drift upward for good.
+//! maintained incrementally instead, as two populations kept apart.
+//!
+//! The *outline* population — every entry `glifo` or the frust-side hvgl
+//! insert put in the map — is charged at the size of the run that was
+//! admitted ([`AtlasPolicy::charge_admissions`]), and an eviction pass
+//! discharges it in proportion to the outline entries it reaped
+//! ([`AtlasPolicy::discharge_evictions`]), which holds the *mean* charge per
+//! outline entry across a reap.
+//!
+//! The *bitmap* population — every strike the frust-side bitmap route
+//! inserts ([`AtlasPolicy::insert_bitmap`]) — is priced exactly: each entry is
+//! charged its real padded slot ([`padded_slot_texels`]), since its slot is
+//! its image whatever size it is drawn at, and that charge is remembered under
+//! the slot's page and origin. The eviction pass reports the padded rectangle
+//! of every entry it reaped, so a reaped strike is refunded its own charge,
+//! exactly, before the proportional rule runs over the outline entries alone.
+//! The two cannot be pooled: a strike costs tens of times an outline glyph, and
+//! a mean held across reaping heavy strikes while light, always-drawn text
+//! survives would keep the strikes' texels charged to the text for good.
+//!
+//! So the total cannot drift upward while the map holds anything: a strike's
+//! charge leaves with it, the outline share never grows across a reap, and
+//! both go to exactly zero when the map empties. After any sequence of inserts
+//! and reaps the total is at most the sum of the live entries' own charges.
 //!
 //! [`glyph_texels_at`] is deliberately an over-estimate: it prices a glyph at
 //! its em square plus `glifo`'s padding, where a Latin lowercase letter is
@@ -337,6 +354,116 @@ pub(crate) const EVICTION_FREQUENCY: u64 = 64;
 /// cheaper and unbounded. Also `glifo`'s own default.
 pub(crate) const MAX_CACHED_FONT_SIZE: f32 = 128.0;
 
+/// Largest run size, in pixels, a bitmap-first face is still offered the
+/// atlas at.
+///
+/// A strike is cached at its own ppem whatever the run's size, so unlike an
+/// outline glyph its entry does not grow with the run: the ceiling bounds only
+/// how large a run the frust-side bitmap route (`crate::text::bitmap_route`)
+/// scales a cached strike to. `glifo` never sees such a run, and keeps its own
+/// [`MAX_CACHED_FONT_SIZE`] backstop for every face it does draw.
+pub(crate) const MAX_BITMAP_RUN_SIZE: f32 = 1024.0;
+
+/// The most bitmap strikes a face's [`StrikePpems`] remembers, in table order.
+/// Apple Color Emoji carries nine; a strike past the bound is never chosen.
+pub(crate) const MAX_BITMAP_STRIKES: usize = 16;
+
+/// `glifo`'s `SUBPIXEL_BITMAP` (glifo 0.3.0 `atlas/key.rs`, one past its
+/// four outline buckets), the sentinel bucket every bitmap-strike entry is
+/// keyed under, restated because it is crate-private there.
+pub(crate) const SUBPIXEL_BITMAP: u8 = 5;
+
+/// A bitmap-first face's strikes, in table order: per strike the ppem its
+/// choice is made by and the ppem its atlas entries are keyed at (`sbix`: the
+/// strike's ppem for both; `CBLC`/`EBLC`: `ppemY` and `ppemX`, as `skrifa`
+/// reads them). Fixed-size and `Copy`, so a face's facts carry it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StrikePpems {
+    /// How many of `strikes` are in use.
+    len: u8,
+    /// `(choice ppem, key ppem)` per strike.
+    strikes: [(u16, u16); MAX_BITMAP_STRIKES],
+}
+
+impl StrikePpems {
+    /// No strikes: a face that is not bitmap-first.
+    pub(crate) const NONE: Self = Self {
+        len: 0,
+        strikes: [(0, 0); MAX_BITMAP_STRIKES],
+    };
+
+    /// Append a strike, ignored once [`MAX_BITMAP_STRIKES`] are held.
+    pub(crate) fn push(&mut self, choice: u16, key: u16) {
+        if let Some(slot) = self.strikes.get_mut(usize::from(self.len)) {
+            *slot = (choice, key);
+            self.len += 1;
+        }
+    }
+
+    /// The strikes in use, in table order.
+    #[must_use]
+    pub(crate) fn as_slice(&self) -> &[(u16, u16)] {
+        &self.strikes[..usize::from(self.len)]
+    }
+
+    /// The strike a run drawn at device size `size` prefers, as its index:
+    /// `skrifa`'s `glyph_for_size` rule (skrifa 0.44 `bitmap.rs`) over every
+    /// strike — the exact size, else the nearest larger, else the nearest
+    /// smaller.
+    #[must_use]
+    pub(crate) fn preferred(&self, size: f32) -> Option<usize> {
+        prefer_strike(
+            size,
+            self.as_slice().iter().map(|&(choice, _)| (choice, true)),
+        )
+    }
+}
+
+/// `skrifa`'s `glyph_for_size` fold (skrifa 0.44 `bitmap.rs`), over `strikes`
+/// in table order as `(choice ppem, holds the glyph)`: the first strike
+/// holding the glyph is taken, then replaced by any holding strike that is
+/// nearer from above, or larger while the best is still below `size`.
+#[must_use]
+pub(crate) fn prefer_strike(
+    size: f32,
+    strikes: impl Iterator<Item = (u16, bool)>,
+) -> Option<usize> {
+    let mut best: Option<(usize, f32)> = None;
+    for (index, (ppem, holds)) in strikes.enumerate() {
+        let ppem = f32::from(ppem);
+        let better = match best {
+            None => true,
+            Some((_, best)) => (ppem >= size && ppem < best) || (best < size && ppem > best),
+        };
+        if better && holds {
+            best = Some((index, ppem));
+        }
+    }
+    best.map(|(index, _)| index)
+}
+
+/// The key `glifo` files a bitmap-strike glyph under (glifo 0.3.0
+/// `glyph.rs`, the bitmap branch of `draw_glyphs`): the strike's x ppem as
+/// the size, unhinted, the [`SUBPIXEL_BITMAP`] sentinel, black, no embolden
+/// and no coordinates. The frust-side bitmap route keys its own entries so.
+#[must_use]
+pub(crate) fn bitmap_key(font_id: u64, font_index: u32, glyph_id: u32, ppem: u16) -> GlyphCacheKey {
+    let mut key = GlyphCacheKey::new(
+        font_id,
+        font_index,
+        glyph_id,
+        f32::from(ppem),
+        false,
+        0.0,
+        BLACK,
+        pack_context_color(BLACK),
+        FontEmbolden::default(),
+        &[],
+    );
+    key.subpixel_x = SUBPIXEL_BITMAP;
+    key
+}
+
 /// Below what magnitude a transform coefficient counts as zero.
 ///
 /// `glifo`'s own `SCALAR_NEARLY_ZERO_F64` — a twelfth of a binary order, i.e.
@@ -483,9 +610,18 @@ pub(crate) fn glyph_texels_at(size: f32) -> u64 {
     let scale = f64::from(size.max(TYPICAL_GLYPH_SIZE)) / f64::from(TYPICAL_GLYPH_SIZE);
     let texels = TYPICAL_GLYPH_TEXELS as f64 * scale * scale;
     // Finite by construction: `scale` is at least one, and `size` is a
-    // quantized font size at or under `MAX_CACHED_FONT_SIZE` by the time any
-    // caller charges it.
+    // quantized font size at or under `MAX_CACHED_FONT_SIZE`, or a strike's
+    // `u16` ppem, by the time any caller charges it.
     texels as u64
+}
+
+/// The texels a `width` x `height` slot really occupies in the packer: the
+/// extent plus [`GLYPH_PADDING`](glifo::GLYPH_PADDING) on every side, which
+/// is what `glifo`'s `insert_entry` allocates.
+#[must_use]
+pub(crate) fn padded_slot_texels(width: u16, height: u16) -> u64 {
+    let pad = u64::from(glifo::GLYPH_PADDING) * 2;
+    (u64::from(width) + pad).saturating_mul(u64::from(height) + pad)
 }
 
 /// How many entries of device size `size` fit in the texels `entries` typical
@@ -907,6 +1043,11 @@ pub(crate) struct AtlasRun {
     /// as a `glifo` run that missed does, is drawn the general way rather
     /// than as quads (see `crate::text::backend`'s module doc).
     missed: bool,
+    /// The device size one of the run's entries is priced at against the
+    /// budget: [`size`](Self::size) for an outline run, its preferred strike's
+    /// ppem for a bitmap-first one (see [`RunKey::bitmap_first`]). Routing
+    /// only, like `distinct_glyphs`.
+    demand_size: f32,
     /// Whether the run's outlines are hinted.
     hinted: bool,
     /// The variation coordinates and faux-bold stroke the run is drawn with.
@@ -923,6 +1064,12 @@ impl AtlasRun {
     #[must_use]
     pub(crate) fn size(&self) -> f32 {
         self.size
+    }
+
+    /// The device size one entry of this run is priced at.
+    #[must_use]
+    pub(crate) fn demand_size(&self) -> f32 {
+        self.demand_size
     }
 
     /// The most entries drawing this run can add to the atlas.
@@ -1108,6 +1255,17 @@ pub(crate) struct RunKey<'g> {
     /// classified on its own merits and collected
     /// ([`AtlasPolicy::collect_run`]).
     pub(crate) color_font: bool,
+    /// Whether the run's face draws from bitmap strikes first (see
+    /// `crate::text::font_is_bitmap_first`), so its run is drawn by the
+    /// frust-side bitmap route rather than `glifo`. A strike is cached at its
+    /// own ppem, not the run's size, so the size-based outline reasons
+    /// ([`OutlineReason::SizeAnimating`]; [`OutlineReason::SizeTooLarge`] below
+    /// [`MAX_BITMAP_RUN_SIZE`]) say nothing about such a run, and its
+    /// residency is probed and priced under the bitmap key at its preferred
+    /// strike ([`bitmap_key`], [`Self::strikes`]). A *routing* input.
+    pub(crate) bitmap_first: bool,
+    /// A bitmap-first face's strikes ([`StrikePpems::NONE`] for any other).
+    pub(crate) strikes: StrikePpems,
     /// The context colour a COLR glyph resolves against.
     pub(crate) context_color: AlphaColor<Srgb>,
     /// The variation coordinates and faux-bold stroke the run is drawn with,
@@ -1181,6 +1339,8 @@ impl<'g> RunKey<'g> {
             transform,
             hinted,
             color_font,
+            bitmap_first: basis.bitmap_first,
+            strikes: basis.strikes,
             context_color,
             synthesis: Synthesis::new(run.font.normalized_coords(), embolden),
             oblique,
@@ -1203,6 +1363,8 @@ impl<'g> RunKey<'g> {
         let basis = RunBasis {
             upem: 0.0,
             synthetic_oblique: false,
+            bitmap_first: false,
+            strikes: StrikePpems::NONE,
         };
         Self::for_run_with(
             run,
@@ -1224,6 +1386,10 @@ pub(crate) struct RunBasis {
     pub(crate) upem: f32,
     /// `SceneCompiler::synthetic_oblique_enabled`.
     pub(crate) synthetic_oblique: bool,
+    /// The face is bitmap-first (see [`RunKey::bitmap_first`]).
+    pub(crate) bitmap_first: bool,
+    /// The face's strikes (see [`RunKey::strikes`]).
+    pub(crate) strikes: StrikePpems,
 }
 
 /// Scratch a run's distinct glyph ids are counted in — what
@@ -1314,17 +1480,42 @@ pub(crate) struct AtlasPolicy {
     /// ([`glyph_entry_ceiling`]), for reporting only.
     max_entries: usize,
     /// What the resident population is estimated to occupy, in texels: every
-    /// entry charged at [`glyph_texels_at`] of the size it was admitted under.
+    /// outline entry charged at [`glyph_texels_at`] of the size it was admitted
+    /// under, plus every bitmap strike's exact charge
+    /// ([`bitmap_texels`](Self::bitmap_texels)).
     ///
     /// Maintained incrementally, because `glifo` 0.3.0 will not price the
     /// population from outside — see this module's doc. Charged by
-    /// [`charge_admissions`](Self::charge_admissions), discharged by
+    /// [`charge_admissions`](Self::charge_admissions), [`build`](Self::build)
+    /// and [`insert_bitmap`](Self::insert_bitmap), discharged by
     /// [`discharge_evictions`](Self::discharge_evictions), and exactly zero
     /// whenever the entry map is empty.
     resident_texels: u64,
     /// How many entries [`resident_texels`](Self::resident_texels) has been
-    /// charged for, so an entry-count change can be read as a delta.
+    /// charged for, so an entry-count change can be read as a delta. The
+    /// bitmap strikes in [`bitmap_charges`](Self::bitmap_charges) are among
+    /// them.
     charged_entries: usize,
+    /// The exact charge of every bitmap strike still charged, by the slot's
+    /// page and origin — what an eviction's clear rectangle names it by, so a
+    /// reaped strike is refunded its own charge (see this module's doc).
+    bitmap_charges: HashMap<SlotOrigin, u64>,
+    /// The sum of [`bitmap_charges`](Self::bitmap_charges): the part of
+    /// [`resident_texels`](Self::resident_texels) the proportional discharge
+    /// never touches.
+    bitmap_texels: u64,
+    /// Bitmap keys whose image could not be produced — a decode that failed,
+    /// a header over the size cap, a CoreText refusal, an inkless raster — so
+    /// the route counts the glyph skipped without producing it again every
+    /// frame. A key carries the face's process-unique blob id and collection
+    /// index, the strike's ppem and the glyph, so a face that joins the set
+    /// later can never match an entry; bounded by [`MAX_REFUSED_BITMAP_KEYS`]
+    /// and emptied when full, and dropped with the policy when the atlas is
+    /// rebuilt.
+    refused_bitmaps: HashSet<GlyphCacheKey>,
+    /// How many bitmap-strike images the route has tried to produce, for the
+    /// cases pinning that a refused glyph is produced once.
+    bitmap_productions: u64,
     /// The device size the next admission delta is charged at: the size of the
     /// last run [`admit_run`](Self::admit_run) let through, since `glifo`
     /// inserts a run's glyphs as it draws them and every entry appearing before
@@ -1477,6 +1668,10 @@ impl AtlasPolicy {
             max_entries: glyph_entry_ceiling(pages),
             resident_texels: 0,
             charged_entries: 0,
+            bitmap_charges: HashMap::new(),
+            bitmap_texels: 0,
+            refused_bitmaps: HashSet::new(),
+            bitmap_productions: 0,
             admitting_size: TYPICAL_GLYPH_SIZE,
             disabled,
             frame: 0,
@@ -1785,12 +1980,31 @@ impl AtlasPolicy {
         // the same terms `glifo` compares its own ceiling against the absorbed
         // size: a run just over the line must not be admitted by rounding down
         // to it.
-        if device_size > MAX_CACHED_FONT_SIZE {
+        //
+        // A bitmap-first face is exempt from the animation reason and has the
+        // higher `MAX_BITMAP_RUN_SIZE` ceiling: its strike is cached at the
+        // strike's ppem whatever size the run is drawn at, so a headline or
+        // an animating emoji stays on the atlas. Every other reason above and
+        // below still applies. Its demand is priced at the preferred strike's
+        // ppem (an estimate: the bitmap route charges each insert its real
+        // padded slot, see `insert_bitmap`).
+        let ceiling = if run.bitmap_first {
+            MAX_BITMAP_RUN_SIZE
+        } else {
+            MAX_CACHED_FONT_SIZE
+        };
+        if device_size > ceiling {
             return RunRoute::Outline(OutlineReason::SizeTooLarge);
         }
-        if animating {
+        if animating && !run.bitmap_first {
             return RunRoute::Outline(OutlineReason::SizeAnimating);
         }
+        let strike = run
+            .bitmap_first
+            .then(|| run.strikes.preferred(device_size))
+            .flatten()
+            .and_then(|index| run.strikes.as_slice().get(index).copied());
+        let demand_size = strike.map_or(size, |(choice, key)| f32::from(choice.max(key)));
         // Last, because it is the only answer that depends on what other runs
         // have already been admitted rather than on this one alone — and the
         // only one this walk cannot answer conclusively, since nothing is
@@ -1802,8 +2016,14 @@ impl AtlasPolicy {
         // atlas whatever the running total says (see this module's doc), and
         // the residency question is asked only once the budget has refused —
         // a population under its share never pays for it.
-        let resident_only = self.would_overspend(size, run.distinct_glyphs);
-        if resident_only && !self.every_glyph_resident(run, synthesis) {
+        let resident_only = self.would_overspend(demand_size, run.distinct_glyphs);
+        if resident_only
+            && !match (run.bitmap_first, strike) {
+                (true, Some((_, key_ppem))) => self.every_bitmap_glyph_resident(run, key_ppem),
+                (true, None) => false,
+                (false, _) => self.every_glyph_resident(run, synthesis),
+            }
+        {
             return RunRoute::Outline(OutlineReason::ResidencyFull);
         }
 
@@ -1815,6 +2035,7 @@ impl AtlasPolicy {
             resident_only,
             collected: false,
             missed: false,
+            demand_size,
             hinted: run.hinted,
             synthesis,
             context_color: run.context_color,
@@ -1870,7 +2091,7 @@ impl AtlasPolicy {
             RunRoute::Atlas(run)
                 if !run.resident_only
                     && !run.collected
-                    && self.would_overspend(run.size(), run.distinct_glyphs()) =>
+                    && self.would_overspend(run.demand_size(), run.distinct_glyphs()) =>
             {
                 RunRoute::Outline(OutlineReason::ResidencyFull)
             }
@@ -1936,6 +2157,29 @@ impl AtlasPolicy {
         let resident = self.placed_glyphs_resident(identity, &placed);
         self.placed = placed;
         resident
+    }
+
+    /// [`every_glyph_resident`](Self::every_glyph_resident) for a
+    /// bitmap-first run: every glyph's [`bitmap_key`] at the run's preferred
+    /// strike `ppem` is resident (or remembered inkless). Bucket-free, since a
+    /// strike entry has one key per glyph whatever its position; a glyph the
+    /// route draws from another strike reads as not resident, which errs
+    /// toward refusing. A miss is a probe's, as above.
+    fn every_bitmap_glyph_resident(&mut self, run: &RunKey<'_>, ppem: u16) -> bool {
+        if run.glyphs.is_empty() {
+            return false;
+        }
+        for glyph in run.glyphs {
+            let key = bitmap_key(run.font_id, run.font_index, glyph.id, ppem);
+            if self.is_inkless(&key) {
+                continue;
+            }
+            if self.atlas.get(&key).is_none() {
+                self.probe_misses = self.probe_misses.saturating_add(1);
+                return false;
+            }
+        }
+        true
     }
 
     /// [`every_glyph_resident`](Self::every_glyph_resident)'s probe, over the
@@ -2016,14 +2260,20 @@ impl AtlasPolicy {
     /// The admission half of the running total. `GlyphAtlas` reports its entry
     /// *count* and nothing else in a release build (see this module's doc), so
     /// the delta since the last charge is what there is to work with, priced at
-    /// the size of the run that was admitted to produce it.
+    /// the size of the run that was admitted to produce it. Only `glifo`'s own
+    /// inserts reach this delta: [`build`](Self::build) and
+    /// [`insert_bitmap`](Self::insert_bitmap) charge theirs as they make them.
     fn charge_admissions(&mut self) {
         let live = self.atlas.len();
         let Some(added) = live.checked_sub(self.charged_entries) else {
             // Fewer entries than were charged: an eviction the accounting has
             // not been told about. `discharge_evictions` is what reconciles it,
-            // in the same proportional terms, rather than this one guessing.
-            self.discharge_evictions();
+            // on the same terms, rather than this one guessing — the reaped
+            // rectangles are still on `glifo`'s queue, and are carried into the
+            // next pass's clears exactly as `end_frame` carries its own.
+            let reaped: Vec<PendingClearRect> = self.atlas.drain_pending_clear_rects().collect();
+            self.discharge_evictions(&reaped);
+            self.clears.extend(reaped);
             return;
         };
         if added == 0 {
@@ -2037,31 +2287,55 @@ impl AtlasPolicy {
         self.charged_entries = live;
     }
 
-    /// Give back what an eviction pass reaped, in proportion to the entries it
-    /// took.
+    /// Give back what an eviction pass reaped: each reaped bitmap strike its
+    /// own charge, then the outline entries in proportion to the ones it took.
     ///
     /// The discharge half, and the reason the estimate cannot ratchet upward.
-    /// `glifo`'s eviction reports the padded *rectangle* of each entry it
-    /// freed, which is a true texel count but not one in this accounting's
-    /// units — the charges were the model's price, not the rasterizer's extent,
-    /// and subtracting one from the other would leave a residue per entry that
-    /// never comes back. Scaling by the surviving fraction keeps the *mean*
-    /// charge per entry unchanged across a reap, which is exact for a
-    /// homogeneous population, unbiased for a mixed one, and — the property
-    /// that matters — takes the total to precisely zero when the last entry
-    /// goes.
-    fn discharge_evictions(&mut self) {
+    /// `reaped` is the padded *rectangle* of every entry the pass freed. A
+    /// rectangle naming a charged strike's slot refunds that strike's charge
+    /// exactly: it was priced from that very slot. For an outline entry the
+    /// rectangle is a true texel count but not one in this accounting's units —
+    /// the charges were the model's price, not the rasterizer's extent, and
+    /// subtracting one from the other would leave a residue per entry that
+    /// never comes back. So the outline share is scaled by the surviving
+    /// fraction of the *outline* entries instead, which keeps their mean charge
+    /// unchanged across a reap: exact for a homogeneous population, unbiased
+    /// for a mixed one. The strikes stay out of that mean — pooled, a mean held
+    /// across reaping a heavy strike would hand its texels to the light entries
+    /// that survived it (see this module's doc). An empty map takes the total
+    /// to precisely zero.
+    fn discharge_evictions(&mut self, reaped: &[PendingClearRect]) {
+        if !self.bitmap_charges.is_empty() {
+            for rect in reaped {
+                if let Some(charge) = self.bitmap_charges.remove(&SlotOrigin::of_clear(rect)) {
+                    self.bitmap_texels = self.bitmap_texels.saturating_sub(charge);
+                    self.resident_texels = self.resident_texels.saturating_sub(charge);
+                    self.charged_entries = self.charged_entries.saturating_sub(1);
+                }
+            }
+        }
         let live = self.atlas.len();
+        if live == 0 {
+            self.resident_texels = 0;
+            self.charged_entries = 0;
+            self.bitmap_charges.clear();
+            self.bitmap_texels = 0;
+            return;
+        }
         if live >= self.charged_entries {
             return;
         }
-        self.resident_texels = if self.charged_entries == 0 {
+        let strikes = self.bitmap_charges.len();
+        let charged = self.charged_entries.saturating_sub(strikes);
+        let surviving = live.saturating_sub(strikes);
+        let outlines = self.resident_texels.saturating_sub(self.bitmap_texels);
+        let scaled = if charged == 0 {
             0
         } else {
-            let scaled =
-                u128::from(self.resident_texels) * live as u128 / self.charged_entries as u128;
+            let scaled = u128::from(outlines) * surviving as u128 / charged as u128;
             u64::try_from(scaled).unwrap_or(u64::MAX)
         };
+        self.resident_texels = self.bitmap_texels.saturating_add(scaled);
         self.charged_entries = live;
     }
 
@@ -2249,6 +2523,79 @@ impl AtlasPolicy {
             .map_or(KeyedSlot::Absent, KeyedSlot::Resident)
     }
 
+    /// Insert one bitmap-strike glyph the frust-side bitmap route produced:
+    /// a slot exactly `pixmap`'s size, with `bearing` stored as the slot's
+    /// bearings, its pixels queued on `glifo`'s pending-upload queue — the two
+    /// steps of `glifo`'s own `insert_and_render_bitmap` (glifo 0.3.0
+    /// `renderer.rs`) over its public API. `None` when the atlas has no room.
+    ///
+    /// Charged its real padded slot, `(w + 2p) * (h + 2p)` texels with `p`
+    /// [`GLYPH_PADDING`](glifo::GLYPH_PADDING), never [`glyph_texels_at`] of
+    /// the run size: a strike's slot is its image, whatever size it is drawn
+    /// at. Anything inserted since the last charge is settled first, so the
+    /// entry-count delta never prices this entry a second time.
+    pub(crate) fn insert_bitmap(
+        &mut self,
+        images: &mut ImageCache,
+        key: GlyphCacheKey,
+        pixmap: std::sync::Arc<vello_common::pixmap::Pixmap>,
+        bearing: (i16, i16),
+    ) -> Option<AtlasSlot> {
+        self.charge_admissions();
+        let metrics = RasterMetrics {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            bearing_x: bearing.0,
+            bearing_y: bearing.1,
+        };
+        let slot = self.atlas.insert_entry(images, key, metrics)?;
+        self.atlas.push_pending_upload(slot.image_id, pixmap, slot);
+        let charge = padded_slot_texels(slot.width, slot.height);
+        // Remembered by the slot, so the reap that frees it refunds this exact
+        // charge (see `discharge_evictions`). Two live entries never share a
+        // page origin; one already charged there was reaped unseen, and its
+        // charge leaves with it.
+        if let Some(stale) = self
+            .bitmap_charges
+            .insert(SlotOrigin::of_slot(&slot), charge)
+        {
+            self.bitmap_texels = self.bitmap_texels.saturating_sub(stale);
+            self.resident_texels = self.resident_texels.saturating_sub(stale);
+            self.charged_entries = self.charged_entries.saturating_sub(1);
+        }
+        self.bitmap_texels = self.bitmap_texels.saturating_add(charge);
+        self.resident_texels = self.resident_texels.saturating_add(charge);
+        self.charged_entries = self.charged_entries.saturating_add(1);
+        Some(slot)
+    }
+
+    /// Whether producing `key`'s strike image already failed (see
+    /// `AtlasPolicy::refused_bitmaps`): the bitmap route counts such a glyph
+    /// skipped without producing it again.
+    #[must_use]
+    pub(crate) fn bitmap_refused(&self, key: &GlyphCacheKey) -> bool {
+        !self.refused_bitmaps.is_empty() && self.refused_bitmaps.contains(key)
+    }
+
+    /// Note one attempt to produce a bitmap strike's image, and remember `key`
+    /// as refused when `produced` is `false`.
+    pub(crate) fn note_bitmap_production(&mut self, key: &GlyphCacheKey, produced: bool) {
+        self.bitmap_productions = self.bitmap_productions.saturating_add(1);
+        if produced {
+            return;
+        }
+        if self.refused_bitmaps.len() >= MAX_REFUSED_BITMAP_KEYS {
+            self.refused_bitmaps.clear();
+        }
+        self.refused_bitmaps.insert(key.clone());
+    }
+
+    /// How many bitmap-strike images the route has tried to produce.
+    #[must_use]
+    pub(crate) fn bitmap_productions(&self) -> u64 {
+        self.bitmap_productions
+    }
+
     /// Remember that `key`'s glyph has no ink: the measuring callback of
     /// [`build`](Self::build) found nothing to rasterize for it (see
     /// `AtlasPolicy::inkless`).
@@ -2334,8 +2681,8 @@ impl AtlasPolicy {
         if evicting {
             self.last_eviction_serial = self.serial;
         }
-        self.discharge_evictions();
         let evicted: Vec<PendingClearRect> = self.atlas.drain_pending_clear_rects().collect();
+        self.discharge_evictions(&evicted);
         // Reaped without the touch having run first: the mirror above disagreed
         // with `glifo` about which call evicts. Nothing remembered can be
         // trusted to have survived, so nothing is.
@@ -2641,6 +2988,44 @@ const NEVER: u64 = u64::MAX;
 /// Spaces are a handful of glyphs per face, size and bucket; a set this full
 /// is emptied and refilled rather than grown.
 pub(crate) const MAX_INKLESS_KEYS: usize = 1024;
+
+/// The most refused bitmap keys the policy remembers (see
+/// `AtlasPolicy::refused_bitmaps`). A face with that many glyphs it cannot
+/// draw is a broken face; a set this full is emptied and refilled rather than
+/// grown, so a refusal is produced again at most once per refill.
+pub(crate) const MAX_REFUSED_BITMAP_KEYS: usize = 1024;
+
+/// Where a slot sits: its page and the top-left corner of its image. Unique
+/// among live entries, and named both by the slot `glifo` hands out and by the
+/// padded clear rectangle its eviction queues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct SlotOrigin {
+    page: u32,
+    x: u16,
+    y: u16,
+}
+
+impl SlotOrigin {
+    /// `slot`'s origin.
+    fn of_slot(slot: &AtlasSlot) -> Self {
+        Self {
+            page: slot.page_index,
+            x: slot.x,
+            y: slot.y,
+        }
+    }
+
+    /// The origin of the slot whose padded rectangle `rect` is: `glifo`
+    /// queues the slot's corner less [`GLYPH_PADDING`](glifo::GLYPH_PADDING)
+    /// (glifo 0.3.0 `atlas/cache.rs`, `push_clear_rect_for_slot`).
+    fn of_clear(rect: &PendingClearRect) -> Self {
+        Self {
+            page: rect.page_index,
+            x: rect.x.saturating_add(glifo::GLYPH_PADDING),
+            y: rect.y.saturating_add(glifo::GLYPH_PADDING),
+        }
+    }
+}
 
 /// What a resident run is identified by besides its glyph ids: everything
 /// `glifo` builds an outline glyph's key from except the glyph and its
@@ -3423,6 +3808,8 @@ mod trace_tests {
             transform: Affine::IDENTITY,
             hinted: false,
             color_font: false,
+            bitmap_first: false,
+            strikes: StrikePpems::NONE,
             context_color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 1.0]),
             synthesis: Some(Synthesis::NONE),
             oblique: false,
@@ -3491,6 +3878,8 @@ mod settle_tests {
             transform: Affine::IDENTITY,
             hinted: false,
             color_font: false,
+            bitmap_first: false,
+            strikes: StrikePpems::NONE,
             context_color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 1.0]),
             synthesis: Some(Synthesis::NONE),
             oblique: false,
@@ -3508,6 +3897,126 @@ mod settle_tests {
         policy.end_frame(images);
         policy.acknowledge_replay();
         cached
+    }
+
+    /// One frame's route for `key`, built and closed like [`cached`].
+    fn route_of(policy: &mut AtlasPolicy, images: &mut ImageCache, key: &RunKey) -> RunRoute {
+        policy.begin_frame();
+        let route = policy.classify_run(key);
+        policy.build(images, |_| None);
+        policy.acknowledge_clears();
+        policy.end_frame(images);
+        policy.acknowledge_replay();
+        route
+    }
+
+    fn fresh() -> (ImageCache, AtlasPolicy) {
+        let images = ImageCache::new_with_config(AtlasConfig {
+            initial_atlas_count: 0,
+            max_atlases: 4,
+            atlas_size: (1024, 1024),
+            auto_grow: true,
+            allocation_strategy: AllocationStrategy::FirstFit,
+        });
+        let policy = AtlasPolicy::new(&images, false);
+        (images, policy)
+    }
+
+    /// A bitmap-first face past `MAX_CACHED_FONT_SIZE` stays on the atlas; an
+    /// outline face at the same size goes to outlines.
+    #[test]
+    fn a_bitmap_first_face_past_the_size_ceiling_is_routed_to_the_atlas() {
+        let size = MAX_CACHED_FONT_SIZE + 32.0;
+        let (mut images, mut policy) = fresh();
+        let bitmap = RunKey {
+            bitmap_first: true,
+            ..run_key(size)
+        };
+        assert!(
+            route_of(&mut policy, &mut images, &bitmap)
+                .atlas()
+                .is_some()
+        );
+        let outline = run_key(size);
+        assert_eq!(
+            route_of(&mut policy, &mut images, &outline).outline_reason(),
+            Some(OutlineReason::SizeTooLarge)
+        );
+    }
+
+    /// A bitmap-first face whose size keeps changing stays on the atlas; an
+    /// outline face animated the same way is routed to outlines.
+    #[test]
+    fn a_bitmap_first_face_during_a_size_animation_is_routed_to_the_atlas() {
+        let (mut images, mut policy) = fresh();
+        let mut bitmap_cached = 0;
+        let mut outline_animating = 0;
+        for step in 0..6_u8 {
+            let size = 20.0 + f32::from(step) * 4.0;
+            let bitmap = RunKey {
+                bitmap_first: true,
+                font_id: 0xb17_0001,
+                ..run_key(size)
+            };
+            let outline = RunKey {
+                font_id: 0xb17_0002,
+                ..run_key(size)
+            };
+            bitmap_cached += usize::from(
+                route_of(&mut policy, &mut images, &bitmap)
+                    .atlas()
+                    .is_some(),
+            );
+            outline_animating += usize::from(
+                route_of(&mut policy, &mut images, &outline).outline_reason()
+                    == Some(OutlineReason::SizeAnimating),
+            );
+        }
+        assert_eq!(bitmap_cached, 6, "every animation step is served");
+        assert!(
+            outline_animating >= 5,
+            "the control animates: {outline_animating}"
+        );
+    }
+
+    /// The other reasons still apply to a bitmap-first face: colour and
+    /// unusable sizes.
+    #[test]
+    fn a_bitmap_first_face_still_takes_the_other_outline_reasons() {
+        let (mut images, mut policy) = fresh();
+        let colr = RunKey {
+            bitmap_first: true,
+            color_font: true,
+            ..run_key(MAX_CACHED_FONT_SIZE + 32.0)
+        };
+        assert_eq!(
+            route_of(&mut policy, &mut images, &colr).outline_reason(),
+            Some(OutlineReason::ColorFont)
+        );
+        let colr_only = RunKey {
+            color_font: true,
+            ..run_key(MAX_CACHED_FONT_SIZE + 32.0)
+        };
+        assert_eq!(
+            route_of(&mut policy, &mut images, &colr_only).outline_reason(),
+            Some(OutlineReason::ColorFont)
+        );
+        let huge = RunKey {
+            bitmap_first: true,
+            ..run_key(MAX_BITMAP_RUN_SIZE + 64.0)
+        };
+        assert_eq!(
+            route_of(&mut policy, &mut images, &huge).outline_reason(),
+            Some(OutlineReason::SizeTooLarge)
+        );
+        let unusable = RunKey {
+            bitmap_first: true,
+            ..run_key(0.0)
+        };
+        assert_eq!(
+            route_of(&mut policy, &mut images, &unusable).outline_reason(),
+            Some(OutlineReason::UnusableSize)
+        );
     }
 
     /// Two sizes that alternate every ten frames (longer than the settle
@@ -3764,6 +4273,157 @@ mod settle_tests {
         assert!(
             cached_frames > 0 && cached_frames < period,
             "the forgotten size pays exactly one window again, got {cached_frames}/{period}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod bitmap_tests {
+    use super::*;
+    use vello_common::multi_atlas::AllocationStrategy;
+    use vello_common::pixmap::Pixmap;
+
+    fn apple_like() -> StrikePpems {
+        let mut strikes = StrikePpems::NONE;
+        for ppem in [20, 26, 32, 40, 48, 52, 64, 96, 160] {
+            strikes.push(ppem, ppem);
+        }
+        strikes
+    }
+
+    /// `skrifa`'s rule: the exact strike, else the nearest larger, else the
+    /// nearest smaller, whatever order the table lists them in.
+    #[test]
+    fn the_preferred_strike_is_exact_then_nearest_larger_then_nearest_smaller() {
+        let strikes = apple_like();
+        let ppem = |size: f32| strikes.as_slice()[strikes.preferred(size).unwrap()].0;
+        assert_eq!(ppem(32.0), 32);
+        assert_eq!(ppem(24.0), 26);
+        assert_eq!(ppem(100.0), 160);
+        assert_eq!(ppem(400.0), 160);
+        assert_eq!(ppem(4.0), 20);
+        let mut reversed = StrikePpems::NONE;
+        for &(choice, key) in apple_like().as_slice().iter().rev() {
+            reversed.push(choice, key);
+        }
+        assert_eq!(reversed.as_slice()[reversed.preferred(24.0).unwrap()].0, 26);
+        assert_eq!(StrikePpems::NONE.preferred(24.0), None);
+    }
+
+    /// A strike lacking the glyph is passed over for the next best one.
+    #[test]
+    fn a_strike_without_the_glyph_is_passed_over() {
+        let strikes = [(20, true), (26, false), (32, true), (160, true)];
+        assert_eq!(prefer_strike(24.0, strikes.into_iter()), Some(2));
+        assert_eq!(prefer_strike(24.0, [(26, false)].into_iter()), None);
+    }
+
+    /// The bound holds: strikes past it are dropped, not wrapped.
+    #[test]
+    fn the_strike_list_is_bounded() {
+        let mut strikes = StrikePpems::NONE;
+        for ppem in 0..(MAX_BITMAP_STRIKES as u16 + 4) {
+            strikes.push(ppem + 1, ppem + 1);
+        }
+        assert_eq!(strikes.as_slice().len(), MAX_BITMAP_STRIKES);
+    }
+
+    /// The key is `glifo`'s bitmap key: the strike ppem as the size, the
+    /// bitmap sentinel bucket, unhinted, no embolden and no coordinates.
+    #[test]
+    fn the_bitmap_key_is_glifos_bitmap_key_shape() {
+        let key = bitmap_key(7, 1, 2096, 160);
+        assert_eq!(key.size_bits, 160.0_f32.to_bits());
+        assert_eq!(key.subpixel_x, SUBPIXEL_BITMAP);
+        assert!(!key.hinted && key.var_coords.is_empty());
+        assert_eq!((key.embolden_x_bits, key.embolden_y_bits), (0, 0));
+        assert_eq!(key.context_color_packed, pack_context_color(BLACK));
+        assert_ne!(key, bitmap_key(7, 1, 2096, 96));
+    }
+
+    fn mobile() -> (ImageCache, AtlasPolicy) {
+        let images = ImageCache::new_with_config(AtlasConfig {
+            initial_atlas_count: 0,
+            max_atlases: 4,
+            atlas_size: (1024, 1024),
+            auto_grow: true,
+            allocation_strategy: AllocationStrategy::FirstFit,
+        });
+        let policy = AtlasPolicy::new(&images, false);
+        (images, policy)
+    }
+
+    /// An inserted strike is charged its padded slot, whatever run size it
+    /// will be drawn at.
+    #[test]
+    fn an_inserted_strike_is_charged_its_padded_slot() {
+        let (mut images, mut policy) = mobile();
+        policy.begin_frame();
+        let _ = policy.build(&mut images, |_| None);
+        let before = policy.resident_texels();
+        let pixmap = std::sync::Arc::new(Pixmap::new(136, 128));
+        let slot = policy
+            .insert_bitmap(&mut images, bitmap_key(1, 0, 1, 109), pixmap, (0, 0))
+            .expect("the atlas has room");
+        assert_eq!((slot.width, slot.height), (136, 128));
+        assert_eq!(policy.resident_texels() - before, 138 * 130);
+        assert_eq!(policy.atlas_mut().drain_pending_uploads().count(), 1);
+        // The next admission's delta does not charge it again.
+        policy.charge_admissions();
+        assert_eq!(policy.resident_texels() - before, 138 * 130);
+    }
+
+    /// Over the budget, a bitmap run whose strike is resident is still served
+    /// from the atlas; one that is not is refused.
+    #[test]
+    fn a_resident_strike_is_served_over_the_budget() {
+        let (mut images, mut policy) = mobile();
+        let glyphs = [frust_scene::Glyph {
+            id: 3,
+            x: 0.25,
+            y: 0.0,
+        }];
+        let run = RunKey {
+            font_id: 0xb17,
+            font_index: 0,
+            font_size: 24.0,
+            distinct_glyphs: 1,
+            transform: Affine::IDENTITY,
+            hinted: false,
+            color_font: false,
+            bitmap_first: true,
+            strikes: apple_like(),
+            context_color: BLACK,
+            synthesis: Some(Synthesis::NONE),
+            oblique: false,
+            glyphs: &glyphs,
+        };
+        policy.begin_frame();
+        let _ = policy.build(&mut images, |_| None);
+        let pixmap = std::sync::Arc::new(Pixmap::new(26, 26));
+        policy
+            .insert_bitmap(&mut images, bitmap_key(0xb17, 0, 3, 26), pixmap, (0, 0))
+            .expect("the atlas has room");
+        policy.end_frame(&mut images);
+        // Spend the whole budget, as other text would.
+        policy.resident_texels = policy.texel_budget();
+
+        policy.begin_frame();
+        let route = policy.classify_run(&run);
+        let served = route.atlas().copied().expect("a resident strike is served");
+        assert!(served.resident_only());
+        assert_eq!(served.demand_size(), 26.0);
+        let absent = RunKey {
+            glyphs: &[frust_scene::Glyph {
+                id: 4,
+                x: 0.0,
+                y: 0.0,
+            }],
+            ..run
+        };
+        assert_eq!(
+            policy.classify_run(&absent).outline_reason(),
+            Some(OutlineReason::ResidencyFull)
         );
     }
 }

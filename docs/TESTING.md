@@ -47,7 +47,7 @@ surface-loss transition is legal.
 
 ### Host-dependent tests
 
-A test that needs a host facility (macOS CoreText, a system emoji font) checks its
+A test that needs a host facility (macOS CoreText, a system emoji font; the `apple_raster` emoji tests run on iOS via the simulator runner and are ignored on macOS) checks its
 real precondition, not just the OS, and when it is missing prints one `SKIPPED (n): <missing
 precondition>` line and passes. The macOS oracle tests in `crates/frust-text/src/oracle/apple.rs`
 check that the PingFang collection is present and that CoreText resolves the named face, and a
@@ -499,7 +499,7 @@ A golden case must fix all inputs that can affect pixels:
 
 Text golden portability is enforced, not assumed: `testing/fonts/` bundles
 five subsetted OFL/Apache faces (Latin, Arabic, Thai, CJK, COLR emoji — provenance,
-subset commands, and checksums in `testing/fonts/LICENSES.md`),
+subset commands, and checksums in `testing/fonts/LICENSES.md`; the CBDT bitmap-strike emoji subset beside them is engine host tests only, not in `test_fonts()`),
 `frust_testing::fonts::register_test_fonts` registers only those,
 `frame::pin_type_scale` rewrites the theme's type scale onto the bundled
 family, and `frame::foreign_font_runs` rejects any captured glyph run whose

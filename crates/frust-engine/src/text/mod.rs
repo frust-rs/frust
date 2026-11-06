@@ -147,6 +147,17 @@
 //! [`SceneCompiler::set_hvgl_atlas`](crate::compile::SceneCompiler::set_hvgl_atlas)
 //! off — is filled from the provider's outlines every frame.
 //!
+//! A bitmap-first face ([`font_is_bitmap_first`]: colour emoji strikes) never
+//! reaches `glifo` either. Its run is drawn by [`bitmap_route`]: each glyph's
+//! strike is keyed as `glifo` keys a bitmap, produced on a miss (CoreText on
+//! iOS, falling back to the font's own PNG record when CoreText refuses; the
+//! PNG record elsewhere, its header checked against a size cap before it is
+//! decoded), inserted and charged its real slot, and drawn from the atlas; a
+//! glyph the atlas cannot serve is counted skipped, and one whose production
+//! failed is remembered and not produced again. Such a run takes neither the
+//! resident-run cache nor glyph quads. `glifo` itself decodes no strike: a
+//! face with outlines as well as strikes draws its outlines.
+//!
 //! # The font gate
 //!
 //! `glifo` takes the font blob as read: it parses the face and reads its
@@ -162,8 +173,19 @@
 //! version; the gate closes the class a plain display list can actually
 //! deliver.
 
+#[cfg(target_vendor = "apple")]
+#[cfg_attr(
+    not(target_os = "ios"),
+    allow(dead_code, reason = "the bitmap route reaches CoreText on iOS only")
+)]
+#[cfg_attr(
+    target_os = "ios",
+    expect(dead_code, reason = "`glyph_for_char` serves the CoreText tests alone")
+)]
+pub(crate) mod apple_raster;
 pub(crate) mod atlas_policy;
 pub(crate) mod backend;
+pub(crate) mod bitmap_route;
 pub(crate) mod color;
 pub(crate) mod hvgl;
 pub(crate) mod hvgl_atlas;
@@ -453,6 +475,10 @@ pub(crate) fn lower_glyph_run(
 /// The colour is the run's solid context colour — the tint `glifo` hands the
 /// sink for every cached outline glyph, and the reason the cache does not key
 /// on it.
+///
+/// A bitmap-first run never has a plan: [`bitmap_route`] draws it glyph by
+/// glyph, so the [`atlas_policy::MAX_CACHED_FONT_SIZE`] ceiling below is
+/// only ever asked of outline runs.
 #[derive(Debug)]
 pub(crate) struct ResidentPlan<'r> {
     /// The run's glyphs.
@@ -648,14 +674,20 @@ pub(crate) fn glyph_atlas_policy(images: &ImageResidency) -> AtlasPolicy {
 
 /// What the font gate answered for one face: whether it is readable at all
 /// ([`font_is_readable`]), whether it carries colour glyphs
-/// ([`font_has_color_glyphs`]), and whether its outlines are `hvgl`-only
-/// ([`hvgl::font_needs_hvgl_provider`]).
+/// ([`font_has_color_glyphs`]), whether it draws from bitmap strikes first
+/// ([`font_is_bitmap_first`], with its strikes), and whether its outlines are
+/// `hvgl`-only ([`hvgl::font_needs_hvgl_provider`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FaceFacts {
     /// [`font_is_readable`]'s answer.
     pub(crate) readable: bool,
     /// [`font_has_color_glyphs`]'s answer.
     pub(crate) color: bool,
+    /// [`font_is_bitmap_first`]'s answer.
+    pub(crate) bitmap_first: bool,
+    /// A bitmap-first face's strikes, in table order
+    /// ([`StrikePpems::NONE`](atlas_policy::StrikePpems::NONE) otherwise).
+    pub(crate) strikes: atlas_policy::StrikePpems,
     /// [`hvgl::font_needs_hvgl_provider`]'s answer.
     pub(crate) hvgl: bool,
     /// The face's units-per-em (`0` when unreadable): the basis of
@@ -700,6 +732,8 @@ impl FontFacts {
         let facts = FaceFacts {
             readable: font_is_readable(font),
             color: font_has_color_glyphs(font),
+            bitmap_first: font_is_bitmap_first(font),
+            strikes: bitmap_strikes(font).unwrap_or(atlas_policy::StrikePpems::NONE),
             hvgl: hvgl::font_needs_hvgl_provider(font),
             upem: font_units_per_em(font),
         };
@@ -727,6 +761,9 @@ const HEAD_TAG: [u8; 4] = *b"head";
 /// `COLR`, on the same terms — the colour-glyph table
 /// [`font_has_color_glyphs`] looks for.
 const COLR_TAG: [u8; 4] = *b"COLR";
+/// Every outline table: TrueType, CFF and CFF2. A `CBDT`/`EBDT` face
+/// carrying any is not bitmap-first ([`font_is_bitmap_first`]).
+const OUTLINE_TAGS: [[u8; 4]; 3] = [*b"glyf", *b"CFF ", *b"CFF2"];
 /// A font collection's own file tag.
 const TTC_TAG: [u8; 4] = *b"ttcf";
 /// Byte offset of a collection header's major version. Only versions 1 and 2
@@ -842,10 +879,15 @@ fn table_directory(data: &[u8], index: u32) -> Option<usize> {
 ///
 /// `COLR` alone, because `COLR` alone is what `glifo` looks at: it resolves
 /// colour glyphs through `skrifa`'s `color_glyphs()`, which reads COLRv0/v1 and
-/// nothing else. A bitmap strike (`CBDT`/`sbix`) reaches the atlas as a
-/// pre-rasterized pixmap through the upload queue rather than as recorded
-/// commands, so it dirties no page and needs no gate; an `SVG ` table is not a
-/// path this backend takes at all.
+/// nothing else. A bitmap-first face's strikes reach the atlas through
+/// [`bitmap_route`] as pre-rasterized pixmaps on the upload queue rather than
+/// as recorded commands, so they dirty no page and need no gate. A face with
+/// outlines as well as strikes is `glifo`'s, and `glifo` decodes none of its
+/// strikes — its `png` feature is off for this crate, because it sizes the
+/// decode from the image header unchecked — so such a face draws its outlines
+/// (or nothing, for a glyph without one). Only [`bitmap_route`] decodes a PNG
+/// strike, behind its own header cap. BGRA and mask strikes are never decoded,
+/// and an `SVG ` table is not a path this backend takes at all.
 ///
 /// Answers per face, not per glyph: `glifo` decides colour-glyph caching from
 /// the presence of a cacher, so there is no way to offer a run's outlines the
@@ -857,6 +899,30 @@ pub(crate) fn font_has_color_glyphs(font: &FontData) -> bool {
     table_directory(data, font.index)
         .and_then(|directory| table_record(data, directory, COLR_TAG))
         .is_some()
+}
+
+/// Whether `font` draws from bitmap strikes first: its `sbix` table leaves
+/// `DRAW_OUTLINES` clear (Apple Color Emoji, whose `glyf` holds placeholder
+/// contours), or it carries `CBDT` or `EBDT` strikes and no `glyf`, `CFF ` or
+/// `CFF2` outlines.
+///
+/// Such a face's runs are drawn by [`bitmap_route`], never by `glifo`, and
+/// the size-based outline reasons do not apply to them (see
+/// `RunKey::bitmap_first`). A `CBDT` face with outlines as well is not
+/// bitmap-first: `glifo` draws it, and caches its outline glyphs by run size.
+pub(crate) fn font_is_bitmap_first(font: &FontData) -> bool {
+    let data = font.data.data();
+    table_directory(data, font.index)
+        .and_then(|directory| bitmap_route::strike_table(data, directory))
+        .is_some()
+}
+
+/// A bitmap-first face's strikes, read once per face; `None` for any other.
+fn bitmap_strikes(font: &FontData) -> Option<atlas_policy::StrikePpems> {
+    let data = font.data.data();
+    let directory = table_directory(data, font.index)?;
+    let table = bitmap_route::strike_table(data, directory)?;
+    Some(bitmap_route::strike_ppems(data, directory, table))
 }
 
 /// Where the record for `tag` starts inside the table directory at
@@ -909,4 +975,116 @@ fn read_u16(data: &[u8], at: usize) -> Option<u16> {
 fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     let bytes: [u8; 4] = data.get(at..at.checked_add(4)?)?.try_into().ok()?;
     Some(u32::from_be_bytes(bytes))
+}
+
+#[cfg(test)]
+mod bitmap_first_tests {
+    use super::*;
+    use peniko::Blob;
+    use std::sync::Arc;
+
+    fn face(bytes: &'static [u8]) -> FontData {
+        FontData::new(Blob::new(Arc::new(bytes)), 0)
+    }
+
+    /// A single-font file holding `tables` (tag, bytes), directory included.
+    fn font_of(tables: &[([u8; 4], Vec<u8>)]) -> FontData {
+        let mut out = vec![0x00, 0x01, 0x00, 0x00];
+        out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+        out.extend_from_slice(&[0; 6]);
+        let mut offset = 12 + 16 * tables.len();
+        for (tag, bytes) in tables {
+            out.extend_from_slice(tag);
+            out.extend_from_slice(&[0; 4]);
+            out.extend_from_slice(&(offset as u32).to_be_bytes());
+            out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+            offset += bytes.len();
+        }
+        for (_, bytes) in tables {
+            out.extend_from_slice(bytes);
+        }
+        FontData::new(Blob::new(Arc::new(out)), 0)
+    }
+
+    /// A minimal `sbix` + `glyf` face: one strike of `ppem`, `flags` as given.
+    fn sbix_face(flags: u16, ppem: u16) -> FontData {
+        let mut head = vec![0; HEAD_TABLE_LEN];
+        head[HEAD_UNITS_PER_EM..HEAD_UNITS_PER_EM + 2].copy_from_slice(&800_u16.to_be_bytes());
+        let mut sbix = Vec::new();
+        sbix.extend_from_slice(&1_u16.to_be_bytes());
+        sbix.extend_from_slice(&flags.to_be_bytes());
+        sbix.extend_from_slice(&1_u32.to_be_bytes());
+        sbix.extend_from_slice(&12_u32.to_be_bytes());
+        sbix.extend_from_slice(&ppem.to_be_bytes());
+        sbix.extend_from_slice(&72_u16.to_be_bytes());
+        sbix.extend_from_slice(&[0; 8]);
+        font_of(&[(*b"glyf", vec![0; 12]), (*b"head", head), (*b"sbix", sbix)])
+    }
+
+    #[test]
+    fn a_cbdt_face_without_outlines_is_bitmap_first() {
+        let font = face(include_bytes!(
+            "../../../../testing/fonts/NotoColorEmoji-CBDT-Subset.ttf"
+        ));
+        assert!(font_is_bitmap_first(&font));
+        assert!(!font_has_color_glyphs(&font));
+        let facts = FontFacts::default().of(&font);
+        assert!(facts.bitmap_first);
+        assert_eq!(facts.strikes.as_slice(), &[(109, 109)]);
+    }
+
+    /// An `sbix` face with `glyf` placeholders and `DRAW_OUTLINES` clear is
+    /// bitmap-first; with the flag set it is not.
+    #[test]
+    fn an_sbix_face_is_bitmap_first_unless_it_draws_outlines() {
+        let bitmaps = sbix_face(0x0001, 64);
+        assert!(font_is_readable(&bitmaps));
+        assert!(font_is_bitmap_first(&bitmaps));
+        assert_eq!(
+            FontFacts::default().of(&bitmaps).strikes.as_slice(),
+            &[(64, 64)]
+        );
+        assert!(!font_is_bitmap_first(&sbix_face(0x0003, 64)));
+    }
+
+    #[test]
+    fn outline_and_colr_faces_are_not_bitmap_first() {
+        let outline = face(include_bytes!(
+            "../../../../testing/fonts/NotoSans-Subset.ttf"
+        ));
+        let colr = face(include_bytes!(
+            "../../../../testing/fonts/NotoEmoji-COLRv1-Subset.ttf"
+        ));
+        assert!(!font_is_bitmap_first(&outline));
+        assert!(!font_is_bitmap_first(&colr));
+        assert!(font_has_color_glyphs(&colr));
+        assert_eq!(
+            FontFacts::default().of(&outline).strikes,
+            atlas_policy::StrikePpems::NONE
+        );
+    }
+
+    #[test]
+    fn an_unparseable_blob_is_not_bitmap_first() {
+        assert!(!font_is_bitmap_first(&face(b"not a font")));
+    }
+
+    /// The installed Apple Color Emoji: `glyf` beside an `sbix` that does not
+    /// ask for outlines, nine strikes up to 160 ppem.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn apple_color_emoji_is_bitmap_first() {
+        let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Color Emoji.ttc") else {
+            eprintln!("Apple Color Emoji is not installed here; skipping");
+            return;
+        };
+        let font = FontData::new(Blob::new(Arc::new(bytes)), 0);
+        assert!(font_is_readable(&font));
+        assert!(font_is_bitmap_first(&font));
+        let strikes = FontFacts::default().of(&font).strikes;
+        assert!(
+            strikes.as_slice().iter().any(|&(ppem, _)| ppem == 160),
+            "{strikes:?}"
+        );
+    }
 }

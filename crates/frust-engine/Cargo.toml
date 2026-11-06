@@ -19,7 +19,10 @@ autobenches = false
 web-time = { workspace = true }
 frust-gpu.workspace = true
 frust-scene.workspace = true
-vello_common.workspace = true
+# `png` is the decoder `text::bitmap_route` calls on a strike record only after its header passed the
+# size cap (the same `png` crate `image` already pulls in). Enabled here, crate-locally: `glifo`'s own
+# `png` feature stays off, because it decodes a face's PNG strikes with no size check at all.
+vello_common = { workspace = true, features = ["png"] }
 glifo.workspace = true
 wgpu.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
@@ -40,7 +43,16 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFNumber",
     "CFString",
 ] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath"] }
+# `CGBitmapContext`, `CGColorSpace`, `CGContext` and `CGImage` are what `CGBitmapContextCreate` is gated on
+# (`src/text/apple_raster.rs`, the colour-bitmap rasterizer).
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGPath",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+] }
 # `CTFontDescriptor` gates `CTFontOrientation` (the bounding-box read); `objc2-core-graphics` gates
 # `CTFontCreatePathForGlyph`.
 objc2-core-text = { version = "0.3", default-features = false, features = [
