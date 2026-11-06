@@ -33,7 +33,7 @@ use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, SceneTextureId, TierCaps};
 use frust_render::texture_bus::{
     ImportError, ImportedTexture, NativeHandle, NativeHandleKind, NativeImporter, SourceFormat,
-    SourceFrame, SourcePayload, clear_native_importer, register_texture_source,
+    SourceFrame, SourcePayload, UpdateRegion, clear_native_importer, register_texture_source,
     set_native_importer,
 };
 use frust_render::{
@@ -555,6 +555,194 @@ fn a_malformed_cpu_frame_is_refused_released_and_leaves_the_last_frame_shown() {
         .collect::<Vec<_>>();
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert!(reports[0].starts_with("WARN"), "{reports:?}");
+
+    drop(registration);
+    settle(&mut harness);
+}
+
+/// A CPU frame of `format` whose payload is `region`'s texels, all `texel`,
+/// over a `FRAME`-square texture.
+fn partial(format: SourceFormat, region: UpdateRegion, texel: [u8; 4]) -> SourceFrame {
+    let pixels: Vec<u8> = texel
+        .iter()
+        .copied()
+        .cycle()
+        .take((region.width * region.height * 4) as usize)
+        .collect();
+    SourceFrame::new(FRAME, FRAME, format, SourcePayload::Cpu(Arc::from(pixels)))
+        .with_update_region(region)
+}
+
+const PATCH: UpdateRegion = UpdateRegion {
+    x: 2,
+    y: 2,
+    width: 4,
+    height: 4,
+};
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_bgra8_frame_samples_in_rgba_order() {
+    let _serial = serial();
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+
+    // A blue texel in BGRA byte order is [255, 0, 0, 255].
+    let pixels: Vec<u8> = [255u8, 0, 0, 255]
+        .iter()
+        .copied()
+        .cycle()
+        .take((FRAME * FRAME * 4) as usize)
+        .collect();
+    queue.push(
+        SourceFrame::new(
+            FRAME,
+            FRAME,
+            SourceFormat::Bgra8,
+            SourcePayload::Cpu(Arc::from(pixels)),
+        )
+        .on_release(releases.callback(0)),
+    );
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, BLUE, "a BGRA blue texel reads back blue");
+    assert_outside_is_base(&drawn);
+    assert_eq!(releases.counts(), vec![1]);
+
+    drop(registration);
+    settle(&mut harness);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_sub_rect_update_changes_only_its_rectangle() {
+    let _serial = serial();
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+
+    queue.push(solid(FRAME, FRAME, RED).on_release(releases.callback(0)));
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, RED, "the full frame is shown");
+
+    queue.push(partial(SourceFormat::Rgba8, PATCH, GREEN).on_release(releases.callback(1)));
+    let drawn = harness.frame(&scene);
+    // The texture maps one-for-one at (16, 16): the patch is x/y 18..22.
+    for (x, y) in [(19, 19), (20, 20), (21, 21), (19, 21), (21, 19)] {
+        assert_eq!(
+            pixel(&drawn, 16 + x - 16, 16 + y - 16),
+            GREEN,
+            "inside ({x}, {y})"
+        );
+    }
+    for (x, y) in [
+        (16, 16),
+        (17, 20),
+        (23, 20),
+        (20, 17),
+        (20, 23),
+        (48, 48),
+        (77, 77),
+    ] {
+        assert_eq!(pixel(&drawn, x, y), RED, "outside the patch ({x}, {y})");
+    }
+    assert_outside_is_base(&drawn);
+    assert_eq!(releases.counts(), vec![1, 1]);
+
+    drop(registration);
+    settle(&mut harness);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_sub_rect_before_any_full_frame_is_refused_and_released() {
+    let _serial = serial();
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+
+    let _ = take_log();
+    queue.push(partial(SourceFormat::Rgba8, PATCH, GREEN).on_release(releases.callback(0)));
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, BASE, "nothing is drawn: no texture was ever shown");
+    assert_eq!(releases.counts(), vec![1], "released exactly once");
+    assert_eq!(harness.engine.bound_texture_count(), 0, "nothing bound");
+    assert_eq!(registration.frame_size(), None);
+    let reports = take_log()
+        .into_iter()
+        .filter(|record| record.contains("partial update"))
+        .collect::<Vec<_>>();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(reports[0].starts_with("WARN"), "{reports:?}");
+
+    drop(registration);
+    settle(&mut harness);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_format_change_requires_a_full_frame() {
+    let _serial = serial();
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+
+    queue.push(solid(FRAME, FRAME, RED).on_release(releases.callback(0)));
+    let _ = harness.frame(&scene);
+
+    // A BGRA partial over an RGBA texture is refused; red stays shown.
+    queue.push(
+        partial(SourceFormat::Bgra8, PATCH, [0, 255, 0, 255]).on_release(releases.callback(1)),
+    );
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, RED, "the refused partial leaves the content alone");
+    assert_eq!(releases.counts(), vec![1, 1]);
+
+    // An out-of-extent region, and a byte-count mismatch, are refused too.
+    let outside = UpdateRegion { x: 62, ..PATCH };
+    queue.push(partial(SourceFormat::Rgba8, outside, GREEN).on_release(releases.callback(2)));
+    let wrong_bytes = SourceFrame::new(
+        FRAME,
+        FRAME,
+        SourceFormat::Rgba8,
+        SourcePayload::Cpu(Arc::from(vec![0u8; 12])),
+    )
+    .with_update_region(PATCH)
+    .on_release(releases.callback(3));
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, RED, "an out-of-extent region is refused");
+    queue.push(wrong_bytes);
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, RED, "a wrong byte count is refused");
+    assert_eq!(releases.counts(), vec![1, 1, 1, 1]);
+
+    // A full BGRA frame switches format; a partial of it then works.
+    let bgra_red: Vec<u8> = [0u8, 0, 255, 255]
+        .iter()
+        .copied()
+        .cycle()
+        .take((FRAME * FRAME * 4) as usize)
+        .collect();
+    queue.push(SourceFrame::new(
+        FRAME,
+        FRAME,
+        SourceFormat::Bgra8,
+        SourcePayload::Cpu(Arc::from(bgra_red)),
+    ));
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, RED, "a full frame of the new format is accepted");
+    queue.push(partial(SourceFormat::Bgra8, PATCH, [0, 255, 0, 255]));
+    let drawn = harness.frame(&scene);
+    assert_eq!(pixel(&drawn, 20, 20), GREEN, "a BGRA partial now lands");
+    assert_eq!(pixel(&drawn, 48, 48), RED);
 
     drop(registration);
     settle(&mut harness);
