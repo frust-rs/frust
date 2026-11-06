@@ -1976,8 +1976,8 @@ pub use frust_theme::{
     Brightness, ColorScheme, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation,
     ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, GlassTier, MonospaceFamily,
     MotionDurations, MotionExtras, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec,
-    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions,
-    TypeScale,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, TextScale, Theme, ThemeBuilder,
+    ThemeExtensions, TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in
