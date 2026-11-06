@@ -81,9 +81,9 @@
 //!   (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`), so a
 //!   fully opaque face still pays the blend and never occludes 2D content
 //!   behind it through depth.
-//! - **Only the desktop shell installs a device**
-//!   (`docs/LIMITATIONS.md`'s `facade-gpu-context-desktop-only`), so
-//!   acquisition answers `None` on Android and iOS today and every 3D
+//! - **The 3D path is off on Android and iOS**: every shell publishes a
+//!   device, but acquisition answers `None` there until the pass and its
+//!   target pool rebuild on a device change (see [`context`]), so every 3D
 //!   component renders flat there.
 //!
 //! # The widget side
