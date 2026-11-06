@@ -4322,8 +4322,9 @@ tests (`gpu_fx::card3d`/`cylinder`/`fan`/`quad3d` test modules) and by a manual 
 `examples/beui-demo`'s GPU Effects page on 2026-09-04 (every 3D pane live, the tilt face
 foreshortens on hover, the wallet switcher fans). Metal is expected to behave the same — the
 substrate reaches the GPU only through `frust::gpu`, with no backend-specific code of its own — but
-unverified until a Mac runs it. Acquisition on Android and iOS is published but not yet device-run
-(`facade-gpu-context-desktop-only` above), so those variants are unverified there.
+unverified until a Mac runs it. beUI keeps acquisition closed on Android and iOS (its passes do not
+yet rebuild device-owned resources on a device change), so every gpu-effects variant renders its 2D
+path there.
 
 **Evidence**: `plugins/beui/src/components/tilt_card.rs`, `wheel_picker.rs`,
 `cylinder_carousel.rs`, `plugins/beui/src/blocks/project_folder.rs`, `wallet_card.rs` module docs'
