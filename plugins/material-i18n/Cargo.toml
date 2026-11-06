@@ -19,6 +19,7 @@ frust-i18n = { path = "../i18n", version = "0.6.5" }
 # Month and weekday names come straight from CLDR through the same ICU4X pins frust-i18n uses.
 icu_datetime = { workspace = true }
 icu_locale_core = { workspace = true }
+log = { workspace = true }
 
 [dev-dependencies]
 frust-core = { path = "../../crates/frust-core", version = "0.6.5", features = ["test-support"] }

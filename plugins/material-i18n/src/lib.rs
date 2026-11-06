@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn every_supported_language_fills_cldr_names() {
-        for tag in ["en", "th", "vi", "ja", "es", "de", "fr"] {
+        for tag in ["en", "th", "vi", "ja", "es", "de", "fr", "zh-Hans"] {
             let s = material_strings_for(&locale(tag));
             let d = s.date_picker;
             assert!(d.months.iter().all(|m| !m.is_empty()), "{tag}");
@@ -319,6 +319,27 @@ mod tests {
             material_strings_for(&locale("xx")),
             MaterialStrings::ENGLISH
         );
+    }
+
+    #[test]
+    fn simplified_chinese_locales_share_the_zh_hans_table() {
+        let hans = material_strings_for(&locale("zh-Hans"));
+        assert_eq!(hans.dialog_cancel, "取消");
+        assert_ne!(hans, MaterialStrings::ENGLISH);
+        for tag in ["zh", "zh-CN", "zh-SG"] {
+            assert_eq!(material_strings_for(&locale(tag)), hans, "{tag}");
+        }
+    }
+
+    #[test]
+    fn traditional_chinese_locales_fall_back_to_english() {
+        for tag in ["zh-Hant", "zh-TW", "zh-HK"] {
+            assert_eq!(
+                material_strings_for(&locale(tag)),
+                MaterialStrings::ENGLISH,
+                "{tag}"
+            );
+        }
     }
 
     #[test]
