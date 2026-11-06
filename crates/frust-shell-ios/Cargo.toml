@@ -59,7 +59,7 @@ devtools = ["frust-shell-common/devtools"]
 # (implies `devtools`), and registers a patch listener that raises the signals-dirty gate input. Absent, frust-hotpatch is
 # not in the iOS graph. The edges sit in the iOS-gated block, so the host build stays macro-and-helpers only.
 hotpatch = ["devtools", "frust-core/hotpatch", "frust-shell-common/hotpatch"]
-# Facade `gpu` forwards here. The `ffi_glue`/`app` render-thread install site is not wired to it yet (accepted gap, see lib.rs docs).
+# Facade `gpu` forwards here; the render loop and inline executor publish their live device into the shell-common slot.
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
 
 [package.metadata.docs.rs]

@@ -53,7 +53,7 @@ frust-widgets = { workspace = true }
 perf-trace = ["frust-shell-common/perf-trace", "frust-render/perf-trace"]
 # Opt-in devtools service: re-exports shell-common `devtools`; a no-op off-Android (the edge is in the gated block).
 devtools = ["frust-shell-common/devtools"]
-# Facade `gpu` forwards here. The `jni_glue` render-thread install site is not wired to it yet (accepted gap, see lib.rs docs).
+# Facade `gpu` forwards here; the render loop and inline executor publish their live device into the shell-common slot.
 gpu = ["frust-shell-common/gpu", "frust-render/gpu"]
 # Opt-in hot patch: forwards frust-core/hotpatch (the `Component::build` jump table) and shell-common's in-app apply arms
 # (implies `devtools`), and registers a patch listener that raises the signals-dirty gate input. Absent, frust-hotpatch is
