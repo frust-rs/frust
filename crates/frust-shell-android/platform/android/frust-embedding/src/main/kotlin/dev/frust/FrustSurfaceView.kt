@@ -17,6 +17,7 @@ import android.text.InputType
 import android.text.Selection
 import android.text.SpannableStringBuilder
 import android.util.Log
+import android.util.TypedValue
 import android.view.Choreographer
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -403,6 +404,13 @@ class FrustSurfaceView(
     // fire. NOT driven by `onConfigurationChanged`: animation scale is not a
     // `Configuration` field and that callback never fires for it.
     private external fun nativeSetReduceMotion(handle: Long, reduce: Boolean)
+
+    // Text scale: the user's font-size preference as the effective scale at
+    // body size — see [textScale]. Called once right after `nativeInit`
+    // returns a handle, again from [onResume], and from
+    // [onConfigurationChanged] (the activity declares `fontScale` in
+    // `android:configChanges`, so a change lands there instead of recreating it).
+    private external fun nativeSetTextScale(handle: Long, scale: Float)
 
     // Deep links. `url` is the raw `Intent.data` Uri's `toString()`,
     // forwarded to `frust_reactive::push_deep_link` on the Rust side.
@@ -825,6 +833,24 @@ class FrustSurfaceView(
         nativeSetReduceMotion(handle, reduceMotionEnabled)
     }
 
+    /**
+     * The effective font scale at body size: 16sp resolved through the display
+     * metrics, divided by 16dp. Unlike `Configuration.fontScale` this includes
+     * the nonlinear scaling curve applied on newer Android versions.
+     */
+    private val textScale: Float
+        get() {
+            val metrics = resources.displayMetrics
+            return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, 16f, metrics) /
+                (16f * metrics.density)
+        }
+
+    /** Push the current [textScale] to the native side. A missing handle is a no-op. */
+    private fun pushTextScale() {
+        if (handle == 0L) return
+        nativeSetTextScale(handle, textScale)
+    }
+
     private fun registerReduceMotionObserver() {
         if (reduceMotionObserverRegistered) return
         context.contentResolver.registerContentObserver(
@@ -1022,6 +1048,8 @@ class FrustSurfaceView(
                 // foreground), but it fires before this handle exists on a cold
                 // start, so its push was a no-op.
                 pushReduceMotion()
+                // Seed the font-size preference the same way.
+                pushTextScale()
                 // Replay the lifecycle facts the activity hooks dropped while no
                 // handle existed. A cold start runs onStart, onResume and window
                 // focus before this point, so without it the state stays Detached
@@ -1095,6 +1123,9 @@ class FrustSurfaceView(
             // what the override is actually painting. `nativeAppIsDark`
             // reports the resolved value either way.
             updateSystemBarsAppearance(nativeAppIsDark(handle))
+            // The font scale is a `Configuration` field, delivered here because
+            // the manifest declares `fontScale` in `android:configChanges`.
+            pushTextScale()
         }
     }
 
@@ -2067,6 +2098,7 @@ class FrustSurfaceView(
         // observer, is the path that normally catches the change.
         registerReduceMotionObserver()
         pushReduceMotion()
+        pushTextScale()
         Choreographer.getInstance().postFrameCallback(this)
     }
 
