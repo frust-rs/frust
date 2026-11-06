@@ -579,7 +579,7 @@ semantic tests:
 | Navigation | Push/pop transitions, hero midpoint/endpoints, edge-swipe states, deep-linked destination |
 | Scrolling | Initial/scrolled/overscroll/refresh/pagination states and clipped content |
 | Insets/theme | Safe areas, keyboard inset, light/dark, Material/Cupertino, accent variations |
-| External GPU pass | An app's own `ExternalPass` rendered through `frust::gpu::headless::HeadlessRenderer::render_with_passes`; the probe example is `examples/playground/tests/gpu_pass_headless.rs` (ignored, run from `examples/playground`). The playground's "GPU pass" section is the on-device gate vehicle (Android verified on a Pixel 4a; iPhone pending) |
+| External GPU pass | An app's own `ExternalPass` rendered through `frust::gpu::headless::HeadlessRenderer::render_with_passes`; the probe example is `examples/playground/tests/gpu_pass_headless.rs` (ignored, run from `examples/playground`). The playground's "GPU pass" section is the on-device gate vehicle (verified on a Pixel 4a, an iPhone 13 mini and a windowed macOS run) |
 | App screens | Stable Huddle home/feed/thread/search/profile/settings states and loading/empty/error variants |
 
 Animations should use a small set of meaningful fixed timestamps: start,

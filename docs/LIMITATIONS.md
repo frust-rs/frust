@@ -6894,25 +6894,6 @@ the first real 3D consumer.
 **Trigger for removal**: a colour load-op on `EngineTarget` proven by the
 shared-encoder tests in both recording orders.
 
-### `facade-gpu-context-desktop-only` — `frust::gpu::with_context` is device-verified on desktop and Android, not yet on iOS
-
-**Observed** (evidence: `crates/frust-shell-desktop/src/render.rs`, `crates/frust-shell-android/src/jni_glue.rs`
-and `crates/frust-shell-ios/src/ffi_glue.rs` each publish their live `DeviceHandle` through
-`frust_shell_common::gpu::GpuPublisher` after every successful surface install and withdraw it when
-their render owner exits): on 2026-11-07 a Pixel 4a (Adreno 618, Android 16; debug and profile
-builds, with a OnePlus 9 supporting leg) read the handle back through `with_context` from the
-playground's GPU pass section, and an Activity destroy/recreate in the same process raised
-`device_generation()` (1 to 3) and the page rendered again. No iPhone run has yet read the device
-back or seen a new generation after a surface rebuild. The Android pre-init *rebuild* branch
-(`gpu-feature-request-forfeits-android-preinit` below) was not exercised: neither attached Adreno
-offers `SHADER_F16` under wgpu 30 Vulkan.
-
-**Accepted because**: the slot and the facade accessor are platform-free and covered by host tests;
-only the iOS device run is outstanding.
-
-**Trigger for removal**: an iPhone run reads the handle back through `with_context` and observes a
-changed `device_generation()` after a surface rebuild; remove this entry then.
-
 ### `gpu-feature-request-forfeits-android-preinit` — an app that requests optional GPU features loses the Android pre-init overlap
 
 **Observed** (evidence: `crates/frust-shell-android/src/ffi_support.rs`'s `resolve_preinit`,
@@ -6928,27 +6909,6 @@ app that requests nothing keeps the overlap.
 
 **Trigger for removal**: building the pre-init device with the request already known (or an
 asynchronous rebuild that does not block the first frame).
-
-### `facade-external-pass-desktop-only` — an `ExternalPass` is device-verified on Android, not yet on iOS or a windowed desktop run
-
-**Observed** (evidence: `crates/frust-render/src/renderer.rs`'s `submit_impl`, both
-`RenderPath::EngineDirect` and `RenderPath::EngineDirectUnpremultiply` arms call
-`external_pass::run_external_passes` unconditionally immediately before `shader_quads.prepare`, into
-the same frame encoder, with no platform gate; `crates/frust-shell-ios/src/app/executor.rs` reaches
-the same drain through `submit_deferred`/`submit`): on 2026-11-07 the playground's GPU pass section
-(`examples/playground/src/pages/gpu_pass.rs`, a `SpinningQuad` registered through the facade only)
-ran on a Pixel 4a (debug and profile) through the Android shell's own frame loop on a real swapchain,
-with a OnePlus 9 supporting leg; leaving the section stopped frames (0 presented frames). Headless,
-`crates/frust-render/tests/external_pass.rs` and `headless_external_pass.rs` drive the same
-drain, encode and submit sequence against a `HeadlessTarget` (NVIDIA T400/Vulkan). Not yet run on a
-device: iOS, and a windowed desktop run. Output is always blended, never opaque
-(`engine-scene-texture-always-blended` above).
-
-**Accepted because**: the engine-tier frame path is the one drain every shell reaches, proven headless
-and on Android; iOS needs no new code in the registry, only a run.
-
-**Trigger for removal**: a windowed desktop run and an iPhone run, each registering and driving a real
-`ExternalPass` through its own frame loop (the playground GPU pass section is the vehicle).
 
 ### `texture-bus-second-surface-keeps-a-stale-view` — with two live engine-tier surfaces, only the first to drain takes a texture-bus source's new frame
 

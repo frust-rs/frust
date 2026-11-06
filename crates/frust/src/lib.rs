@@ -1263,9 +1263,9 @@ pub mod authoring {
 /// alike, which is what the Android and iOS shells call exactly as desktop
 /// does — a registered pass is not desktop-only by construction, and
 /// [`with_context`] answers on every shell once a surface exists. A
-/// registered pass has been driven headless and through the Android shell's
-/// own frame loop on a device; iOS and a windowed desktop run have not yet
-/// (`docs/LIMITATIONS.md`'s `facade-external-pass-desktop-only`).
+/// registered pass has been driven headless and through each shell's own
+/// frame loop: on an Android device, on an iPhone and in a windowed desktop
+/// run.
 ///
 /// A panic inside `record` is caught in a debug build: the pass is reported
 /// and unregistered, the surface that caught it unbinds it at once (every
