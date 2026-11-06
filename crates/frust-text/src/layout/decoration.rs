@@ -11,10 +11,9 @@
 //! horizontal extent is the segment's pen span from the shared
 //! [`crate::convert::walk_clusters`] walk, so it follows bidi order, justified
 //! spacing and the ellipsis exactly as the glyphs do. A space or a newline at
-//! the line's trailing edge hangs there, as the line breaker hangs it, and is
-//! not decorated. Every other whitespace kind is decorated, a no-break space
-//! included, since it is not a break opportunity and it is drawn like any
-//! other character.
+//! the line's trailing edge is not decorated. Every other whitespace kind is,
+//! a no-break space included, even where the line breaker hangs it (see
+//! `hangs`).
 //!
 //! The vertical position comes from the face's own metrics at the run's size
 //! ([`crate::shape::RunMetrics`]): each offset is the distance from the
@@ -64,13 +63,13 @@ struct Piece {
     hangs: bool,
 }
 
-/// Whether a character of this whitespace class hangs at a line's trailing
-/// edge and so goes undecorated there. The line breaker hangs an overflowing
-/// [`Whitespace::Space`] (see `break_lines`) and ends a line after a newline,
-/// so those two hang. The breaker fits every other class as an
-/// ordinary advance: a no-break space is not a break opportunity, and a tab,
-/// an ideographic space or another space separator is counted in the fit. A
-/// control glyph is painted, so none of those hang.
+/// Whether a character of this whitespace class goes undecorated at a line's
+/// trailing edge: only a [`Whitespace::Space`] or a newline. A no-break space,
+/// a tab, an ideographic or other space separator and a control glyph keep
+/// their decoration there. That is deliberately narrower than layout:
+/// `break_lines` also hangs an overflowing no-break space, and the line
+/// metrics leave every whitespace class out of the line width, so the stroke
+/// under a trailing no-break space or tab can reach past the layout's width.
 fn hangs(ws: Whitespace) -> bool {
     matches!(ws, Whitespace::Space | Whitespace::Newline)
 }
