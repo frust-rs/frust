@@ -108,7 +108,7 @@ pub use frust_core::OverlayKeys;
 pub use frust_core::ScrollAxis;
 pub use gesture::{
     DragEndDetails, DragStartDetails, DragUpdateDetails, GestureDetector, GestureDetectorView,
-    GestureDetectorWidget,
+    GestureDetectorWidget, TapDownDetails, TapUpDetails,
 };
 pub use glass_surface::{GlassSurfaceView, GlassSurfaceWidget, glass_surface};
 pub use icon::{
