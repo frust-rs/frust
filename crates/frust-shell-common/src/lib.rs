@@ -40,8 +40,8 @@
 //! into, so app code can observe a `RefusedTranslucent` platform refusal
 //! instead of an invisible native sibling. Behind the non-default `gpu`
 //! cargo feature, [`gpu`] carries the process-wide GPU-device slot
-//! ([`gpu::install_gpu_handle`]/[`gpu::gpu_handle`]) a shell's render
-//! executor installs its device into once, type-erased so this crate still
+//! ([`gpu::GpuPublisher`]/[`gpu::with_gpu_handle`]) a shell's render
+//! executor publishes its device into, replaceable and generation-tagged, type-erased so this crate still
 //! names no GPU type — see the module's own docs. The [`overlay`] module is
 //! the shells' shared overlay-surface core: the layer/surface table whose
 //! withdraw never blocks, the `FRUST_OVERLAYS` switch, the frame-request
@@ -71,9 +71,8 @@ pub mod devtools;
 mod ffi_support;
 pub mod font_registry;
 pub mod frame_gate;
-/// The process-wide GPU-device slot — [`gpu::install_gpu_handle`]/
-/// [`gpu::gpu_handle`] — a shell's render executor installs its device into
-/// once, and the facade's `frust::gpu::with_context` (see
+/// The process-wide replaceable GPU-device slot — [`gpu::GpuPublisher`]/
+/// [`gpu::with_gpu_handle`] — a shell's render executor publishes its device into, and the facade's `frust::gpu::with_context` (see
 /// `crates/frust/src/lib.rs`) reads it back. Compiled only under the `gpu`
 /// cargo feature; absent entirely otherwise, and type-erased even then so
 /// this crate names no GPU type (see the module's own docs).

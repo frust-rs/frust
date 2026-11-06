@@ -1119,17 +1119,24 @@ pub mod authoring {
 /// Everything above builds a *standalone* [`Context`] — useful for a
 /// headless harness, but a second device, not the one the running shell
 /// already created and is presenting frames through. [`with_context`] reaches
-/// that one instead: the shell's render executor installs its
+/// that one instead: the shell's render executor publishes its
 /// [`DeviceHandle`] (the device/queue/adapter pair, cheap to clone since
-/// wgpu's own types are `Arc`-backed) into a process-wide slot the first time
-/// a surface — and so a device — comes up
-/// (`frust_shell_common::gpu::install_gpu_handle`, see that module's docs),
-/// and [`with_context`] reads it back through the identical seam
-/// (`frust_shell_common::gpu::gpu_handle`). It answers `None` before that
-/// first surface exists (desktop's zero-config preview window, a mobile
+/// wgpu's own types are `Arc`-backed) into a process-wide, replaceable slot
+/// each time a surface — and so a device — comes up
+/// (`frust_shell_common::gpu::GpuPublisher`, see that module's docs), and
+/// [`with_context`] reads it back through the identical seam
+/// (`frust_shell_common::gpu::with_gpu_handle`). It answers `None` before
+/// that first surface exists (desktop's zero-config preview window, a mobile
 /// shell before its first frame) — check the `Option`, never assume `Some`.
-/// Never blocks: once installed, the read is a lock-free `OnceLock::get`, so
-/// calling this from the UI thread is always safe.
+/// The slot lock is held only to clone a reference, never while your closure
+/// runs, so calling this from the UI thread is always safe.
+///
+/// The handle is current only for the duration of the call: never stash
+/// device or queue clones across frames. A shell may drop and recreate its
+/// device, so rebuild any device-owned resources (pipelines, textures,
+/// buffers) whenever [`device_generation`] (or [`DeviceHandle::generation`])
+/// changes, and treat [`DeviceHandle::is_lost`] as the signal that the device
+/// you hold is gone.
 ///
 /// Only the desktop shell installs one today; the two mobile shells forward
 /// the `gpu` feature but do not install yet (an accepted gap — see
@@ -1281,7 +1288,15 @@ pub mod gpu {
     /// second device. `with_context` never creates one; it only reads back
     /// the one the running shell already owns.
     pub fn with_context<R>(f: impl FnOnce(&DeviceHandle) -> R) -> Option<R> {
-        frust_shell_common::gpu::gpu_handle::<DeviceHandle>().map(f)
+        frust_shell_common::gpu::with_gpu_handle::<DeviceHandle, _>(f)
+    }
+
+    /// The generation of the currently published device, or `None` if no
+    /// shell has published one. It changes whenever the shell replaces its
+    /// device; compare it to the value you built your device-owned resources
+    /// against and rebuild on a mismatch.
+    pub fn device_generation() -> Option<u64> {
+        frust_shell_common::gpu::gpu_handle_generation()
     }
 }
 

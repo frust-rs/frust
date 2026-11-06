@@ -68,22 +68,6 @@ fn scene_texture_seam_compiles_and_records_through_facade_types_only() {
     record_scene_texture_draw();
 }
 
-/// `with_context` before any shell has installed a device answers `None` —
-/// the state every host unit test and this crate's own default (`--ignored`
-/// excluded) test run is in, since only the ignored test below ever calls
-/// `frust_shell_common::gpu::install_gpu_handle`, and cargo's default `cargo
-/// test` invocation runs the non-ignored set only (an `--ignored` run
-/// replaces it rather than adding to it), so this process never sees an
-/// install. Device-free: no GPU adapter needed.
-#[test]
-fn with_context_answers_none_before_any_shell_installs_a_device() {
-    let answer = with_context(|handle| handle.caps.adapter_name.clone());
-    assert!(
-        answer.is_none(),
-        "with_context must answer None until a shell installs a device"
-    );
-}
-
 /// A minimal, dependency-free `block_on`: this crate carries no async
 /// executor of its own to reach for (`pollster` is a shell-only dependency,
 /// and adding one here just for this test's one-shot device-creation future
@@ -154,9 +138,9 @@ fn scene_texture_seam_reaches_a_real_headless_device_through_the_facade_context(
 }
 
 /// Brings up a real headless [`DeviceHandle`] and installs it through
-/// `frust_shell_common::gpu::install_gpu_handle` — the exact public seam a
-/// shell's own render executor calls (see `frust-shell-desktop`'s
-/// `render.rs`'s `publish_gpu_handle`), not a facade-internal shortcut — then
+/// `frust_shell_common::gpu::GpuPublisher` — the exact public seam a
+/// shell's own render executor calls (see `publish_gpu_handle` in
+/// `frust-shell-desktop`'s `render.rs`), not a facade-internal shortcut — then
 /// reads it back purely through the facade's [`with_context`], proving the
 /// full shell-installs / app-reads round trip with no shell in the loop.
 ///
@@ -170,6 +154,7 @@ fn scene_texture_seam_reaches_a_real_headless_device_through_the_facade_context(
             gpu_seam -- --ignored` (WGPU_BACKEND/WGPU_ADAPTER_NAME pin the adapter; \
             FRUST_GOLDEN_EXPECT_ADAPTER verifies it resolved)"]
 fn with_context_reaches_a_handle_installed_the_way_a_shell_would() {
+    let mut publisher = frust_shell_common::gpu::GpuPublisher::new();
     let installed_adapter = block_on(async {
         let mut context = Context::new();
         context
@@ -192,10 +177,10 @@ fn with_context_reaches_a_handle_installed_the_way_a_shell_would() {
         }
 
         // The exact call a shell's render executor makes once its own device
-        // exists (`frust_shell_common::gpu::install_gpu_handle`) — never a
-        // facade-internal function, since installing is shell-glue's job and
-        // the facade only ever reads through `with_context`.
-        frust_shell_common::gpu::install_gpu_handle(handle);
+        // exists (`GpuPublisher::publish`) — never a facade-internal
+        // function, since publishing is shell-glue's job and the facade only
+        // ever reads through `with_context`.
+        publisher.publish(handle.generation(), || handle);
         adapter_name
     });
 
@@ -204,4 +189,34 @@ fn with_context_reaches_a_handle_installed_the_way_a_shell_would() {
     assert_eq!(read_back_adapter, installed_adapter);
 
     println!("frust::gpu::with_context resolved adapter: {read_back_adapter}");
+}
+
+/// The slot is process-wide, so this is the one non-ignored test that reads
+/// or writes it (the `--ignored` GPU test publishes too, but an `--ignored` run
+/// replaces the default set rather than adding to it; do not combine them with
+/// `--include-ignored` without `--test-threads=1`).
+///
+/// Walks the slot's life: empty answers `None` from both readers; after a
+/// publish `device_generation` follows the installed generation (a stand-in
+/// type is not a `DeviceHandle`, so `with_context` still answers `None` for
+/// the mismatched type); a newer generation replaces it; and dropping the
+/// publisher empties the slot again.
+#[test]
+fn slot_lifecycle_through_the_facade_readers() {
+    use frust::gpu::device_generation;
+    use frust_shell_common::gpu::GpuPublisher;
+
+    assert!(with_context(|handle| handle.caps.adapter_name.clone()).is_none());
+    assert_eq!(device_generation(), None);
+
+    let mut publisher = GpuPublisher::new();
+    publisher.publish(3, || 0u8);
+    assert_eq!(device_generation(), Some(3));
+    assert!(with_context(|_| ()).is_none(), "u8 is not a DeviceHandle");
+    publisher.publish(4, || 0u8);
+    assert_eq!(device_generation(), Some(4));
+
+    drop(publisher);
+    assert_eq!(device_generation(), None);
+    assert!(with_context(|_| ()).is_none());
 }
