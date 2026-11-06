@@ -344,8 +344,14 @@ impl HeadlessRenderer {
     /// what the pass bound.
     ///
     /// Deterministic: it reads no process-wide state, so only the passes
-    /// listed run. Passes record in ascending id order, inside the render's
-    /// validation scope, so a validation error from a pass fails the render.
+    /// listed run, and
+    /// [`ExternalFrame::frame_index`](crate::ExternalFrame::frame_index)
+    /// counts, from 0, this renderer's explicit renders that ran at least one
+    /// pass (never the process-wide frame counter that surfaces and
+    /// [`render_draining_registry`](Self::render_draining_registry) share).
+    /// Ids in a reserved namespace are refused. Passes record in ascending id
+    /// order, inside the render's validation scope, so a validation error from
+    /// a pass fails the render.
     /// An id bound by an earlier call on this renderer but absent from
     /// `passes` here is unbound before any pass records.
     ///

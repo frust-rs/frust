@@ -77,6 +77,10 @@ struct Target {
     params: wgpu::Buffer,
     /// Kept alive beside the bind group that samples it.
     _checker: wgpu::Texture,
+    /// This pass's record counter value when this target last drew.
+    last_record: u64,
+    /// Frames this target has drawn: the animation clock (see `record`).
+    frames: u64,
 }
 
 impl Target {
@@ -206,6 +210,8 @@ impl Target {
             bind_group,
             params,
             _checker: checker,
+            last_record: 0,
+            frames: 0,
         }
     }
 }
@@ -226,6 +232,10 @@ fn checker_texels() -> Vec<u8> {
     }
     texels
 }
+
+/// A target not drawn within this many records of the pass is dropped: its
+/// drain (an engine-tier surface) stopped drawing.
+const STALE_AFTER: u64 = 240;
 
 /// The animated external pass: a rotating checker quad over a cycling
 /// background colour. See the [module docs](self).
@@ -281,6 +291,7 @@ impl ExternalPass for SpinningQuad {
         let drain = frame.drain_id();
         let generation = frame.device_generation();
         let index = frame.frame_index();
+        let record_no = self.records.load(Ordering::Relaxed);
 
         let mut targets = self.targets.lock().unwrap_or_else(PoisonError::into_inner);
         let rebuild = targets
@@ -290,6 +301,10 @@ impl ExternalPass for SpinningQuad {
             // Nothing built under another generation may be kept.
             targets.retain(|_, t| t.generation == generation);
         }
+        // Drop targets of drains that stopped drawing.
+        targets.retain(|&key, t| {
+            key == drain || record_no.saturating_sub(t.last_record) <= STALE_AFTER
+        });
         let target = match targets.entry(drain) {
             Entry::Occupied(entry) if !rebuild => entry.into_mut(),
             Entry::Occupied(mut entry) => {
@@ -299,7 +314,13 @@ impl ExternalPass for SpinningQuad {
             Entry::Vacant(entry) => entry.insert(Target::new(frame, EXTENT)),
         };
 
-        let t = index as f64;
+        target.last_record = record_no;
+        // Animated from a count kept on this drain's target, not from
+        // `frame.frame_index()`: that index is process-wide on a surface, so
+        // it advances for every other drain and pass too and would make this
+        // quad spin faster the more surfaces are live.
+        let t = target.frames as f64;
+        target.frames += 1;
         let angle = (t * 0.03) as f32;
         let aspect = EXTENT.0 as f32 / EXTENT.1 as f32;
         let mut params = [0u8; 8];

@@ -307,7 +307,11 @@ impl EngineOracle {
     /// scene names) into the frame's encoder so a scene texture command
     /// naming that id composites what the pass bound.
     ///
-    /// Deterministic: no process-wide state is read. Passes record in
+    /// Deterministic: no process-wide state is read, and
+    /// `ExternalFrame::frame_index` counts, from 0, this renderer's explicit
+    /// renders that ran at least one pass (the registry path uses the
+    /// process-wide counter instead). Ids
+    /// in a reserved namespace are refused. Passes record in
     /// ascending id order inside the render's validation scope, so a pass's
     /// validation error fails the render. An id bound by an earlier call but
     /// absent from `passes` is unbound before any pass records.

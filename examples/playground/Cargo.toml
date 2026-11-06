@@ -16,6 +16,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 # Path dep on this checkout (`frust-ui`, imported as `frust`: https://github.com/lloydmeta/frunk/issues/258).
 # The only authoring line: custom widgets use `frust::authoring`, never `frust-core`/`kurbo`/`peniko` directly.
+# The `gpu` feature enables the `frust::gpu` facade (external passes, texture bus) the GPU pass page draws through.
 frust = { package = "frust-ui", path = "../../crates/frust", features = ["gpu"] }
 
 # Material only (the home-page `app_bar`/`navigation_bar`); this app uses no Cupertino/Glyph widget.

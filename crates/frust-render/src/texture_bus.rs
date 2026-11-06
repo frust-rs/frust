@@ -145,9 +145,10 @@
 //! rebuilds its engine on the same device (a fresh surface) gets the current
 //! view bound again on its first frame; a *device* change drops what was
 //! shown until the source yields its next frame. With two engine-tier
-//! surfaces live at once, each binds the shown view into its own engine, and
-//! each clears its own binding on its next frame once the registration is
-//! dropped.
+//! surfaces live at once, each clears its own binding on its next frame once
+//! the registration is dropped. A source's frame is consumed by whichever
+//! surface drains first, so a second surface keeps the view it last bound
+//! until the source produces again.
 //!
 //! # Waking the shell
 //!
