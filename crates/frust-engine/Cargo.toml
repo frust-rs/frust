@@ -41,7 +41,16 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     "CFNumber",
     "CFString",
 ] }
-objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGPath"] }
+# `CGBitmapContext`, `CGColorSpace`, `CGContext` and `CGImage` are what `CGBitmapContextCreate` is gated on
+# (`src/text/apple_raster.rs`, the colour-bitmap rasterizer).
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGPath",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+] }
 # `CTFontDescriptor` gates `CTFontOrientation` (the bounding-box read); `objc2-core-graphics` gates
 # `CTFontCreatePathForGlyph`.
 objc2-core-text = { version = "0.3", default-features = false, features = [

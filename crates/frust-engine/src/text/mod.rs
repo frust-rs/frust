@@ -163,6 +163,11 @@
 //! deliver.
 
 pub(crate) mod atlas_policy;
+// The CoreText colour-bitmap primitive is not called from the engine until the frust-side
+// bitmap route lands on top of it.
+#[cfg(target_vendor = "apple")]
+#[allow(dead_code)]
+pub(crate) mod apple_raster;
 pub(crate) mod backend;
 pub(crate) mod color;
 pub(crate) mod hvgl;
