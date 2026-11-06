@@ -585,6 +585,21 @@ only-en = English only";
         assert_eq!(active_locale(), None);
     }
 
+    #[test]
+    fn a_traditional_chinese_request_falls_through_to_the_fallback_over_a_simplified_bundle() {
+        let _owner = ambient_owner();
+        let set = LocaleSet::new(locale("en"))
+            .with_locale(locale("en"), [("app.ftl", EN)])
+            .with_locale(locale("zh-Hans"), [("app.ftl", ZH_HANS)])
+            .with_isolating(false);
+        let i18n = I18n::new(set, &[locale("en")]).expect("engine builds");
+
+        i18n.set_locale(locale("zh-TW"));
+
+        assert_eq!(i18n.locale().to_string(), "en");
+        assert_eq!(i18n.format_locale().to_string(), "en-TW");
+    }
+
     // `format_locale` matrix — pins the message-vs-format locale distinction
     // `I18n::locale`/`I18n::format_locale`'s doc comments describe.
 
