@@ -8,7 +8,7 @@ use frust::{Theme, provide_context, use_context};
 use frust_i18n::{I18n, Locale};
 use frust_material::{DatePickerStrings, DatePickerStringsOwned, MaterialStrings};
 
-use crate::tables::{de, en, es, fr, ja, th, vi};
+use crate::tables::{de, en, es, fr, ja, th, vi, zh_hans};
 use names::calendar_names;
 
 /// Month and weekday names read from CLDR through ICU4X.
@@ -28,10 +28,11 @@ mod names {
     /// 2026-01-04 is a Sunday.
     const SUNDAY: (i32, u8, u8) = (2026, 1, 4);
 
-    /// CLDR names for `language` (a bare language subtag), or `None` when ICU4X
-    /// cannot load them.
-    pub(super) fn calendar_names(language: &str) -> Option<CalendarNames> {
-        let id: LanguageIdentifier = language.parse().ok()?;
+    /// CLDR names for the table `key` (a bare language subtag, or a
+    /// language-script pair such as `zh-Hans`), or `None` when ICU4X cannot
+    /// load them.
+    pub(super) fn calendar_names(key: &str) -> Option<CalendarNames> {
+        let id: LanguageIdentifier = key.parse().ok()?;
         let prefs = DateTimeFormatterPreferences::from(&id);
         let long = DateTimeFormatter::try_new(prefs, M::long()).ok()?;
         let abbreviated = DateTimeFormatter::try_new(prefs, M::medium()).ok()?;
@@ -62,14 +63,30 @@ mod names {
     }
 }
 
-/// Finished tables by language. Building one reads CLDR and leaks the owned
+/// Finished tables by [`table_key`]. Building one reads CLDR and leaks the owned
 /// month and weekday strings once (see [`DatePickerStringsOwned`]), so each
-/// language is built a single time per process.
+/// key is built a single time per process.
 static TABLES: Mutex<Option<HashMap<String, MaterialStrings>>> = Mutex::new(None);
 
-/// The hand-written table for `language`, or `None` when unsupported.
-fn hand_written(language: &str) -> Option<MaterialStrings> {
-    Some(match language {
+/// The table key for `locale`: the bare language, except Chinese, which splits
+/// by script into `zh-Hans` and `zh-Hant`. The script comes from
+/// [`Locale::likely_script`], the same table locale negotiation uses, so a
+/// bundle and its Material strings always agree. A Chinese locale whose
+/// script cannot be inferred (`zh-US`) takes `zh-Hans`.
+fn table_key(locale: &Locale) -> String {
+    let language = locale.language();
+    if language.as_str() != "zh" {
+        return language.as_str().to_owned();
+    }
+    match locale.likely_script() {
+        Some(script) if script.as_str() == "Hant" => "zh-Hant".to_owned(),
+        _ => "zh-Hans".to_owned(),
+    }
+}
+
+/// The hand-written table for `key`, or `None` when unsupported.
+fn hand_written(key: &str) -> Option<MaterialStrings> {
+    Some(match key {
         "en" => en::strings(),
         "th" => th::strings(),
         "vi" => vi::strings(),
@@ -77,15 +94,21 @@ fn hand_written(language: &str) -> Option<MaterialStrings> {
         "es" => es::strings(),
         "de" => de::strings(),
         "fr" => fr::strings(),
+        "zh-Hans" => zh_hans::strings(),
         _ => return None,
     })
 }
 
-fn build_table(language: &str) -> MaterialStrings {
-    let Some(mut strings) = hand_written(language) else {
+fn build_table(key: &str) -> MaterialStrings {
+    let Some(mut strings) = hand_written(key) else {
+        if key == "zh-Hant" {
+            log::warn!(
+                "no Traditional Chinese Material strings table; zh-Hant falls back to English"
+            );
+        }
         return MaterialStrings::ENGLISH;
     };
-    if let Some(names) = calendar_names(language) {
+    if let Some(names) = calendar_names(key) {
         let mut owned = DatePickerStringsOwned::from(strings.date_picker);
         owned.months = names.months.map(Cow::Owned);
         owned.month_abbreviations = names.month_abbreviations.map(Cow::Owned);
@@ -95,19 +118,22 @@ fn build_table(language: &str) -> MaterialStrings {
     strings
 }
 
-/// The [`MaterialStrings`] for `locale`'s language, falling back to
+/// The [`MaterialStrings`] for `locale`, falling back to
 /// [`MaterialStrings::ENGLISH`] for a language without a table.
 ///
-/// Region and script are ignored: `de-CH` and `de` share one table. Month and
-/// weekday names come from CLDR; every other string is hand-written.
+/// Region is ignored: `de-CH` and `de` share one table. Chinese is keyed by
+/// script instead: `zh`, `zh-CN`, `zh-SG` and `zh-Hans` share the Simplified
+/// table, while `zh-Hant`, `zh-TW`, `zh-HK` and `zh-MO` have no table yet and
+/// get English (with one logged warning) rather than Simplified strings.
+/// Month and weekday names come from CLDR; every other string is
+/// hand-written.
 pub fn material_strings_for(locale: &Locale) -> MaterialStrings {
-    let language = locale.language();
-    let language = language.as_str();
+    let key = table_key(locale);
     let mut guard = TABLES.lock().unwrap_or_else(PoisonError::into_inner);
     guard
         .get_or_insert_with(HashMap::new)
-        .entry(language.to_owned())
-        .or_insert_with(|| build_table(language))
+        .entry(key.clone())
+        .or_insert_with(|| build_table(&key))
         .clone()
 }
 

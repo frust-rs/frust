@@ -10,3 +10,4 @@ pub(crate) mod fr;
 pub(crate) mod ja;
 pub(crate) mod th;
 pub(crate) mod vi;
+pub(crate) mod zh_hans;

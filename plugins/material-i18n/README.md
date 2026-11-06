@@ -29,6 +29,11 @@ badges, the FAB menu, snackbars and chips alike. No shell theme push is needed.
 - `material_strings_for(&Locale)` returns the table directly. An unsupported
   language gives `MaterialStrings::ENGLISH`.
 
+Chinese is keyed by script: `zh`, `zh-CN`, `zh-SG` and `zh-Hans` get the
+Simplified table. `zh-Hant`, `zh-TW`, `zh-HK` and `zh-MO` have no table yet and
+fall back to English (with one logged warning) rather than receiving Simplified
+strings.
+
 Month and weekday names are read from CLDR (through ICU4X), not hand-written.
 
 ## Native review status
@@ -42,6 +47,7 @@ Month and weekday names are read from CLDR (through ICU4X), not hand-written.
 | es | machine-drafted, pending native review |
 | de | machine-drafted, pending native review |
 | fr | machine-drafted, pending native review |
+| zh-Hans | machine-drafted, pending native review |
 
 Weekday initials are hand-written per language; CLDR has no narrow weekday
 length in ICU4X's field sets.
