@@ -77,9 +77,10 @@
 //! scale), the row labels from `bodyLarge` and the hints from `bodySmall`
 //! (both IBM Plex Mono), so a theme swap reshapes them (see [`crate::badge`]'s
 //! Typeface section); unthemed, each falls back to the matching Glyph stack.
-//! The query field is the exception: [`frust::TextInput`] takes its style at
-//! build and has no themed-family seam, so the field keeps an explicit IBM
-//! Plex Mono stack and does not follow a theme swap.
+//! The query field takes the theme's monospace family
+//! ([`frust::TextInput`]'s `themed_mono_family`, IBM Plex Mono under Glyph's
+//! baseline), so a theme that swaps its monospace family reshapes it; unthemed,
+//! it keeps the explicit IBM Plex Mono stack.
 
 use crate::badge::LayoutGuard;
 use std::cell::Cell;
@@ -419,8 +420,9 @@ fn input_view<State: 'static>(
     any::<State, _>(
         text_input(query.to_string(), move |s: &mut State, t: String| oq(s, t))
             .placeholder(placeholder.to_string())
-            // Kept explicit: `TextInput` takes its style at build and has no
-            // themed-family seam, so no type-scale role can reach the field.
+            // The theme's monospace family wins at layout; the explicit stack
+            // is the unthemed fallback (and the family with no theme active).
+            .themed_mono_family()
             .text_style(palette_style(
                 ui_face(),
                 LABEL_SIZE,
@@ -1745,7 +1747,8 @@ mod tests {
                 Face::PlexMono
             ]
         );
-        // The query field keeps its explicit family (no `TextInput` seam).
+        // The query field takes the monospace family, which the role swap
+        // leaves at IBM Plex Mono, so it does not flip with the roles.
         assert_eq!(
             after,
             [
@@ -1754,6 +1757,32 @@ mod tests {
                 Face::SpaceMono,
                 Face::SpaceMono
             ]
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn query_field_follows_the_theme_monospace_family() {
+        use crate::badge::typeface_probe::{Face, painted_faces};
+        use frust::MonospaceFamily;
+        use frust::authoring::text::{FontFamily, GenericSlot};
+        // Glyph's baseline with its monospace family swapped to Space Mono.
+        // The query field's placeholder is the second run; the rest are unchanged.
+        let theme = Theme::builder(crate::baseline())
+            .extension(MonospaceFamily {
+                family: FontFamily::stack_with_generic(["Space Mono"], GenericSlot::Monospace),
+            })
+            .build();
+        let faces = painted_faces(one_hinted_row, theme, Size::new(800.0, 600.0));
+        assert_eq!(
+            faces,
+            [
+                Face::SpaceMono,
+                Face::SpaceMono,
+                Face::PlexMono,
+                Face::PlexMono
+            ],
+            "the query field shapes in the theme's monospace family"
         );
     }
 }
