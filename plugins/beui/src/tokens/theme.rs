@@ -104,7 +104,7 @@
 
 use frust::{
     Brightness, Color, ColorScheme, DesignLanguage, FontFace, GlassFill, GlassMaterial, GlassScale,
-    NativeTypefaces, ShadowSpec, ShapeScale, Theme, ThemeBuilder, TypeScale,
+    MonospaceFamily, NativeTypefaces, ShadowSpec, ShapeScale, Theme, ThemeBuilder, TypeScale,
     authoring::text::{FontFamily, GenericSlot, TextStyle},
 };
 
@@ -666,6 +666,9 @@ pub fn theme() -> Theme {
         .design_language(DesignLanguage::Custom(BEUI_DESIGN_LANGUAGE))
         .extension(BeuiTokens::beui())
         .extension(native_typefaces())
+        .extension(MonospaceFamily {
+            family: mono_family(),
+        })
         .build()
 }
 
@@ -699,6 +702,13 @@ mod tests {
         assert_eq!(t.type_scale, type_scale(&TextStyle::default()));
         assert_eq!(t.extension::<BeuiTokens>(), Some(&BeuiTokens::beui()));
         assert_eq!(t.extension::<NativeTypefaces>(), Some(&native_typefaces()));
+        assert_eq!(t.monospace_family(), mono_family());
+        assert_eq!(
+            t.extension::<MonospaceFamily>(),
+            Some(&MonospaceFamily {
+                family: mono_family()
+            })
+        );
         // Survives the clone the framework's two delivery paths take.
         let c = t.clone();
         assert_eq!(c.extension::<BeuiTokens>(), Some(&BeuiTokens::beui()));

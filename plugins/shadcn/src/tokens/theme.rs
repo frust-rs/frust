@@ -74,8 +74,8 @@
 //!   is the other brightness's accent.
 
 use frust::{
-    Brightness, Color, ColorScheme, DesignLanguage, FontFace, NativeTypefaces, ShapeScale, Theme,
-    ThemeBuilder, TypeScale,
+    Brightness, Color, ColorScheme, DesignLanguage, FontFace, MonospaceFamily, NativeTypefaces,
+    ShapeScale, Theme, ThemeBuilder, TypeScale,
     authoring::text::{FontFamily, GenericSlot, TextStyle},
 };
 
@@ -343,6 +343,9 @@ pub fn theme_for(base: ShadcnBase) -> Theme {
         .design_language(DesignLanguage::Custom(SHADCN_DESIGN_LANGUAGE))
         .extension(ShadcnTokens::for_base(base))
         .extension(native_typefaces())
+        .extension(MonospaceFamily {
+            family: mono_family(),
+        })
         .build()
 }
 
@@ -413,6 +416,13 @@ mod tests {
         assert_eq!(t.type_scale, type_scale(&TextStyle::default()));
         assert_eq!(t.extension::<ShadcnTokens>(), Some(&ShadcnTokens::shadcn()));
         assert_eq!(t.extension::<NativeTypefaces>(), Some(&native_typefaces()));
+        assert_eq!(t.monospace_family(), mono_family());
+        assert_eq!(
+            t.extension::<MonospaceFamily>(),
+            Some(&MonospaceFamily {
+                family: mono_family()
+            })
+        );
         // Survives the clone the framework's two delivery paths take.
         let c = t.clone();
         assert_eq!(c.extension::<ShadcnTokens>(), Some(&ShadcnTokens::shadcn()));

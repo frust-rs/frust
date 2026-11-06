@@ -1895,9 +1895,10 @@ pub use route_state::RouteObserver;
 /// app (or a design-system plugin) authors a theme against `frust::*` alone.
 pub use frust_theme::{
     Brightness, ColorScheme, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation,
-    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, GlassTier, MotionDurations,
-    MotionExtras, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec, ShapeScale,
-    StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
+    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, GlassTier, MonospaceFamily,
+    MotionDurations, MotionExtras, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions,
+    TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in
