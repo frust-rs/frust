@@ -141,7 +141,8 @@ fn scaled_run_key(font_id: u64, size: f32, transform: Affine) -> RunKey<'static>
         transform,
         hinted: false,
         color_font: false,
-        bitmap_only: false,
+        bitmap_first: false,
+        strikes: atlas_policy::StrikePpems::NONE,
         context_color: BLACK,
         synthesis: Some(atlas_policy::Synthesis::NONE),
         oblique: false,
@@ -1970,9 +1971,10 @@ fn the_cache_runs_on_the_documented_numbers() {
     let config = glyph_cache_config();
     assert_eq!(config.max_entry_age, 64);
     assert_eq!(config.eviction_frequency, 64);
-    // The ceiling `glifo` is told is the bitmap one: an outline glyph past
-    // `MAX_CACHED_FONT_SIZE` is routed to outlines before `glifo` sees it.
-    assert!((config.max_cached_font_size - 1024.0).abs() < f32::EPSILON);
+    // `glifo`'s own backstop is the outline ceiling: a bitmap-first face,
+    // the one kind routed to the atlas past it, never reaches `glifo`.
+    assert!((config.max_cached_font_size - MAX_CACHED_FONT_SIZE).abs() < f32::EPSILON);
+    assert_eq!(MAX_CACHED_FONT_SIZE, 128.0);
     assert_eq!(SIZE_QUANTUM, 0.25);
 }
 
