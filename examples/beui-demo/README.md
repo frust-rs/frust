@@ -111,9 +111,8 @@ all — the page still shows, with a placeholder in every 3D pane naming this
 command.
 
 Compiling the feature in is not the same as rendering 3D: a device is only
-reachable once the desktop shell has opened its first surface
-(`docs/LIMITATIONS.md`'s `facade-gpu-context-desktop-only` — Android/iOS have
-none yet), and `FRUST_BEUI_NO_GPU_FX=1` turns the whole path back off
+reachable once the desktop shell has opened its first surface (beUI keeps the
+3D path off on Android and iOS), and `FRUST_BEUI_NO_GPU_FX=1` turns the whole path back off
 regardless of the build. Every component already carries that degrade in its
 own contract, so a `--features gpu-effects` build with no reachable device
 renders exactly the default build's 2D panes — the GPU Effects page states

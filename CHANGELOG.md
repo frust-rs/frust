@@ -249,6 +249,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `TextInputView::themed_family(role)` and `themed_mono_family()` take a field's content and
   placeholder family from the active theme at layout (the theme's family wins over a `text_style`
   family). The catalogs' text fields use them, so a theme swap re-faces typed text.
+- `ExternalFrame::drain_id()` and `device_generation()` identify the surface drain and device a pass
+  records for, so a pass can key per-surface, per-device resources.
+- `HeadlessRenderer::render_with_passes` (and `render_draining_registry`, which opts into the
+  process-wide registry) render external passes offscreen; `EngineOracle` has the same two methods.
+- `frust::gpu::headless` re-exports `HeadlessRenderer`, `HeadlessOptions`, `HeadlessSpec`,
+  `HeadlessImage`, `HeadlessMeta` and the golden env-var names, so an app can golden-test its own pass.
+- The playground gains a "GPU pass" section that drives an `ExternalPass` through the facade only.
 
 ### Changed
 
@@ -354,6 +361,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `docs/PERFORMANCE_BASELINES.md`).
 - `TextStyle` gains the public fields `features` and `decoration`; since it is
   `#[non_exhaustive]`, no struct-literal migration is needed outside `frust-text`.
+- An `ExternalPass` registration's `record` is never run concurrently, even with two live surfaces.
+- `ExternalFrame::frame_index` on an explicit headless render (`render_with_passes`) counts that
+  renderer's own renders from 0; surfaces and registry drains keep the process-wide count.
 
 ### Fixed
 
@@ -389,6 +399,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - A `Checkbox` / `Radio` with an empty label is exactly the control size tall (20 px) instead of
   taking the host UI font's line height; this was a golden mismatch on Windows and on the Linux
   T400 host, and the golden is unchanged (2f2832c1c).
+- A second surface no longer keeps a stale external-pass binding after `unregister_external_pass`:
+  each surface's drain reconciles against the registry and unbinds in its own engine.
 
 ## 0.6.5 — 2026-11-02
 

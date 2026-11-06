@@ -21,9 +21,8 @@
 //! # The paint/record split
 //!
 //! A component's `paint` runs on the UI thread; `record` runs on the render
-//! thread, and — with two engine-tier surfaces live at once — can run on two
-//! threads at the same moment (`docs/LIMITATIONS.md`'s
-//! `external-pass-registry-process-wide`). So paint never touches the GPU: it
+//! thread of whichever surface drains — never two at once for one
+//! registration, but not always the same thread. So paint never touches the GPU: it
 //! calls [`FxPass::submit`] with plain data, and `record` picks that data up
 //! under a mutex. The last submitted scene is *kept*, not consumed, because a
 //! frame can be drained without a repaint having happened — a component that

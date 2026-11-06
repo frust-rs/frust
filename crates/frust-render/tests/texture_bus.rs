@@ -37,8 +37,8 @@ use frust_render::texture_bus::{
     set_native_importer,
 };
 use frust_render::{
-    ExternalFrame, ExternalPass, GOLDEN_EXPECT_ADAPTER_ENV_VAR, register_external_pass,
-    unregister_external_pass,
+    ExternalFrame, ExternalPass, ExternalPassDrain, GOLDEN_EXPECT_ADAPTER_ENV_VAR,
+    register_external_pass, unregister_external_pass,
 };
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
@@ -270,7 +270,12 @@ struct Harness {
     device: wgpu::Device,
     queue: wgpu::Queue,
     caps: TierCaps,
+    /// The generation drawn for `device` — what a shell's
+    /// `DeviceHandle::generation` would report for it.
+    generation: u64,
     engine: EngineRenderer,
+    /// The external-pass drain beside `engine`, rebuilt with it.
+    drain: ExternalPassDrain,
     target: HeadlessTarget,
 }
 
@@ -309,11 +314,14 @@ impl Harness {
         let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
         let engine = EngineRenderer::new(&device, &caps, FORMAT, None)
             .expect("the engine builds on this device");
+        let generation = frust_gpu::next_device_generation();
         Self {
             device,
             queue,
             caps,
+            generation,
             engine,
+            drain: ExternalPassDrain::new(generation),
             target,
         }
     }
@@ -323,6 +331,7 @@ impl Harness {
     fn rebuild_engine(&mut self) {
         self.engine = EngineRenderer::new(&self.device, &self.caps, FORMAT, None)
             .expect("the engine rebuilds on this device");
+        self.drain = ExternalPassDrain::new(self.generation);
     }
 
     /// One whole frame in `SurfaceRenderer::submit`'s order: external passes
@@ -339,6 +348,7 @@ impl Harness {
             &self.queue,
             &mut encoder,
             &mut self.engine,
+            &mut self.drain,
         );
         self.engine
             .encode(

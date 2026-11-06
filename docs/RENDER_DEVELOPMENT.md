@@ -168,6 +168,11 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 cargo test -p frust-gpu -- --ignored
 `tests/device_identity.rs` (generation, loss latch, feature request) is another ignored arm:
 `cargo test -p frust-gpu --test device_identity -- --ignored --test-threads=1`.
 
+`frust-render`'s ExternalPass suites are ignored GPU arms too: `cargo test -p frust-render --test
+external_pass --test headless_external_pass -- --ignored --test-threads=1` (`frust-testing`'s
+`--test engine_external_pass` likewise; the app-crate probe `gpu_pass_headless` runs from
+`examples/playground`).
+
 Every device-suite fixture — this crate's own `--ignored` arm, `frust-engine`'s, and
 `frust-testing`'s `EngineOracle::new` — requests its device limits through
 `frust_gpu::test_device_limits(&adapter, &caps)`, the same derivation `create_device` uses for the

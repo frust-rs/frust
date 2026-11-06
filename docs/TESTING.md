@@ -114,7 +114,11 @@ The repository already contains substantial non-pixel coverage:
   `crates/frust-engine`: scene-to-strip compile tests.
 - `crates/frust-render/tests/gpu_smoke.rs`: ignored real-GPU offscreen
   render/readback smoke tests over `frust_render::HeadlessRenderer`
-  (`crates/frust-render/src/headless.rs`), engine-backed.
+  (`crates/frust-render/src/headless.rs`), engine-backed. Its `#[ignore]` GPU siblings cover
+  `ExternalPass`: `external_pass.rs` (per-engine unbind, never-concurrent record, `drain_id` /
+  `device_generation`) and `headless_external_pass.rs` (explicit and registry-draining renders,
+  per-renderer frame numbering, reserved-id refusal); `crates/frust-testing/tests/engine_external_pass.rs`
+  covers `EngineOracle`'s pass methods. Run with `-- --ignored --test-threads=1`.
 - `crates/frust-testing`: the versioned golden corpus and comparator — a
   renderer-agnostic `SceneRenderer` pair (`CpuOracle` over the dev-only
   `vello_cpu` 0.2.0 pin, `EngineOracle` over `frust-gpu`'s `HeadlessTarget`), a 4-channel
@@ -575,6 +579,7 @@ semantic tests:
 | Navigation | Push/pop transitions, hero midpoint/endpoints, edge-swipe states, deep-linked destination |
 | Scrolling | Initial/scrolled/overscroll/refresh/pagination states and clipped content |
 | Insets/theme | Safe areas, keyboard inset, light/dark, Material/Cupertino, accent variations |
+| External GPU pass | An app's own `ExternalPass` rendered through `frust::gpu::headless::HeadlessRenderer::render_with_passes`; the probe example is `examples/playground/tests/gpu_pass_headless.rs` (ignored, run from `examples/playground`). The playground's "GPU pass" section is the on-device gate vehicle (verified on a Pixel 4a, an iPhone 13 mini and a windowed macOS run) |
 | App screens | Stable Huddle home/feed/thread/search/profile/settings states and loading/empty/error variants |
 
 Animations should use a small set of meaningful fixed timestamps: start,

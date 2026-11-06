@@ -131,7 +131,9 @@ seams from above; this lab goes down into the substrate and runs its tests.
    intermediate, then run an `UnpremultiplyPass`. Each frame, `SurfaceRenderer::submit_impl` first
    drains registered `ExternalPass`es (`run_external_passes`), handing each an `ExternalFrame`
    with the device, queue and the frame's own encoder, and records the scene after them in that
-   same encoder. `HeadlessRenderer` is the windowless version, used for goldens and
+   same encoder; each engine's `ExternalPassDrain` first unbinds ids that left the registry.
+   `HeadlessRenderer` is the windowless version (it runs passes only through
+   `render_with_passes` or `render_draining_registry`), used for goldens and
    `crates/frust-render/tests/gpu_smoke.rs`.
 
 ## Experiments

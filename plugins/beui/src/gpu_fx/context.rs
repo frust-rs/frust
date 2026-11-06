@@ -36,9 +36,8 @@
 //! Acquisition is deliberately gated on the *device* being reachable, which
 //! is stricter than the pass registry itself requires — the engine drains
 //! registered passes on every engine-tier frame path, mobile shells included.
-//! Requiring the handle keeps a component from registering a pass on a
-//! platform where nothing here has ever been exercised
-//! (`docs/LIMITATIONS.md`'s `facade-external-pass-desktop-only`).
+//! Requiring the handle keeps a component from registering a pass before
+//! any device exists to record it on.
 //!
 //! On Android and iOS the gate stays closed even though the shell publishes a
 //! device: [`crate::gpu_fx::schedule::FxPass`] caches its renderer and the
