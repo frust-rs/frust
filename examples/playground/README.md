@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between twenty sections
+`pattern_switcher`-hosted section body, selecting between twenty-one sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twenty
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twenty-one
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -195,6 +195,18 @@ The sections, in order:
     there is expected. Gate recipe: open Glass, step the surfaces 1 to 8 at cap 4
     and at cap 8, and compare frame cost with the blur visible and the refusal
     past the cap.
+
+21. **GPU pass** — an animated `frust::gpu::ExternalPass` (a rotating checker
+    quad over a cycling background, rendered into the pass's own target and
+    composited as a scene texture) drawn through the public facade with the
+    `gpu` feature. The page shows the published device generation, whether the
+    `SHADER_F16` feature the app requests (`gpu_features` in `frust::app!`) was
+    granted, and the pass's last drain id, frame index and record count (press
+    **Refresh readout** to re-read them). The pass asks for the next frame
+    itself, only while the page is mounted: leaving the section stops
+    continuous frames. The ignored `tests/gpu_pass_headless.rs` renders the same
+    pass offscreen on a GPU host (`cargo test --test gpu_pass_headless --
+    --ignored`).
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
