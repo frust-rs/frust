@@ -11,7 +11,7 @@ use frust_core::{AnyView, View};
 
 use super::ambient::host_reachable;
 use super::options::{
-    BackPolicy, NavOp, NavigatorId, PageBuilder, PopResult, PushOptions, ReplaceOptions,
+    BackPolicy, NavOp, NavigatorId, PageBuilder, PageSpec, PopResult, PushOptions, ReplaceOptions,
     ResultCallback,
 };
 use super::route_state::RouteStack;
@@ -449,6 +449,7 @@ impl<State: 'static> NavigatorController<State> {
             pop_swipe: options.pop_swipe,
             barrier: options.barrier,
             barrier_dismissible: options.barrier_dismissible,
+            key: options.key,
         });
     }
 
@@ -476,6 +477,7 @@ impl<State: 'static> NavigatorController<State> {
             pop_swipe: None,
             barrier: None,
             barrier_dismissible: false,
+            key: None,
         });
     }
 
@@ -519,6 +521,7 @@ impl<State: 'static> NavigatorController<State> {
             opaque: true,
             transition: None,
             route: None,
+            key: None,
         });
     }
 
@@ -534,6 +537,7 @@ impl<State: 'static> NavigatorController<State> {
             opaque: true,
             transition: Some(transition),
             route: None,
+            key: None,
         });
     }
 
@@ -551,7 +555,26 @@ impl<State: 'static> NavigatorController<State> {
             opaque: options.opaque,
             transition: options.transition,
             route: options.route,
+            key: options.key,
         });
+    }
+
+    /// Make the stack exactly `pages`, bottom to top, retaining every page whose
+    /// [`PageKey`](super::options::PageKey) the list names. `pages` must not be
+    /// empty: a navigator always keeps one page.
+    // rr-02 (`Router::go`) is the first non-test caller and removes this allow.
+    #[allow(dead_code)]
+    pub(super) fn set_pages(&self, pages: Vec<PageSpec<State>>) {
+        debug_assert!(!pages.is_empty(), "a navigator always keeps one page");
+        self.enqueue(NavOp::SetPages { pages });
+    }
+
+    /// Drop every op queued and not yet applied.
+    // rr-02 (`Router::go`) is the first non-test caller and removes this allow.
+    #[allow(dead_code)]
+    pub(super) fn discard_queued(&self) {
+        // Through `drain`, so an op's closures drop with the queue unborrowed.
+        drop(self.drain());
     }
 
     /// Record `op`, then raise [`frust_core::mark_pending_result_flush`] so the
