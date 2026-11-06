@@ -74,15 +74,22 @@
 //! [`on_tap_up`](GestureDetectorView::on_tap_up) and
 //! [`on_tap_cancel`](GestureDetectorView::on_tap_cancel) make a still press
 //! observable (a "hold to see" preview, a pressed highlight). The contract:
-//! every `on_tap_down` is followed by **exactly one** `on_tap_up` or
-//! `on_tap_cancel` before the next `on_tap_down`.
+//! while the detector stays mounted, every `on_tap_down` is followed by exactly
+//! one `on_tap_up` or `on_tap_cancel` before the next `on_tap_down`; a detector
+//! removed mid-press fires neither (see LIMITATIONS
+//! `gesture-drag-no-cancel-on-removal`).
 //!
 //! - **Down.** A primary `Down` fires `on_tap_down` at once, with no delay and
 //!   even inside a scroll view, carrying the local position. A second `Down`
 //!   while a press is still active (a missed `Up`/`Cancel`) first delivers the
 //!   `on_tap_cancel` of the old press.
-//! - **Up.** A release of an active press fires `on_tap_up` (before `on_tap`).
-//!   A press held past [`LONG_PRESS_MS`] still ends in `on_tap_up`.
+//! - **Up.** A release of an active press ends in `on_tap_up`. A normal tap
+//!   fires `on_tap_up` before `on_tap`. A press held past [`LONG_PRESS_MS`] that
+//!   resolves as a long-press fires `on_long_press` before `on_tap_up`, so the
+//!   order is always down, long, up — whether the threshold fired from the
+//!   Housekeeping pass or the release arrived first. A release of a
+//!   non-primary button (a chorded secondary press) is not this press's
+//!   release and changes nothing.
 //! - **Cancel by movement.** A `Move` that passes [`TOUCH_SLOP`] from the
 //!   `Down`, or leaves the detector's bounds, fires `on_tap_cancel` at once;
 //!   the later `Up` then fires no `on_tap_up`. This is stricter than `on_tap`:
@@ -95,8 +102,9 @@
 //!   application state, so the callback runs one frame late, from the next
 //!   `Housekeeping` broadcast or the next pointer event, whichever comes
 //!   first.
-//! - **Removal.** A detector torn down mid-press fires nothing, so the
-//!   one-follow-up guarantee does not hold across removal.
+//! - **Removal.** A detector torn down mid-press fires neither, so the
+//!   one-follow-up guarantee holds only while the detector stays mounted (see
+//!   LIMITATIONS `gesture-drag-no-cancel-on-removal`).
 //!
 //! # Long-press firing semantics
 //!
@@ -211,6 +219,12 @@ use crate::authoring::{
 /// The straight-line travel a pan must exceed before it starts: twice
 /// [`TOUCH_SLOP`], so an axis drag wired beside it wins a near-straight move.
 const PAN_SLOP: f64 = 2.0 * TOUCH_SLOP;
+
+/// Whether `pos` lies outside a detector of `size` (its local bounds, origin
+/// at zero). Leaving the bounds cancels a press, even within the slop.
+fn outside(pos: Point, size: Size) -> bool {
+    pos.x < 0.0 || pos.y < 0.0 || pos.x > size.width || pos.y > size.height
+}
 
 /// What a drag `start` callback receives: where the drag began.
 ///
@@ -455,7 +469,7 @@ pub struct GestureDetectorView<State: 'static> {
     on_tap_down: Option<TypedArgCallback<State, TapDownDetails>>,
     on_tap_up: Option<TypedArgCallback<State, TapUpDetails>>,
     on_tap_cancel: Option<GestureCallback<State>>,
-    on_hold_progress: Option<crate::authoring::TypedArgCallback<State, f64>>,
+    on_hold_progress: Option<TypedArgCallback<State, f64>>,
     hold_threshold_ms: Option<u64>,
     vertical_drag: DragCallbacks<State>,
     horizontal_drag: DragCallbacks<State>,
@@ -581,18 +595,20 @@ impl<State: 'static> GestureDetectorView<State> {
     }
 
     /// Call `f` the instant a primary press lands on the detector, with the
-    /// local position. No delay, even inside a scroll view. Exactly one of
-    /// [`on_tap_up`](Self::on_tap_up) or [`on_tap_cancel`](Self::on_tap_cancel)
-    /// follows before the next `on_tap_down`; see the [module
-    /// docs](self#press-state).
+    /// local position. No delay, even inside a scroll view. While the detector
+    /// stays mounted, exactly one of [`on_tap_up`](Self::on_tap_up) or
+    /// [`on_tap_cancel`](Self::on_tap_cancel) follows before the next
+    /// `on_tap_down`; see the [module docs](self#press-state).
     pub fn on_tap_down<F: Fn(&mut State, TapDownDetails) + 'static>(mut self, f: F) -> Self {
         self.on_tap_down = Some(Rc::new(f));
         self
     }
 
-    /// Call `f` when an active press is released, before
-    /// [`on_tap`](Self::on_tap). A press held past the long-press threshold
-    /// still ends here. See the [module docs](self#press-state).
+    /// Call `f` when an active press is released: after
+    /// [`on_long_press`](Self::on_long_press) when the press resolved as a
+    /// long-press, and before [`on_tap`](Self::on_tap). A press held past the
+    /// long-press threshold still ends here. See the [module
+    /// docs](self#press-state).
     pub fn on_tap_up<F: Fn(&mut State, TapUpDetails) + 'static>(mut self, f: F) -> Self {
         self.on_tap_up = Some(Rc::new(f));
         self
@@ -689,8 +705,8 @@ enum Recognizer {
 pub struct GestureDetectorWidget {
     child: ChildPod,
     state: Recognizer,
-    on_tap: Option<crate::authoring::ErasedCallback>,
-    on_long_press: Option<crate::authoring::ErasedCallback>,
+    on_tap: Option<ErasedCallback>,
+    on_long_press: Option<ErasedCallback>,
     on_tap_down: Option<ErasedArgCallback<TapDownDetails>>,
     on_tap_up: Option<ErasedArgCallback<TapUpDetails>>,
     on_tap_cancel: Option<ErasedCallback>,
@@ -702,7 +718,7 @@ pub struct GestureDetectorWidget {
     /// A `Cancel` ended an active press, whose `on_tap_cancel` is owed to the
     /// next state-bearing pass (see the [module docs](self#press-state)).
     owed_tap_cancel: bool,
-    on_hold_progress: Option<crate::authoring::ErasedArgCallback<f64>>,
+    on_hold_progress: Option<ErasedArgCallback<f64>>,
     /// The press timer, firing at the resolved hold threshold —
     /// [`GestureDetectorView::hold_threshold_ms`] if set, else
     /// [`LONG_PRESS_MS`]. Shared by the long-press timer and the hold-progress
@@ -823,21 +839,15 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
         GestureDetectorWidget {
             child: crate::authoring::build_child(&self.child, ctx),
             state: Recognizer::Idle,
-            on_tap: self.on_tap.as_ref().map(crate::authoring::erase_callback),
+            on_tap: self.on_tap.as_ref().map(erase_callback),
             on_tap_down: self.on_tap_down.as_ref().map(erase_callback_arg),
             on_tap_up: self.on_tap_up.as_ref().map(erase_callback_arg),
             on_tap_cancel: self.on_tap_cancel.as_ref().map(erase_callback),
             press_active: false,
             press_origin: Point::ZERO,
             owed_tap_cancel: false,
-            on_long_press: self
-                .on_long_press
-                .as_ref()
-                .map(crate::authoring::erase_callback),
-            on_hold_progress: self
-                .on_hold_progress
-                .as_ref()
-                .map(crate::authoring::erase_callback_arg),
+            on_long_press: self.on_long_press.as_ref().map(erase_callback),
+            on_hold_progress: self.on_hold_progress.as_ref().map(erase_callback_arg),
             // `.max(1)` guards against a 0ms override: `f64::clamp` passes
             // NaN through unchanged, so an unguarded `0.0 / 0.0` divisor in
             // paint's progress computation would poison every subsequent
@@ -863,18 +873,12 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
         element: &mut GestureDetectorWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        element.on_tap = self.on_tap.as_ref().map(crate::authoring::erase_callback);
-        element.on_long_press = self
-            .on_long_press
-            .as_ref()
-            .map(crate::authoring::erase_callback);
+        element.on_tap = self.on_tap.as_ref().map(erase_callback);
+        element.on_long_press = self.on_long_press.as_ref().map(erase_callback);
         element.on_tap_down = self.on_tap_down.as_ref().map(erase_callback_arg);
         element.on_tap_up = self.on_tap_up.as_ref().map(erase_callback_arg);
         element.on_tap_cancel = self.on_tap_cancel.as_ref().map(erase_callback);
-        element.on_hold_progress = self
-            .on_hold_progress
-            .as_ref()
-            .map(crate::authoring::erase_callback_arg);
+        element.on_hold_progress = self.on_hold_progress.as_ref().map(erase_callback_arg);
         // Same NaN guard as `build` above — see `hold_threshold_ms`'s doc comment.
         element.hold.set_threshold_ms(
             self.hold_threshold_ms
@@ -1005,18 +1009,19 @@ impl Widget for GestureDetectorWidget {
                     return EventResult::Handled;
                 }
                 PointerPhase::Move => {
+                    // Only the primary button's moves belong to a primary press;
+                    // a chorded secondary move passes on without cancelling it.
+                    if !presses(p) {
+                        return self.child.event_child(ctx, event);
+                    }
                     // The press ends the moment the pointer passes the slop or
                     // leaves the bounds; `on_tap` and the other recognizers
                     // below keep their own rules.
-                    if self.press_active {
-                        let size = ctx.size();
-                        let outside = p.position.x < 0.0
-                            || p.position.y < 0.0
-                            || p.position.x > size.width
-                            || p.position.y > size.height;
-                        if outside || (p.position - self.press_origin).hypot() > TOUCH_SLOP {
-                            self.fire_tap_cancel(ctx);
-                        }
+                    if self.press_active
+                        && (outside(p.position, ctx.size())
+                            || (p.position - self.press_origin).hypot() > TOUCH_SLOP)
+                    {
+                        self.fire_tap_cancel(ctx);
                     }
                     // Feed the release-velocity trackers on every `Move` of a
                     // press a drag recognizer takes part in.
@@ -1130,6 +1135,12 @@ impl Widget for GestureDetectorWidget {
                     return EventResult::Handled;
                 }
                 PointerPhase::Up => {
+                    // Only the primary button's release ends a primary press. A
+                    // chorded secondary release belongs to another button: pass it
+                    // on and leave the press armed for its own release.
+                    if !presses(p) {
+                        return self.child.event_child(ctx, event);
+                    }
                     // Resolve at most one recogniser: a held-past-threshold press
                     // releases as a long-press, otherwise a within-slop press is
                     // a tap. Never both.
@@ -1158,6 +1169,15 @@ impl Widget for GestureDetectorWidget {
                         cb(ctx, progress);
                         ctx.request_redraw();
                     }
+                    // A press that resolves as a long-press fires on_long_press
+                    // before on_tap_up, so the order is always down, long, up —
+                    // the same order as when the Housekeeping pass fires it first.
+                    let mut long_pressed = false;
+                    if fire_long && let Some(cb) = self.on_long_press.as_mut() {
+                        cb(ctx);
+                        ctx.request_redraw();
+                        long_pressed = true;
+                    }
                     if std::mem::take(&mut self.press_active)
                         && let Some(cb) = self.on_tap_up.as_mut()
                     {
@@ -1174,10 +1194,8 @@ impl Widget for GestureDetectorWidget {
                     // tap-only detector must still fire the tap on an in-bounds
                     // release (the paint timer never marks `elapsed` for it, but
                     // stay robust to a handler unwired mid-gesture).
-                    if fire_long && let Some(cb) = self.on_long_press.as_mut() {
-                        cb(ctx);
-                        ctx.request_redraw();
-                    } else if (fire_tap || fire_long)
+                    if !long_pressed
+                        && (fire_tap || fire_long)
                         && let Some(cb) = self.on_tap.as_mut()
                     {
                         cb(ctx);
@@ -2581,6 +2599,20 @@ mod tests {
         send_sized(w, log, Size::new(100.0, 100.0), event);
     }
 
+    /// A pointer event from a non-primary button, for the chorded-press tests.
+    fn ev_button(
+        phase: PointerPhase,
+        x: f64,
+        y: f64,
+        button: frust_core::PointerButton,
+    ) -> InputEvent {
+        InputEvent::Pointer(frust_core::PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button,
+        })
+    }
+
     #[test]
     fn a_still_press_delivers_down_then_up_with_nothing_between() {
         let mut root = press_root();
@@ -2700,25 +2732,86 @@ mod tests {
     }
 
     #[test]
-    fn a_long_hold_ends_in_tap_up_after_the_long_press_and_a_tap_orders_up_first() {
+    fn a_long_hold_released_before_housekeeping_orders_down_long_up() {
         let mut root = press_root();
         let mut log = PressLog::default();
         let mut sink = NullScene;
         root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
         root.paint(&mut sink, ft(0.0));
         root.paint(&mut sink, ft(600.0));
+        // The Up lands before any Housekeeping pass fires the long-press.
         root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
-        assert!(
-            log.events.contains(&"long".to_string()) && log.events.contains(&"up 10 10".into()),
-            "{:?}",
-            log.events
-        );
-        assert!(!log.events.contains(&"tap".to_string()), "{:?}", log.events);
-        assert_eq!(log.events.last().map(String::as_str), Some("long"));
+        assert_eq!(log.events, vec!["down 10 10", "long", "up 10 10"]);
+    }
 
+    #[test]
+    fn a_long_hold_fired_by_housekeeping_then_released_orders_down_long_up() {
+        let mut root = press_root();
+        let mut log = PressLog::default();
+        let mut sink = NullScene;
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(600.0));
+        // A frame runs between the threshold paint and the release: the
+        // Housekeeping pass fires the long-press before the Up arrives.
+        root.rebuild(&mut { press_logic }, &mut log);
+        assert_eq!(log.events, vec!["down 10 10", "long"]);
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(log.events, vec!["down 10 10", "long", "up 10 10"]);
+    }
+
+    #[test]
+    fn a_tap_orders_tap_up_before_tap() {
+        let mut root = press_root();
         let mut log = PressLog::default();
         root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
         root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+    }
+
+    #[test]
+    fn a_chorded_secondary_release_leaves_the_primary_press_to_its_own_up() {
+        let mut w = press_widget();
+        let mut log = PressLog::default();
+        let secondary = frust_core::PointerButton::Secondary;
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        send(
+            &mut w,
+            &mut log,
+            &ev_button(PointerPhase::Down, 12.0, 10.0, secondary),
+        );
+        send(
+            &mut w,
+            &mut log,
+            &ev_button(PointerPhase::Up, 12.0, 10.0, secondary),
+        );
+        assert_eq!(
+            log.events,
+            vec!["down 10 10"],
+            "the secondary release ends nothing"
+        );
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+    }
+
+    #[test]
+    fn a_chorded_secondary_move_does_not_cancel_the_primary_press() {
+        let mut w = press_widget();
+        let mut log = PressLog::default();
+        let secondary = frust_core::PointerButton::Secondary;
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        // Far outside the bounds: a primary move here would cancel the press.
+        send(
+            &mut w,
+            &mut log,
+            &ev_button(PointerPhase::Move, 150.0, 150.0, secondary),
+        );
+        assert_eq!(
+            log.events,
+            vec!["down 10 10"],
+            "the secondary move cancels nothing"
+        );
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
         assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
     }
 
