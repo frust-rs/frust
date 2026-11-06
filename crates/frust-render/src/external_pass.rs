@@ -156,6 +156,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
+use frust_engine::SceneTextureHints;
 use frust_gpu::SceneTextureId;
 
 /// Caller-supplied GPU work recorded into the frame ahead of the scene.
@@ -360,6 +361,24 @@ impl<'a> ExternalFrame<'a> {
         view: wgpu::TextureView,
     ) -> Option<wgpu::TextureView> {
         self.engine.bind_texture(self.id, size, view)
+    }
+
+    /// [`Self::bind_texture`] with registration-side [`SceneTextureHints`]:
+    /// how the texture is filtered when drawn scaled, and whether the caller
+    /// guarantees it is fully opaque.
+    ///
+    /// The engine never reads the bound texels, so an `opaque` hint is taken
+    /// on trust: assert it only when alpha is one everywhere in `view`. A view
+    /// holding any alpha below one drawn as opaque occludes what it should
+    /// blend over. Re-binding replaces the hints along with the view.
+    /// [`Self::bind_texture`] is this with the default hints.
+    pub fn bind_texture_with(
+        &mut self,
+        size: (u32, u32),
+        view: wgpu::TextureView,
+        hints: SceneTextureHints,
+    ) -> Option<wgpu::TextureView> {
+        self.engine.bind_texture_with(self.id, size, view, hints)
     }
 
     /// Whether the engine this frame is recorded for currently holds a view
