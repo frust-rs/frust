@@ -6,8 +6,24 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Breaking
+
+- `frust-shell-common`'s non-default `gpu` feature: `install_gpu_handle` and `gpu_handle` are
+  removed. A shell now publishes through an RAII `GpuPublisher` into a replaceable, generation-tagged
+  slot, read with `with_gpu_handle` and `gpu_handle_generation`. Only in-repo consumers were affected.
+
 ### Added
 
+- `DeviceHandle::generation()` (process-wide, monotonic, non-zero, shared by clones) and
+  `DeviceHandle::is_lost()` (latched by the device-lost callback, never cleared); `frust::gpu::device_generation()`.
+- `frust::gpu::request_optional_features`/`requested_optional_features` (and
+  `frust_render::missing_requested_features`): a process-wide, adapter-conditioned union of optional
+  wgpu features, honoured by the shells and the headless renderer. A missing feature is left out; none
+  can be required, and limits are not opt-in.
+- `app!(Root, gpu_features = { .. }, ..)` (facade `gpu` feature) requests optional features before
+  the device is built on desktop, web, Android and iOS (`@pre_init` on `android_app!`/`ios_app!`). On
+  Android a pre-init device lacking a requested feature is rebuilt, forfeiting that launch overlap.
+- Android and iOS publish their live device to `frust::gpu::with_context`, as desktop does.
 - Bitmap-strike colour emoji render on the engine: bitmap-first faces (sbix without outlines, CBDT)
   bypass glifo for an engine-side route, drawn by CoreText on iOS and decoded
   from PNG/dupe/flip records elsewhere, each strike charged its exact atlas slot, strikes over 512 px
@@ -240,6 +256,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- `frust::gpu::with_context` keeps its signature but answers the current device, which may change
+  between calls: do not keep device or queue clones across frames, and rebuild device-owned
+  resources when `device_generation()` changes.
 - `MainAxisAlignment` gained `Center`, `End`, `SpaceBetween`, `SpaceAround` and `SpaceEvenly` (a
   narrow source break): an exhaustive `match` over it must add the arms or a wildcard.
 - The per-frame backdrop cap counts only backdrops whose blur region reaches the frame target, so a

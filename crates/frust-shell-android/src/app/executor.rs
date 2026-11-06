@@ -22,6 +22,7 @@ use frust_shell_common::{
 };
 
 use super::render::{RenderSignals, gpu_passes, render_scene};
+use crate::jni_glue::{DevicePublisher, publish_gpu_handle};
 
 /// One finished frame's payload crossing the UI→render-thread handoff in the
 /// split: the painted [`Scene`] plus the clear color it was
@@ -60,6 +61,11 @@ pub(crate) struct InlineExecutor {
     /// Read by [`super::AndroidAppHandle`]'s surface-lifecycle arms, which drive
     /// this thread's renderer directly (`pub(super)` for that reach alone).
     pub(super) render_cx: RenderContext,
+    /// Publishes `render_cx`'s live device; dropping it (with this executor)
+    /// withdraws the device from the process-wide slot. The recreate arms in
+    /// the FFI layer cannot reach it, so `submit_frame` republishes (a no-op
+    /// while the generation is unchanged).
+    gpu_publisher: DevicePublisher,
     /// See [`Self::render_cx`] for why this is `pub(super)`.
     pub(super) renderer: SurfaceRenderer,
     frame_stats: FrameStats,
@@ -91,8 +97,13 @@ impl InlineExecutor {
         renderer: SurfaceRenderer,
         startup_spans: StartupSpans,
     ) -> Self {
+        // The caller installed the surface before handing the context over, so
+        // the device exists: publish it now.
+        let mut gpu_publisher = DevicePublisher::new();
+        publish_gpu_handle(&mut gpu_publisher, &render_cx);
         Self {
             render_cx,
+            gpu_publisher,
             renderer,
             frame_stats: FrameStats::new(),
             startup_spans: Some(startup_spans),
@@ -112,6 +123,9 @@ impl InlineExecutor {
         paint_serial: u64,
         perf_on: bool,
     ) -> Duration {
+        // A recreate (driven from the FFI layer) may have rebuilt the device
+        // since the last frame; republish picks up a new generation.
+        publish_gpu_handle(&mut self.gpu_publisher, &self.render_cx);
         self.frame_id += 1;
         // Named before the encode, so the ledger published once this scene is
         // committed carries it.

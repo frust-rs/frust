@@ -7,9 +7,10 @@
 //!
 //! - **Is there a device at all?** `frust::gpu::with_context` reads back the
 //!   `DeviceHandle` the running shell installed when its first surface came
-//!   up. It answers `None` before that — and, today, always on Android and
-//!   iOS (`docs/LIMITATIONS.md`'s `facade-gpu-context-desktop-only`). It is a
-//!   lock-free read, safe to call from the UI thread every paint.
+//!   up. It answers `None` before that. Every shell publishes a handle now,
+//!   and a shell may replace it (an Android Activity recreate installs a new
+//!   device). It is a short mutex read of a replaceable slot, cheap enough to
+//!   call from the UI thread every paint.
 //! - **Where does my GPU work go?** `frust::gpu::register_external_pass`
 //!   claims a `SceneTextureId` and hands the engine a pass it calls once per
 //!   frame with that frame's own device, queue and encoder. The pass — not
@@ -37,8 +38,15 @@
 //! registered passes on every engine-tier frame path, mobile shells included.
 //! Requiring the handle keeps a component from registering a pass on a
 //! platform where nothing here has ever been exercised
-//! (`docs/LIMITATIONS.md`'s `facade-external-pass-desktop-only`); lifting it
-//! is one condition here once a mobile shell installs a handle.
+//! (`docs/LIMITATIONS.md`'s `facade-external-pass-desktop-only`).
+//!
+//! On Android and iOS the gate stays closed even though the shell publishes a
+//! device: [`crate::gpu_fx::schedule::FxPass`] caches its renderer and the
+//! target pool reuses textures built on the first frame's device, and neither
+//! is rebuilt when the device is replaced (an Android Activity recreate), so
+//! a surviving pass would record old-device resources into the new device's
+//! encoder. Lift it by removing the mobile branch in [`GpuFx::availability`]
+//! once `FxPass` and the pool rebuild on a `device_generation()` change.
 //!
 //! # Teardown is explicit
 //!
@@ -76,9 +84,10 @@ pub enum FxAvailability {
     Ready,
     /// [`KILL_SWITCH_ENV_VAR`] is set: the path is off by operator choice.
     Disabled,
-    /// No shell has installed a `DeviceHandle` yet — before the first
-    /// surface, or on a platform whose shell does not install one
-    /// (`docs/LIMITATIONS.md`'s `facade-gpu-context-desktop-only`).
+    /// No shell has installed a `DeviceHandle` yet (before the first
+    /// surface), or this is a mobile shell (Android, iOS), where beUI keeps
+    /// the 3D path off until its passes rebuild device-owned resources on a
+    /// device-generation change.
     NoDevice,
 }
 
@@ -103,11 +112,16 @@ impl GpuFx {
     /// Why the 3D path is or is not available, without claiming anything.
     ///
     /// Cheap enough to call every paint: the kill switch is read from the
-    /// environment and the device slot is a lock-free `OnceLock` read.
+    /// environment and the device slot is a short mutex read. On Android and
+    /// iOS this answers [`FxAvailability::NoDevice`] without consulting the
+    /// slot (see the module docs).
     #[must_use]
     pub fn availability() -> FxAvailability {
         if disabled() {
             return FxAvailability::Disabled;
+        }
+        if cfg!(any(target_os = "android", target_os = "ios")) {
+            return FxAvailability::NoDevice;
         }
         match frust::gpu::with_context(|_| ()) {
             Some(()) => FxAvailability::Ready,

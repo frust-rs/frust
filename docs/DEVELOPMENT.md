@@ -279,21 +279,21 @@ plain (non-feature-gated) dependencies of `frust-render`, so their host-only tes
 `cargo test --workspace`; their adapter-pinned real-GPU arms are separate `--ignored` commands — see
 [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s GPU Substrate / Golden Oracle Tests sections.
 `frust-native-widgets`' `demo-components` is a composite `NativeComponent` demo of real JNI/UIKit/AppKit view construction, shipped inside the plugin rather than in `examples/native-widgets-demo` (whose Composite page merely switches it on) because an app crate cannot implement that trait without raw `jni`/`objc2-ui-kit`/`objc2-app-kit` deps the plugin does not re-export; three builds compile it — `examples/native-widgets-demo`'s standalone gate above (which enables it unconditionally, so it builds and lints on every host), the Android/iOS compile gates below, and the macOS compile gate's darwin check below. Separately, `frust-native-widgets`' own shared runtime/component/mount/demo-lifecycle host tests compile only on a host with **no** platform arm (`#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos")))]`) — so a macOS `cargo test --workspace` run silently skips roughly 50 of them (runtime 26, component 21, `api::mount` 3, demo 3), and Linux/Windows/web are what actually exercise that dispatch/diff/lifecycle contract; see [TESTING.md](TESTING.md).
-`frust-database`'s `engine-turso` needs its own gate (`cargo test -p frust-database --features
-engine-turso`, libclang required), and `devtools` (the in-app debug service,
-[DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) the same shape: `cargo test -p
-frust-shell-common --features devtools` at minimum; `BuildMode::cargo_features()` enables it
-alongside `perf-trace` for generated apps' Debug/Profile builds, never Release. `hotpatch`
-(opt-in, never default) has two gates, both in CI: `bash scripts/ci/hotpatch-feature-gate.sh`
-(`cargo test` + `cargo clippy --all-targets -- -D warnings` for `-p frust-hotpatch`, then the same
-pair with `--features hotpatch` by manifest path for `frust-core`, `frust-shell-desktop` and the
-facade, e.g. `cargo clippy --manifest-path crates/frust/Cargo.toml --features hotpatch
---all-targets --locked -- -D warnings`) and, on macOS/Linux, `bash scripts/ci/hotpatch-canary.sh`
-(the desktop patch builder end to end on the standalone `testing/hotpatch-canary` fixture: fat
-build, a value edit and a non-member `shared` crate's value edit (each thin-built, L3-gated and
-applied in process), and a layout-changing edit to each that must be refused; the fixture also
-gates from its own directory like the chain above). Windows-only
-hot-patch tests: [TESTING.md](TESTING.md).
+CI also builds the `gpu` arms: `cargo test -p frust-shell-common --features gpu` and `-p frust-ui --features gpu`,
+plus clippy (`--all-targets -- -D warnings`) for `frust-ui` and `frust-shell-desktop` with `--features gpu` and
+`frust-beui` with `--features gpu-effects`. `frust-database`'s `engine-turso` needs its own gate (`cargo test -p
+frust-database --features engine-turso`, libclang required), and `devtools` (the in-app debug service,
+[DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md)) the same shape: `cargo test -p frust-shell-common --features
+devtools` at minimum; `BuildMode::cargo_features()` enables it alongside `perf-trace` for generated apps'
+Debug/Profile builds, never Release. `hotpatch` (opt-in, never default) has two gates, both in CI: `bash
+scripts/ci/hotpatch-feature-gate.sh` (`cargo test` + `cargo clippy --all-targets -- -D warnings` for `-p
+frust-hotpatch`, then the same pair with `--features hotpatch` by manifest path for `frust-core`,
+`frust-shell-desktop` and the facade, e.g. `cargo clippy --manifest-path crates/frust/Cargo.toml --features hotpatch
+--all-targets --locked -- -D warnings`) and, on macOS/Linux, `bash scripts/ci/hotpatch-canary.sh` (the desktop patch
+builder end to end on the standalone `testing/hotpatch-canary` fixture: fat build, a value edit and a non-member
+`shared` crate's value edit (each thin-built, L3-gated and applied in process), and a layout-changing edit to each
+that must be refused; the fixture also gates from its own directory like the chain above). Windows-only hot-patch
+tests: [TESTING.md](TESTING.md).
 
 ```bash
 # frust-database / frust-network-image Android gates: C builds (bindgen, ring) need cargo-ndk's

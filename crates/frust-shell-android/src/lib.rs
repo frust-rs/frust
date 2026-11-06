@@ -28,13 +28,14 @@
 //! `DeviceHandle` re-export — see `frust-shell-common`'s `gpu` module and
 //! `crates/frust/src/lib.rs`'s `gpu` module), the same seam
 //! `frust-shell-desktop`'s render executor installs its live device into.
-//! **This shell does not install one yet** — its render-thread device
-//! creation lives in `jni_glue`'s pre-init/`create_handle` path and the
-//! `app::executor` render loop, wiring an install call there is a
-//! render-thread-split-aware change of its own, not a one-line addition —
-//! so `frust::gpu::with_context` currently answers `None` on Android even
-//! with `--features gpu` on. An accepted, explicitly tracked gap rather than
-//! a half-built accessor.
+//! This shell publishes its live device into that slot after every
+//! successful surface install, from the render thread's loop (`jni_glue::render_loop`
+//! split) and from the inline executor, and withdraws it when the owner goes
+//! away: one device per render context, so a recreated context (a new
+//! Activity) publishes a fresh generation and the old device is
+//! withdrawn when its loop exits. `frust::gpu::with_context` therefore
+//! answers `Some` once a surface exists. A default (non-`gpu`) build carries
+//! a zero-sized stand-in and is unchanged.
 //!
 //! # Unsafe
 //!
@@ -182,17 +183,28 @@ pub mod __jni {
 ///   like `MyState::new`), for a `State` that doesn't implement `Default`. The
 ///   2-arg form delegates to this one.
 ///
+/// Either form may be prefixed with `@pre_init $pre;`, where `$pre` is a
+/// `()`-typed expression the generated `nativeInit` evaluates first, inside
+/// `jni_glue::native_init`'s panic guard and before it adopts the GPU device or
+/// builds the app — the earliest point app code runs. A panic in it is logged
+/// and `nativeInit` returns `0`, like a failed init. `frust::app!`'s `gpu_features = { .. }` key
+/// uses it to request optional device features. A pre-built device lacking a
+/// requested feature its adapter offers is rebuilt (`gpu` feature).
+///
 /// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` that returns any `View<State>`; since a `Component::build` result's opaque type captures the borrows, it must be erased with `AnyView::new` before passing it to the macro (`move |s| frust::AnyView::new(root.build(s))`).
 #[macro_export]
 macro_rules! android_app {
-    ($state_ty:ty, $build:expr $(,)?) => {
+    // `$(@pre_init $pre:expr;)?` is empty for every invocation that does not
+    // name it, so those expand exactly as before the hook existed.
+    ($(@pre_init $pre:expr;)? $state_ty:ty, $build:expr $(,)?) => {
         $crate::android_app!(
+            $(@pre_init $pre;)?
             $state_ty,
             <$state_ty as ::core::default::Default>::default,
             $build
         );
     };
-    ($state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
+    ($(@pre_init $pre:expr;)? $state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
         /// JNI `nativeInit`: create the native handle for one surface.
         ///
         /// `cache_dir` is the app's `context.cacheDir.absolutePath`,
@@ -209,7 +221,7 @@ macro_rules! android_app {
             scale: $crate::__jni::jfloat,
             cache_dir: $crate::__jni::JString<'local>,
         ) -> $crate::__jni::jlong {
-            $crate::jni_glue::native_init(env, surface, scale, cache_dir, || {
+            $crate::jni_glue::native_init(env, surface, scale, cache_dir, || { $(let () = $pre;)? }, || {
                 $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
             })
         }

@@ -27,12 +27,14 @@
 //! `DeviceHandle` re-export — see `frust-shell-common`'s `gpu` module and
 //! `crates/frust/src/lib.rs`'s `gpu` module), the same seam
 //! `frust-shell-desktop`'s render executor installs its live device into.
-//! **This shell does not install one yet** — its render-thread device
-//! creation lives in `ffi_glue`'s render-loop bring-up and `app::executor`,
-//! wiring an install call there is a render-thread-split-aware change of
-//! its own, not a one-line addition — so `frust::gpu::with_context`
-//! currently answers `None` on iOS even with `--features gpu` on. An
-//! accepted, explicitly tracked gap rather than a half-built accessor.
+//! This shell publishes its live device into that slot after every
+//! successful surface install, from the render thread's loop (`ffi_glue::render_loop`
+//! split) and from the inline executor, and withdraws it when the owner goes
+//! away: one device per render context, so a recreated context (a new
+//! view/render loop) publishes a fresh generation and the old device is
+//! withdrawn when its loop exits. `frust::gpu::with_context` therefore
+//! answers `Some` once a surface exists. A default (non-`gpu`) build carries
+//! a zero-sized stand-in and is unchanged.
 //!
 //! # Unsafe
 //!
@@ -134,17 +136,27 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 ///   delegates to this one with `<$state_ty as Default>::default` as the
 ///   factory.
 ///
+/// Either form may be prefixed with `@pre_init $pre;`, where `$pre` is a
+/// `()`-typed expression the generated `frust_init` evaluates first, inside
+/// `ffi_glue::init`'s panic guard and before it spawns the render thread that
+/// creates the GPU device — the earliest point app code runs. A panic in it is
+/// logged and `frust_init` returns null, like a failed init. `frust::app!`'s `gpu_features = { .. }`
+/// key uses it to request optional device features.
+///
 /// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` that returns any `View<State>`; since a `Component::build` result's opaque type captures the borrows, it must be erased with `AnyView::new` before passing it to the macro (`move |s| frust::AnyView::new(root.build(s))`).
 #[macro_export]
 macro_rules! ios_app {
-    ($state_ty:ty, $build:expr $(,)?) => {
+    // `$(@pre_init $pre:expr;)?` is empty for every invocation that does not
+    // name it, so those expand exactly as before the hook existed.
+    ($(@pre_init $pre:expr;)? $state_ty:ty, $build:expr $(,)?) => {
         $crate::ios_app!(
+            $(@pre_init $pre;)?
             $state_ty,
             <$state_ty as ::core::default::Default>::default,
             $build
         );
     };
-    ($state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
+    ($(@pre_init $pre:expr;)? $state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
         /// `frust_init`: create the native handle for the app's CAMetalLayer.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
@@ -154,7 +166,7 @@ macro_rules! ios_app {
             height: u32,
             scale: f32,
         ) -> *mut ::core::ffi::c_void {
-            $crate::ffi_glue::init(metal_layer, width, height, scale, || {
+            $crate::ffi_glue::init(metal_layer, width, height, scale, || { $(let () = $pre;)? }, || {
                 $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
             })
         }
@@ -578,4 +590,25 @@ macro_rules! ios_app {
             $crate::ffi_glue::overlay_take_released(handle, layers, capacity)
         }
     };
+}
+
+/// Compile-only smoke of [`ios_app!`]'s `@pre_init` prefix, through the 2-arg
+/// arm (which forwards it to the 3-arg arm's `frust_init`), on the iOS target
+/// (`cargo check --target aarch64-apple-ios-sim --tests`). Never linked, for
+/// the same reason as `ffi_glue`'s own `macro_expansion` fixtures.
+#[cfg(all(test, target_os = "ios"))]
+mod macro_expansion_pre_init {
+    #[derive(Default)]
+    struct TestState {
+        n: u32,
+    }
+
+    fn pre_init_hook() {}
+
+    fn test_logic(state: &mut TestState) -> impl frust_core::view::View<TestState> + use<> {
+        state.n += 1;
+        frust_widgets::text(format!("{}", state.n))
+    }
+
+    crate::ios_app!(@pre_init pre_init_hook(); TestState, test_logic);
 }

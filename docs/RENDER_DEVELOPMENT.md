@@ -165,6 +165,9 @@ WGPU_BACKEND=vulkan WGPU_ADAPTER_NAME=T400 cargo test -p frust-gpu -- --ignored
 `--nocapture` to see it (`cargo test -p frust-gpu --test warm_up -- --ignored --test-threads=1
 --nocapture`).
 
+`tests/device_identity.rs` (generation, loss latch, feature request) is another ignored arm:
+`cargo test -p frust-gpu --test device_identity -- --ignored --test-threads=1`.
+
 Every device-suite fixture — this crate's own `--ignored` arm, `frust-engine`'s, and
 `frust-testing`'s `EngineOracle::new` — requests its device limits through
 `frust_gpu::test_device_limits(&adapter, &caps)`, the same derivation `create_device` uses for the

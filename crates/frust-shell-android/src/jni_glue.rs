@@ -898,6 +898,14 @@ fn spawn_gpu_preinit() {
 /// at worst this blocks for the remainder of work already in flight. The
 /// adopt-vs-fallback decision itself is the host-tested
 /// [`crate::ffi_support::resolve_preinit`].
+///
+/// With the `gpu` feature, a ready pre-built context is also dropped when its
+/// device lacks an optional feature the app requested (through the generated
+/// `nativeInit`'s pre-init hook, which runs before this) and its adapter
+/// offers: the device was created at library load, before any app code could
+/// ask. The fresh `RenderContext` creates its device with the request applied.
+/// An app that requested nothing keeps the pre-built device exactly as before,
+/// and without `gpu` no request is possible, so the context is always kept.
 fn take_preinit_context() -> frust_render::RenderContext {
     let joined: Option<PreInitResult> = GPU_PREINIT
         .get()
@@ -912,7 +920,34 @@ fn take_preinit_context() -> frust_render::RenderContext {
                 None
             }
         });
-    crate::ffi_support::resolve_preinit(joined, frust_render::RenderContext::new)
+    crate::ffi_support::resolve_preinit(
+        joined,
+        preinit_has_requested_features,
+        frust_render::RenderContext::new,
+    )
+}
+
+/// The keep-predicate [`take_preinit_context`] hands
+/// [`crate::ffi_support::resolve_preinit`]: whether the pre-built device
+/// already has every requested optional feature its adapter offers. Logs the
+/// rebuild once (the pre-init context is taken at most once per process).
+#[cfg(feature = "gpu")]
+fn preinit_has_requested_features(render_cx: &frust_render::RenderContext) -> bool {
+    let missing = frust_render::missing_requested_features(render_cx.device_handle());
+    if missing.is_empty() {
+        return true;
+    }
+    log::info!(
+        "frust-shell-android: GPU pre-init device lacks requested features {missing:?}; rebuilding"
+    );
+    false
+}
+
+/// Without the `gpu` feature no optional-feature request can exist, so the
+/// pre-built device is always kept.
+#[cfg(not(feature = "gpu"))]
+fn preinit_has_requested_features(_render_cx: &frust_render::RenderContext) -> bool {
+    true
 }
 
 /// The renderer's first-install timings as the plain-`Duration` steps the
@@ -1092,6 +1127,50 @@ impl SendableWindowPtr {
     pub(crate) fn as_ptr(&self) -> *mut c_void {
         self.0
     }
+}
+
+/// The device owner's write access to the process-wide GPU-device slot
+/// (`frust_shell_common::gpu`) the facade's `frust::gpu::with_context` reads
+/// through. One publisher per `RenderContext` owner; dropping it withdraws the
+/// device it published. A zero-sized stand-in under a default (non-`gpu`)
+/// build.
+#[cfg(feature = "gpu")]
+pub(crate) type DevicePublisher = frust_shell_common::gpu::GpuPublisher;
+
+#[cfg(not(feature = "gpu"))]
+pub(crate) struct DevicePublisher;
+
+#[cfg(not(feature = "gpu"))]
+impl DevicePublisher {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+}
+
+/// Publish this render context's live GPU device, tagged with its
+/// generation. Call only after a successful surface install (`device_handle`
+/// panics before a device exists) and only on the thread that owns
+/// `render_cx`. Republishing an unchanged generation is a no-op; a rebuilt
+/// device replaces the old one. Compiled to nothing under a default
+/// (non-`gpu`) build.
+///
+/// `take_preinit_context` can hand an owner a context whose device already
+/// exists before any surface is installed; that device is deliberately not
+/// published until the first install succeeds.
+#[cfg(feature = "gpu")]
+pub(crate) fn publish_gpu_handle(
+    publisher: &mut DevicePublisher,
+    render_cx: &frust_render::RenderContext,
+) {
+    let handle = render_cx.device_handle();
+    publisher.publish(handle.generation(), || handle.clone());
+}
+
+#[cfg(not(feature = "gpu"))]
+pub(crate) fn publish_gpu_handle(
+    _publisher: &mut DevicePublisher,
+    _render_cx: &frust_render::RenderContext,
+) {
 }
 
 /// Install (or reinstall) a `wgpu::Surface` on `renderer` from the raw
@@ -1343,6 +1422,11 @@ pub(crate) fn render_loop(
     if let Some(spans) = startup_spans.as_mut() {
         spans.record(SPAN_PREINIT_JOINED);
     }
+    // Declared after `render_cx` so it drops first: the device is withdrawn
+    // from the process-wide slot when this loop exits (the `RenderSender`
+    // dropped with its Activity), before the context itself goes. A next
+    // Activity builds a fresh context and publishes its new generation.
+    let mut gpu_publisher = DevicePublisher::new();
 
     let mut renderer = frust_render::SurfaceRenderer::new();
     let mut frame_stats = FrameStats::new();
@@ -1387,6 +1471,10 @@ pub(crate) fn render_loop(
                             // density so a later change is recognised.
                             renderer.note_device_scale(sanitize_scale(size.scale as f32));
                             publish_cleared_ledger(&mut renderer);
+                            // Strictly after the successful install (a
+                            // pre-init context has a device before any
+                            // surface, but is not published until here).
+                            publish_gpu_handle(&mut gpu_publisher, &render_cx);
                         }
                         Err(err) => {
                             // A failed (re)install leaves no surface whose
@@ -1575,7 +1663,8 @@ unsafe fn handle_mut<'a>(handle: jlong) -> Option<&'a mut AndroidAppHandle> {
 ///
 /// `make_app` is supplied by the macro and erases the app's `State`/`build`;
 /// on any failure (null window, GPU init error, panic) returns `0`, matching
-/// Kotlin's "no native side yet" sentinel.
+/// Kotlin's "no native side yet" sentinel. `pre_init` is the macro's optional
+/// `@pre_init` hook (a no-op closure when absent); a panic in it also returns `0`.
 ///
 /// `cache_dir` is the app's `context.cacheDir.absolutePath`, read into
 /// a Rust `String` up front — before the surface handle is touched below — so
@@ -1588,9 +1677,20 @@ pub fn native_init(
     surface: JObject,
     scale: jfloat,
     cache_dir: JString,
+    pre_init: impl FnOnce(),
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> jlong {
     init_logger_once();
+    // The macro's `@pre_init` hook: app code, so it runs under the same panic
+    // containment as the init itself (an unwind across `extern "system"`
+    // aborts), after the logger so a panic message is visible, and before
+    // anything adopts the GPU device or builds the app.
+    if !guard("nativeInit pre_init", false, || {
+        pre_init();
+        true
+    }) {
+        return 0;
+    }
     // Devtools, compiled in only under this crate's `devtools` feature. Started
     // here — after `init_logger_once` above, never before it — because the
     // service's discovery line (`frust-devtools listening on <port>`) is a
@@ -3369,6 +3469,26 @@ mod macro_expansion_factory {
     }
 
     crate::android_app!(NonDefaultState, make_state, test_logic);
+}
+
+/// Compile-only smoke of [`crate::android_app!`]'s `@pre_init` prefix, through
+/// the 2-arg arm (which forwards it to the 3-arg arm's `nativeInit`). Same
+/// `cfg(test)`, check-only reasoning as [`macro_expansion`].
+#[cfg(test)]
+mod macro_expansion_pre_init {
+    #[derive(Default)]
+    struct TestState {
+        n: u32,
+    }
+
+    fn pre_init_hook() {}
+
+    fn test_logic(state: &mut TestState) -> impl frust_core::view::View<TestState> + use<> {
+        state.n += 1;
+        frust_widgets::text(format!("{}", state.n))
+    }
+
+    crate::android_app!(@pre_init pre_init_hook(); TestState, test_logic);
 }
 
 /// `content_type_wire`/`ime_state_to_json` coverage. Compiled (and would run)
