@@ -5326,15 +5326,9 @@ impl Scratch {
             self.routing.uber,
             &mut self.class_runs,
         );
+        // Indexing the span also checks the run is in range of the instances.
         debug_assert!(
-            self.opaque.get(first as usize..end as usize).is_some(),
-            "the opaque run {first}..{end} is out of range of {} instances",
-            self.opaque.len()
-        );
-        debug_assert!(
-            self.opaque
-                .get(first as usize..end as usize)
-                .is_none_or(|span| runs_draw(&self.class_runs, span)),
+            runs_draw(&self.class_runs, &self.opaque[first as usize..end as usize]),
             "the opaque marks disagree with the instances they mark"
         );
         for run in &self.class_runs {

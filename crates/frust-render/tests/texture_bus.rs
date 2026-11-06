@@ -27,7 +27,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Once, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, SceneTextureId, TierCaps};
@@ -265,7 +265,9 @@ fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Opt
     }
 }
 
-static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
+fn new_instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env())
+}
 
 /// One case's device, engine and read-back target.
 struct Harness {
@@ -282,18 +284,16 @@ struct Harness {
 }
 
 impl Harness {
+    /// A device on an instance of its own — the production shape, where a
+    /// recreated activity builds a new instance.
     fn new() -> Self {
+        Self::on_instance(&new_instance())
+    }
+
+    /// A device on `instance`: the same-instance counterpart of [`Self::new`].
+    fn on_instance(instance: &wgpu::Instance) -> Self {
         let (device, queue, caps) = block_on(async {
-            // One instance for the process: device identity is per instance,
-            // so devices from separate instances can compare equal.
-            let instance = INSTANCE
-                .get_or_init(|| {
-                    wgpu::Instance::new(
-                        wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-                    )
-                })
-                .clone();
-            let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
+            let adapter = wgpu::util::initialize_adapter_from_env_or_default(instance, None)
                 .await
                 .expect("no compatible GPU adapter");
             let info = adapter.get_info();
@@ -693,11 +693,10 @@ fn a_sub_rect_before_any_full_frame_is_refused_and_released() {
     settle(&mut harness);
 }
 
-#[test]
-#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
-fn a_device_change_makes_frame_size_none_until_a_full_frame() {
-    let _serial = serial();
-    let mut first = Harness::new();
+/// Shows a frame on `first`, then moves the registration to the harness
+/// `second_of` builds from it, and checks the reset and recovery.
+fn check_device_change(first: Harness, second_of: impl FnOnce(&Harness) -> Harness) {
+    let mut first = first;
     let queue = Queue::default();
     let releases = Releases::default();
     let registration = register_texture_source(queue.source());
@@ -711,9 +710,12 @@ fn a_device_change_makes_frame_size_none_until_a_full_frame() {
     // A second harness is a second device and engine: the same registration's
     // pass now sees a frame from a device other than the one it showed on,
     // which is what an Activity recreate or a GPU reset looks like to it.
-    let mut second = Harness::new();
+    let mut second = second_of(&first);
     let drawn = second.frame(&scene);
-    assert_ne!(first.device, second.device, "a second, distinct device");
+    assert_ne!(
+        first.generation, second.generation,
+        "a second, distinct device generation"
+    );
     assert_dest_is(&drawn, BASE, "nothing carries over to the new device");
     assert_eq!(
         registration.frame_size(),
@@ -749,6 +751,25 @@ fn a_device_change_makes_frame_size_none_until_a_full_frame() {
     drop(registration);
     settle(&mut second);
     settle(&mut first);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_device_change_across_separate_instances_makes_frame_size_none_until_a_full_frame() {
+    let _serial = serial();
+    // Each instance numbers its devices from the same start, so the two
+    // devices can compare equal; only the generation tells them apart.
+    check_device_change(Harness::new(), |_| Harness::new());
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_device_change_on_a_shared_instance_makes_frame_size_none_until_a_full_frame() {
+    let _serial = serial();
+    let instance = new_instance();
+    check_device_change(Harness::on_instance(&instance), |_| {
+        Harness::on_instance(&instance)
+    });
 }
 
 #[test]
@@ -993,6 +1014,52 @@ fn an_installed_importer_draws_native_frames_and_a_failed_import_keeps_the_last(
         &removed,
         &(Arc::clone(&importer) as Arc<dyn NativeImporter>)
     )));
+    drop(registration);
+    settle(&mut harness);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_native_frame_with_a_region_is_refused_and_released() {
+    let _serial = serial();
+    let importer = install_fake_importer();
+    let mut harness = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+
+    queue.push(solid(FRAME, FRAME, RED).on_release(releases.callback(0)));
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, RED, "the full frame is shown");
+    assert_eq!(registration.frame_size(), Some((FRAME, FRAME)));
+    assert_eq!(importer.calls.load(Ordering::SeqCst), 0);
+
+    let mut buffer = FakeBuffer { rgba: GREEN };
+    queue.push(
+        native(Some(&mut buffer))
+            .with_update_region(PATCH)
+            .on_release(releases.callback(1)),
+    );
+    let drawn = harness.frame(&scene);
+    assert_dest_is(&drawn, RED, "the previously shown content is unchanged");
+    assert_eq!(
+        registration.frame_size(),
+        Some((FRAME, FRAME)),
+        "the shown extent is unchanged"
+    );
+    assert_eq!(
+        importer.calls.load(Ordering::SeqCst),
+        0,
+        "a native frame with a region never reaches the importer"
+    );
+    assert_eq!(
+        releases.counts(),
+        vec![1, 1],
+        "the refused frame is released exactly once"
+    );
+
+    let _ = clear_native_importer(NativeHandleKind::AHardwareBuffer);
     drop(registration);
     settle(&mut harness);
 }
