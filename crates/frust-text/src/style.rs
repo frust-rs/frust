@@ -413,6 +413,9 @@ pub struct TextStyle {
     /// [`OverflowWrap::Normal`].
     pub overflow_wrap: OverflowWrap,
     /// Underline and line-through. Defaults to none.
+    ///
+    /// Decorations are painted by `TextView` (`text(..)`) only; a `TextInput`'s
+    /// content and placeholder ignore this field.
     pub decoration: TextDecoration,
 }
 
@@ -468,6 +471,9 @@ impl TextStyle {
     }
 
     /// This style with the given [`TextDecoration`].
+    ///
+    /// Painted by `TextView` (`text(..)`) only; a `TextInput`'s content and
+    /// placeholder ignore the decoration.
     pub fn with_decoration(mut self, decoration: TextDecoration) -> Self {
         self.decoration = decoration;
         self
