@@ -6599,30 +6599,32 @@ source line, and the parity test pins it.
 use glifo's own), or an automated macOS run of the parity test on every glifo bump (the CI check above
 acknowledges a bump; it does not run the test).
 
-### `engine-bitmap-glyphs-gap` — BGRA/Mask strikes and non-atlas bitmap glyphs do not render on the engine tier
+### `engine-bitmap-glyphs-gap` — some bitmap-strike emoji records and run shapes do not render on the engine tier
 
-**Observed** (evidence: `crates/frust-engine/tests/text_bitmap_strike.rs`, the Mac (sbix) and
-Android (CBDT) device gates, glifo 0.3.0 `glyph.rs`, and `crates/frust-engine/src/text/backend.rs`):
-`frust-engine` enables glifo's `png` feature (one `png` in the graph, shared with `image`), so sbix
-and CBDT PNG strikes decode and a bitmap-only face's glyphs upload to the atlas at any run size up
-to 1024 px. What remains missing, counted in `skipped_glyphs` rather than drawn wrong:
+**Observed** (evidence: `crates/frust-engine/tests/text_bitmap_strike.rs`,
+`crates/frust-engine/tests/apple_raster.rs`, and the Mac (sbix), Android (CBDT) and iPhone gates; the
+iOS route is covered by iOS-simulator tests, with the iPhone device gate pending at write time):
+bitmap-first faces (`sbix` with `DRAW_OUTLINES` clear, or `CBDT`/`EBDT` with no outlines) bypass
+glifo for `text::bitmap_route`. CoreText draws every `sbix` glyph on iOS; elsewhere the engine
+decodes png, dupe and flip records, and refuses any strike over 512 px. What remains missing, counted
+in `skipped_glyphs` rather than drawn wrong:
 
-- BGRA and Mask strikes, which glifo never decodes.
-- A bitmap glyph on a non-atlas route — `FRUST_ENGINE_NO_ATLAS`, an oblique or skewed transform,
-  residency full, or outside the collect phase — arrives as an inline pixmap and is skipped.
+- `emjc` and other non-PNG `sbix` records off iOS; non-PNG `EBDT` strikes; BGRA and Mask strikes.
+- A bitmap run under a non-uniform scale or skew draws only already-resident strikes.
 - A bitmap run past 1024 px.
-- A bitmap-only face that also carries COLR, which routes as `ColorFont`.
+- An `sbix` face with `DRAW_OUTLINES` set, or a `CBDT` face with outlines, still goes through glifo
+  (128 px limit).
 
 COLRv1 colour glyphs remain drawn by `crates/frust-engine/src/text/color.rs`. Within COLR, a glyph
 whose paint graph needs a shape the engine cannot express exactly — a layer inside an isolated blend
 bracket, or two nested outline clips at once — is dropped whole and counted, never half-painted.
 
 **Accepted because**: a wrong-pixels approximation of an inexpressible shape would violate the
-backend's never-wrong-pixels invariant, and the target platforms' emoji fonts ship PNG strikes or
-COLR.
+backend's never-wrong-pixels invariant, and the target platforms' emoji fonts ship PNG strikes,
+CoreText-decodable records on iOS, or COLR.
 
-**Trigger for removal**: a glifo release decoding BGRA/Mask strikes or exposing the inline-pixmap
-path to the engine, or a measured need for a bitmap-strike font on a non-atlas route.
+**Trigger for removal**: an engine decoder for `emjc`/BGRA/Mask records, or a measured need for a
+bitmap-strike font on a skewed or oversized run.
 
 ### `engine-text-hinting-policy` — hinting is desktop-only and vertical-only; the reference oracle never hints
 
