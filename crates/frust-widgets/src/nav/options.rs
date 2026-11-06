@@ -1,6 +1,7 @@
 //! The navigator's option and vocabulary types: the page/callback type
 //! aliases, [`PageVisibility`], [`PopResult`], [`BackPolicy`], [`PushOptions`],
-//! [`ReplaceOptions`], the queued [`NavOp`], and [`NavigatorId`].
+//! [`ReplaceOptions`], the queued [`NavOp`] with its [`PageSpec`]/[`PageKey`], and
+//! [`NavigatorId`].
 //!
 //! [`navigator`](super::navigator) re-exports every public name here, so the
 //! `nav::navigator::*` paths callers already use keep resolving.
@@ -169,6 +170,7 @@ pub struct PushOptions<State: 'static> {
     pub(super) pop_swipe: Option<bool>,
     pub(super) barrier: Option<Color>,
     pub(super) barrier_dismissible: bool,
+    pub(super) key: Option<PageKey>,
 }
 
 impl<State: 'static> PushOptions<State> {
@@ -187,6 +189,7 @@ impl<State: 'static> PushOptions<State> {
             pop_swipe: None,
             barrier: None,
             barrier_dismissible: false,
+            key: None,
         }
     }
 
@@ -369,6 +372,15 @@ impl<State: 'static> PushOptions<State> {
         self.barrier_dismissible = dismissible;
         self
     }
+
+    /// Key this page so a later [`NavOp::SetPages`] can retain it.
+    // rr-02 (`Router::go`'s shell pages) is the first non-test caller and removes
+    // this allow.
+    #[allow(dead_code)]
+    pub(super) fn key(mut self, key: PageKey) -> Self {
+        self.key = Some(key);
+        self
+    }
 }
 
 /// Options for [`NavigatorController::replace_with_options`] — opacity, an
@@ -381,6 +393,7 @@ pub struct ReplaceOptions {
     pub(super) opaque: bool,
     pub(super) transition: Option<TransitionSpec>,
     pub(super) route: Option<Location>,
+    pub(super) key: Option<PageKey>,
 }
 
 impl ReplaceOptions {
@@ -391,6 +404,7 @@ impl ReplaceOptions {
             opaque: true,
             transition: None,
             route: None,
+            key: None,
         }
     }
 
@@ -414,6 +428,42 @@ impl ReplaceOptions {
         self.route = Some(location);
         self
     }
+
+    /// Key the replacement page so a later [`NavOp::SetPages`] can retain it.
+    // rr-02 (`Router::go`'s shell pages) is the first non-test caller and removes
+    // this allow.
+    #[allow(dead_code)]
+    pub(super) fn key(mut self, key: PageKey) -> Self {
+        self.key = Some(key);
+        self
+    }
+}
+
+/// The identity [`NavOp::SetPages`] reconciles a page by: a new page with the same
+/// key as a page already on the stack keeps that page's pod and state.
+// rr-02 (`Router::go`) is the first non-test constructor and removes this allow.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PageKey {
+    /// A page for this concrete path.
+    Path(String),
+    /// A shell page hosting the navigator with this id.
+    Shell(NavigatorId),
+}
+
+/// One page of the list [`NavOp::SetPages`] makes the stack into.
+// rr-02 (`Router::go`) is the first non-test constructor and removes this allow.
+#[allow(dead_code)]
+pub(super) struct PageSpec<State: 'static> {
+    /// What to match an existing page by. `None` never matches: the page always
+    /// builds fresh.
+    pub(super) key: Option<PageKey>,
+    pub(super) builder: PageBuilder<State>,
+    /// Applies to a freshly built page. A retained page keeps its own opacity.
+    pub(super) opaque: bool,
+    /// Per-page transition override (`None` → the navigator's default).
+    pub(super) transition: Option<TransitionSpec>,
+    pub(super) route: Option<Location>,
 }
 
 /// One queued navigation op, recorded by the [`NavigatorController`] and drained
@@ -448,6 +498,9 @@ pub(super) enum NavOp<State: 'static> {
         /// Whether a tap on that barrier dismisses the page
         /// ([`PushOptions::barrier_dismissible`]).
         barrier_dismissible: bool,
+        /// The [`PageKey`] a later [`SetPages`](Self::SetPages) retains this page
+        /// by, `None` for every page not given one.
+        key: Option<PageKey>,
     },
     /// Pop the top page (never the last/root page), delivering `result` to the
     /// popped page's pusher-registered callback. A pop *reverses* the popped
@@ -466,7 +519,13 @@ pub(super) enum NavOp<State: 'static> {
         /// The route identity from [`ReplaceOptions::route`], `None` for
         /// a plain [`NavigatorController::replace`]/`replace_with`.
         route: Option<Location>,
+        /// The [`PageKey`] a later [`SetPages`](Self::SetPages) retains this page
+        /// by, `None` for every page not given one.
+        key: Option<PageKey>,
     },
+    /// Make the stack exactly this list, bottom to top, retaining every old page
+    /// whose [`PageKey`] the list names. Never empty.
+    SetPages { pages: Vec<PageSpec<State>> },
 }
 
 /// An opaque identity for the navigator a [`NavigatorController`] drives: every

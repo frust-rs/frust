@@ -59,6 +59,14 @@
 //! `NavigatorWidget::event` directly, never through the op queue, so it still
 //! needs its own explicit mark). See [`NavigatorController::push_for_result`].
 //!
+//! # Declarative stack op
+//!
+//! Besides the imperative ops, the crate-internal `NavOp::SetPages` makes the stack
+//! exactly a given page list. A new page with the same key as an old one retains it;
+//! every other old page is removed, its result callback firing empty on the op's
+//! frame. The stack commits on that frame too, whatever flight `apply_set_pages`
+//! chooses.
+//!
 //! # Paint culling (Flutter opaque-route parity)
 //!
 //! Only the topmost **settled opaque** page (and any transparent pages stacked
@@ -146,7 +154,7 @@ use super::ambient::{
     ambient_page_reach, ambient_swipe_claim, host_reachable, with_page_reach, with_swipe_claim,
 };
 use super::edge_swipe::{EDGE_SWIPE_ZONE_DP, EdgeSwipe};
-use super::options::NavOp;
+use super::options::{NavOp, PageKey, PageSpec};
 use super::path::Location;
 use super::route_state::RouteStack;
 use super::transition::{
@@ -243,6 +251,9 @@ pub(super) struct PageEntry<State: 'static> {
     /// page through its [`back`](Self::back) policy
     /// ([`PushOptions::barrier_dismissible`]).
     pub(super) barrier_dismissible: bool,
+    /// What a [`NavOp::SetPages`] retains this page by. `None` for the root page,
+    /// a bare push or replace: such a page is never retained.
+    key: Option<PageKey>,
 }
 
 /// A primary press the top page left unhandled over its dismissible barrier,
@@ -269,7 +280,8 @@ pub(super) struct ActiveTransition<State: 'static> {
     /// Direction: `true` reverses the horizontal motion + paint order (a pop).
     pub(super) is_pop: bool,
     /// The removed page retained until settle (pop/replace). `None` for a push,
-    /// whose leaving page is still in the stack at `len - 2`.
+    /// whose leaving page is still in the stack at `len - 2` (or at
+    /// [`HeldFlight::leaving_index`] for a [`NavOp::SetPages`] push).
     pub(super) stashed: Option<PageEntry<State>>,
     /// The spring a manual [`settle`](NavigatorWidget::settle_transition) uses
     /// when the timing mode is duration-based (a duration has no spring).
@@ -323,6 +335,79 @@ pub(super) struct ActiveTransition<State: 'static> {
     pub(super) pending_interactive_reduce: bool,
 }
 
+/// Where a [`HeldFlight`] backdrop page lives during the flight.
+#[derive(Clone, Copy)]
+enum BackdropPage {
+    /// Removed by the op: an index into [`HeldFlight::held`].
+    Held(usize),
+    /// Retained by the op: an index into [`NavigatorWidget::pages`].
+    Stack(usize),
+}
+
+/// What a [`NavOp::SetPages`] push flight carries beyond its
+/// [`ActiveTransition`]. `Some` on [`NavigatorWidget::held_flight`] only alongside
+/// the transition it belongs to; [`finalize_transition`](NavigatorWidget::finalize_transition)
+/// disposes both together.
+struct HeldFlight<State: 'static> {
+    /// The removed pages other than the leaving page, top to bottom, kept alive
+    /// until settle. They receive no events and take part in no rebuild.
+    held: Vec<PageEntry<State>>,
+    /// The old pages that were visible below a non-opaque old top, bottom to top.
+    /// They paint as a static backdrop under the leaving layer.
+    backdrop: Vec<BackdropPage>,
+    /// The stack index of the old top when the op retained it, which is the
+    /// leaving page wherever the new list put it. `None` when the old top was
+    /// removed, so [`ActiveTransition::stashed`] holds it.
+    leaving_index: Option<usize>,
+}
+
+/// The [`HeldFlight::backdrop`] page `slot` names.
+fn backdrop_entry<'a, State: 'static>(
+    slot: BackdropPage,
+    held: &'a mut [PageEntry<State>],
+    pages: &'a mut [PageEntry<State>],
+) -> &'a mut PageEntry<State> {
+    match slot {
+        BackdropPage::Held(index) => &mut held[index],
+        BackdropPage::Stack(index) => &mut pages[index],
+    }
+}
+
+/// Which pass is applying a batch of ops, passed down to the
+/// [`NavOp::SetPages`] arm's flight choice.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpsPass {
+    /// [`NavigatorView::build`]: nothing has been painted, so nothing can animate
+    /// away.
+    FirstBuild,
+    /// [`NavigatorView::rebuild`].
+    Rebuild,
+}
+
+/// For each page of a [`NavOp::SetPages`] list, the index of the old page it
+/// retains: the topmost old page with the same key. A page without a key, or
+/// whose key an earlier page in the list already used, retains nothing.
+fn match_retained<State: 'static>(
+    specs: &[PageSpec<State>],
+    old: &[PageEntry<State>],
+) -> Vec<Option<usize>> {
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let key = spec.key.as_ref()?;
+            let repeated = specs[..index]
+                .iter()
+                .any(|earlier| earlier.key.as_ref() == Some(key));
+            if repeated {
+                return None;
+            }
+            old.iter()
+                .rposition(|entry| entry.key.as_ref() == Some(key))
+        })
+        .collect()
+}
+
 impl<State: 'static> crate::authoring::VisitPods for PageEntry<State> {
     fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
         visitor(&self.pod);
@@ -334,6 +419,13 @@ impl<State: 'static> crate::authoring::VisitPods for ActiveTransition<State> {
         // Only the stashed (removed-but-still-animating) page: a transition's
         // other participants are still in `pages`.
         crate::authoring::VisitPods::visit_pods(&self.stashed, visitor);
+    }
+}
+
+impl<State: 'static> crate::authoring::VisitPods for HeldFlight<State> {
+    fn visit_pods(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+        // A retained backdrop page is still in `pages`.
+        crate::authoring::VisitPods::visit_pods(&self.held, visitor);
     }
 }
 
@@ -366,6 +458,8 @@ pub struct NavigatorWidget<State: 'static> {
     /// The single in-flight transition, if any. `None` between
     /// transitions — the common case, where paint/layout cull normally.
     pub(super) transition: Option<ActiveTransition<State>>,
+    /// The extra pages of an in-flight [`NavOp::SetPages`] push; see [`HeldFlight`].
+    held_flight: Option<HeldFlight<State>>,
     /// Whether the interactive edge-swipe back gesture is enabled.
     /// Resolved from the view each rebuild — default-on for the iOS-push preset,
     /// or explicitly via [`NavigatorView::pop_swipe`].
@@ -855,6 +949,20 @@ impl<State: 'static> NavigatorWidget<State> {
         } else {
             to_depth.saturating_sub(1)
         };
+        self.stage_transition(spec, is_pop, stashed, from_depth);
+    }
+
+    /// Install and publish a programmatic transition with no transition in flight.
+    /// `from_depth` is the pre-op depth: [`start_transition`](Self::start_transition)
+    /// derives it from the op's shape, and [`apply_set_pages`](Self::apply_set_pages)
+    /// passes the depth it recorded, since one op can drop any number of pages.
+    fn stage_transition(
+        &mut self,
+        spec: TransitionSpec,
+        is_pop: bool,
+        stashed: Option<PageEntry<State>>,
+        from_depth: usize,
+    ) {
         // Build a fallback driver eagerly (the unthemed M3 default — current
         // behavior), and stash the *unresolved* spec so the first paint can
         // re-resolve `ThemeDefault` timing + `reduce_motion` against the live
@@ -919,6 +1027,14 @@ impl<State: 'static> NavigatorWidget<State> {
                         frust_core::mark_pending_result_flush();
                     }
                     crate::authoring::teardown_child(&stashed.view, &mut stashed.pod, ctx);
+                }
+            }
+            // Every page a `SetPages` push kept alive for the flight goes now, top
+            // to bottom. Its result callback already fired at the op.
+            if let Some(flight) = self.held_flight.take() {
+                for mut held in flight.held {
+                    held.reach.set(false);
+                    crate::authoring::teardown_child(&held.view, &mut held.pod, ctx);
                 }
             }
             // Publication point: the transition is over. Publish an at-rest
@@ -1304,9 +1420,177 @@ impl<State: 'static> NavigatorWidget<State> {
         }
     }
 
+    /// Make the stack exactly `specs` (the [`NavOp::SetPages`] arm), returning the
+    /// dirtiness. The caller's closing `publish_state` commits depth, route stack
+    /// and visibility on this frame, even when a flight starts.
+    ///
+    /// A page whose key matches an old page retains it: pod, widget state,
+    /// `on_result`, back policy, barrier, opacity, visibility and reach all stay,
+    /// and the page takes the new builder, route and stored transition. Every other
+    /// old page is removed, top to bottom, with its `on_result` firing empty now
+    /// rather than at settle. New pages build before anything is torn down, so a
+    /// controller shared between an old and a new page never reads as unmounted.
+    ///
+    /// The flight follows Flutter's `DefaultTransitionDelegate`:
+    ///
+    /// - **Push:** the new top is fresh and its spec animates. The old top leaves
+    ///   under it. Every other removed page is [held](HeldFlight::held) until settle,
+    ///   and whatever was visible below a non-opaque old top stays painted.
+    /// - **Pop:** the new top was retained, the old top was removed and its stored
+    ///   spec animates. The old top animates out reversed; other removed pages tear
+    ///   down now.
+    /// - **None:** otherwise, or on [`OpsPass::FirstBuild`] whatever the spec. Every
+    ///   removed page tears down now.
+    fn apply_set_pages(
+        &mut self,
+        specs: Vec<PageSpec<State>>,
+        pass: OpsPass,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
+        // `NavigatorController::set_pages` asserts this; an empty list must not
+        // drain the stack in a release build either.
+        if specs.is_empty() {
+            return ChangeFlags::NONE;
+        }
+        // First, so a cancelled swipe still settling restores its page into the
+        // list reconciled below rather than above the new stack. An unreleased
+        // swipe completes, as under any other superseding op.
+        self.finalize_transition(ctx);
+        let from_depth = self.pages.len();
+        // Read before `cancel_top` drops it (see `top_pod_focused`).
+        let outgoing_focused = self.top_pod_focused();
+        self.cancel_top();
+        // A stack mutation invalidates an arm captured against the old stack.
+        self.edge.armed = false;
+        self.edge.inner_claimed = false;
+
+        let matches = match_retained(&specs, &self.pages);
+        let old_visible_from = self.base_visible_index();
+        let mut old: Vec<Option<PageEntry<State>>> = std::mem::take(&mut self.pages)
+            .into_iter()
+            .map(Some)
+            .collect();
+        // For each old page, its index in the new list if retained.
+        let mut retained_at: Vec<Option<usize>> = vec![None; from_depth];
+
+        let new_top = specs.len() - 1;
+        let new_top_fresh = matches[new_top].is_none();
+        let own_reach = self.reachable();
+        let mut pages = Vec::with_capacity(specs.len());
+        for (index, (spec, matched)) in specs.into_iter().zip(matches).enumerate() {
+            let transition = self.effective_spec(spec.transition);
+            pages.push(match matched {
+                Some(old_index) => {
+                    retained_at[old_index] = Some(index);
+                    let mut entry = old[old_index]
+                        .take()
+                        .expect("match_retained uses each key once");
+                    entry.builder = spec.builder;
+                    entry.route = spec.route;
+                    entry.transition = transition;
+                    entry
+                }
+                None => {
+                    // Live from before the builder runs, so a nested navigator
+                    // built in there reads a correct value on its first `build`.
+                    let reach = Rc::new(Cell::new(index == new_top && own_reach));
+                    let (view, pod) = with_page_reach(&reach, || {
+                        let view = (spec.builder)();
+                        let pod = crate::authoring::build_child(&view, ctx);
+                        (view, pod)
+                    });
+                    PageEntry {
+                        builder: spec.builder,
+                        view,
+                        pod,
+                        opaque: spec.opaque,
+                        on_result: None,
+                        transition,
+                        back: BackPolicy::Pop,
+                        dismiss_signal: None,
+                        visibility: None,
+                        on_visibility: None,
+                        reconciled_covered: false,
+                        route: spec.route,
+                        pop_swipe: None,
+                        reach,
+                        boundary: RetainedBoundary::new(),
+                        barrier: None,
+                        barrier_dismissible: false,
+                        key: spec.key,
+                    }
+                }
+            });
+        }
+
+        // Removed pages, top to bottom, each with its old index. Out of `pages`, so
+        // out of `publish_reach`'s sight: a nested navigator riding out a flight on
+        // one must not keep claiming back presses.
+        let mut removed = Vec::new();
+        for (old_index, slot) in old.into_iter().enumerate().rev() {
+            let Some(mut entry) = slot else { continue };
+            entry.reach.set(false);
+            if let Some(callback) = entry.on_result.take() {
+                self.pending_results.push((callback, PopResult::empty()));
+                frust_core::mark_pending_result_flush();
+            }
+            removed.push((old_index, entry));
+        }
+        let old_top_removed = removed
+            .first()
+            .is_some_and(|(old_index, _)| *old_index + 1 == from_depth);
+        self.pages = pages;
+        // Full gate (`top_pod_focused`): the removed page's own link ANDed with the
+        // rebuild-pass chain down to this navigator. `ctx.has_focus()` is unchanged
+        // by the `build_child` above: that descent restores the chain on the way out.
+        if old_top_removed && outgoing_focused && ctx.has_focus() {
+            self.needs_ime_clear = true;
+        }
+
+        let may_fly = pass == OpsPass::Rebuild;
+        let new_top_spec = self.pages[new_top].transition;
+        if may_fly && new_top_fresh && new_top_spec.is_animated() {
+            let stashed = old_top_removed.then(|| removed.remove(0).1);
+            let backdrop = (old_visible_from..from_depth.saturating_sub(1))
+                .map(|old_index| match retained_at[old_index] {
+                    Some(index) => BackdropPage::Stack(index),
+                    None => BackdropPage::Held(
+                        removed
+                            .iter()
+                            .position(|(removed_index, _)| *removed_index == old_index)
+                            .expect("an old page not retained was removed"),
+                    ),
+                })
+                .collect();
+            self.held_flight = Some(HeldFlight {
+                held: removed.into_iter().map(|(_, entry)| entry).collect(),
+                backdrop,
+                leaving_index: retained_at.last().copied().flatten(),
+            });
+            self.stage_transition(new_top_spec, false, stashed, from_depth);
+        } else {
+            if may_fly && !new_top_fresh && old_top_removed {
+                let spec = removed[0].1.transition;
+                if spec.is_animated() {
+                    let leaving = removed.remove(0).1;
+                    self.stage_transition(spec, true, Some(leaving), from_depth);
+                }
+            }
+            for (_, mut entry) in removed {
+                crate::authoring::teardown_child(&entry.view, &mut entry.pod, ctx);
+            }
+        }
+        ChangeFlags::LAYOUT | ChangeFlags::PAINT
+    }
+
     /// Drain and apply the controller's queued ops (structural changes only),
     /// building/tearing down pods through `ctx`. Returns the accumulated dirtiness.
-    fn apply_ops(&mut self, ops: Vec<NavOp<State>>, ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+    fn apply_ops(
+        &mut self,
+        ops: Vec<NavOp<State>>,
+        pass: OpsPass,
+        ctx: &mut BuildCtx<'_>,
+    ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
         for op in ops {
             match op {
@@ -1322,6 +1606,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     pop_swipe,
                     barrier,
                     barrier_dismissible,
+                    key,
                 } => {
                     let spec = self.effective_spec(transition);
                     // A push severs nothing, but it does *cover* the current top
@@ -1369,6 +1654,7 @@ impl<State: 'static> NavigatorWidget<State> {
                         boundary: RetainedBoundary::new(),
                         barrier,
                         barrier_dismissible,
+                        key,
                     });
                     // Full gate (`top_pod_focused`): the covered page's own link
                     // ANDed with the rebuild-pass chain down to this navigator.
@@ -1395,6 +1681,7 @@ impl<State: 'static> NavigatorWidget<State> {
                     opaque,
                     transition,
                     route,
+                    key,
                 } => {
                     let spec = self.effective_spec(transition);
                     // The replaced top is the outgoing pod; read its link before
@@ -1443,6 +1730,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             // a pushed modal's, and replace has no options for it.
                             barrier: None,
                             barrier_dismissible: false,
+                            key,
                         };
                         if spec.is_animated() {
                             // Stash the old top and animate the new one in over it
@@ -1474,6 +1762,7 @@ impl<State: 'static> NavigatorWidget<State> {
                             boundary: RetainedBoundary::new(),
                             barrier: None,
                             barrier_dismissible: false,
+                            key,
                         });
                     }
                     // Full gate (`top_pod_focused`): the replaced page's own link
@@ -1482,6 +1771,9 @@ impl<State: 'static> NavigatorWidget<State> {
                         self.needs_ime_clear = true;
                     }
                     flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+                }
+                NavOp::SetPages { pages } => {
+                    flags |= self.apply_set_pages(pages, pass, ctx);
                 }
             }
         }
@@ -1492,9 +1784,20 @@ impl<State: 'static> NavigatorWidget<State> {
         flags
     }
 
-    /// Lay out the two pages a transition involves (entering = top of stack,
-    /// leaving = the retained page or the page below), returning the union size.
-    /// Origins are reset to `ZERO`; paint applies the animated offset per frame.
+    /// The stack index of an in-flight transition's leaving page when it was not
+    /// stashed: the old top a [`NavOp::SetPages`] push retained, otherwise the page
+    /// below the new top.
+    fn stack_leaving_index(&self) -> Option<usize> {
+        let retained_old_top = self.held_flight.as_ref().and_then(|f| f.leaving_index);
+        let n = self.pages.len();
+        retained_old_top.or((n >= 2).then(|| n - 2))
+    }
+
+    /// Lay out the pages a transition involves (entering = top of stack, leaving =
+    /// the retained page or the page below, and any [`HeldFlight::backdrop`] page),
+    /// returning the union size. A held page outside the backdrop was covered and
+    /// stays so. Origins are reset to `ZERO`; paint applies the animated offset per
+    /// frame.
     fn layout_transition(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let mut size = Size::ZERO;
         if let Some(entry) = self.pages.last_mut() {
@@ -1516,11 +1819,16 @@ impl<State: 'static> NavigatorWidget<State> {
                 stashed.pod.set_origin(Point::ZERO);
                 size = Size::new(size.width.max(child.width), size.height.max(child.height));
             }
-        } else {
-            let n = self.pages.len();
-            if n >= 2 {
-                let child = self.pages[n - 2].pod.layout_child(ctx, bc);
-                self.pages[n - 2].pod.set_origin(Point::ZERO);
+        } else if let Some(index) = self.stack_leaving_index() {
+            let child = self.pages[index].pod.layout_child(ctx, bc);
+            self.pages[index].pod.set_origin(Point::ZERO);
+            size = Size::new(size.width.max(child.width), size.height.max(child.height));
+        }
+        if let Some(flight) = self.held_flight.as_mut() {
+            for slot in &flight.backdrop {
+                let entry = backdrop_entry(*slot, &mut flight.held, &mut self.pages);
+                let child = entry.pod.layout_child(ctx, bc);
+                entry.pod.set_origin(Point::ZERO);
                 size = Size::new(size.width.max(child.width), size.height.max(child.height));
             }
         }
@@ -1610,6 +1918,15 @@ impl<State: 'static> NavigatorWidget<State> {
         // Clip every offset page to the navigator's own area — content that slides
         // off-screen must not bleed past the navigator (relevant when nested).
         scene.push_clip(nav_origin, area);
+        // A `SetPages` push's backdrop paints first and at rest: it is whatever the
+        // leaving page was over, and moves with neither layer.
+        if let Some(flight) = self.held_flight.as_mut() {
+            for slot in &flight.backdrop {
+                let entry = backdrop_entry(*slot, &mut flight.held, &mut self.pages);
+                paint_barrier(ctx, scene, entry.barrier.map(|color| (color, 1.0)));
+                entry.boundary.paint_plain(&mut entry.pod, ctx, scene);
+            }
+        }
         // Paint order: a push paints leaving (below) then entering (on top); a pop
         // paints entering (revealed, below) then leaving (popped, on top). Each
         // page paints with a hero reporter installed so its tagged descendants
@@ -1699,10 +2016,8 @@ impl<State: 'static> NavigatorWidget<State> {
                 .and_then(|page| page.barrier)
                 .map(|color| (color, 1.0 - pc))
         } else {
-            let n = self.pages.len();
-            (n >= 2)
-                .then(|| self.pages[n - 2].barrier)
-                .flatten()
+            self.stack_leaving_index()
+                .and_then(|index| self.pages[index].barrier)
                 .map(|color| (color, 1.0))
         };
         (entering, leaving)
@@ -1822,24 +2137,21 @@ impl<State: 'static> NavigatorWidget<State> {
                 );
             }
             HashMap::new()
+        } else if let Some(index) = self.stack_leaving_index() {
+            let entry = &mut self.pages[index];
+            paint_page_heroes(
+                &mut entry.pod,
+                &mut entry.boundary,
+                ctx,
+                scene,
+                layer,
+                area,
+                reference,
+                directives,
+                eligible,
+            )
         } else {
-            let n = self.pages.len();
-            if n >= 2 {
-                let entry = &mut self.pages[n - 2];
-                paint_page_heroes(
-                    &mut entry.pod,
-                    &mut entry.boundary,
-                    ctx,
-                    scene,
-                    layer,
-                    area,
-                    reference,
-                    directives,
-                    eligible,
-                )
-            } else {
-                HashMap::new()
-            }
+            HashMap::new()
         }
     }
 
@@ -2034,11 +2346,14 @@ impl<State: 'static> View<State> for NavigatorView<State> {
                 // The root page is never a modal: no barrier.
                 barrier: None,
                 barrier_dismissible: false,
+                // Unkeyed: a `SetPages` always replaces the root page.
+                key: None,
             }],
             pending_results: Vec::new(),
             needs_ime_clear: false,
             default_transition: self.default_transition,
             transition: None,
+            held_flight: None,
             pop_swipe_enabled: self.resolve_pop_swipe(),
             edge: EdgeSwipe::new(),
             last_input_time: FrameTime::ZERO,
@@ -2056,7 +2371,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         // Apply any ops the app queued before the first frame.
         let ops = self.controller.drain();
         if !ops.is_empty() {
-            widget.apply_ops(ops, ctx);
+            widget.apply_ops(ops, OpsPass::FirstBuild, ctx);
         }
         // Publish the initial (post-any-queued-ops) depth + back-interest so
         // `can_pop`/`back_interest` are authoritative from the first frame, even
@@ -2158,7 +2473,7 @@ impl<State: 'static> View<State> for NavigatorView<State> {
         // 1. Structural ops (view-driven): push/pop/replace the retained stack.
         let ops = self.controller.drain();
         if !ops.is_empty() {
-            flags |= element.apply_ops(ops, ctx);
+            flags |= element.apply_ops(ops, OpsPass::Rebuild, ctx);
         }
         // 1a. A barrier tap the event pass completed: dismiss through the top
         //     page's `BackPolicy`. After the ops, so a queued op that already
@@ -2414,8 +2729,8 @@ impl<State: 'static> Widget for NavigatorWidget<State> {
 
     // Every RETAINED page, not just the ones input or semantics reach:
     // an inspector's job is to show what the tree holds, including a
-    // covered page and the stashed page of a running transition.
-    crate::authoring::visit_children!(pages, transition);
+    // covered page and the stashed or held pages of a running transition.
+    crate::authoring::visit_children!(pages, transition, held_flight);
 
     /// The Current page only: a `Visible` page paints but takes no input, and a
     /// `Covered` one neither (R23), so Tab traversal never stops on either.
