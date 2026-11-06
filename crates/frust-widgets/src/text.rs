@@ -1516,17 +1516,6 @@ mod tests {
         fn logic(_state: &mut ()) -> TextView {
             text("label").themed_family(ThemeTextType::BodyLarge)
         }
-        #[derive(Default)]
-        struct FaceRecorder {
-            faces: Vec<Vec<u8>>,
-        }
-        impl PaintScene for FaceRecorder {
-            fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
-            fn draw_text(&mut self, _o: Point, _t: &str) {}
-            fn draw_glyph_run(&mut self, run: GlyphRun) {
-                self.faces.push(run.font.font().data.as_ref().to_vec());
-            }
-        }
         let paint_faces = |root: &mut RenderRoot<(), TextView>, tcx: &mut TextContext| {
             root.layout_with_text(Size::new(200.0, 100.0), tcx as &mut dyn Any);
             let mut rec = FaceRecorder::default();
@@ -1547,6 +1536,63 @@ mod tests {
             !after.is_empty() && after.iter().all(|f| f == TUFFY),
             "a bare type-scale family swap must re-shape the opted-in text in the \
              new family"
+        );
+    }
+
+    /// Records the font bytes of every painted glyph run, in paint order.
+    #[derive(Default)]
+    struct FaceRecorder {
+        faces: Vec<Vec<u8>>,
+    }
+
+    impl PaintScene for FaceRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: GlyphRun) {
+            self.faces.push(run.font.font().data.as_ref().to_vec());
+        }
+    }
+
+    #[test]
+    fn a_monospace_only_theme_swap_re_faces_the_text() {
+        // Two themes identical except for the `MonospaceFamily` value. The
+        // extension set is the same type either way, so only the effective
+        // style can tell them apart: the text must re-shape in the new family.
+        use frust_core::{FrameTime, RenderRoot};
+
+        fn logic(_state: &mut ()) -> TextView {
+            text("0123456789").themed_mono_family()
+        }
+        let with_mono = |family: &str| {
+            Theme::builder(Theme::neutral())
+                .extension(frust_theme::MonospaceFamily {
+                    family: FontFamily::named(family),
+                })
+                .build()
+        };
+        let paint_faces = |root: &mut RenderRoot<(), TextView>, tcx: &mut TextContext| {
+            root.layout_with_text(Size::new(200.0, 100.0), tcx as &mut dyn Any);
+            let mut rec = FaceRecorder::default();
+            root.paint(&mut rec, FrameTime::ZERO);
+            rec.faces
+        };
+
+        let (mut tcx, _slot) = tuffy_context();
+        let mut root: RenderRoot<(), TextView> = RenderRoot::new();
+        root.set_theme(Box::new(with_mono("Tuffy")));
+        root.rebuild(&mut logic, &mut ());
+        let before = paint_faces(&mut root, &mut tcx);
+        assert!(
+            !before.is_empty() && before.iter().all(|f| f == TUFFY),
+            "before the monospace-only swap the text shapes in the theme's mono face"
+        );
+
+        root.set_theme(Box::new(with_mono(UNREGISTERED)));
+        let after = paint_faces(&mut root, &mut tcx);
+        assert!(
+            !after.is_empty() && after.iter().all(|f| f != TUFFY),
+            "a monospace-only swap must re-shape the text in the new mono family, \
+             not replay the cached face"
         );
     }
 
