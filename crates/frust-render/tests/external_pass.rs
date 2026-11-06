@@ -26,18 +26,24 @@
 //! The drain is driven directly rather than through `SurfaceRenderer::submit`
 //! because `submit` needs a swapchain and so a window; what is driven is the
 //! identical function that arm calls, in the identical position — before the
-//! scene is encoded, into the encoder the scene is then encoded into.
+//! scene is encoded, into the encoder the scene is then encoded into — with an
+//! `ExternalPassDrain` built beside each engine exactly as the renderer builds
+//! one beside each surface's. Two engines on one device stand in for two
+//! engine-tier surfaces: each must unbind its own view once a pass goes away,
+//! and two render threads draining at once must never run one registration's
+//! `record` concurrently.
 
 #![cfg(not(target_arch = "wasm32"))]
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
+use std::time::Duration;
 
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, SceneTextureId, TierCaps};
 use frust_render::{
-    ExternalFrame, ExternalPass, GOLDEN_EXPECT_ADAPTER_ENV_VAR, register_external_pass,
-    unregister_external_pass,
+    ExternalFrame, ExternalPass, ExternalPassDrain, GOLDEN_EXPECT_ADAPTER_ENV_VAR, RenderContext,
+    register_external_pass, unregister_external_pass,
 };
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
@@ -389,7 +395,13 @@ fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Opt
 struct Harness {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    caps: TierCaps,
+    /// The generation drawn for `device` — what a shell's
+    /// `DeviceHandle::generation` would report for it.
+    generation: u64,
     engine: EngineRenderer,
+    /// The external-pass drain beside `engine`, as a surface builds one.
+    drain: ExternalPassDrain,
     target: HeadlessTarget,
 }
 
@@ -434,13 +446,27 @@ impl Harness {
         let target = HeadlessTarget::new(&device, SIZE, SIZE, FORMAT);
         let engine = EngineRenderer::new(&device, &caps, FORMAT, None)
             .expect("the engine builds on this device");
+        let generation = frust_gpu::next_device_generation();
 
         Self {
             device,
             queue,
+            caps,
+            generation,
             engine,
+            drain: ExternalPassDrain::new(generation),
             target,
         }
+    }
+
+    /// A second engine on this harness's device, with a drain of its own —
+    /// what a second engine-tier surface on the same device holds.
+    fn second_engine(&self) -> (EngineRenderer, ExternalPassDrain) {
+        (
+            EngineRenderer::new(&self.device, &self.caps, FORMAT, None)
+                .expect("a second engine builds on this device"),
+            ExternalPassDrain::new(self.generation),
+        )
     }
 
     /// One whole frame, in the order `SurfaceRenderer::submit` records it:
@@ -458,6 +484,7 @@ impl Harness {
             &self.queue,
             &mut encoder,
             &mut self.engine,
+            &mut self.drain,
         );
         self.engine
             .encode(
@@ -584,9 +611,10 @@ fn a_registered_pass_renders_a_texture_the_scene_composites_and_unregistering_st
         "the pass's binding is live for as long as the pass is registered"
     );
 
-    // Unregistering queues the unbind; the next frame's drain performs it
-    // before any pass runs, and the same scene then names an id nothing is
-    // bound under — the display list's documented draw-nothing case.
+    // Unregistering leaves the binding for the drain: the next frame's drain
+    // reconciles and clears it before any pass runs, and the same scene then
+    // names an id nothing is bound under — the display list's documented
+    // draw-nothing case.
     assert!(unregister_external_pass(id));
     let _ = take_log();
     let after = harness.frame(&scene);
@@ -681,9 +709,8 @@ fn a_panicking_pass_is_retired_without_taking_the_frame_or_its_siblings_down() {
     );
 
     assert!(unregister_external_pass(solid));
-    // Leave the registry as this case found it: the queued unbinds are the
-    // next drain's work, and this harness is the only thing that would run
-    // one.
+    // Leave the engine as this case found it: clearing the survivor's
+    // binding is the next drain's work.
     let _ = harness.frame(&Scene::new());
 }
 
@@ -744,4 +771,223 @@ fn a_pass_panicking_with_its_own_render_pass_open_still_lets_the_frame_submit() 
 
     assert!(unregister_external_pass(solid));
     let _ = harness.frame(&Scene::new());
+}
+
+/// One drain of the external passes alone, into an encoder of its own, then
+/// one submit — the pre-scene half of a frame, which is all the binding
+/// bookkeeping these cases inspect.
+fn drain_once(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    engine: &mut EngineRenderer,
+    drain: &mut ExternalPassDrain,
+) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("frust-render external pass drain"),
+    });
+    frust_render::external_pass::run_external_passes(device, queue, &mut encoder, engine, drain);
+    queue.submit([encoder.finish()]);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test external_pass -- --ignored`"]
+fn two_engines_each_unbind_after_unregister() {
+    let _serial = serial();
+    let mut harness = Harness::new();
+    let (mut second, mut second_drain) = harness.second_engine();
+    let id = SceneTextureId::mint();
+    let pass = Arc::new(SolidPass::new(id, GREEN));
+    assert!(register_external_pass(
+        id,
+        Arc::clone(&pass) as Arc<dyn ExternalPass>
+    ));
+
+    drain_once(
+        &harness.device,
+        &harness.queue,
+        &mut harness.engine,
+        &mut harness.drain,
+    );
+    drain_once(
+        &harness.device,
+        &harness.queue,
+        &mut second,
+        &mut second_drain,
+    );
+    assert!(
+        harness.engine.bound_texture(id).is_some() && second.bound_texture(id).is_some(),
+        "one registration records into, and binds into, every engine that drains"
+    );
+
+    assert!(unregister_external_pass(id));
+    drain_once(
+        &harness.device,
+        &harness.queue,
+        &mut harness.engine,
+        &mut harness.drain,
+    );
+    drain_once(
+        &harness.device,
+        &harness.queue,
+        &mut second,
+        &mut second_drain,
+    );
+    assert!(
+        harness.engine.bound_texture(id).is_none(),
+        "the first engine to drain after the unregister cleared its own view"
+    );
+    assert!(
+        second.bound_texture(id).is_none(),
+        "the second engine cleared its own view too, rather than keeping a stale one forever"
+    );
+    let _ = harness.device.poll(wgpu::PollType::wait_indefinitely());
+}
+
+/// A pass that fails if it ever observes another call of its own `record` in
+/// flight, holding each call open long enough for an overlap to show.
+#[derive(Default)]
+struct GuardedPass {
+    in_flight: AtomicBool,
+    overlapped: AtomicBool,
+    records: AtomicUsize,
+}
+
+impl ExternalPass for GuardedPass {
+    fn record(&self, _frame: &mut ExternalFrame<'_>) {
+        if self.in_flight.swap(true, Ordering::SeqCst) {
+            self.overlapped.store(true, Ordering::SeqCst);
+        }
+        std::thread::sleep(Duration::from_micros(100));
+        self.in_flight.store(false, Ordering::SeqCst);
+        self.records.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test external_pass -- --ignored`"]
+fn record_is_never_concurrent_for_one_registration() {
+    /// Drains per render thread.
+    const DRAINS: usize = 200;
+
+    let _serial = serial();
+    let harness = Harness::new();
+    let id = SceneTextureId::mint();
+    let pass = Arc::new(GuardedPass::default());
+    assert!(register_external_pass(
+        id,
+        Arc::clone(&pass) as Arc<dyn ExternalPass>
+    ));
+
+    // Two render threads, each with its own engine and drain on the one
+    // device — two engine-tier surfaces presenting at once.
+    let (device, queue, caps, generation) = (
+        &harness.device,
+        &harness.queue,
+        &harness.caps,
+        harness.generation,
+    );
+    std::thread::scope(|scope| {
+        for _ in 0..2 {
+            scope.spawn(move || {
+                let mut engine = EngineRenderer::new(device, caps, FORMAT, None)
+                    .expect("a render thread's engine builds");
+                let mut drain = ExternalPassDrain::new(generation);
+                for _ in 0..DRAINS {
+                    drain_once(device, queue, &mut engine, &mut drain);
+                }
+            });
+        }
+    });
+
+    assert!(unregister_external_pass(id));
+    let _ = harness.device.poll(wgpu::PollType::wait_indefinitely());
+    assert!(
+        !pass.overlapped.load(Ordering::SeqCst),
+        "two drains ran the same registration's record concurrently"
+    );
+    assert_eq!(
+        pass.records.load(Ordering::SeqCst),
+        2 * DRAINS,
+        "every drain on both threads ran the pass once"
+    );
+}
+
+/// A pass recording which drain and device generation each call saw.
+#[derive(Default)]
+struct StampPass {
+    seen: Mutex<Vec<(u64, u64)>>,
+}
+
+impl ExternalPass for StampPass {
+    fn record(&self, frame: &mut ExternalFrame<'_>) {
+        self.seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((frame.drain_id(), frame.device_generation()));
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test external_pass -- --ignored`"]
+fn drain_ids_differ_and_generation_matches_the_device() {
+    let _serial = serial();
+    // A device built the way a shell builds its own, so the generation it
+    // carries is a real `DeviceHandle::generation` rather than one drawn by
+    // hand.
+    let mut context = RenderContext::new();
+    block_on(context.ensure_device_headless()).expect("a headless device");
+    let handle = context.device_handle().clone();
+    if let Ok(expected) = std::env::var(GOLDEN_EXPECT_ADAPTER_ENV_VAR) {
+        let expected = expected.trim();
+        let name = handle.adapter.get_info().name;
+        assert!(
+            expected.is_empty() || name.to_lowercase().contains(&expected.to_lowercase()),
+            "{GOLDEN_EXPECT_ADAPTER_ENV_VAR}={expected:?} but the run resolved {name:?}"
+        );
+    }
+    let generation = handle.generation();
+    let engine = || {
+        EngineRenderer::new(&handle.device, &handle.caps, FORMAT, None)
+            .expect("the engine builds on the shell-style device")
+    };
+    let (mut first, mut second) = (engine(), engine());
+    let mut first_drain = ExternalPassDrain::new(generation);
+    let mut second_drain = ExternalPassDrain::new(generation);
+    assert_ne!(
+        first_drain.drain_id(),
+        second_drain.drain_id(),
+        "two surface engines are told apart"
+    );
+
+    let id = SceneTextureId::mint();
+    let pass = Arc::new(StampPass::default());
+    assert!(register_external_pass(
+        id,
+        Arc::clone(&pass) as Arc<dyn ExternalPass>
+    ));
+    drain_once(&handle.device, &handle.queue, &mut first, &mut first_drain);
+    drain_once(
+        &handle.device,
+        &handle.queue,
+        &mut second,
+        &mut second_drain,
+    );
+    drain_once(&handle.device, &handle.queue, &mut first, &mut first_drain);
+    assert!(unregister_external_pass(id));
+    let _ = handle.device.poll(wgpu::PollType::wait_indefinitely());
+
+    let seen = pass
+        .seen
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert_eq!(
+        seen,
+        [
+            (first_drain.drain_id(), generation),
+            (second_drain.drain_id(), generation),
+            (first_drain.drain_id(), generation),
+        ],
+        "each frame reports its own engine's stable drain id and its device's generation"
+    );
 }

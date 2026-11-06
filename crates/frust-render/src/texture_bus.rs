@@ -144,7 +144,10 @@
 //! and web shells alike, and nowhere a surface is not presenting. A shell that
 //! rebuilds its engine on the same device (a fresh surface) gets the current
 //! view bound again on its first frame; a *device* change drops what was
-//! shown until the source yields its next frame.
+//! shown until the source yields its next frame. With two engine-tier
+//! surfaces live at once, each binds the shown view into its own engine, and
+//! each clears its own binding on its next frame once the registration is
+//! dropped.
 //!
 //! # Waking the shell
 //!
@@ -745,8 +748,11 @@ type FrameSource = Box<dyn FnMut() -> Option<SourceFrame> + Send>;
 
 /// One registration's pass.
 struct SourcePass {
-    /// Serializes `record`: a pass may be called concurrently by two
-    /// engine-tier surfaces, and the source is `FnMut`.
+    /// The pass's cross-frame state behind the interior mutability `record`'s
+    /// `&self` needs (the source is `FnMut`). The drain already never runs
+    /// one registration's `record` concurrently, so this lock is never
+    /// contended between two surfaces; it is what makes the state reachable
+    /// from `&self` at all.
     state: Mutex<PassState>,
     status: Arc<Status>,
 }
