@@ -28,8 +28,7 @@
 //! column names the flag that turns it on. `cargo run -p beui-demo --features
 //! gpu-effects` compiles the five opt-ins in; whether a pane then actually
 //! *renders* 3D still depends on [`GpuFx::availability`] — a device exists
-//! only once a desktop shell has opened its first surface
-//! (`docs/LIMITATIONS.md`'s `facade-gpu-context-desktop-only`), and
+//! only once the desktop shell has opened its first surface, and
 //! `FRUST_BEUI_NO_GPU_FX=1` turns the whole path off regardless of the
 //! build. Every component already carries that degrade in its own contract,
 //! so the "3D" pane below is always the real component call — it simply
