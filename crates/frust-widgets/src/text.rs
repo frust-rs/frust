@@ -180,6 +180,15 @@ impl ThemeTextType {
     }
 }
 
+/// Where an opted-in themed family resolves from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FamilySource {
+    /// The family of a type-scale slot ([`TextView::themed_family`]).
+    Role(ThemeTextType),
+    /// The theme's monospace family ([`TextView::themed_mono_family`]).
+    Monospace,
+}
+
 /// A declarative description of a run of text.
 ///
 /// Content does not read application state in v0 — the build closure interpolates the
@@ -206,11 +215,12 @@ pub struct TextView {
     /// The themed default color role used when `color_explicit` is `false`.
     role: ThemeTextColor,
     /// Whether the app set the font family explicitly (via
-    /// `.family()`/`.style()`). When `true`, `family_role` is never consulted.
+    /// `.family()`/`.style()`). When `true`, `family_source` is never consulted.
     family_explicit: bool,
-    /// The type-scale role the family resolves from at layout, set via
-    /// [`Self::themed_family`]. `None` (default) keeps the style's own family.
-    family_role: Option<ThemeTextType>,
+    /// Where the family resolves from at layout, set via
+    /// [`Self::themed_family`] or [`Self::themed_mono_family`]. `None`
+    /// (default) keeps the style's own family.
+    family_source: Option<FamilySource>,
     /// The maximum number of lines to render, set via [`Self::max_lines`].
     /// `None` (default) is unbounded — today's behavior.
     max_lines: Option<usize>,
@@ -230,7 +240,7 @@ pub fn text(content: impl Into<String>) -> TextView {
         color_explicit: false,
         role: ThemeTextColor::OnSurface,
         family_explicit: false,
-        family_role: None,
+        family_source: None,
         max_lines: None,
         overflow: TextOverflow::default(),
     }
@@ -409,7 +419,23 @@ impl TextView {
     /// Part of the widget-authoring toolkit (see [`crate::authoring`]),
     /// alongside [`Self::themed_role`].
     pub fn themed_family(mut self, role: ThemeTextType) -> Self {
-        self.family_role = Some(role);
+        self.family_source = Some(FamilySource::Role(role));
+        self
+    }
+
+    /// Resolve the font family from the active theme's monospace family
+    /// ([`Theme::monospace_family`]) at layout — the family only; size,
+    /// weight, line height and tracking stay as this view sets them.
+    ///
+    /// Opt-in, with the same precedence as [`Self::themed_family`]: an
+    /// explicit [`Self::family`]/[`Self::style`] wins regardless of call
+    /// order, and with no theme threaded in the style's own family is used
+    /// unchanged. A theme that attaches no `MonospaceFamily` resolves to the
+    /// generic monospace family.
+    ///
+    /// Part of the widget-authoring toolkit (see [`crate::authoring`]).
+    pub fn themed_mono_family(mut self) -> Self {
+        self.family_source = Some(FamilySource::Monospace);
         self
     }
 }
@@ -424,7 +450,7 @@ impl<State: 'static> View<State> for TextView {
             color_explicit: self.color_explicit,
             role: self.role,
             family_explicit: self.family_explicit,
-            family_role: self.family_role,
+            family_source: self.family_source,
             max_lines: self.max_lines,
             overflow: self.overflow,
             layout: None,
@@ -461,9 +487,10 @@ impl<State: 'static> View<State> for TextView {
         }
         // The themed family is resolved at layout and shaped with, exactly like
         // the themed color above — a role change must reshape.
-        if prev.family_explicit != self.family_explicit || prev.family_role != self.family_role {
+        if prev.family_explicit != self.family_explicit || prev.family_source != self.family_source
+        {
             element.family_explicit = self.family_explicit;
-            element.family_role = self.family_role;
+            element.family_source = self.family_source;
             element.layout = None;
             flags |= ChangeFlags::LAYOUT;
         }
@@ -491,9 +518,9 @@ pub struct TextWidget {
     role: ThemeTextColor,
     /// Whether the app set the font family explicitly — see [`TextView`].
     family_explicit: bool,
-    /// The type-scale role the family resolves from when `family_explicit`
-    /// is `false` — see [`TextView::themed_family`].
-    family_role: Option<ThemeTextType>,
+    /// Where the family resolves from when `family_explicit` is `false` —
+    /// see [`TextView::themed_family`] and [`TextView::themed_mono_family`].
+    family_source: Option<FamilySource>,
     /// The maximum rendered line count — see [`TextView::max_lines`].
     max_lines: Option<usize>,
     /// How content past `max_lines` is handled — see [`TextView::overflow`].
@@ -545,9 +572,12 @@ impl TextWidget {
             };
         }
         if !self.family_explicit
-            && let Some(role) = self.family_role
+            && let Some(source) = self.family_source
         {
-            style.family = role.style_in(&theme.type_scale).family.clone();
+            style.family = match source {
+                FamilySource::Role(role) => role.style_in(&theme.type_scale).family.clone(),
+                FamilySource::Monospace => theme.monospace_family(),
+            };
         }
         style
     }
@@ -1397,6 +1427,48 @@ mod tests {
                 .collect()
         };
         assert_eq!(faces(&opted_in), faces(&never));
+    }
+
+    #[test]
+    fn themed_mono_family_resolves_extension_generic_fallback_or_style_family() {
+        let build =
+            |view: TextView| View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mono = FontFamily::named("Acme Mono");
+        let attached = Theme::builder(Theme::neutral())
+            .extension(frust_theme::MonospaceFamily {
+                family: mono.clone(),
+            })
+            .build();
+        let bare = Theme::neutral();
+        let generic = FontFamily::NamedWithGeneric(vec![frust_text::FamilyName::Generic(
+            frust_text::GenericSlot::Monospace,
+        )]);
+
+        let widget = build(text("1").themed_mono_family());
+        assert_eq!(widget.effective_style(Some(&attached)).family, mono);
+        assert_eq!(widget.effective_style(Some(&bare)).family, generic);
+        assert_eq!(widget.effective_style(None).family, FontFamily::SystemUi);
+
+        // An explicit family wins in either call order.
+        let explicit = FontFamily::named("Explicit");
+        let a = build(text("1").themed_mono_family().family(explicit.clone()));
+        let b = build(text("1").family(explicit.clone()).themed_mono_family());
+        assert_eq!(a.effective_style(Some(&attached)).family, explicit);
+        assert_eq!(b.effective_style(Some(&attached)).family, explicit);
+    }
+
+    #[test]
+    fn switching_between_role_and_mono_family_on_rebuild_requests_layout() {
+        let view_a = text("1").themed_family(ThemeTextType::BodyLarge);
+        let view_b = text("1").themed_mono_family();
+        let mut widget = View::<()>::build(&view_a, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let flags = View::<()>::rebuild(
+            &view_b,
+            &view_a,
+            &mut widget,
+            &mut frust_core::BuildCtx::new(&mut 0u64),
+        );
+        assert!(flags.needs_layout());
     }
 
     #[test]

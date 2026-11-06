@@ -60,7 +60,9 @@
 //! (0.5px baseline → 0.15px emphasized, matching the source's
 //! `BodyLargeEmphasizedTracking`).
 
-use frust_text::{FontFamily, FontWeight, GenericSlot, LineHeight, TextStyle};
+use frust_text::{FamilyName, FontFamily, FontWeight, GenericSlot, LineHeight, TextStyle};
+
+use crate::theme::Theme;
 
 /// The 15 named type-scale presets, each a full [`TextStyle`], plus 15
 /// `_emphasized` siblings (see the module docs' "Emphasized type scale"
@@ -375,5 +377,55 @@ mod tests {
         let scale = TypeScale::neutral(&base);
         assert_ne!(scale.body_large.family, base.family);
         assert_eq!(scale.body_large.color, base.color);
+    }
+}
+
+/// The monospace family a design system attaches as a
+/// [`crate::extensions::ThemeExtensions`] payload, for code and numeric text.
+///
+/// It lives beside [`TypeScale`] rather than inside it: the 30 type-scale
+/// slots stay a pure size/weight ladder. Read it with
+/// [`Theme::monospace_family`], which falls back to the generic monospace
+/// family when nothing is attached. Note that extension equality compares the
+/// set of attached types, not their values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MonospaceFamily {
+    /// The family code and numeric text shapes with.
+    pub family: FontFamily,
+}
+
+impl Theme {
+    /// The theme's monospace family: the attached [`MonospaceFamily`], else
+    /// the generic monospace family.
+    pub fn monospace_family(&self) -> FontFamily {
+        self.extension::<MonospaceFamily>()
+            .map(|m| m.family.clone())
+            .unwrap_or_else(|| {
+                FontFamily::NamedWithGeneric(vec![FamilyName::Generic(GenericSlot::Monospace)])
+            })
+    }
+}
+
+#[cfg(test)]
+mod monospace_family_tests {
+    use super::*;
+
+    #[test]
+    fn returns_the_attached_family() {
+        let family = FontFamily::named("Acme Mono");
+        let theme = Theme::builder(Theme::neutral())
+            .extension(MonospaceFamily {
+                family: family.clone(),
+            })
+            .build();
+        assert_eq!(theme.monospace_family(), family);
+    }
+
+    #[test]
+    fn falls_back_to_generic_monospace_when_unattached() {
+        assert_eq!(
+            Theme::neutral().monospace_family(),
+            FontFamily::NamedWithGeneric(vec![FamilyName::Generic(GenericSlot::Monospace)])
+        );
     }
 }

@@ -4,8 +4,8 @@
 //! [`GlyphInk`], and the [`NativeTypefaces`] binding for native controls).
 
 use frust::{
-    Brightness, DesignLanguage, FontFace, NativeTypefaces, Theme, ThemeExtensions,
-    authoring::text::TextStyle,
+    Brightness, DesignLanguage, FontFace, MonospaceFamily, NativeTypefaces, Theme, ThemeExtensions,
+    authoring::text::{FontFamily, GenericSlot, TextStyle},
 };
 
 use super::color::{self, GlyphInk};
@@ -42,6 +42,7 @@ pub fn baseline() -> Theme {
     extensions.insert(color::status());
     extensions.insert(GlyphInk::default_ink());
     extensions.insert(native_typefaces());
+    extensions.insert(monospace_family());
     Theme {
         light: color::light(),
         dark: color::dark(),
@@ -53,6 +54,15 @@ pub fn baseline() -> Theme {
         brightness: Brightness::Dark,
         design_language: DesignLanguage::Glyph,
         extensions,
+    }
+}
+
+/// The monospace family [`baseline`] attaches: IBM Plex Mono, then the
+/// platform's generic monospace — the same stack Glyph's own inline text
+/// names.
+pub fn monospace_family() -> MonospaceFamily {
+    MonospaceFamily {
+        family: FontFamily::stack_with_generic([IBM_PLEX_MONO_FAMILY], GenericSlot::Monospace),
     }
 }
 
@@ -122,6 +132,18 @@ mod tests {
         let t = baseline();
         assert_eq!(t.extension::<StatusPalette>(), Some(&color::status()));
         assert_eq!(t.extension::<GlyphInk>(), Some(&GlyphInk::default_ink()));
+    }
+
+    #[test]
+    fn glyph_baseline_exposes_the_plex_mono_stack() {
+        assert_eq!(
+            baseline().monospace_family(),
+            FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace)
+        );
+        assert_eq!(
+            baseline().extension::<MonospaceFamily>(),
+            Some(&monospace_family())
+        );
     }
 
     #[test]
