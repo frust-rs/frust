@@ -315,6 +315,18 @@ open class FrustActivity : ComponentActivity() {
         surfaceView.onStart()
     }
 
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        surfaceView.onTrimMemory(level)
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onLowMemory() {
+        super.onLowMemory()
+        // TRIM_MEMORY_COMPLETE: the most severe level.
+        surfaceView.onTrimMemory(80)
+    }
+
     override fun onStop() {
         surfaceView.onStop()
         super.onStop()

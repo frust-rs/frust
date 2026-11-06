@@ -306,6 +306,14 @@ impl SplitExecutor {
         }
     }
 
+    /// Send a fire-and-forget [`RenderCommand::TrimMemory`]: the render thread
+    /// trims the renderer's caches on its next wakeup, whatever its phase.
+    pub(super) fn trim_memory(&mut self) {
+        if let Some(sender) = self.sender.as_ref() {
+            sender.send_command(RenderCommand::TrimMemory);
+        }
+    }
+
     /// Send a [`RenderCommand::SurfaceChanged`] (in-place resize), fire-and-forget.
     pub(super) fn resize(&mut self, size: SurfaceSize) {
         if let Some(sender) = self.sender.as_ref() {
@@ -357,6 +365,22 @@ impl Drop for SplitExecutor {
         self.sender.take();
         if let Some(join) = self.join.take() {
             let _ = join.join();
+        }
+    }
+}
+
+impl super::AndroidAppHandle {
+    /// Trim the renderer's caches on critical memory pressure (`onTrimMemory`):
+    /// inline trims the renderer directly and publishes the ledger its
+    /// evictions changed; the split sends a fire-and-forget
+    /// [`RenderCommand::TrimMemory`]. Neither submits GPU work.
+    pub(crate) fn trim_memory(&mut self) {
+        match &mut self.executor {
+            FrameExecutor::Inline(inline) => {
+                inline.renderer.trim_memory();
+                super::render::publish_ledger(&mut inline.renderer);
+            }
+            FrameExecutor::Split(split) => split.trim_memory(),
         }
     }
 }
