@@ -14,6 +14,24 @@
 //! faces store their strikes as `png ` records, which the engine decodes
 //! itself, so callers must reach this rasterizer only on iOS.
 //!
+//! # Font identity
+//!
+//! iOS font fallback can hand back a hidden, dot-prefixed face such as
+//! `.AppleColorEmojiUI`. CoreText's by-name lookup cannot open those; it
+//! silently returns a fallback text font, and glyph ids meant for the emoji
+//! face would then index into the wrong font. Every open therefore verifies
+//! identity before any glyph is drawn:
+//!
+//! 1. the opened font's PostScript name must equal the requested name (and
+//!    its glyph count the caller's `expected_glyphs`);
+//! 2. otherwise, for a dot-prefixed request, the public sibling is derived
+//!    (drop the leading `.` and a trailing `UI`: `.AppleColorEmojiUI` to
+//!    `AppleColorEmoji`) and accepted only when its PostScript name equals the
+//!    derived name and its glyph count equals the caller's `expected_glyphs`.
+//!    The system collection stores the two faces with shared `sbix`, `glyf`,
+//!    `cmap` and `maxp` tables, so a glyph id means the same image in both;
+//! 3. otherwise the open is refused and the glyph counts as skipped.
+//!
 //! # Placement convention
 //!
 //! A [`RasterGlyph`] is positioned relative to the pen at the baseline, in
@@ -54,9 +72,10 @@ pub(crate) struct RasterGlyph {
 }
 
 /// The glyph CoreText's character map gives `character` in the face named
-/// `postscript_name`; `None` when CoreText maps it to no glyph.
+/// `postscript_name`; `None` when CoreText maps it to no glyph or does not
+/// open that exact face (no sibling substitution here: see [`open`]).
 pub(crate) fn glyph_for_char(postscript_name: &str, character: char) -> Option<u16> {
-    let font = open(postscript_name, 16.0);
+    let font = open(postscript_name, 16.0, None)?;
     let mut units = [0_u16; 2];
     let encoded = character.encode_utf16(&mut units).len();
     let mut glyphs = [0_u16; 2];
@@ -71,8 +90,17 @@ pub(crate) fn glyph_for_char(postscript_name: &str, character: char) -> Option<u
     (mapped && glyphs[0] != 0).then_some(glyphs[0])
 }
 
+/// The glyph count of the face CoreText opens for exactly `postscript_name`;
+/// `None` when it does not open that face.
+pub(crate) fn glyph_count(postscript_name: &str) -> Option<u16> {
+    let font = open(postscript_name, 16.0, None)?;
+    // SAFETY: `font` is a live CTFont.
+    u16::try_from(unsafe { font.glyph_count() }).ok()
+}
+
 /// Draws `glyph` of the face named `postscript_name` at `ppem` pixels per em
-/// and returns its image, or `None` when the glyph has no ink, either
+/// and returns its image, or `None` when the face's identity cannot be
+/// verified against `expected_glyphs` (see the module docs), the glyph has no ink, either
 /// dimension of its bounds exceeds `max_dim` pixels, or CoreText cannot
 /// produce the bitmap. The pixmap is premultiplied RGBA8: the bitmap context
 /// is created `kCGImageAlphaPremultipliedLast` at the default byte order, so
@@ -83,13 +111,14 @@ pub(crate) fn glyph_for_char(postscript_name: &str, character: char) -> Option<u
 pub(crate) fn rasterize_glyph(
     postscript_name: &str,
     glyph: u16,
+    expected_glyphs: u16,
     ppem: u16,
     max_dim: u32,
 ) -> Option<RasterGlyph> {
     if ppem == 0 {
         return None;
     }
-    let font = open(postscript_name, f64::from(ppem));
+    let font = open(postscript_name, f64::from(ppem), Some(expected_glyphs))?;
     let mut glyph = glyph;
     // SAFETY: `glyph` is one valid `CGGlyph` and the count is 1; a null
     // `bounding_rects` asks for the overall box alone.
@@ -173,9 +202,47 @@ pub(crate) fn rasterize_glyph(
     })
 }
 
-/// The face CoreText resolves `name` to, at `size` points.
-fn open(name: &str, size: f64) -> objc2_core_foundation::CFRetained<CTFont> {
+/// The face CoreText resolves `name` to at `size` points, verified to be that
+/// face (module docs, "Font identity"). `expected_glyphs` enables the
+/// public-sibling route for a dot-prefixed `name` and is checked against the
+/// glyph count of whichever face opens; `None` accepts an exact name match
+/// with no count check.
+fn open(
+    name: &str,
+    size: f64,
+    expected_glyphs: Option<u16>,
+) -> Option<objc2_core_foundation::CFRetained<CTFont>> {
+    let font = open_named(name, size);
+    if postscript_name(&font) == name {
+        // SAFETY: `font` is a live CTFont.
+        let count = unsafe { font.glyph_count() };
+        return expected_glyphs
+            .is_none_or(|expected| u16::try_from(count) == Ok(expected))
+            .then_some(font);
+    }
+    let expected = expected_glyphs?;
+    let sibling = public_sibling(name)?;
+    let font = open_named(&sibling, size);
+    // SAFETY: `font` is a live CTFont.
+    let count = unsafe { font.glyph_count() };
+    (postscript_name(&font) == sibling && u16::try_from(count) == Ok(expected)).then_some(font)
+}
+
+/// `.AppleColorEmojiUI` to `AppleColorEmoji`: the hidden face's public name;
+/// `None` for a name that is not dot-prefixed or leaves nothing.
+fn public_sibling(name: &str) -> Option<String> {
+    let rest = name.strip_prefix('.')?;
+    let rest = rest.strip_suffix("UI").unwrap_or(rest);
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
+fn open_named(name: &str, size: f64) -> objc2_core_foundation::CFRetained<CTFont> {
     let name = CFString::from_str(name);
     // SAFETY: a null matrix is the documented "identity" argument.
     unsafe { CTFont::with_name(&name, size, core::ptr::null()) }
+}
+
+fn postscript_name(font: &CTFont) -> String {
+    // SAFETY: `font` is a live CTFont.
+    unsafe { font.post_script_name() }.to_string()
 }
