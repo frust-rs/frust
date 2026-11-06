@@ -1097,21 +1097,6 @@ impl FrameSyncLatch {
 mod tests {
     use super::*;
     use TrimPressure::{Critical, Moderate};
-
-    #[test]
-    fn trim_levels_map_to_pressure() {
-        assert_eq!(trim_level_to_pressure(5), Some(Moderate));
-        assert_eq!(trim_level_to_pressure(10), Some(Moderate));
-        assert_eq!(trim_level_to_pressure(15), Some(Critical));
-        assert_eq!(trim_level_to_pressure(20), None);
-        assert_eq!(trim_level_to_pressure(40), Some(Moderate));
-        assert_eq!(trim_level_to_pressure(60), Some(Moderate));
-        assert_eq!(trim_level_to_pressure(80), Some(Critical));
-        assert_eq!(trim_level_to_pressure(100), Some(Critical));
-        assert_eq!(trim_level_to_pressure(0), None);
-        assert_eq!(trim_level_to_pressure(7), None);
-        assert_eq!(trim_level_to_pressure(-1), None);
-    }
     use std::sync::atomic::AtomicBool;
 
     #[test]
@@ -2122,5 +2107,20 @@ mod tests {
             bits,
             FRAME_SYNC_IME_CHANGED | FRAME_SYNC_SYSTEM_UI_CHANGED | FRAME_SYNC_DARK_CHANGED
         );
+    }
+
+    #[test]
+    fn trim_levels_map_to_pressure() {
+        assert_eq!(trim_level_to_pressure(5), Some(Moderate));
+        assert_eq!(trim_level_to_pressure(10), Some(Moderate));
+        assert_eq!(trim_level_to_pressure(15), Some(Critical));
+        assert_eq!(trim_level_to_pressure(20), None);
+        assert_eq!(trim_level_to_pressure(40), Some(Moderate));
+        assert_eq!(trim_level_to_pressure(60), Some(Moderate));
+        assert_eq!(trim_level_to_pressure(80), Some(Critical));
+        assert_eq!(trim_level_to_pressure(100), Some(Critical));
+        assert_eq!(trim_level_to_pressure(0), None);
+        assert_eq!(trim_level_to_pressure(7), None);
+        assert_eq!(trim_level_to_pressure(-1), None);
     }
 }

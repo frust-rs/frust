@@ -120,7 +120,7 @@ impl PatchFrameProbe {
 }
 
 pub(crate) use executor::{FrameExecutor, InlineExecutor, PaintedScene, SplitExecutor};
-pub(crate) use render::{RenderSignals, render_scene};
+pub(crate) use render::{RenderSignals, publish_ledger, render_scene};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
