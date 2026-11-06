@@ -998,15 +998,19 @@ impl MorphingSearchWidget {
     }
 }
 
+/// The type-scale role the panel's query field (typed text and placeholder)
+/// resolves its family from at layout.
+const FILTER_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
 impl<State: 'static> SearchPanelView<State> {
-    /// The wrapped baseline field, with its own chrome suppressed.
+    /// The wrapped field, with its own chrome suppressed.
     fn field(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_change.clone();
-        // Not themed: the baseline `text_input` has no themed-family opt-in.
         text_input(self.query.clone(), move |state: &mut State, text| {
             on_change(state, text)
         })
         .placeholder(self.config.borrow().placeholder.clone())
+        .themed_family(FILTER_ROLE)
         .padding(0.0, 0.0)
         .border_width(0.0)
         .corner_radius(0.0)
@@ -2086,10 +2090,17 @@ mod tests {
     };
 
     /// The trigger over the panel, both `open`. The panel's query and
-    /// placeholder are empty: the wrapped baseline field has no themed-family
-    /// opt-in, so its own text would paint the system face and is not what
-    /// these tests pin.
+    /// placeholder are empty, so its field paints no run here; the field's
+    /// placeholder is pinned by [`filter_placeholder_follows_the_theme_body_family`].
     fn probe_logic(open: bool) -> impl FnMut(&mut ()) -> frust::StackView<()> {
+        panel_logic(open, "")
+    }
+
+    /// [`probe_logic`] with the panel's filter placeholder set to `placeholder`.
+    fn panel_logic(
+        open: bool,
+        placeholder: &'static str,
+    ) -> impl FnMut(&mut ()) -> frust::StackView<()> {
         let anchor = OverlayAnchor::new();
         move |_: &mut ()| {
             frust::stack()
@@ -2109,7 +2120,7 @@ mod tests {
                     )
                     .anchor(&anchor)
                     .open(open)
-                    .placeholder(""),
+                    .placeholder(placeholder),
                 )
         }
     }
@@ -2128,5 +2139,12 @@ mod tests {
     fn search_text_follows_a_live_theme_family_swap() {
         assert_follows_a_live_family_swap("the trigger's text", probe_logic(false), WINDOW);
         assert_follows_a_live_family_swap("the panel's text", probe_logic(true), WINDOW);
+    }
+
+    #[test]
+    fn filter_placeholder_follows_the_theme_body_family() {
+        let what = "the panel's filter placeholder";
+        assert_paints_only_in_geist(what, panel_logic(true, "Search docs"), WINDOW);
+        assert_follows_a_live_family_swap(what, panel_logic(true, "Search docs"), WINDOW);
     }
 }

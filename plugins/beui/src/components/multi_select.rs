@@ -176,6 +176,10 @@ const ROW_DISABLED_OPACITY: f32 = 0.45;
 /// empty state [`combobox::EMPTY_ROLE`], as on the combobox.
 const CHIP_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
 
+/// The type-scale role the query field's family (typed text and placeholder)
+/// resolves from at layout.
+const QUERY_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
 // ---- Options ---------------------------------------------------------------
 
 /// One option in a [`multi_select`] list.
@@ -338,12 +342,12 @@ impl<State: 'static> MultiSelectTriggerView<State> {
         } else {
             String::new()
         };
-        // The query and placeholder keep the baseline `text_input`'s own
-        // family: that field has no themed-family seam.
+        // The query and placeholder take the theme's body family at layout.
         text_input(self.query.clone(), move |state: &mut State, text| {
             on_change(state, text);
         })
         .placeholder(placeholder)
+        .themed_family(QUERY_ROLE)
         .enabled(!self.disabled)
         .padding(0.0, 0.0)
         .border_width(0.0)
@@ -1905,9 +1909,9 @@ mod tests {
 
     /// A token field holding two chips, over an unfiltered panel (its rows)
     /// and one whose query keeps nothing (its empty state). The token field's
-    /// search slot is empty and, with a selection, shows no placeholder: its
-    /// baseline field has no themed-family opt-in, so its text would paint the
-    /// system face and is not what these tests pin.
+    /// search slot is empty and, with a selection, shows no placeholder, so it
+    /// paints no run here; the search slot's own text is pinned by
+    /// [`search_slot_follows_the_theme_body_family`].
     fn probe_view(_: &mut ()) -> frust::FlexView<()> {
         frust::column()
             .child(multi_select_trigger::<(), _>(
@@ -1929,5 +1933,31 @@ mod tests {
     #[test]
     fn chips_and_panel_text_follow_a_live_theme_family_swap() {
         assert_follows_a_live_family_swap("the multi-select's text", probe_view, PROBE_WINDOW);
+    }
+
+    /// The empty token field: with no selection its search slot shows the
+    /// placeholder, the only run it paints.
+    fn search_slot_view(_: &mut ()) -> frust::FlexView<()> {
+        frust::column().child(multi_select_trigger::<(), _>(
+            &OverlayAnchor::new(),
+            options(),
+            vec![],
+            "",
+            |_: &mut (), _| {},
+        ))
+    }
+
+    #[test]
+    fn search_slot_follows_the_theme_body_family() {
+        assert_paints_only_in_geist(
+            "the multi-select's search slot",
+            search_slot_view,
+            PROBE_WINDOW,
+        );
+        assert_follows_a_live_family_swap(
+            "the multi-select's search slot",
+            search_slot_view,
+            PROBE_WINDOW,
+        );
     }
 }

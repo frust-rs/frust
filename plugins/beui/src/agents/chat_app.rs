@@ -1602,9 +1602,8 @@ mod tests {
         assert_follows_a_live_family_swap, assert_paints_only_in_geist,
     };
 
-    /// One finished exchange with an empty composer. The composer's field is
-    /// the wrapped baseline `text_input`, which has no themed-family opt-in, so
-    /// it carries neither a value nor a placeholder and paints no run here; the
+    /// One finished exchange with an empty composer. The composer's field
+    /// carries neither a value nor a placeholder here, so it paints no run; the
     /// transcript's avatars and message bodies are what these tests pin.
     fn probe_view(_: &mut ()) -> ChatConversationView<()> {
         let mut model = ChatModel::new();
