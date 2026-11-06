@@ -4435,9 +4435,9 @@ item order carries no meaning of its own (whichever face is nearest wins by dist
 folder fan's caller-supplied stacking order is the only signal that pile has — so one rule cannot
 serve both, and each geometry module owns its own resolution rather than pushing the decision onto
 a component. (b) is accepted because every shipped shell drives one engine-tier surface per
-process — see `external-pass-registry-process-wide` above, which the same one-process-wide-state
-shape traces back to; a per-surface `Binding` is real design work with no shipping consumer to
-prove it against yet. In (c), the pool's 256px quantization and 120-frame reap mirror
+process (the engine's per-surface drains now reconcile registrations themselves, but beUI's own
+single `Binding` is not keyed by surface); a per-surface `Binding` is real design work with no
+shipping consumer to prove it against yet. In (c), the pool's 256px quantization and 120-frame reap mirror
 `frust_gpu::effects`' own texture-pool policy value for value, so a small face's over-allocation
 is the same trade the engine already makes; the device-ceiling check and the two-scope
 error-scoped allocation turn an out-of-range or refused request into "draw nothing this frame"
@@ -4457,8 +4457,8 @@ doc; `plugins/beui/src/gpu_fx/fan.rs` module docs ("Depth, and why the sheets ar
 back-to-front"); `plugins/beui/src/gpu_fx/quad3d.rs` module docs ("Depth") and its
 `Quad3dRenderer` doc ("Accepted as a documented per-instance cost for now rather than solved");
 `plugins/beui/src/gpu_fx/schedule.rs` (`PassState`'s single `binding: Binding` field, `FxPass`'s
-`Mutex<PassState>`, `ExternalPass::record`'s `needs_rebind`/`record_bind` call); `docs/LIMITATIONS.md`'s
-own `external-pass-registry-process-wide` entry; `plugins/beui/src/gpu_fx/pool.rs`
+`Mutex<PassState>`, `ExternalPass::record`'s `needs_rebind`/`record_bind` call); `crates/frust-render/src/external_pass.rs`'s
+`ExternalPassDrain`; `plugins/beui/src/gpu_fx/pool.rs`
 (`TARGET_QUANTUM = 256`, `MAX_UNSEEN_FRAMES = 120`, `MAX_TARGET_SIDE = 4096`, `TargetPool::acquire`'s
 device-ceiling check, `create_target`'s `push_error_scope`/`drain_error_scope` over both
 `wgpu::ErrorFilter::Validation` and `wgpu::ErrorFilter::OutOfMemory`, module docs "Why a pool at
@@ -4471,9 +4471,8 @@ shape in (c) — both are structural consequences of a shared depth-tested-trans
 and a bounded per-component texture pool, not a defect either geometry module could fix
 independently. The device-ceiling refusal within (c) has a real trigger: the facade exposing the
 live device's limits to widgets, so a paint-side check can refuse before the component ever
-commits to the 3D path. (b) shares its trigger with
-`external-pass-registry-process-wide`: a per-surface `Binding` keyed by surface identity, or the
-first shell that keeps two engine-tier surfaces live at once, whichever lands first.
+commits to the 3D path. (b)'s trigger: a per-surface `Binding` keyed by surface identity (`ExternalFrame::drain_id`),
+or the first shell that keeps two engine-tier surfaces live at once, whichever lands first.
 
 ---
 
@@ -6895,21 +6894,24 @@ the first real 3D consumer.
 **Trigger for removal**: a colour load-op on `EngineTarget` proven by the
 shared-encoder tests in both recording orders.
 
-### `facade-gpu-context-desktop-only` — `frust::gpu::with_context` is installed on every shell, but only desktop has read it back on a device
+### `facade-gpu-context-desktop-only` — `frust::gpu::with_context` is device-verified on desktop and Android, not yet on iOS
 
 **Observed** (evidence: `crates/frust-shell-desktop/src/render.rs`, `crates/frust-shell-android/src/jni_glue.rs`
 and `crates/frust-shell-ios/src/ffi_glue.rs` each publish their live `DeviceHandle` through
 `frust_shell_common::gpu::GpuPublisher` after every successful surface install and withdraw it when
-their render owner exits): the Android and iOS publication paths have had no device run: no
-Pixel or iPhone run has yet read the device back through `with_context`, or seen a new generation
-after an Activity recreate.
+their render owner exits): on 2026-11-07 a Pixel 4a (Adreno 618, Android 16; debug and profile
+builds, with a OnePlus 9 supporting leg) read the handle back through `with_context` from the
+playground's GPU pass section, and an Activity destroy/recreate in the same process raised
+`device_generation()` (1 to 3) and the page rendered again. No iPhone run has yet read the device
+back or seen a new generation after a surface rebuild. The Android pre-init *rebuild* branch
+(`gpu-feature-request-forfeits-android-preinit` below) was not exercised: neither attached Adreno
+offers `SHADER_F16` under wgpu 30 Vulkan.
 
 **Accepted because**: the slot and the facade accessor are platform-free and covered by host tests;
-only the device run is outstanding.
+only the iOS device run is outstanding.
 
-**Trigger for removal**: a device run (Pixel 5, iPhone) reads the handle back through `with_context`
-and observes a changed `device_generation()` after a surface or Activity rebuild; remove this entry
-then.
+**Trigger for removal**: an iPhone run reads the handle back through `with_context` and observes a
+changed `device_generation()` after a surface rebuild; remove this entry then.
 
 ### `gpu-feature-request-forfeits-android-preinit` — an app that requests optional GPU features loses the Android pre-init overlap
 
@@ -6927,42 +6929,34 @@ app that requests nothing keeps the overlap.
 **Trigger for removal**: building the pre-init device with the request already known (or an
 asynchronous rebuild that does not block the first frame).
 
-### `facade-external-pass-desktop-only` — an `ExternalPass` has only ever run against a headless target, on desktop
+### `facade-external-pass-desktop-only` — an `ExternalPass` is device-verified on Android, not yet on iOS or a windowed desktop run
 
 **Observed** (evidence: `crates/frust-render/src/renderer.rs`'s `submit_impl`, both
 `RenderPath::EngineDirect` and `RenderPath::EngineDirectUnpremultiply` arms call
-`external_pass::run_external_passes` unconditionally (`renderer.rs` ~1165 and ~1294) immediately
-before `shader_quads.prepare`, into the same frame encoder; those are the only two arms `submit_impl`
-has, so the drain runs on every engine-tier `SurfaceRenderer` frame path with no platform gate —
-`crates/frust-shell-android/src/app/render.rs:174` calls `renderer.submit`, and
-`crates/frust-shell-ios/src/app/executor.rs:592`/`599` call `submit_deferred`/`submit`, both reaching
-the same unconditional drain: a pass registered while an Android or iOS shell is running is invoked
-every frame there, exactly as on desktop. What has actually been *exercised* is narrower:
-`crates/frust-render/tests/external_pass.rs`'s two `#[ignore]` GPU cases drive that identical
-drain→encode→submit sequence directly — against a `HeadlessTarget`, not a real swapchain — run on an
-NVIDIA T400 4GB/Vulkan adapter on 2026-09-03: a pass-rendered 64×64 solid target composited at its
-registered destination with the base colour intact outside it, and unregistering it stopped the draw
-the next frame. No windowed run of any kind, and no mobile device run of any kind, has registered and
-driven a real pass yet — that is an untested surface, not a gated one; the `frust::gpu::with_context`
-slot (`facade-gpu-context-desktop-only` above) is the shared
-`DeviceHandle` facade accessor, a separate mechanism that `run_external_passes` does not consult and
-so does not gate this drain. `HeadlessRenderer` never drains the registry at all (see the module
-docs). Output is always blended, never opaque (`engine-scene-texture-always-blended` above) — the
-same rule an unproven mobile pass would still be under.
+`external_pass::run_external_passes` unconditionally immediately before `shader_quads.prepare`, into
+the same frame encoder, with no platform gate; `crates/frust-shell-ios/src/app/executor.rs` reaches
+the same drain through `submit_deferred`/`submit`): on 2026-11-07 the playground's GPU pass section
+(`examples/playground/src/pages/gpu_pass.rs`, a `SpinningQuad` registered through the facade only)
+ran on a Pixel 4a (debug and profile) through the Android shell's own frame loop on a real swapchain,
+with a OnePlus 9 supporting leg; leaving the section stopped frames (0 presented frames). Headless,
+`crates/frust-render/tests/external_pass.rs` and `headless_external_pass.rs` drive the same
+drain, encode and submit sequence against a `HeadlessTarget` (NVIDIA T400/Vulkan). Not yet run on a
+device: iOS, and a windowed desktop run. Output is always blended, never opaque
+(`engine-scene-texture-always-blended` above).
 
-**Accepted because**: the seam's first and only exercised host is the engine-tier frame path itself,
-proven headless; a real window and a mobile shell need no new code in the registry, only a run.
+**Accepted because**: the engine-tier frame path is the one drain every shell reaches, proven headless
+and on Android; iOS needs no new code in the registry, only a run.
 
-**Trigger for removal**: a windowed desktop run and a mobile-shell run (Pixel 5 / iPhone), each
-registering and driving a real `ExternalPass` through its own frame loop.
+**Trigger for removal**: a windowed desktop run and an iPhone run, each registering and driving a real
+`ExternalPass` through its own frame loop (the playground GPU pass section is the vehicle).
 
 ### `external-pass-panic-isolation-dev-only` — a panicking `ExternalPass` is only isolated in a build that unwinds
 
 **Observed** (evidence: root `Cargo.toml`'s `[profile.release]` sets `panic = "abort"` (also recorded
 in `docs/PERFORMANCE_BASELINES.md`'s Release-profile hardening); `crates/frust-render/src/external_pass.rs`'s
 `run_external_passes` wraps each pass's `record` call in `catch_unwind`, reporting the first panic of
-an id at `warn!` and every later one at `debug!`, retiring the pass and queuing its binding for
-unbind): `catch_unwind` keeps a panicking pass from taking the frame's encoder — and every sibling
+an id at `warn!` and every later one at `debug!`, retiring the pass so each engine's drain
+unbinds it): `catch_unwind` keeps a panicking pass from taking the frame's encoder — and every sibling
 pass, and the scene recorded after it — down with it, but only when the binary can actually unwind.
 Under this workspace's `release` profile, `panic = "abort"` means the process is gone before
 `catch_unwind` (or any other guard) ever runs, so a panicking pass aborts the process exactly like any
@@ -7000,36 +6994,6 @@ binds.
 
 **Trigger for removal**: staged binds applied only after a confirmed encode, or a pass-visible
 frame-outcome signal a pass can use to redo work a refusal discarded.
-
-### `external-pass-registry-process-wide` — one process-wide registry serves every live `EngineRenderer`, so a second surface can be left holding a stale binding
-
-**Observed** (evidence: `crates/frust-render/src/external_pass.rs`'s module docs, "Who reaches this";
-`static REGISTRY: Mutex<Registry>` is one process-wide map, while `run_external_passes` is called once
-per surface, each time with that surface's own `&mut EngineRenderer`): a registered pass is recorded
-into every live engine-tier surface's frame from one registration — the intended behaviour, so a
-caller registers a pass once for every surface it wants it on. `unregister_external_pass`, though,
-queues exactly one pending unbind per id in the shared map, and whichever surface's drain
-(`run_external_passes`) runs first for the next frame takes and clears the whole queue: only that
-surface's `EngineRenderer` unbinds the id. A second live surface's `EngineRenderer` keeps the stale
-`wgpu::TextureView` bound — the pass is gone from the registry, so nothing calls `record` again to
-refresh or clear that surface's own binding, and it stays stale until something re-registers under the
-same id (which restores `record` calls, and so re-binding, on every live surface again).
-
-The same one-registration-per-id design means the identical `Arc<dyn ExternalPass>` is what every live
-surface's `run_external_passes` calls `record` on, and `SurfaceRenderer` drives each surface's
-frame on its own dedicated render thread by default (`RENDER_ARCHITECTURE.md`'s Module Structure):
-with two engine-tier surfaces live at once, nothing serializes their drains against each other, so the
-same pass instance's `record` can be called from two threads at the same moment. `ExternalPass: Send +
-Sync` has to mean tolerating that concurrent invocation — a pass whose interior mutability assumes only
-sequential reuse (one surface's drain finishing before the next one starts) is unsound under two live
-surfaces, not merely stale.
-
-**Accepted because**: a single-window desktop shell is the only engine-tier host any shell ships today
-(`desktop-single-window` above); a per-surface registry is real design work with no shipping consumer
-to prove it against yet.
-
-**Trigger for removal**: a per-surface registry keyed by surface identity, or the first shell that
-keeps two engine-tier surfaces live at once — whichever lands first.
 
 ### `shell-ios-first-frame-above-goal` — the iOS split executor's first frame still lands above the 85 ms goal
 
