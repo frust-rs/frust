@@ -30,8 +30,8 @@ use std::rc::Rc;
 
 use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, SemanticsCtx, Size, View, Widget,
-    build_child, rebuild_child, route_event_single, teardown_child, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, SemanticsCtx, Size, ThemeTextType, View,
+    Widget, build_child, rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text_input};
 
@@ -132,6 +132,7 @@ impl<State: 'static> TextareaView<State> {
         })
         .placeholder(self.placeholder.clone())
         .multiline(self.max_visible_lines)
+        .themed_family(ThemeTextType::BodyMedium)
         .enabled(!self.disabled)
         .padding(style::spacing(3.0), style::spacing(2.0))
         .border_width(0.0)
@@ -476,5 +477,31 @@ mod tests {
         let mut seen = 0usize;
         Widget::visit_children(&w, &mut |_pod| seen += 1);
         assert_eq!(seen, 1);
+    }
+
+    // ---- Typeface: the textarea text follows the theme's body role ----
+
+    /// A multi-line field with typed text and a placeholder.
+    #[cfg(feature = "bundled-fonts")]
+    fn themed_textarea(_: &mut ()) -> TextareaView<()> {
+        textarea("Hello", |_: &mut (), _: String| {}).placeholder("Notes")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_textarea_text_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "the textarea's text",
+            themed_textarea,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_textarea_text_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "the textarea's text",
+            themed_textarea,
+        );
     }
 }
