@@ -133,9 +133,9 @@
 //!
 //! A CPU frame is tightly packed premultiplied-alpha RGBA8, `width * 4` bytes
 //! per row, top row first, sampled as `Rgba8Unorm` (bytes pass through
-//! unconverted). The engine composites the bound texture blended, never as
-//! opaque — it cannot read the texels to know (`docs/LIMITATIONS.md`'s
-//! `engine-scene-texture-always-blended`), and the bus inherits that.
+//! unconverted). The bus binds without an opacity hint, so the engine
+//! composites the texture blended — it cannot read the texels to know
+//! (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`).
 //!
 //! [`SourceFormat::Bgra8`] frames are the same layout in BGRA byte order and
 //! still sample in RGBA order; the GL backend swizzles them on the CPU.

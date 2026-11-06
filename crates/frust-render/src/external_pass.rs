@@ -46,9 +46,10 @@
 //! a pass renders into a target *it* owns and then hands the engine a view of
 //! it. Re-binding the same id replaces the previous view (the engine's own
 //! semantics), which is what lets a pass that re-creates its target on resize
-//! keep one stable id. The composited result is always *blended*, never
-//! claimed opaque — the engine never reads the caller's texels, so it cannot
-//! know (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`).
+//! keep one stable id. The composited result is *blended* unless the pass
+//! binds with [`ExternalFrame::bind_texture_with`] and asserts opacity — the
+//! engine never reads the caller's texels, so it cannot know
+//! (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`).
 //!
 //! Binding happens inside `record`, immediately — it does not wait for the
 //! frame to actually submit. So work a pass recorded is submitted only if the
