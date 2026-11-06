@@ -142,7 +142,7 @@
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use frust_gpu::SceneTextureId;
 
@@ -597,6 +597,11 @@ pub struct ExternalPassDrain {
     drain_id: u64,
     device_generation: u64,
     bound: BTreeMap<u64, Tracked>,
+    /// A weak handle to each explicit pass this drain last ran, keyed by id.
+    /// An explicit pass's identity is its `Arc` address; a `Weak` keeps that
+    /// allocation alive (not the pass), so the address cannot be reused by a
+    /// later pass while this drain still tracks the id.
+    pinned: BTreeMap<u64, Weak<dyn ExternalPass>>,
 }
 
 impl ExternalPassDrain {
@@ -609,6 +614,7 @@ impl ExternalPassDrain {
             drain_id: NEXT_DRAIN_ID.fetch_add(1, Ordering::Relaxed),
             device_generation,
             bound: BTreeMap::new(),
+            pinned: BTreeMap::new(),
         }
     }
 
@@ -631,7 +637,9 @@ struct Due {
     id: SceneTextureId,
     serial: u64,
     pass: Arc<dyn ExternalPass>,
-    record_lock: Arc<Mutex<()>>,
+    /// The registration's record lock; `None` for an explicit pass, which no
+    /// other drain can see and so has nothing to serialize against.
+    record_lock: Option<Arc<Mutex<()>>>,
 }
 
 /// The registry's passes, in id order, for a drain to run — or `None` when
@@ -650,7 +658,7 @@ fn snapshot(registry: &Registry, drain: &ExternalPassDrain) -> Option<Vec<Due>> 
                 id: registration.id,
                 serial: registration.serial,
                 pass: Arc::clone(&registration.pass),
-                record_lock: Arc::clone(&registration.record_lock),
+                record_lock: Some(Arc::clone(&registration.record_lock)),
             })
             .collect(),
     )
@@ -701,7 +709,95 @@ pub fn run_external_passes(
     let Some(due) = snapshot(&registry(), drain) else {
         return;
     };
+    for pass in run_due(device, queue, encoder, engine, drain, due) {
+        if drop_panicking_pass(pass.id, pass.serial, &pass.pass) {
+            // The surface that caught the panic clears its own binding at
+            // once; every other one does on its next drain, by reconciling.
+            drain.bound.remove(&pass.id.get());
+            engine.unbind_texture(pass.id);
+        }
+    }
+}
 
+/// Runs an explicit list of passes into `encoder` on `drain`'s engine, for a
+/// renderer that owns its passes rather than draining the process-wide
+/// registry (an offscreen render handed its passes by the caller).
+///
+/// Nothing here touches the registry: an explicit pass has no registration,
+/// so it is identified within `drain` by the address of its `Arc` (the caller
+/// owns the list, no other drain sees it) and takes no record lock. Passes
+/// run in ascending id order. Before any pass records, every id `drain`
+/// tracks that is absent from `passes` — or present under a different `Arc`
+/// — is unbound, so mixing explicit and registry renders on one engine never
+/// leaves a stale bind.
+///
+/// A panicking pass is isolated exactly as a registered one is, but nothing
+/// is retired (there is no registry entry to retire): its binding is cleared,
+/// the remaining passes still record, and the panic is reported as an `Err`
+/// naming the ids so the caller can fail the render.
+///
+/// # Errors
+///
+/// Fails, recording nothing, when two entries share an id; and after
+/// recording when any pass panicked.
+#[doc(hidden)]
+pub fn run_explicit_external_passes(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    engine: &mut frust_engine::EngineRenderer,
+    drain: &mut ExternalPassDrain,
+    passes: &[(SceneTextureId, Arc<dyn ExternalPass>)],
+) -> Result<(), String> {
+    let mut due: Vec<Due> = passes
+        .iter()
+        .map(|(id, pass)| Due {
+            id: *id,
+            serial: Arc::as_ptr(pass) as *const () as usize as u64,
+            pass: Arc::clone(pass),
+            record_lock: None,
+        })
+        .collect();
+    due.sort_by_key(|pass| pass.id.get());
+    if let Some(pair) = due.windows(2).find(|pair| pair[0].id == pair[1].id) {
+        return Err(format!(
+            "scene texture {} is named by more than one explicit external pass",
+            pair[0].id.get()
+        ));
+    }
+    let panicked = run_due(device, queue, encoder, engine, drain, due);
+    // Every id tracked now came from `passes` (reconcile unbound the rest), so
+    // pinning exactly this list keeps each tracked identity unique.
+    drain.pinned = passes
+        .iter()
+        .map(|(id, pass)| (id.get(), Arc::downgrade(pass)))
+        .collect();
+    for pass in &panicked {
+        drain.bound.remove(&pass.id.get());
+        engine.unbind_texture(pass.id);
+    }
+    if panicked.is_empty() {
+        Ok(())
+    } else {
+        let ids: Vec<String> = panicked.iter().map(|p| p.id.get().to_string()).collect();
+        Err(format!(
+            "external pass for scene texture {} panicked; the frame was recorded without it",
+            ids.join(", ")
+        ))
+    }
+}
+
+/// The shared core of both drains: reconciles `drain` against `due` (id
+/// order), then records each pass under panic isolation, and answers the
+/// passes that panicked for the caller to retire or report.
+fn run_due(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    engine: &mut frust_engine::EngineRenderer,
+    drain: &mut ExternalPassDrain,
+    due: Vec<Due>,
+) -> Vec<Due> {
     // Before any pass records: an id with no owner — or a new one — keeps no
     // view of a previous owner's alive in this engine. `due` is in id order,
     // so the lookup is a binary search.
@@ -715,7 +811,7 @@ pub fn run_external_passes(
         engine.unbind_texture(id);
     }
     if due.is_empty() {
-        return;
+        return Vec::new();
     }
 
     let stamp = FrameStamp {
@@ -723,6 +819,7 @@ pub fn run_external_passes(
         drain_id: drain.drain_id,
         device_generation: drain.device_generation,
     };
+    let mut panicked = Vec::new();
     for pass in due {
         // Tracked before `record` runs, so whatever it binds — even on a path
         // that panics afterwards — is this drain's to clear once the
@@ -734,18 +831,18 @@ pub fn run_external_passes(
                 registration: pass.serial,
             },
         );
-        let panicked = {
+        let failed = {
             // One registration's `record` at a time, process-wide: the only
             // lock held across caller code, and never alongside another one
-            // (the registry's is released above, and this one is dropped
-            // before the next pass's is taken). Poison is ignored: the
-            // `catch_unwind` below returns before the guard drops, so a panic
-            // in `record` never poisons it, and an unrelated poison must not
-            // stop the pass running.
+            // (the registry's is released by the caller, and this one is
+            // dropped before the next pass's is taken). Poison is ignored:
+            // the `catch_unwind` below returns before the guard drops, so a
+            // panic in `record` never poisons it, and an unrelated poison
+            // must not stop the pass running.
             let _serialized = pass
                 .record_lock
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
+                .as_ref()
+                .map(|lock| lock.lock().unwrap_or_else(PoisonError::into_inner));
             // Built fresh per pass, scoped to that pass's own id — `device`,
             // `encoder` and `engine` are reborrowed each iteration rather
             // than moved, so the outer `&mut` references stay usable for the
@@ -757,13 +854,11 @@ pub fn run_external_passes(
             // surface's whole frame loop with it.
             catch_unwind(AssertUnwindSafe(|| pass.pass.record(&mut frame))).is_err()
         };
-        if panicked && drop_panicking_pass(pass.id, pass.serial, &pass.pass) {
-            // The surface that caught the panic clears its own binding at
-            // once; every other one does on its next drain, by reconciling.
-            drain.bound.remove(&pass.id.get());
-            engine.unbind_texture(pass.id);
+        if failed {
+            panicked.push(pass);
         }
     }
+    panicked
 }
 
 /// Retires the registration `serial` under `id` after its pass panicked,
