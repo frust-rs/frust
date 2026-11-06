@@ -263,6 +263,73 @@ impl LineHeight {
     }
 }
 
+/// Lines drawn over a run of text: an underline and/or a line-through.
+///
+/// The lines are placed from the font's own underline and strikeout metrics
+/// (see [`crate::TextLayout::decoration_rects`]); [`Self::with_thickness`]
+/// overrides the stroke thickness and [`Self::with_color`] the colour, which
+/// otherwise follows the text.
+///
+/// ```
+/// use frust_text::TextDecoration;
+///
+/// let link = TextDecoration::underline();
+/// assert!(link.underline && !link.line_through);
+/// assert_eq!(TextDecoration::default(), TextDecoration::none());
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct TextDecoration {
+    /// Draw a line under the text.
+    pub underline: bool,
+    /// Draw a line through the middle of the text.
+    pub line_through: bool,
+    /// The line colour; `None` follows the text colour.
+    pub color: Option<Color>,
+    /// The line thickness in logical pixels; `None` takes the font's metric.
+    pub thickness: Option<f32>,
+}
+
+impl TextDecoration {
+    /// No decoration. The [`Default`].
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// An underline.
+    pub fn underline() -> Self {
+        Self {
+            underline: true,
+            ..Self::default()
+        }
+    }
+
+    /// A line through the text.
+    pub fn line_through() -> Self {
+        Self {
+            line_through: true,
+            ..Self::default()
+        }
+    }
+
+    /// This decoration drawn in `color` rather than the text colour.
+    pub fn with_color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// This decoration with its lines `thickness` logical pixels thick.
+    pub fn with_thickness(mut self, thickness: f32) -> Self {
+        self.thickness = Some(thickness);
+        self
+    }
+
+    /// Whether any line is drawn.
+    pub fn is_none(&self) -> bool {
+        !self.underline && !self.line_through
+    }
+}
+
 /// What a line does with a word wider than itself (CSS `overflow-wrap`).
 ///
 /// A paragraph-level knob, like [`TextAlign`]: the first span's style decides
@@ -345,6 +412,8 @@ pub struct TextStyle {
     /// What a word wider than the line does. Defaults to
     /// [`OverflowWrap::Normal`].
     pub overflow_wrap: OverflowWrap,
+    /// Underline and line-through. Defaults to none.
+    pub decoration: TextDecoration,
 }
 
 impl TextStyle {
@@ -395,6 +464,12 @@ impl TextStyle {
     /// Paragraph-level: the first style decides; later spans' values are ignored.
     pub fn with_overflow_wrap(mut self, overflow_wrap: OverflowWrap) -> Self {
         self.overflow_wrap = overflow_wrap;
+        self
+    }
+
+    /// This style with the given [`TextDecoration`].
+    pub fn with_decoration(mut self, decoration: TextDecoration) -> Self {
+        self.decoration = decoration;
         self
     }
 
@@ -472,6 +547,7 @@ impl Default for TextStyle {
             line_height: LineHeight::default(),
             align: TextAlign::default(),
             overflow_wrap: OverflowWrap::default(),
+            decoration: TextDecoration::default(),
         }
     }
 }
@@ -529,7 +605,8 @@ mod tests {
             .with_letter_spacing(1.5)
             .with_line_height(LineHeight::Absolute(24.0))
             .with_align(TextAlign::Center)
-            .with_overflow_wrap(OverflowWrap::Anywhere);
+            .with_overflow_wrap(OverflowWrap::Anywhere)
+            .with_decoration(TextDecoration::underline().with_thickness(2.0));
         assert_eq!(style.family, FontFamily::Named(vec!["Inter".to_string()]));
         assert_eq!(style.weight, FontWeight::BOLD);
         assert_eq!(style.style, FontStyle::Italic);
@@ -543,6 +620,10 @@ mod tests {
         assert_eq!(style.line_height, LineHeight::Absolute(24.0));
         assert_eq!(style.align, TextAlign::Center);
         assert_eq!(style.overflow_wrap, OverflowWrap::Anywhere);
+        assert_eq!(
+            style.decoration,
+            TextDecoration::underline().with_thickness(2.0)
+        );
     }
 
     #[test]
@@ -562,6 +643,7 @@ mod tests {
             line_height: LineHeight::FontSizeRelative(1.5),
             align: TextAlign::Justify,
             overflow_wrap: OverflowWrap::Anywhere,
+            decoration: TextDecoration::line_through().with_color(color),
         };
         let built = TextStyle::default()
             .with_family(FontFamily::named("Inter"))
@@ -576,7 +658,8 @@ mod tests {
             .with_letter_spacing(0.25)
             .with_line_height(LineHeight::FontSizeRelative(1.5))
             .with_align(TextAlign::Justify)
-            .with_overflow_wrap(OverflowWrap::Anywhere);
+            .with_overflow_wrap(OverflowWrap::Anywhere)
+            .with_decoration(TextDecoration::line_through().with_color(color));
         assert_eq!(built, literal);
     }
 

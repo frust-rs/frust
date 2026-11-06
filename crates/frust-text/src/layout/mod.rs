@@ -20,6 +20,7 @@
 
 mod align;
 mod r#break;
+mod decoration;
 mod metrics;
 mod reorder;
 mod truncate;
@@ -35,6 +36,7 @@ use crate::convert::RunMemo;
 use crate::shape::{Shaped, ShapedCluster, ShapedRun};
 use crate::style::{OverflowWrap, TextStyle};
 use r#break::{BreakReason, BrokenLine, break_lines};
+pub use decoration::{DecorationKind, DecorationRect};
 pub(crate) use metrics::LineMetrics;
 pub(crate) use truncate::ELLIPSIS;
 

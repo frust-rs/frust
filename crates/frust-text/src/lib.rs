@@ -30,7 +30,7 @@ pub use editor::{
     EditOp, EditingState, EditingStateBytes, TextEditor, byte_to_utf16, sanitize_paste,
     utf16_to_byte,
 };
-pub use layout::TextLayout;
+pub use layout::{DecorationKind, DecorationRect, TextLayout};
 /// The shared lock over the default-locale slot for tests (`test-support` feature).
 #[cfg(any(test, feature = "test-support"))]
 pub use locale::test_support;
@@ -40,7 +40,7 @@ pub use oracle::cache::FontCacheStats;
 pub use shape_cache::ShapeCacheStats;
 pub use style::{
     FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, OverflowWrap,
-    TextAlign, TextOverflow, TextStyle,
+    TextAlign, TextDecoration, TextOverflow, TextStyle,
 };
 
 /// The process-wide count of visible-text glyphs that shaped to glyph 0
@@ -289,5 +289,22 @@ mod tests {
         italic.style = FontStyle::Italic;
         let layout = cx.layout("Hello", &italic, None);
         assert!(layout.size().width > 0.0, "italic text should still shape");
+    }
+
+    #[test]
+    fn a_decoration_change_misses_the_shape_cache_and_plain_text_hits() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = TextContext::builder().without_font_cache().build();
+        let plain = style(16.0);
+        let link = style(16.0).with_decoration(TextDecoration::underline());
+        let _ = cx.layout("link", &plain, None);
+        let _ = cx.layout("link", &plain, None);
+        let after_plain = cx.shape_cache_stats();
+        assert_eq!(after_plain.shapes, 1);
+        assert_eq!(after_plain.hits, 1);
+        let _ = cx.layout("link", &link, None);
+        assert_eq!(cx.shape_cache_stats().shapes, 2);
+        let _ = cx.layout("link", &plain, None);
+        assert_eq!(cx.shape_cache_stats().shapes, 2);
     }
 }
