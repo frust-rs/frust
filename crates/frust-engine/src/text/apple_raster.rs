@@ -6,6 +6,14 @@
 //! CoreText draw one glyph into a throwaway bitmap and hands the pixels back,
 //! ready to be uploaded to the glyph atlas by the caller.
 //!
+//! # iOS only in practice
+//!
+//! On macOS 27 a `CTFontDrawGlyphs` of an `sbix` emoji glyph into a bitmap
+//! context faults inside ImageIO's PNG reader (a bus error in any process,
+//! sandboxed or not), while the same call on iOS 27 draws correctly. macOS
+//! faces store their strikes as `png ` records, which the engine decodes
+//! itself, so callers must reach this rasterizer only on iOS.
+//!
 //! # Placement convention
 //!
 //! A [`RasterGlyph`] is positioned relative to the pen at the baseline, in
