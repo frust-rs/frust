@@ -501,8 +501,8 @@ subset commands, and checksums in `testing/fonts/LICENSES.md`),
 family, and `frame::foreign_font_runs` rejects any captured glyph run whose
 font bytes are not a bundled face. Widget-internal text is therefore
 pinnable when its family comes from the theme's type scale — a widget that
-resolves its family from `Theme::type_scale`, or a `Text` opted in with
-`.themed_family(..)` — and not when the family is fixed in code rather than
+resolves its family from `Theme::type_scale`, a `Text` or `TextInput` opted
+in with `.themed_family(..)` / `.themed_mono_family()` — and not when the family is fixed in code rather than
 taken from the theme (`TextStyle::default()`'s `FontFamily::SystemUi`, or a
 hardcoded stack). Golden cases empty or avoid the string slots of the second
 kind and supply real text through view slots or as plain page content

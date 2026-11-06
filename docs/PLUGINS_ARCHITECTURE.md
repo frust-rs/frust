@@ -267,10 +267,11 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   `tokens/fonts.rs`. The other bundled faces are upstream bytes unmodified. Glyph keeps its two
   italic faces for the opposite reason: Frust never applies fontique's synthetic oblique, so an
   italic request with no italic face would render upright with no sign italics were asked for.
-- **Every catalog's text takes its font family from the live theme's type-scale role through the
-  catalog's own text helper**, with two standing exceptions — monospace text (`TypeScale` has no
-  mono role) and a baseline `TextInput` field, whose `effective_style` resolves only color
-  (`textinput-no-themed-family` in [LIMITATIONS.md](LIMITATIONS.md); mechanism in
+- **Every catalog's text takes its font family from the live theme** through the catalog's own text
+  helper: a type-scale role for proportional text, and the `MonospaceFamily` theme extension
+  (`Theme::monospace_family()`) for monospace. Shadcn, beUI and Glyph attach `MonospaceFamily`;
+  Material and Cupertino use the generic monospace fallback. Catalog text fields follow the theme
+  too, through `TextInput`'s themed-family opt-in (mechanism in
   [WIDGETS_CODE_STANDARDS.md](WIDGETS_CODE_STANDARDS.md)).
 - **`frust_glyph::baseline()`, `frust_material::baseline()`, `frust_shadcn::theme()`, and
   `frust_beui::theme()` all attach the `NativeTypefaces` theme extension** — the bundled faces reach
