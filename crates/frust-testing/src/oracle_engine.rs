@@ -64,9 +64,13 @@
 
 use anyhow::{Result, anyhow};
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
-use frust_gpu::{HeadlessTarget, TierCaps, test_device_limits};
-use frust_render::{GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR};
+use frust_gpu::{HeadlessTarget, SceneTextureId, TierCaps, test_device_limits};
+use frust_render::{
+    ExternalPass, ExternalPassDrain, GOLDEN_EXPECT_ADAPTER_ENV_VAR, GOLDEN_EXPECT_BACKEND_ENV_VAR,
+    run_explicit_external_passes, run_external_passes,
+};
 use kurbo::Affine;
+use std::sync::Arc;
 
 use crate::render::{AlphaKind, BackendMeta, RenderSpec, RenderedImage, SceneRenderer};
 
@@ -190,6 +194,19 @@ pub struct EngineOracle {
     /// Captured once at construction — [`SceneRenderer::meta`]'s contract is
     /// static backend identity, not per-render state.
     meta: BackendMeta,
+    /// This oracle's own external-pass bookkeeping: what its engine has
+    /// bound, so passes dropped between renders are unbound before the next.
+    drain: ExternalPassDrain,
+}
+
+/// Which external passes a render runs.
+enum Passes<'a> {
+    /// None: the [`SceneRenderer::render`] path.
+    None,
+    /// The caller's explicit list.
+    Explicit(&'a [(SceneTextureId, Arc<dyn ExternalPass>)]),
+    /// The process-wide registry.
+    Registry,
 }
 
 impl EngineOracle {
@@ -281,7 +298,57 @@ impl EngineOracle {
                 device_kind: "gpu".to_string(),
             },
             adapter: meta,
+            drain: ExternalPassDrain::new(frust_gpu::next_device_generation()),
         })
+    }
+
+    /// Renders `scene` like [`SceneRenderer::render`], first recording
+    /// `passes` (each an [`ExternalPass`] under the [`SceneTextureId`] the
+    /// scene names) into the frame's encoder so a scene texture command
+    /// naming that id composites what the pass bound.
+    ///
+    /// Deterministic: no process-wide state is read, and
+    /// `ExternalFrame::frame_index` counts, from 0, this renderer's explicit
+    /// renders that ran at least one pass (the registry path uses the
+    /// process-wide counter instead). Ids
+    /// in a reserved namespace are refused. Passes record in
+    /// ascending id order inside the render's validation scope, so a pass's
+    /// validation error fails the render. An id bound by an earlier call but
+    /// absent from `passes` is unbound before any pass records.
+    ///
+    /// # Errors
+    ///
+    /// As [`SceneRenderer::render`], and also when two entries share an id or
+    /// a pass panics (it is isolated and its binding cleared; nothing is
+    /// unregistered, since an explicit pass has no registration).
+    pub fn render_with_passes(
+        &mut self,
+        scene: &frust_scene::Scene,
+        spec: &RenderSpec,
+        passes: &[(SceneTextureId, Arc<dyn ExternalPass>)],
+    ) -> anyhow::Result<RenderedImage> {
+        self.render_inner(scene, spec, Passes::Explicit(passes))
+    }
+
+    /// Renders `scene` like [`SceneRenderer::render`], first draining the
+    /// process-wide registry of registered external passes, as a windowed
+    /// surface does.
+    ///
+    /// Opt-in because the registry is process-wide: any pass registered by
+    /// another test in the same binary records against this oracle's device.
+    /// Prefer [`Self::render_with_passes`] unless registration itself is under
+    /// test. A panicking pass is retired from the registry and the render
+    /// succeeds without it.
+    ///
+    /// # Errors
+    ///
+    /// As [`SceneRenderer::render`].
+    pub fn render_draining_registry(
+        &mut self,
+        scene: &frust_scene::Scene,
+        spec: &RenderSpec,
+    ) -> anyhow::Result<RenderedImage> {
+        self.render_inner(scene, spec, Passes::Registry)
     }
 
     /// The GPU this oracle resolved — the provenance to print when a run
@@ -338,6 +405,17 @@ impl SceneRenderer for EngineOracle {
         scene: &frust_scene::Scene,
         spec: &RenderSpec,
     ) -> anyhow::Result<RenderedImage> {
+        self.render_inner(scene, spec, Passes::None)
+    }
+}
+
+impl EngineOracle {
+    fn render_inner(
+        &mut self,
+        scene: &frust_scene::Scene,
+        spec: &RenderSpec,
+        passes: Passes<'_>,
+    ) -> anyhow::Result<RenderedImage> {
         if spec.width == 0 || spec.height == 0 {
             return Err(anyhow!(
                 "frust-testing engine oracle: a render target must have a non-zero size, got {}x{}",
@@ -357,29 +435,66 @@ impl SceneRenderer for EngineOracle {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frust-testing engine oracle frame"),
             });
-        let encoded = self.renderer.encode(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            scene,
-            EngineTarget {
-                view: target.view(),
-                format: TARGET_FORMAT,
-                width: spec.width,
-                height: spec.height,
-                // The engine owns its own depth attachment here: this oracle
-                // composites no 3D pass of its own, so there is no populated
-                // depth buffer for a frame to test against.
-                depth: None,
-                output: OutputAlpha::Premultiplied,
-            },
-            spec.base_color,
-            // `scale` applies AHEAD of `root` (see `RenderSpec::scale`), the
-            // same composition the other two arms build — the arms must fold
-            // the spec identically or every scaled case would diverge for a
-            // reason that is not the renderer's.
-            Affine::scale(spec.scale) * spec.root,
-        );
+        // Passes record ahead of the scene into the same encoder, inside the
+        // validation scope. A failed explicit run still submits below, but
+        // skips the scene.
+        let passed = match passes {
+            Passes::None => run_explicit_external_passes(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.renderer,
+                &mut self.drain,
+                &[],
+            ),
+            Passes::Explicit(list) => run_explicit_external_passes(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.renderer,
+                &mut self.drain,
+                list,
+            ),
+            Passes::Registry => {
+                run_external_passes(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &mut self.renderer,
+                    &mut self.drain,
+                );
+                Ok(())
+            }
+        };
+        let encoded = match passed {
+            Err(message) => Err(anyhow!("{message}")),
+            Ok(()) => self
+                .renderer
+                .encode(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    scene,
+                    EngineTarget {
+                        view: target.view(),
+                        format: TARGET_FORMAT,
+                        width: spec.width,
+                        height: spec.height,
+                        // The engine owns its own depth attachment here: this oracle
+                        // composites no 3D pass of its own, so there is no populated
+                        // depth buffer for a frame to test against.
+                        depth: None,
+                        output: OutputAlpha::Premultiplied,
+                    },
+                    spec.base_color,
+                    // `scale` applies AHEAD of `root` (see `RenderSpec::scale`), the
+                    // same composition the other two arms build — the arms must fold
+                    // the spec identically or every scaled case would diverge for a
+                    // reason that is not the renderer's.
+                    Affine::scale(spec.scale) * spec.root,
+                )
+                .map_err(|err| anyhow!("{err}")),
+        };
         // Submitted whether or not the frame encoded: a refused frame leaves
         // the encoder exactly as it was found, and finishing it keeps the
         // device's own bookkeeping in step before the error scope is drained.

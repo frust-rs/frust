@@ -1738,6 +1738,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "frust-core",
+ "frust-gpu",
  "frust-reactive",
  "frust-render",
  "frust-scene",
@@ -1757,6 +1758,7 @@ dependencies = [
  "peniko",
  "reactive_graph",
  "wasm-bindgen",
+ "wgpu",
 ]
 
 [[package]]

@@ -75,6 +75,8 @@ struct RecScene {
     text_run_origins: Vec<Point>,
     /// `draw_scene_texture` commands — an in-scene texture (`texture_view`).
     scene_textures: usize,
+    /// The id each `draw_scene_texture` named, in paint order.
+    scene_texture_ids: Vec<u64>,
 }
 
 impl PaintScene for RecScene {
@@ -110,8 +112,9 @@ impl PaintScene for RecScene {
     fn stroke_line(&mut self, _p0: Point, _p1: Point, _width: f64, _color: Color) {
         self.lines += 1;
     }
-    fn draw_scene_texture(&mut self, _id: u64, _dest: Rect) {
+    fn draw_scene_texture(&mut self, id: u64, _dest: Rect) {
         self.scene_textures += 1;
+        self.scene_texture_ids.push(id);
     }
 }
 
@@ -236,6 +239,31 @@ fn texture_pages_mount_in_both_modes() {
                 );
             }
         }
+    }
+}
+
+/// The GPU pass page draws its picture as a scene texture (the id of the pass
+/// it registered). No GPU is needed: the page only registers the pass and
+/// names its id; the headless pass render lives in `gpu_pass_headless.rs`.
+#[test]
+fn gpu_pass_page_draws_its_scene_texture() {
+    let _owner = setup();
+    let mut tcx = TextContext::new();
+    let mut root: RenderRoot<PlaygroundState, AnyView<PlaygroundState>> = RenderRoot::new();
+    let mut state = PlaygroundState::new();
+    let section = SECTION_LABELS
+        .iter()
+        .position(|label| *label == "GPU pass")
+        .expect("the GPU pass section exists");
+    let mut logic = |s: &mut PlaygroundState| pages::current(section, s);
+    for t_ms in [0, 16] {
+        let (scene, _outcome) = frame_at(&mut root, &mut logic, &mut state, &mut tcx, t_ms);
+        assert!(scene.text_runs > 0, "the page paints its readout text");
+        assert_eq!(
+            scene.scene_textures, 1,
+            "one picture drawn as a scene texture at {t_ms} ms"
+        );
+        assert_ne!(scene.scene_texture_ids[0], 0, "a minted, non-zero id");
     }
 }
 

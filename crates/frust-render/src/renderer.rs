@@ -250,6 +250,15 @@ enum TierBackend {
         /// buffers, no map — so there is nothing to feature-gate at this
         /// level.
         timestamps: frust_gpu::diag::TimestampRing,
+        /// This surface engine's side of the external-pass seam
+        /// (`crate::external_pass`): which registration it last ran under
+        /// each id, reconciled against the process-wide registry on every
+        /// drain so this engine — and only this one — clears the bindings
+        /// of passes that went away.
+        ///
+        /// Built fresh beside every engine, because the bindings it tracks
+        /// live in that engine and die with it.
+        external_passes: crate::external_pass::ExternalPassDrain,
     },
 }
 
@@ -1392,6 +1401,9 @@ impl SurfaceRenderer {
                 refused_frames: 0,
                 shader_quads: Box::new(frust_engine::ShaderQuadPass::new(pipeline_cache.clone())),
                 timestamps,
+                external_passes: crate::external_pass::ExternalPassDrain::new(
+                    ctx.device_handle().generation(),
+                ),
             };
             (backend, caps_probe, engine_timings)
         };
@@ -2286,6 +2298,7 @@ impl SurfaceRenderer {
                     engine,
                     shader_quads,
                     timestamps,
+                    external_passes,
                     ..
                 } = backend;
                 let root = crate::context::frame_renders_via_intermediate(
@@ -2314,8 +2327,8 @@ impl SurfaceRenderer {
                 // Whatever the process registered ahead of the scene:
                 // caller-supplied passes recorded into this SAME encoder and
                 // binding their own targets into the engine's external-texture
-                // registry, plus the unbind of any id whose pass was
-                // unregistered since the last frame (see
+                // registry, plus the unbind of any id this surface's drain ran
+                // a pass under whose registration is gone (see
                 // `crate::external_pass`). Ahead of the shader quads for the
                 // same two orderings they need, and a no-op — one lock, no
                 // encoder work — on the process that registered none.
@@ -2324,6 +2337,7 @@ impl SurfaceRenderer {
                     &device_handle.queue,
                     &mut encoder,
                     engine,
+                    external_passes,
                 );
                 // The frame's shader quads, rendered into this SAME encoder
                 // ahead of the scene's own passes and registered with the
@@ -2492,6 +2506,7 @@ impl SurfaceRenderer {
                     engine,
                     shader_quads,
                     timestamps,
+                    external_passes,
                     ..
                 } = backend;
                 let base_color = pending_base_color.take().unwrap_or(peniko::Color::BLACK);
@@ -2505,8 +2520,8 @@ impl SurfaceRenderer {
                 // Whatever the process registered ahead of the scene:
                 // caller-supplied passes recorded into this SAME encoder and
                 // binding their own targets into the engine's external-texture
-                // registry, plus the unbind of any id whose pass was
-                // unregistered since the last frame (see
+                // registry, plus the unbind of any id this surface's drain ran
+                // a pass under whose registration is gone (see
                 // `crate::external_pass`). Ahead of the shader quads for the
                 // same two orderings they need, and a no-op — one lock, no
                 // encoder work — on the process that registered none.
@@ -2515,6 +2530,7 @@ impl SurfaceRenderer {
                     &device_handle.queue,
                     &mut encoder,
                     engine,
+                    external_passes,
                 );
                 // The same pre-pass the direct arm records, for the same two
                 // orderings — the conversion pass appended after the frame
@@ -3542,6 +3558,9 @@ mod tests {
                 queue,
                 frust_engine::EngineSpan::COUNT,
                 "frust-render refused-frame test timestamps",
+            ),
+            external_passes: crate::external_pass::ExternalPassDrain::new(
+                frust_gpu::next_device_generation(),
             ),
         }
     }

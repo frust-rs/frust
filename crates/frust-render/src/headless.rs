@@ -44,7 +44,14 @@
 //! No `wgpu` type crosses this module's public surface — the confinement rule
 //! in `docs/RENDER_ARCHITECTURE.md`. Pixels come back as plain bytes.
 
+use std::sync::Arc;
+
 use anyhow::{Result, anyhow};
+use frust_gpu::SceneTextureId;
+
+use crate::external_pass::{
+    ExternalPass, ExternalPassDrain, run_explicit_external_passes, run_external_passes,
+};
 
 /// Environment variable naming the adapter a golden/oracle run must have
 /// resolved. Case-insensitive substring match on the adapter name, the same
@@ -210,6 +217,19 @@ pub struct HeadlessRenderer {
     /// The current render target, rebuilt only when a render asks for a
     /// different size.
     target: Option<frust_gpu::HeadlessTarget>,
+    /// This renderer's own external-pass bookkeeping: what its engine has
+    /// bound, so passes dropped between renders are unbound before the next.
+    drain: ExternalPassDrain,
+}
+
+/// Which external passes a render runs.
+enum Passes<'a> {
+    /// None: [`HeadlessRenderer::render`].
+    None,
+    /// The caller's explicit list.
+    Explicit(&'a [(SceneTextureId, Arc<dyn ExternalPass>)]),
+    /// The process-wide registry.
+    Registry,
 }
 
 impl HeadlessRenderer {
@@ -292,6 +312,7 @@ impl HeadlessRenderer {
             engine,
             meta,
             target: None,
+            drain: ExternalPassDrain::new(frust_gpu::next_device_generation()),
         })
     }
 
@@ -314,6 +335,72 @@ impl HeadlessRenderer {
         scene: &frust_scene::Scene,
         spec: &HeadlessSpec,
     ) -> Result<HeadlessImage> {
+        self.render_inner(scene, spec, Passes::None).await
+    }
+
+    /// Like [`render`](Self::render), but first records `passes` (each an
+    /// [`ExternalPass`] under the [`SceneTextureId`] the scene names) into the
+    /// frame's encoder, so a `Command::SceneTexture` naming that id composites
+    /// what the pass bound.
+    ///
+    /// Deterministic: it reads no process-wide state, so only the passes
+    /// listed run, and
+    /// [`ExternalFrame::frame_index`](crate::ExternalFrame::frame_index)
+    /// counts, from 0, this renderer's explicit renders that ran at least one
+    /// pass (never the process-wide frame counter that surfaces and
+    /// [`render_draining_registry`](Self::render_draining_registry) share).
+    /// Ids in a reserved namespace are refused. Passes record in ascending id
+    /// order, inside the render's validation scope, so a validation error from
+    /// a pass fails the render.
+    /// An id bound by an earlier call on this renderer but absent from
+    /// `passes` here is unbound before any pass records.
+    ///
+    /// # Errors
+    ///
+    /// As [`render`](Self::render), and also when two entries share an id, or
+    /// when a pass panics. A panicking pass is isolated and its binding
+    /// cleared, but nothing is unregistered (an explicit pass has no
+    /// registration) and the render fails rather than returning pixels
+    /// recorded without it.
+    pub async fn render_with_passes(
+        &mut self,
+        scene: &frust_scene::Scene,
+        spec: &HeadlessSpec,
+        passes: &[(SceneTextureId, Arc<dyn ExternalPass>)],
+    ) -> Result<HeadlessImage> {
+        self.render_inner(scene, spec, Passes::Explicit(passes))
+            .await
+    }
+
+    /// Like [`render`](Self::render), but drains the process-wide registry of
+    /// [`register_external_pass`](crate::register_external_pass) first, as a
+    /// windowed surface does.
+    ///
+    /// Opt-in because the registry is process-wide: every pass registered by
+    /// any other test in the same binary records against this renderer's
+    /// device. Prefer [`render_with_passes`](Self::render_with_passes) unless
+    /// the registration path itself is under test. A pass that panics is
+    /// retired from the registry, as on a surface, and the render succeeds
+    /// without it. An id bound by an earlier call but no longer registered
+    /// is unbound before the passes run.
+    ///
+    /// # Errors
+    ///
+    /// As [`render`](Self::render).
+    pub async fn render_draining_registry(
+        &mut self,
+        scene: &frust_scene::Scene,
+        spec: &HeadlessSpec,
+    ) -> Result<HeadlessImage> {
+        self.render_inner(scene, spec, Passes::Registry).await
+    }
+
+    async fn render_inner(
+        &mut self,
+        scene: &frust_scene::Scene,
+        spec: &HeadlessSpec,
+        passes: Passes<'_>,
+    ) -> Result<HeadlessImage> {
         if spec.width == 0 || spec.height == 0 {
             return Err(anyhow!(
                 "frust-render headless: a render target must have a non-zero size, got {}x{}",
@@ -333,25 +420,66 @@ impl HeadlessRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("frust-render headless frame"),
             });
-        let encoded = self.engine.encode(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            scene,
-            frust_engine::EngineTarget {
-                view: target.view(),
-                format: TARGET_FORMAT,
-                width: spec.width,
-                height: spec.height,
-                // The engine owns its own depth attachment here: this harness
-                // composites no pass of its own, so there is no surface-owned
-                // buffer for the frame to test against.
-                depth: None,
-                output: frust_engine::OutputAlpha::Premultiplied,
-            },
-            spec.base_color,
-            spec.root,
-        );
+        // Passes record ahead of the scene, into the same encoder and inside
+        // the validation scope. A failed explicit run still submits below so
+        // the device's bookkeeping stays in step, but skips the scene.
+        let passed = match passes {
+            Passes::None => {
+                // Nothing runs, but the drain still reconciles: a binding
+                // left by an earlier pass render must not outlive it.
+                run_explicit_external_passes(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &mut self.engine,
+                    &mut self.drain,
+                    &[],
+                )
+            }
+            Passes::Explicit(list) => run_explicit_external_passes(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &mut self.engine,
+                &mut self.drain,
+                list,
+            ),
+            Passes::Registry => {
+                run_external_passes(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &mut self.engine,
+                    &mut self.drain,
+                );
+                Ok(())
+            }
+        };
+        let encoded = match passed {
+            Err(message) => Err(anyhow!("frust-render headless: {message}")),
+            Ok(()) => self
+                .engine
+                .encode(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    scene,
+                    frust_engine::EngineTarget {
+                        view: target.view(),
+                        format: TARGET_FORMAT,
+                        width: spec.width,
+                        height: spec.height,
+                        // The engine owns its own depth attachment here: no
+                        // surface-owned buffer exists for the frame to test
+                        // against, and passes composite through the scene.
+                        depth: None,
+                        output: frust_engine::OutputAlpha::Premultiplied,
+                    },
+                    spec.base_color,
+                    spec.root,
+                )
+                .map_err(|e| anyhow!("frust-render headless: the frame was refused: {e}")),
+        };
         // Submitted whether or not the frame encoded: a refused frame leaves
         // the encoder exactly as it was found, and finishing it keeps the
         // device's own bookkeeping in step before the error scope is drained.
@@ -359,8 +487,6 @@ impl HeadlessRenderer {
         self.engine.end_frame(&self.queue);
 
         let validation = scope.pop().await;
-        let encoded =
-            encoded.map_err(|e| anyhow!("frust-render headless: the frame was refused: {e}"));
         finish_scoped(encoded, validation, "render")?;
 
         let target = self

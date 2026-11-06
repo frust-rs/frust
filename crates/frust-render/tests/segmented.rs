@@ -49,7 +49,8 @@ use frust_render::overlay::{
     project_main_segment,
 };
 use frust_render::{
-    EncodeOutcome, FrameOutcome, GOLDEN_EXPECT_ADAPTER_ENV_VAR, RenderContext, SurfaceRenderer,
+    EncodeOutcome, ExternalPassDrain, FrameOutcome, GOLDEN_EXPECT_ADAPTER_ENV_VAR, RenderContext,
+    SurfaceRenderer,
 };
 use frust_scene::{Command, FontHandle, Glyph, GlyphRun, Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
@@ -633,6 +634,8 @@ struct Rig {
     device: wgpu::Device,
     queue: wgpu::Queue,
     main: EngineRenderer,
+    /// The external-pass drain beside `main`.
+    drain: ExternalPassDrain,
     main_target: HeadlessTarget,
     overlays: Vec<(OverlayRenderer, HeadlessTarget)>,
     main_scene: Scene,
@@ -670,6 +673,7 @@ impl Rig {
             device,
             queue,
             main,
+            drain: ExternalPassDrain::new(frust_gpu::next_device_generation()),
             overlays,
             main_scene: Scene::new(),
             submits: 0,
@@ -714,6 +718,7 @@ impl Rig {
             &self.queue,
             &mut encoder,
             &mut self.main,
+            &mut self.drain,
         );
         self.main
             .encode(
