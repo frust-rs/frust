@@ -10,8 +10,11 @@
 //! One rectangle per contiguous same-style, same-face segment of a line. Its
 //! horizontal extent is the segment's pen span from the shared
 //! [`crate::convert::walk_clusters`] walk, so it follows bidi order, justified
-//! spacing and the ellipsis exactly as the glyphs do. Whitespace hanging at the
-//! line's trailing edge is not decorated.
+//! spacing and the ellipsis exactly as the glyphs do. A space or a newline at
+//! the line's trailing edge hangs there, as the line breaker hangs it, and is
+//! not decorated. Every other whitespace kind is decorated, a no-break space
+//! included, since it is not a break opportunity and it is drawn like any
+//! other character.
 //!
 //! The vertical position comes from the face's own metrics at the run's size
 //! ([`crate::shape::RunMetrics`]): each offset is the distance from the
@@ -27,7 +30,7 @@ use peniko::Color;
 
 use super::{Paragraph, Source, TextLayout};
 use crate::convert::{Step, walk_clusters};
-use crate::shape::RunMetrics;
+use crate::shape::{RunMetrics, Whitespace};
 use crate::style::TextStyle;
 
 /// Which line a [`DecorationRect`] is.
@@ -58,7 +61,18 @@ struct Piece {
     style: u16,
     start: f32,
     end: f32,
-    whitespace: bool,
+    hangs: bool,
+}
+
+/// Whether a character of this whitespace class hangs at a line's trailing
+/// edge and so goes undecorated there. The line breaker hangs an overflowing
+/// [`Whitespace::Space`] (see `break_lines`) and ends a line after a newline,
+/// so those two hang. The breaker fits every other class as an
+/// ordinary advance: a no-break space is not a break opportunity, and a tab,
+/// an ideographic space or another space separator is counted in the fit. A
+/// control glyph is painted, so none of those hang.
+fn hangs(ws: Whitespace) -> bool {
+    matches!(ws, Whitespace::Space | Whitespace::Newline)
 }
 
 /// A contiguous run of pieces drawn alike.
@@ -94,19 +108,19 @@ impl TextLayout {
                     style: c.style,
                     start: c.pen,
                     end: c.end,
-                    whitespace: c.cluster.whitespace != crate::shape::Whitespace::None,
+                    hangs: hangs(c.cluster.whitespace),
                 });
             }
         });
 
         let mut out = Vec::new();
         for (line, mut pieces) in self.lines.lines.iter().zip(lines) {
-            // The whitespace hanging at the trailing visual edge is not drawn on.
+            // The hanging whitespace at the trailing visual edge is not drawn on.
             if paragraph.is_rtl() {
-                let keep = pieces.iter().take_while(|p| p.whitespace).count();
+                let keep = pieces.iter().take_while(|p| p.hangs).count();
                 pieces.drain(..keep);
             } else {
-                while pieces.last().is_some_and(|p| p.whitespace) {
+                while pieces.last().is_some_and(|p| p.hangs) {
                     pieces.pop();
                 }
             }
@@ -400,6 +414,52 @@ mod tests {
     }
 
     #[test]
+    fn a_trailing_no_break_space_stays_underlined() {
+        let bare = laid_out(
+            NOTO_SANS,
+            "Hello",
+            &style(TextDecoration::underline()),
+            None,
+        );
+        let nbsp = laid_out(
+            NOTO_SANS,
+            "Hello\u{A0}",
+            &style(TextDecoration::underline()),
+            None,
+        );
+        let a = bare.decoration_rects(Point::ORIGIN);
+        let b = nbsp.decoration_rects(Point::ORIGIN);
+        assert_eq!(b.len(), 1);
+        let advance = f64::from(nbsp.shaped.clusters.last().unwrap().advance);
+        assert!(
+            (b[0].rect.x1 - (a[0].rect.x1 + advance)).abs() < 0.01,
+            "the rect reaches the NBSP's end: {:?} vs {:?}",
+            b[0].rect,
+            a[0].rect
+        );
+    }
+
+    #[test]
+    fn spaces_after_a_trailing_no_break_space_are_trimmed() {
+        let nbsp = laid_out(
+            NOTO_SANS,
+            "Hello\u{A0}",
+            &style(TextDecoration::underline()),
+            None,
+        );
+        let padded = laid_out(
+            NOTO_SANS,
+            "Hello\u{A0}  ",
+            &style(TextDecoration::underline()),
+            None,
+        );
+        assert_eq!(
+            nbsp.decoration_rects(Point::ORIGIN),
+            padded.decoration_rects(Point::ORIGIN),
+        );
+    }
+
+    #[test]
     fn an_rtl_run_is_underlined_over_its_visual_span() {
         let text = "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}";
         let layout = laid_out(NOTO_ARABIC, text, &style(TextDecoration::underline()), None);
@@ -417,6 +477,30 @@ mod tests {
                 .all(
                     |g| f64::from(g.x) + 10.0 >= rect.x0 - 0.01 && f64::from(g.x) + 10.0 <= rect.x1
                 )
+        );
+    }
+
+    #[test]
+    fn an_rtl_trailing_no_break_space_stays_underlined() {
+        let text = "\u{627}\u{644}\u{639}\u{631}\u{628}\u{64a}\u{629}";
+        let plain = laid_out(NOTO_ARABIC, text, &style(TextDecoration::underline()), None);
+        let nbsp = laid_out(
+            NOTO_ARABIC,
+            &format!("{text}\u{A0}"),
+            &style(TextDecoration::underline()),
+            None,
+        );
+        assert_eq!(nbsp.shaped.paragraph_level, 1);
+        let a = plain.decoration_rects(Point::new(10.0, 0.0))[0].rect;
+        let b = nbsp.decoration_rects(Point::new(10.0, 0.0));
+        assert_eq!(b.len(), 1);
+        // The NBSP is the logical end, so it sits at the visual start of an RTL line.
+        let advance = f64::from(nbsp.shaped.clusters.last().unwrap().advance);
+        assert!(
+            (b[0].rect.width() - (a.width() + advance)).abs() < 0.01,
+            "{:?} vs {:?} + {advance}",
+            b[0].rect,
+            a
         );
     }
 
