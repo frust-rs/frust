@@ -54,8 +54,8 @@
 //! device request is exactly the plain `request_device` one.
 
 use std::ffi::CStr;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
 
@@ -118,9 +118,88 @@ pub struct DeviceHandle {
     /// The first uncaptured error this device raised, latched by the handler
     /// installed in [`create_device`]. See [`Self::first_uncaptured_error`].
     first_uncaptured_error: Arc<OnceLock<String>>,
+    /// Process-wide monotonic id of this logical device; see
+    /// [`Self::generation`].
+    generation: u64,
+    /// Set by the device-lost callback installed in [`create_device`]; see
+    /// [`Self::is_lost`].
+    lost: Arc<AtomicBool>,
+}
+
+/// The next device generation to hand out. Starts at 1 so `0` is never a valid
+/// generation and can serve a caller as "no device yet".
+static NEXT_DEVICE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Draws the next process-wide device generation.
+///
+/// [`create_device`] uses this for every device it makes. A device created
+/// outside it (the headless renderer, a test oracle) calls this directly so all
+/// devices in the process share one strictly increasing counter.
+#[doc(hidden)]
+pub fn next_device_generation() -> u64 {
+    NEXT_DEVICE_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Optional features apps have asked for, process-wide. See
+/// [`request_optional_features`].
+static REQUESTED_FEATURES: Mutex<wgpu::Features> = Mutex::new(wgpu::Features::empty());
+
+/// Asks that every device created from now on also enable `features`, **when
+/// the adapter offers them**.
+///
+/// Requests union into a process-wide set and never shrink. They are
+/// adapter-conditioned exactly like [`optional_device_features`]: a feature
+/// the adapter lacks is silently left out, so a request can never turn a
+/// working adapter into a failed device request. There is deliberately no way
+/// to *require* a feature.
+///
+/// Only features are opt-in. Limits are not: on the full profile the device is
+/// already requested with the adapter's own limits passed through unclamped.
+///
+/// A device that already exists is unaffected; see
+/// [`missing_requested_features`] for what rebuilding it would gain.
+pub fn request_optional_features(features: wgpu::Features) {
+    let mut guard = REQUESTED_FEATURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard |= features;
+}
+
+/// Everything requested so far through [`request_optional_features`].
+pub fn requested_optional_features() -> wgpu::Features {
+    *REQUESTED_FEATURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The requested features `handle`'s adapter offers but its device was created
+/// without: what recreating the device now would gain.
+pub fn missing_requested_features(handle: &DeviceHandle) -> wgpu::Features {
+    requested_optional_features() & handle.adapter.features() & !handle.device.features()
 }
 
 impl DeviceHandle {
+    /// Process-wide monotonic id of this logical device.
+    ///
+    /// Non-zero and strictly increasing per device creation in the process.
+    /// Clones of a handle share it, so it distinguishes "the device a resource
+    /// was built on" from "the current device" once a device may be dropped and
+    /// recreated.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Whether `wgpu` reported this device lost (driver reset, adapter removal,
+    /// an explicit destroy).
+    ///
+    /// Latched and never cleared: a lost device is not recoverable, build a new
+    /// one. Dropping the last handle to a device does not set it — `wgpu` runs
+    /// the lost callback only for a device that was explicitly destroyed or
+    /// genuinely lost, not for an ordinary drop.
+    pub fn is_lost(&self) -> bool {
+        self.lost.load(Ordering::Relaxed)
+    }
+
     /// The **first** uncaptured `wgpu` error this device ever raised, or `None`
     /// if it has raised none.
     ///
@@ -483,8 +562,12 @@ async fn create_device(
     // alignment mitigation layered on top of it.
     let base_limits = base_device_limits(caps.downlevel_profile, adapter.limits());
     let required_limits = effective_limits(base_limits, is_ios_simulator());
-    let required_features =
-        device_features(adapter.features(), &caps, cfg!(feature = "perf-trace"));
+    let required_features = device_features(
+        adapter.features(),
+        &caps,
+        cfg!(feature = "perf-trace"),
+        requested_optional_features(),
+    );
 
     let descriptor = wgpu::DeviceDescriptor {
         label: Some(&options.device_label),
@@ -549,12 +632,27 @@ async fn create_device(
         }
     }));
 
+    // Latch device loss. wgpu runs this on its own thread, so it only stores a
+    // flag and logs; it never panics. An ordinary drop does not invoke it.
+    let lost = Arc::new(AtomicBool::new(false));
+    let lost_latch = Arc::clone(&lost);
+    device.set_device_lost_callback(move |reason, message| {
+        lost_latch.store(true, Ordering::Relaxed);
+        if matches!(reason, wgpu::DeviceLostReason::Destroyed) {
+            log::debug!("frust-gpu: device destroyed");
+        } else {
+            log::warn!("frust-gpu: device lost ({reason:?}): {message}");
+        }
+    });
+
     Ok(DeviceHandle {
         adapter,
         device,
         queue,
         caps,
         first_uncaptured_error: first_error,
+        generation: next_device_generation(),
+        lost,
     })
 }
 
@@ -933,7 +1031,8 @@ fn required_features(caps: &TierCaps, perf_trace: bool) -> wgpu::Features {
 }
 
 /// The complete `required_features` set a device request is made with: the
-/// opportunistic set ([`optional_device_features`]) narrowed to what
+/// opportunistic set ([`optional_device_features`] plus the app's `requested`
+/// features) narrowed to what
 /// `adapter_features` actually offers, plus the genuinely required set
 /// ([`required_features`]).
 ///
@@ -944,8 +1043,10 @@ fn device_features(
     adapter_features: wgpu::Features,
     caps: &TierCaps,
     perf_trace: bool,
+    requested: wgpu::Features,
 ) -> wgpu::Features {
-    (adapter_features & optional_device_features()) | required_features(caps, perf_trace)
+    (adapter_features & (optional_device_features() | requested))
+        | required_features(caps, perf_trace)
 }
 
 /// Number of uncaptured `wgpu` errors logged at error level per device before
@@ -1155,7 +1256,7 @@ mod tests {
         let caps = TierCaps::fake(DownlevelProfile::Full);
         let adapter = wgpu::Features::PIPELINE_CACHE | wgpu::Features::DEPTH_CLIP_CONTROL;
         assert_eq!(
-            device_features(adapter, &caps, false),
+            device_features(adapter, &caps, false, wgpu::Features::empty()),
             wgpu::Features::PIPELINE_CACHE,
             "an offered optional feature is taken, and nothing else is"
         );
@@ -1168,7 +1269,12 @@ mod tests {
         // failure, i.e. no GPU at all rather than merely no persisted cache.
         let caps = TierCaps::fake(DownlevelProfile::Full);
         assert_eq!(
-            device_features(wgpu::Features::empty(), &caps, false),
+            device_features(
+                wgpu::Features::empty(),
+                &caps,
+                false,
+                wgpu::Features::empty()
+            ),
             wgpu::Features::empty()
         );
     }
@@ -1178,9 +1284,73 @@ mod tests {
         let caps = TierCaps::fake(DownlevelProfile::Full);
         assert!(caps.has_timestamp_query, "fixture precondition");
         assert_eq!(
-            device_features(wgpu::Features::PIPELINE_CACHE, &caps, true),
+            device_features(
+                wgpu::Features::PIPELINE_CACHE,
+                &caps,
+                true,
+                wgpu::Features::empty()
+            ),
             wgpu::Features::PIPELINE_CACHE | wgpu::Features::TIMESTAMP_QUERY
         );
+    }
+
+    /// Serialises tests that write the process-wide request slot.
+    static REQUEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn requested_features_are_added_only_when_the_adapter_offers_them() {
+        let caps = TierCaps::fake(DownlevelProfile::Full);
+        let want = wgpu::Features::SHADER_F16;
+        assert_eq!(
+            device_features(wgpu::Features::empty(), &caps, false, want),
+            wgpu::Features::empty(),
+            "a request the adapter cannot meet is left out"
+        );
+        assert_eq!(
+            device_features(wgpu::Features::SHADER_F16, &caps, false, want),
+            wgpu::Features::SHADER_F16
+        );
+    }
+
+    #[test]
+    fn a_request_can_never_produce_a_feature_outside_adapter_or_required() {
+        let caps = TierCaps::fake(DownlevelProfile::Full);
+        let masks = [
+            wgpu::Features::empty(),
+            wgpu::Features::SHADER_F16,
+            wgpu::Features::FLOAT32_FILTERABLE | wgpu::Features::PIPELINE_CACHE,
+            wgpu::Features::TEXTURE_FORMAT_16BIT_NORM | wgpu::Features::SHADER_F16,
+            wgpu::Features::all(),
+        ];
+        for adapter in masks {
+            for requested in masks {
+                for perf in [false, true] {
+                    let got = device_features(adapter, &caps, perf, requested);
+                    let allowed = adapter | required_features(&caps, perf);
+                    assert!(
+                        allowed.contains(got),
+                        "{got:?} escapes adapter {adapter:?} + required"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn requests_union_and_never_shrink() {
+        let _guard = REQUEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        request_optional_features(wgpu::Features::SHADER_F16);
+        request_optional_features(wgpu::Features::FLOAT32_FILTERABLE);
+        request_optional_features(wgpu::Features::empty());
+        let got = requested_optional_features();
+        assert!(got.contains(wgpu::Features::SHADER_F16 | wgpu::Features::FLOAT32_FILTERABLE));
+    }
+
+    #[test]
+    fn device_generations_strictly_increase_and_are_non_zero() {
+        let a = next_device_generation();
+        let b = next_device_generation();
+        assert!(a >= 1 && b > a);
     }
 
     #[test]
