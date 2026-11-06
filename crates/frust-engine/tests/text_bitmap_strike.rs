@@ -1,9 +1,11 @@
 //! Bitmap-strike colour glyphs on the frust-side bitmap route: a bitmap-first
 //! face (a `CBDT` strike with no outlines here; Apple Color Emoji's `sbix` on
-//! Apple targets) never reaches `glifo`. Its PNG record is decoded by the
-//! engine, inserted into the atlas through the pending-upload queue and
-//! charged its real slot, and drawn from the atlas; a glyph the atlas cannot
-//! serve is counted skipped.
+//! Apple targets; a synthetic `sbix` face) never reaches `glifo`. Its PNG
+//! record is decoded by the engine, inserted into the atlas through the
+//! pending-upload queue and charged its real slot, and drawn from the atlas; a
+//! glyph the atlas cannot serve is counted skipped. A face with outlines as
+//! well as strikes is `glifo`'s, and `glifo` decodes none of its strikes: it
+//! draws the outlines.
 //!
 //! Sibling of `text_color_hint.rs` and driven the same way: a `frust_scene`
 //! `Scene` compiled by `SceneCompiler`, with glyph ids named directly against
@@ -123,7 +125,7 @@ fn the_strikes_png_decodes_into_a_pixmap() {
     };
 
     // The decoder the bitmap route calls for a PNG strike: present only under
-    // the `png` feature `frust-engine` enables through `glifo`.
+    // the `png` feature `frust-engine` enables on `vello_common`.
     let pixmap = vello_common::pixmap::Pixmap::from_png(std::io::Cursor::new(data))
         .expect("the strike's PNG decodes");
     assert!(pixmap.width() > 0 && pixmap.height() > 0);
@@ -295,6 +297,302 @@ fn a_strike_whose_png_header_is_oversized_is_refused_without_an_upload() {
         compiler.glyph_atlas_mut().drain_pending_uploads().count(),
         0
     );
+}
+
+/// The tables of the single-font file `font`, in directory order.
+fn tables_of(font: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    let read_u32 = |at: usize| u32::from_be_bytes(font[at..at + 4].try_into().unwrap()) as usize;
+    let count = usize::from(u16::from_be_bytes([font[4], font[5]]));
+    (0..count)
+        .map(|index| {
+            let record = 12 + 16 * index;
+            let tag: [u8; 4] = font[record..record + 4].try_into().unwrap();
+            let (offset, length) = (read_u32(record + 8), read_u32(record + 12));
+            (tag, font[offset..offset + length].to_vec())
+        })
+        .collect()
+}
+
+/// The table `tag` of `tables`.
+fn table_in<'a>(tables: &'a [([u8; 4], Vec<u8>)], tag: &[u8; 4]) -> &'a [u8] {
+    &tables
+        .iter()
+        .find(|(found, _)| found == tag)
+        .unwrap_or_else(|| panic!("no {tag:?} table"))
+        .1
+}
+
+/// A single-font file holding `tables`, its directory sorted by tag (the
+/// parsers search it) and every table four-byte aligned.
+fn sfnt(mut tables: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+    tables.sort_by_key(|(tag, _)| *tag);
+    let mut out = vec![0x00, 0x01, 0x00, 0x00];
+    out.extend_from_slice(&(tables.len() as u16).to_be_bytes());
+    out.extend_from_slice(&[0; 6]);
+    let mut offset = 12 + 16 * tables.len();
+    for (tag, bytes) in &tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&(offset as u32).to_be_bytes());
+        out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        offset += bytes.len().next_multiple_of(4);
+    }
+    for (_, bytes) in &tables {
+        out.extend_from_slice(bytes);
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    out
+}
+
+/// [`CBDT_FONT`]'s one strike image: the PNG file from its signature through
+/// its `IEND` chunk.
+fn grinning_png() -> Vec<u8> {
+    let start = CBDT_FONT
+        .windows(8)
+        .position(|window| window == b"\x89PNG\r\n\x1a\n")
+        .expect("the strike carries a PNG");
+    let end = CBDT_FONT
+        .windows(4)
+        .position(|window| window == b"IEND")
+        .expect("the PNG ends")
+        + 8;
+    CBDT_FONT[start..end].to_vec()
+}
+
+/// [`CBDT_FONT`] with TrueType outlines added — Noto Sans's `H` as glyph
+/// [`GRINNING_FACE`]'s outline — so it is no longer bitmap-first and its runs
+/// reach `glifo`; with its strike's PNG header claiming `claimed` px square
+/// when given.
+fn cbdt_with_outlines(claimed: Option<u32>) -> FontData {
+    let mut tables = tables_of(CBDT_FONT);
+    if let Some(side) = claimed {
+        let cbdt = &mut tables.iter_mut().find(|(tag, _)| tag == b"CBDT").unwrap().1;
+        let ihdr = cbdt
+            .windows(4)
+            .position(|window| window == b"IHDR")
+            .expect("the strike carries a PNG");
+        cbdt[ihdr + 4..ihdr + 8].copy_from_slice(&side.to_be_bytes());
+        cbdt[ihdr + 8..ihdr + 12].copy_from_slice(&side.to_be_bytes());
+    }
+    let latin = tables_of(LATIN_FONT);
+    let (latin_loca, latin_glyf) = (table_in(&latin, b"loca"), table_in(&latin, b"glyf"));
+    let short = |glyph: usize| {
+        usize::from(u16::from_be_bytes([
+            latin_loca[glyph * 2],
+            latin_loca[glyph * 2 + 1],
+        ])) * 2
+    };
+    const LATIN_H: usize = 5;
+    let outline = latin_glyf[short(LATIN_H)..short(LATIN_H + 1)].to_vec();
+    assert!(!outline.is_empty(), "Noto Sans's H has an outline");
+
+    let maxp = table_in(&tables, b"maxp");
+    let glyphs = usize::from(u16::from_be_bytes([maxp[4], maxp[5]]));
+    let mut loca = Vec::new();
+    let mut glyf = Vec::new();
+    for glyph in 0..=glyphs {
+        loca.extend_from_slice(&(glyf.len() as u32).to_be_bytes());
+        if glyph == GRINNING_FACE as usize {
+            glyf.extend_from_slice(&outline);
+        }
+    }
+    let head = &mut tables.iter_mut().find(|(tag, _)| tag == b"head").unwrap().1;
+    head[50..52].copy_from_slice(&1_u16.to_be_bytes());
+    tables.push((*b"loca", loca));
+    tables.push((*b"glyf", glyf));
+    FontData::new(Blob::new(Arc::new(sfnt(tables))), 0)
+}
+
+/// A PNG strike of a face that also carries outlines is `glifo`'s, and
+/// `glifo` decodes none: the glyph draws its outline on every frame — the
+/// animating first frames and the settled, atlas-routed ones alike — and no
+/// bitmap is ever queued. With the strike's header claiming a 20000 px square
+/// the frames compile just the same, and as quickly: nothing sizes a decode
+/// from that header.
+#[test]
+fn a_png_strike_of_a_face_with_outlines_is_never_decoded() {
+    for claimed in [None, Some(20_000)] {
+        let face = FontHandle::new(cbdt_with_outlines(claimed));
+        let font = FontRef::new(face.font().data.data()).expect("the face parses");
+        let strike = font
+            .bitmap_strikes()
+            .glyph_for_size(Size::new(SIZE), GlyphId::new(GRINNING_FACE))
+            .expect("fixture precondition: the strike survives the rebuild");
+        assert!(matches!(strike.data, BitmapData::Png(_)));
+
+        let mut compiler = atlas_compiler();
+        let started = std::time::Instant::now();
+        for frame_index in 0..12 {
+            let frame = compiler
+                .compile(
+                    &scene_of(GlyphRun {
+                        font: face.clone(),
+                        ..run()
+                    }),
+                    Affine::IDENTITY,
+                    VIEWPORT,
+                )
+                .expect("an in-range scene compiles");
+            let case = format!("{claimed:?} px header, frame {frame_index}");
+            assert_eq!(frame.skipped_glyphs, 0, "{case}: the outline is drawn");
+            assert_eq!(frame.glyph_draws, 1, "{case}");
+            assert_eq!(
+                compiler.glyph_atlas_mut().drain_pending_uploads().count(),
+                0,
+                "{case}: no strike is decoded, so no bitmap is queued"
+            );
+            compiler.acknowledge_glyph_replay();
+            compiler.acknowledge_glyph_clears();
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{claimed:?}: twelve frames took {:?}",
+            started.elapsed()
+        );
+    }
+}
+
+/// The `sbix` ppem the synthetic face's one strike is drawn at: the PNG it
+/// carries is [`CBDT_FONT`]'s 109 ppem image.
+const SBIX_PPEM: u16 = 109;
+
+/// The synthetic `sbix` face's glyph that carries a `png ` record.
+const SBIX_IMAGE: u32 = 1;
+
+/// Its glyph that no strike holds a record for.
+const SBIX_STRIKELESS: u32 = 2;
+
+/// A bitmap-first `sbix` face (`DRAW_OUTLINES` clear) of three glyphs and one
+/// strike: `.notdef` and [`SBIX_STRIKELESS`] without records,
+/// [`SBIX_IMAGE`] with [`grinning_png`] as its `png ` record.
+fn sbix_face() -> FontData {
+    let source = tables_of(CBDT_FONT);
+    let mut maxp = table_in(&source, b"maxp").to_vec();
+    maxp[4..6].copy_from_slice(&3_u16.to_be_bytes());
+    let mut hhea = table_in(&source, b"hhea").to_vec();
+    hhea[34..36].copy_from_slice(&1_u16.to_be_bytes());
+    // One long metric (advance 2550, lsb 0) and two short lsbs.
+    let mut hmtx = 2550_u16.to_be_bytes().to_vec();
+    hmtx.extend_from_slice(&[0; 6]);
+
+    let png = grinning_png();
+    let mut record = 0_i16.to_be_bytes().to_vec();
+    record.extend_from_slice(&0_i16.to_be_bytes());
+    record.extend_from_slice(b"png ");
+    record.extend_from_slice(&png);
+    // The strike: ppem, ppi, four glyph-data offsets (three glyphs plus the
+    // end), then glyph 1's record.
+    let records_at = 4 + 4 * 4_u32;
+    let mut strike = SBIX_PPEM.to_be_bytes().to_vec();
+    strike.extend_from_slice(&72_u16.to_be_bytes());
+    let end = records_at + record.len() as u32;
+    for offset in [records_at, records_at, end, end] {
+        strike.extend_from_slice(&offset.to_be_bytes());
+    }
+    strike.extend_from_slice(&record);
+    let mut sbix = 1_u16.to_be_bytes().to_vec();
+    sbix.extend_from_slice(&1_u16.to_be_bytes());
+    sbix.extend_from_slice(&1_u32.to_be_bytes());
+    sbix.extend_from_slice(&12_u32.to_be_bytes());
+    sbix.extend_from_slice(&strike);
+
+    let tables = vec![
+        (*b"head", table_in(&source, b"head").to_vec()),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"maxp", maxp),
+        (*b"sbix", sbix),
+    ];
+    FontData::new(Blob::new(Arc::new(sfnt(tables))), 0)
+}
+
+/// One frame of `glyph` of `face` at [`SIZE`] on a fresh atlas compiler, the
+/// compiler kept for a second frame.
+fn sbix_frame(face: &FontHandle, glyph: u32) -> (SceneCompiler, CompiledFrame) {
+    let mut compiler = atlas_compiler();
+    let frame = compiler
+        .compile(
+            &scene_of(GlyphRun {
+                font: face.clone(),
+                glyphs: vec![Glyph {
+                    id: glyph,
+                    x: 0.0,
+                    y: 0.0,
+                }],
+                ..run()
+            }),
+            Affine::IDENTITY,
+            VIEWPORT,
+        )
+        .expect("an in-range scene compiles");
+    (compiler, frame)
+}
+
+/// In a bitmap-first `sbix` face a glyph no strike holds a record for is a
+/// missing glyph — such a face never falls back to its outlines — and is
+/// counted skipped; its sibling with a `png ` record is decoded and drawn.
+#[test]
+fn an_sbix_glyph_no_strike_holds_is_counted_skipped() {
+    let face = FontHandle::new(sbix_face());
+    let (_, frame) = sbix_frame(&face, SBIX_STRIKELESS);
+    assert_eq!(frame.skipped_glyphs, 1, "the strike-less glyph is counted");
+    assert_eq!(frame.glyph_draws, 0);
+
+    let (mut compiler, frame) = sbix_frame(&face, SBIX_IMAGE);
+    assert_eq!(frame.skipped_glyphs, 0, "the png record draws");
+    assert_eq!(frame.glyph_draws, 1);
+    let uploads: Vec<_> = compiler.glyph_atlas_mut().drain_pending_uploads().collect();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(
+        (uploads[0].atlas_slot.width, uploads[0].atlas_slot.height),
+        (136, 128)
+    );
+}
+
+/// On iOS a named `sbix` face CoreText cannot open — an app-bundled face it
+/// was never given — falls back to the engine's own decode of the same
+/// strike's `png ` record instead of being counted skipped, and the resident
+/// slot keeps drawing on the next frame without a second upload.
+#[cfg(target_os = "ios")]
+#[test]
+fn an_sbix_face_core_text_cannot_open_draws_through_the_engines_decode() {
+    let face = FontHandle::new(sbix_face())
+        .with_identity(Some(Arc::from("FrustTestNoSuchSbixFace")), false);
+    let (mut compiler, frame) = sbix_frame(&face, SBIX_IMAGE);
+    assert_eq!(frame.skipped_glyphs, 0, "the record is decoded instead");
+    assert_eq!(frame.glyph_draws, 1);
+    let uploads: Vec<_> = compiler.glyph_atlas_mut().drain_pending_uploads().collect();
+    assert_eq!(uploads.len(), 1);
+    assert_eq!(
+        (uploads[0].atlas_slot.width, uploads[0].atlas_slot.height),
+        (136, 128)
+    );
+
+    let again = compiler
+        .compile(
+            &scene_of(GlyphRun {
+                font: face.clone(),
+                glyphs: vec![Glyph {
+                    id: SBIX_IMAGE,
+                    x: 0.0,
+                    y: 0.0,
+                }],
+                ..run()
+            }),
+            Affine::IDENTITY,
+            VIEWPORT,
+        )
+        .expect("an in-range scene compiles");
+    assert_eq!(again.skipped_glyphs, 0);
+    assert_eq!(again.glyph_draws, 1);
+    assert_eq!(
+        compiler.glyph_atlas_mut().drain_pending_uploads().count(),
+        0,
+        "the decoded slot is resident"
+    );
+
+    let (_, strikeless) = sbix_frame(&face, SBIX_STRIKELESS);
+    assert_eq!(strikeless.skipped_glyphs, 1);
 }
 
 /// Noto Sans, subsetted to Latin: the outline text that spends the budget.

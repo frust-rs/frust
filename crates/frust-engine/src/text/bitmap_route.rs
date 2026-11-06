@@ -12,9 +12,27 @@
 //! by CoreText ([`super::apple_raster`]), which resolves every record type;
 //! elsewhere the record is read here — `png ` decoded behind a
 //! [`MAX_STRIKE_DIM`] header check, `dupe` and `flip` followed — and anything
-//! else is counted skipped. A resident glyph is drawn from its slot with
-//! `glifo`'s own placement ([`bitmap_transform`]). Such runs never take the
-//! resident-run cache or glyph quads: a strike is sampled bilinearly.
+//! else is counted skipped. When CoreText refuses a glyph (it cannot open or
+//! verify the face, or draws nothing), the same strike's record is decoded
+//! here before the glyph is counted skipped, so an app-bundled `sbix` face
+//! with `png ` records still draws; its slot is marked ([`DECODED_BEARINGS`])
+//! so it is placed as a decoded strike is. A resident glyph is drawn from its
+//! slot with `glifo`'s own placement ([`bitmap_transform`]). Such runs never
+//! take the resident-run cache or glyph quads: a strike is sampled bilinearly.
+//!
+//! A production that fails — a record that does not decode, a header over the
+//! cap, a CoreText refusal with nothing decodable behind it — is remembered
+//! under the glyph's key ([`AtlasPolicy::note_bitmap_production`]) and not
+//! tried again: the glyph is counted skipped each frame without the work. An
+//! `sbix` glyph no strike holds a record for is counted skipped too: a
+//! bitmap-first face never falls back to outlines, so it is a missing glyph.
+//! (A `CBDT`/`EBDT` bitmap-first face has no outlines to miss, and such a
+//! glyph draws nothing.)
+//!
+//! Every offset read out of a `CBLC`/`EBLC` index subtable is computed in the
+//! table's own 32-bit offset space with checked arithmetic, so a crafted
+//! subtable is refused rather than wrapped into another record on a 32-bit
+//! target.
 //!
 //! # Pin-bound
 //!
@@ -50,6 +68,11 @@ const SBIX_DRAW_OUTLINES: u16 = 0x0002;
 
 /// A PNG file's eight-byte signature.
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+
+/// The slot bearings that mark an `sbix` strike decoded here on the CoreText
+/// route (iOS), which is placed by [`bitmap_transform`] rather than by its
+/// raster origin. No CoreText raster is accepted with this origin.
+const DECODED_BEARINGS: (i16, i16) = (i16::MIN, i16::MIN);
 
 /// Which table a bitmap-first face's strikes are read from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,24 +364,31 @@ impl<'a> Face<'a> {
     /// Strike `index`'s `CBDT`/`EBDT` image of `glyph`: a PNG record (image
     /// formats 17-19 at 32 bits per pixel, as `skrifa` decodes them).
     fn bdt_image(&self, index: usize, glyph: u32) -> Result<Option<StrikeGlyph<'a>>, bool> {
-        let size = 8 + index * 48;
+        let size = index
+            .checked_mul(48)
+            .and_then(|at| at.checked_add(8))
+            .ok_or(false)?;
         let (ppem_y, ppem_x) = self.strike_ppem(index).ok_or(false)?;
-        let bit_depth = *self.strikes.get(size + 46).ok_or(false)?;
+        let bit_depth = *self
+            .strikes
+            .get(size.checked_add(46).ok_or(false)?)
+            .ok_or(false)?;
         let BdtImage {
             format,
             bytes: image,
             metrics: big,
         } = self.bdt_location(size, glyph).ok_or(false)?;
         let metrics = |at: usize| -> Option<(f32, f32)> {
-            let x = *image.get(at + 2)? as i8;
-            let y = *image.get(at + 3)? as i8;
+            let x = *image.get(at.checked_add(2)?)? as i8;
+            let y = *image.get(at.checked_add(3)?)? as i8;
             Some((f32::from(x), f32::from(y)))
         };
         // The PNG follows the record's metrics (5 or 8 bytes, none for 19)
         // and its `u32` length.
         let data = |at: usize| -> Option<&'a [u8]> {
-            let length = read_u32(image, at)? as usize;
-            image.get(at + 4..(at + 4).checked_add(length)?)
+            let length = usize::try_from(read_u32(image, at)?).ok()?;
+            let start = at.checked_add(4)?;
+            image.get(start..start.checked_add(length)?)
         };
         let (inner, png) = match format {
             17 => (metrics(0), data(5)),
@@ -380,67 +410,90 @@ impl<'a> Face<'a> {
 
     /// Where `glyph`'s image lives in the strike whose `BitmapSize` is at
     /// `size`.
+    ///
+    /// Every offset is an `Offset32` into the table, so the arithmetic is done
+    /// in `u32` and checked: an index subtable whose sums or products leave
+    /// that range is refused, on every target alike, rather than wrapped into
+    /// another record where `usize` is 32 bits wide (the browser shell).
     fn bdt_location(&self, size: usize, glyph: u32) -> Option<BdtImage<'a>> {
         let glyph = u16::try_from(glyph).ok()?;
-        let array = read_u32(self.strikes, size)? as usize;
-        let count = read_u32(self.strikes, size + 8)? as usize;
-        for entry in 0..count.min(u16::MAX as usize) {
-            let at = array.checked_add(entry * 8)?;
-            let (first, last) = (read_u16(self.strikes, at)?, read_u16(self.strikes, at + 2)?);
+        let strikes = self.strikes;
+        let at = |offset: u32| usize::try_from(offset).ok();
+        let u16_at = |offset: u32| read_u16(strikes, at(offset)?);
+        let u32_at = |offset: u32| read_u32(strikes, at(offset)?);
+        let size = u32::try_from(size).ok()?;
+        let array = u32_at(size)?;
+        let count = u32_at(size.checked_add(8)?)?;
+        for entry in 0..count.min(u32::from(u16::MAX)) {
+            let record = array.checked_add(entry.checked_mul(8)?)?;
+            let (first, last) = (u16_at(record)?, u16_at(record.checked_add(2)?)?);
             if glyph < first || glyph > last {
                 continue;
             }
-            let header = array.checked_add(read_u32(self.strikes, at + 4)? as usize)?;
-            let index_format = read_u16(self.strikes, header)?;
-            let image_format = read_u16(self.strikes, header + 2)?;
-            let base = read_u32(self.strikes, header + 4)? as usize;
-            let nth = usize::from(glyph - first);
-            let big = |at: usize| -> Option<(f32, f32)> {
-                let x = *self.strikes.get(at + 2)? as i8;
-                let y = *self.strikes.get(at + 3)? as i8;
+            let header = array.checked_add(u32_at(record.checked_add(4)?)?)?;
+            let index_format = u16_at(header)?;
+            let image_format = u16_at(header.checked_add(2)?)?;
+            let base = u32_at(header.checked_add(4)?)?;
+            let nth = u32::from(glyph - first);
+            let field = |offset: u32| header.checked_add(offset);
+            let big = |offset: u32| -> Option<(f32, f32)> {
+                let offset = at(field(offset)?)?;
+                let x = *strikes.get(offset.checked_add(2)?)? as i8;
+                let y = *strikes.get(offset.checked_add(3)?)? as i8;
                 Some((f32::from(x), f32::from(y)))
+            };
+            // `(start, end)` of the image, relative to `base`, from a run of
+            // equal-size images: the `n`th of them.
+            let sized = |n: u32, image_size: u32| -> Option<(u32, u32)> {
+                let start = n.checked_mul(image_size)?;
+                Some((start, start.checked_add(image_size)?))
             };
             let (start, end, metrics) = match index_format {
                 1 => {
-                    let at = header + 8 + nth * 4;
-                    let (s, e) = (read_u32(self.strikes, at)?, read_u32(self.strikes, at + 4)?);
-                    (s as usize, e as usize, None)
+                    let offsets = field(8)?.checked_add(nth.checked_mul(4)?)?;
+                    let start = u32_at(offsets)?;
+                    let end = u32_at(offsets.checked_add(4)?)?;
+                    (start, end, None)
                 }
                 3 => {
-                    let at = header + 8 + nth * 2;
-                    let (s, e) = (read_u16(self.strikes, at)?, read_u16(self.strikes, at + 2)?);
-                    (usize::from(s), usize::from(e), None)
+                    let offsets = field(8)?.checked_add(nth.checked_mul(2)?)?;
+                    let start = u16_at(offsets)?;
+                    let end = u16_at(offsets.checked_add(2)?)?;
+                    (u32::from(start), u32::from(end), None)
                 }
                 2 => {
-                    let image_size = read_u32(self.strikes, header + 8)? as usize;
-                    (nth * image_size, (nth + 1) * image_size, big(header + 12))
+                    let image_size = u32_at(field(8)?)?;
+                    let (start, end) = sized(nth, image_size)?;
+                    (start, end, big(12))
                 }
                 4 => {
-                    let glyphs = read_u32(self.strikes, header + 8)? as usize;
-                    let pairs = header + 12;
-                    let found = (0..glyphs.min(u16::MAX as usize))
-                        .find(|&pair| read_u16(self.strikes, pairs + pair * 4) == Some(glyph))?;
-                    let at = pairs + found * 4 + 2;
-                    let (s, e) = (read_u16(self.strikes, at)?, read_u16(self.strikes, at + 4)?);
-                    (usize::from(s), usize::from(e), None)
+                    let glyphs = u32_at(field(8)?)?;
+                    let pairs = field(12)?;
+                    let pair_at = |pair: u32| pairs.checked_add(pair.checked_mul(4)?);
+                    let found = (0..glyphs.min(u32::from(u16::MAX)))
+                        .find(|&pair| pair_at(pair).and_then(u16_at) == Some(glyph))?;
+                    let offset = pair_at(found)?.checked_add(2)?;
+                    let start = u16_at(offset)?;
+                    let end = u16_at(offset.checked_add(4)?)?;
+                    (u32::from(start), u32::from(end), None)
                 }
                 5 => {
-                    let image_size = read_u32(self.strikes, header + 8)? as usize;
-                    let glyphs = read_u32(self.strikes, header + 20)? as usize;
-                    let ids = header + 24;
-                    let found = (0..glyphs.min(u16::MAX as usize))
-                        .find(|&id| read_u16(self.strikes, ids + id * 2) == Some(glyph))?;
-                    (
-                        found * image_size,
-                        (found + 1) * image_size,
-                        big(header + 12),
-                    )
+                    let image_size = u32_at(field(8)?)?;
+                    let glyphs = u32_at(field(20)?)?;
+                    let ids = field(24)?;
+                    let id_at = |id: u32| ids.checked_add(id.checked_mul(2)?);
+                    let found = (0..glyphs.min(u32::from(u16::MAX)))
+                        .find(|&id| id_at(id).and_then(u16_at) == Some(glyph))?;
+                    let (start, end) = sized(found, image_size)?;
+                    (start, end, big(12))
                 }
                 _ => return None,
             };
+            let start = at(base.checked_add(start)?)?;
+            let end = at(base.checked_add(end)?)?;
             let image = self
                 .images
-                .get(base.checked_add(start)?..base.checked_add(end)?)
+                .get(start..end)
                 .filter(|image| !image.is_empty())?;
             return Some(BdtImage {
                 format: image_format,
@@ -610,7 +663,8 @@ pub(crate) struct BitmapRouting<'a> {
 /// Draw `run` of a bitmap-first face under its device `transform`, painted
 /// with `paint` (the run's brush: unused by a colour strike, carried for the
 /// sink's bookkeeping). Every glyph is drawn from the atlas or counted
-/// skipped; a glyph no strike holds a record for draws nothing.
+/// skipped; a glyph no strike holds a record for draws nothing, and is
+/// counted skipped in an `sbix` face (see this module's doc).
 pub(crate) fn lower_run(
     run: &GlyphRun,
     transform: Affine,
@@ -706,6 +760,11 @@ struct RunDraw<'r, 'f> {
 impl RunDraw<'_, '_> {
     /// `key`'s slot, inserting `produce`'s pixmap on a miss when the run may
     /// insert; `Ok(None)` for a glyph with nothing to draw, `Err` for a skip.
+    ///
+    /// A key whose production already failed is not produced again (see
+    /// [`AtlasPolicy::bitmap_refused`]); a failure here is remembered. An
+    /// insert the atlas has no room for is not a failure of the glyph's and
+    /// is retried on a later frame.
     fn resolve(
         &mut self,
         key: glifo::GlyphCacheKey,
@@ -714,8 +773,10 @@ impl RunDraw<'_, '_> {
         match self.policy.keyed_slot(&key) {
             KeyedSlot::Resident(slot) => Ok(Some(slot)),
             KeyedSlot::Inkless => Ok(None),
-            KeyedSlot::Absent if self.insert => {
-                let (pixmap, bearing) = produce().ok_or(())?;
+            KeyedSlot::Absent if self.insert && !self.policy.bitmap_refused(&key) => {
+                let produced = produce();
+                self.policy.note_bitmap_production(&key, produced.is_some());
+                let (pixmap, bearing) = produced.ok_or(())?;
                 self.policy
                     .insert_bitmap(self.images, key, Arc::new(pixmap), bearing)
                     .map(Some)
@@ -731,7 +792,9 @@ impl RunDraw<'_, '_> {
         let size = self.props.font_size;
         let image = match self.face.lookup(glyph, size) {
             Lookup::Image(image) => image,
-            Lookup::Absent => return true,
+            // Nothing to draw in a face with no outlines; a missing glyph in
+            // an `sbix` face, whose glyph would otherwise draw its outline.
+            Lookup::Absent => return self.face.kind != StrikeTable::Sbix,
             Lookup::Undecodable => return false,
         };
         let scale = (
@@ -760,7 +823,9 @@ impl RunDraw<'_, '_> {
 
     /// One glyph of an `sbix` face drawn by CoreText at its chosen strike's
     /// ppem, its slot's bearings holding the raster's origin (see
-    /// [`super::apple_raster`]'s placement convention).
+    /// [`super::apple_raster`]'s placement convention). When CoreText refuses
+    /// it, the same strike's record is decoded here instead and its slot
+    /// marked [`DECODED_BEARINGS`], placed as [`Self::decoded`] places one.
     fn core_text(
         &mut self,
         name: &str,
@@ -769,6 +834,7 @@ impl RunDraw<'_, '_> {
         sink: &mut EngineGlyphSink<'_>,
     ) -> bool {
         let face = self.face;
+        let size = self.props.font_size;
         let strikes = (0..face.strike_count()).map(|strike| {
             let ppem = face.strike_ppem(strike).map_or(0, |p| p.0);
             let held = face
@@ -777,19 +843,37 @@ impl RunDraw<'_, '_> {
                 .is_some();
             (ppem, held)
         });
-        let Some(ppem) = prefer_strike(self.props.font_size, strikes)
-            .and_then(|strike| face.strike_ppem(strike))
-            .map(|p| p.0)
-            .filter(|&ppem| ppem > 0)
-        else {
-            return true;
+        // No strike holds a record: a missing glyph (see `Self::decoded`).
+        let Some((strike, ppem)) = prefer_strike(size, strikes).and_then(|strike| {
+            let ppem = face.strike_ppem(strike)?.0;
+            (ppem > 0).then_some((strike, ppem))
+        }) else {
+            return false;
         };
-        let scale = f64::from(self.props.font_size / f32::from(ppem));
+        let scale = f64::from(size / f32::from(ppem));
         if !atlas_drawable(self.props.effective.pre_scale(scale)) {
             return false;
         }
         let key = bitmap_key(self.font.0, self.font.1, glyph, ppem);
-        match self.resolve(key, || rasterize(name, glyph, face.glyphs, ppem)) {
+        let record = || face.sbix_image(strike, glyph).ok().flatten();
+        let produce = || {
+            rasterize(name, glyph, face.glyphs, ppem)
+                .filter(|(_, origin)| *origin != DECODED_BEARINGS)
+                .or_else(|| {
+                    let image = record()?;
+                    let pixmap = decode_png(image.png, image.mirrored)?;
+                    Some((pixmap, DECODED_BEARINGS))
+                })
+        };
+        match self.resolve(key, produce) {
+            Ok(Some(slot)) if (slot.bearing_x, slot.bearing_y) == DECODED_BEARINGS => {
+                let Some(image) = record() else {
+                    return false;
+                };
+                let at = bitmap_transform(positioned, &image, size, face.upem, slot.height, true);
+                draw_from_atlas(sink, slot, at);
+                true
+            }
             Ok(Some(slot)) => {
                 let origin = Vec2::new(f64::from(slot.bearing_x), -f64::from(slot.bearing_y));
                 draw_from_atlas(
@@ -920,135 +1004,18 @@ mod tests {
         assert_eq!(plain.data()[row], mirrored.data()[row + width - 1]);
     }
 
-    /// What `glifo` draws an uncached bitmap glyph with: the transform at
-    /// each pixmap `fill_rect`, recorded by a sink that draws nothing.
-    #[derive(Default)]
-    struct Recorder {
-        transform: Affine,
-        pixmap: bool,
-        drawn: Vec<Affine>,
-        paint: Option<vello_common::paint::PaintType>,
-    }
-
-    impl glifo::DrawSink for Recorder {
-        fn set_transform(&mut self, t: Affine) {
-            self.transform = t;
-        }
-        fn set_paint(&mut self, _: glifo::AtlasPaint) {}
-        fn set_paint_transform(&mut self, _: Affine) {}
-        fn fill_path(&mut self, _: &kurbo::BezPath) {}
-        fn fill_rect(&mut self, _: &Rect) {
-            if self.pixmap {
-                self.drawn.push(self.transform);
-            }
-        }
-        fn push_clip_layer(&mut self, _: &kurbo::BezPath) {}
-        fn push_blend_layer(&mut self, _: peniko::BlendMode) {}
-        fn pop_layer(&mut self) {}
-        fn width(&self) -> u16 {
-            1024
-        }
-        fn height(&self) -> u16 {
-            1024
-        }
-    }
-
-    impl glifo::GlyphRenderer for Recorder {
-        type SavedState = Affine;
-        fn save_state(&mut self) -> Affine {
-            self.transform
-        }
-        fn restore_state(&mut self, state: Affine) {
-            self.transform = state;
-            self.pixmap = false;
-        }
-        fn stroke_path(&mut self, _: &kurbo::BezPath) {}
-        fn set_paint_image(&mut self, image: Image) {
-            self.pixmap = matches!(image.image, vello_common::paint::ImageSource::Pixmap(_));
-        }
-        fn set_tint(&mut self, _: Option<vello_common::paint::Tint>) {}
-        fn get_context_color(&self) -> peniko::color::AlphaColor<peniko::color::Srgb> {
-            peniko::color::palette::css::BLACK
-        }
-        fn current_paint(&self) -> &vello_common::paint::PaintType {
-            self.paint.as_ref().expect("set by the backend")
-        }
-        fn atlas_image_source(&self, slot: &AtlasSlot) -> vello_common::paint::ImageSource {
-            vello_common::paint::ImageSource::opaque_id(slot.image_id)
-        }
-        fn atlas_paint_transform(&self, _: &AtlasSlot) -> Affine {
-            Affine::IDENTITY
-        }
-    }
-
-    struct Backend<'a> {
-        sink: &'a mut Recorder,
-        prep: &'a mut glifo::GlyphPrepCache,
-    }
-
-    impl<'a> glifo::GlyphRunBackend<'a> for Backend<'a> {
-        fn atlas_cache(self, _: bool) -> Self {
-            self
-        }
-        fn fill_glyphs<G: Iterator<Item = glifo::Glyph> + Clone>(
-            self,
-            run: glifo::GlyphRun<'a>,
-            glyphs: G,
-        ) {
-            let mut renderer = run.build(glyphs, self.prep.as_mut(), glifo::AtlasCacher::Disabled);
-            renderer.fill_glyphs(self.sink);
-        }
-        fn stroke_glyphs<G: Iterator<Item = glifo::Glyph> + Clone>(
-            self,
-            _: glifo::GlyphRun<'a>,
-            _: G,
-        ) {
-        }
-        fn render_decoration<G: Iterator<Item = glifo::Glyph> + Clone>(
-            self,
-            _: glifo::GlyphRun<'a>,
-            _: G,
-            _: core::ops::RangeInclusive<f32>,
-            _: f32,
-            _: f32,
-            _: f32,
-            _: f32,
-        ) {
-        }
-    }
-
-    /// `glifo`'s transform for `glyph` of `font` at `size` under `transform`,
-    /// drawn uncached, beside the route's own for the same glyph.
+    /// `glifo`'s own `calculate_bitmap_transform` (glifo 0.3.0 `glyph.rs`),
+    /// fed `skrifa`'s reading of the glyph's strike — the source `glifo` takes
+    /// every input from — for `glyph` of `font` at `size` under `transform`,
+    /// beside the route's own transform from its own reading.
     fn both_transforms(
         font: &FontData,
         glyph: frust_scene::Glyph,
         size: f32,
         transform: Affine,
     ) -> (Affine, Affine) {
-        let mut sink = Recorder {
-            paint: Some(vello_common::paint::PaintType::Solid(
-                peniko::color::palette::css::BLACK,
-            )),
-            ..Recorder::default()
-        };
-        let mut prep = glifo::GlyphPrepCache::default();
-        glifo::GlyphRunBuilder::new(
-            font.clone(),
-            transform,
-            Affine::IDENTITY,
-            Backend {
-                sink: &mut sink,
-                prep: &mut prep,
-            },
-        )
-        .font_size(size)
-        .hint(false)
-        .fill_glyphs(std::iter::once(glifo::Glyph {
-            id: glyph.id,
-            x: glyph.x,
-            y: glyph.y,
-        }));
-        let theirs = *sink.drawn.first().expect("glifo drew the bitmap");
+        use skrifa::MetadataProvider as _;
+        use skrifa::bitmap::{BitmapData, BitmapFormat, Origin};
 
         let face = Face::open(font).expect("a bitmap-first face");
         let props = DrawProps::of(size, transform);
@@ -1067,6 +1034,43 @@ mod tests {
             height,
             sbix,
         );
+
+        let skrifa_font = skrifa::FontRef::from_index(font.data.data(), font.index).unwrap();
+        let strikes = skrifa_font.bitmap_strikes();
+        let theirs = strikes
+            .glyph_for_size(
+                skrifa::instance::Size::new(props.font_size),
+                skrifa::GlyphId::new(glyph.id),
+            )
+            .expect("skrifa finds the glyph's image");
+        let BitmapData::Png(png) = theirs.data else {
+            panic!("the strike is PNG data");
+        };
+        assert_eq!(png, image.png, "the route reads the record skrifa reads");
+        let x_scale = props.font_size / theirs.ppem_x;
+        let y_scale = props.font_size / theirs.ppem_y;
+        let units = props.font_size / f32::from(face.upem);
+        let bearing_y = if theirs.bearing_y == 0.0 && strikes.format() == Some(BitmapFormat::Sbix) {
+            100.0
+        } else {
+            theirs.bearing_y
+        };
+        let origin_shift = match theirs.placement_origin {
+            Origin::TopLeft => Vec2::ZERO,
+            Origin::BottomLeft => Vec2::new(0.0, -f64::from(height)),
+        };
+        let theirs = props
+            .positioned(&glyph)
+            .pre_translate(Vec2::new(
+                (-theirs.bearing_x * units).into(),
+                (bearing_y * units).into(),
+            ))
+            .pre_scale_non_uniform(f64::from(x_scale), f64::from(y_scale))
+            .pre_translate(Vec2::new(
+                (-theirs.inner_bearing_x).into(),
+                (-theirs.inner_bearing_y).into(),
+            ))
+            .pre_translate(origin_shift);
         (theirs, ours)
     }
 
@@ -1080,37 +1084,68 @@ mod tests {
         }
     }
 
-    /// The route places a `CBDT` strike exactly where `glifo` does, absorbed
-    /// or not, at fractional positions.
-    #[test]
-    fn the_cbdt_placement_matches_glifos_own() {
-        let font = FontData::new(
+    fn noto_cbdt() -> FontData {
+        FontData::new(
             peniko::Blob::new(Arc::new(
                 include_bytes!("../../../../testing/fonts/NotoColorEmoji-CBDT-Subset.ttf")
                     .as_slice(),
             )),
             0,
-        );
-        let transforms = [
-            Affine::translate((8.0, 64.0)),
-            Affine::translate((3.3, 40.7)) * Affine::scale(2.0),
-            Affine::scale_non_uniform(1.5, 0.75),
+        )
+    }
+
+    /// The route places a `CBDT` strike where `glifo` does, absorbed or not,
+    /// at fractional positions: against `glifo`'s formula over `skrifa`'s
+    /// reading, and against the transforms `glifo` 0.3.0 itself drew the same
+    /// glyph uncached with (recorded with its `png` feature on, which this
+    /// crate no longer enables).
+    #[test]
+    fn the_cbdt_placement_matches_glifos_own() {
+        let font = noto_cbdt();
+        let glyph = frust_scene::Glyph {
+            id: 1,
+            x: 5.25,
+            y: 1.5,
+        };
+        #[rustfmt::skip]
+        let recorded: [(Affine, f32, [f64; 6]); 12] = [
+            (Affine::translate((8.0, 64.0)), 24.0,
+                [0.22018349170684814, 0.0, 0.0, 0.22018349170684814, 13.25, 43.26146733760834]),
+            (Affine::translate((8.0, 64.0)), 32.0,
+                [0.29357796907424927, 0.0, 0.0, 0.29357796907424927, 13.25, 35.848625123500824]),
+            (Affine::translate((8.0, 64.0)), 109.0, [1.0, 0.0, 0.0, 1.0, 13.25, -35.5]),
+            (Affine::translate((8.0, 64.0)), 160.0,
+                [1.4678899049758911, 0.0, 0.0, 1.4678899049758911, 13.25, -82.756880402565]),
+            (Affine::translate((3.3, 40.7)) * Affine::scale(2.0), 24.0,
+                [0.4403669834136963, 0.0, 0.0, 0.4403669834136963, 13.8, -0.7770653247833224]),
+            (Affine::translate((3.3, 40.7)) * Affine::scale(2.0), 32.0,
+                [0.5871559381484985, 0.0, 0.0, 0.5871559381484985, 13.8, -15.60274975299835]),
+            (Affine::translate((3.3, 40.7)) * Affine::scale(2.0), 109.0,
+                [2.0, 0.0, 0.0, 2.0, 13.8, -158.3]),
+            (Affine::translate((3.3, 40.7)) * Affine::scale(2.0), 160.0,
+                [2.9357798099517822, 0.0, 0.0, 2.9357798099517822, 13.8, -252.81376080513002]),
+            (Affine::scale_non_uniform(1.5, 0.75), 24.0,
+                [0.3302752375602722, 0.0, 0.0, 0.1651376187801361, 7.875, -15.553899496793747]),
+            (Affine::scale_non_uniform(1.5, 0.75), 32.0,
+                [0.4403669536113739, 0.0, 0.0, 0.22018347680568695, 7.875, -21.113531157374382]),
+            (Affine::scale_non_uniform(1.5, 0.75), 109.0, [1.5, 0.0, 0.0, 0.75, 7.875, -74.625]),
+            (Affine::scale_non_uniform(1.5, 0.75), 160.0,
+                [2.2018348574638367, 0.0, 0.0, 1.1009174287319183, 7.875, -110.06766030192375]),
         ];
-        for transform in transforms {
-            for size in [24.0, 32.0, 109.0, 160.0] {
-                let glyph = frust_scene::Glyph {
-                    id: 1,
-                    x: 5.25,
-                    y: 1.5,
-                };
-                let (theirs, ours) = both_transforms(&font, glyph, size, transform);
-                assert_same(theirs, ours, &format!("{size} px under {transform:?}"));
-            }
+        for (transform, size, drawn) in recorded {
+            let case = format!("{size} px under {transform:?}");
+            let (theirs, ours) = both_transforms(&font, glyph, size, transform);
+            assert_same(theirs, ours, &case);
+            assert_same(
+                Affine::new(drawn),
+                ours,
+                &format!("{case}, as glifo drew it"),
+            );
         }
     }
 
-    /// The route places an Apple Color Emoji `sbix` strike exactly where
-    /// `glifo` does, its 100-unit offset included.
+    /// The route places an Apple Color Emoji `sbix` strike where `glifo`'s
+    /// formula over `skrifa`'s reading does, its 100-unit offset included.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_sbix_placement_matches_glifos_own() {
@@ -1129,5 +1164,141 @@ mod tests {
             let (theirs, ours) = both_transforms(&font, glyph, size, transform);
             assert_same(theirs, ours, &format!("{size} px"));
         }
+    }
+
+    /// [`noto_cbdt`] with its strike's PNG header claiming a 4096 px square.
+    fn oversized_cbdt() -> FontData {
+        let mut bytes =
+            include_bytes!("../../../../testing/fonts/NotoColorEmoji-CBDT-Subset.ttf").to_vec();
+        let ihdr = bytes
+            .windows(4)
+            .position(|window| window == b"IHDR")
+            .expect("the strike carries a PNG");
+        bytes[ihdr + 4..ihdr + 8].copy_from_slice(&4096_u32.to_be_bytes());
+        bytes[ihdr + 8..ihdr + 12].copy_from_slice(&4096_u32.to_be_bytes());
+        FontData::new(peniko::Blob::new(Arc::new(bytes)), 0)
+    }
+
+    /// A glyph whose strike the route refuses is produced once, however many
+    /// frames draw it, and counted skipped on every one of them.
+    #[test]
+    fn a_refused_strike_is_produced_once_across_frames() {
+        let run = GlyphRun {
+            font: frust_scene::FontHandle::new(oversized_cbdt()),
+            font_size: 32.0,
+            brush: Brush::Solid(peniko::color::palette::css::RED),
+            transform: Affine::translate((8.0, 64.0)),
+            glyphs: vec![frust_scene::Glyph {
+                id: 1,
+                x: 0.0,
+                y: 0.0,
+            }],
+        };
+        let mut scene = frust_scene::Scene::new();
+        frust_scene::SceneBuilder::new(&mut scene).draw_glyph_run(run);
+        let mut compiler = crate::SceneCompiler::new(128, 128);
+        for frame_index in 0..12 {
+            let frame = compiler
+                .compile(&scene, Affine::IDENTITY, (128, 128))
+                .expect("an in-range scene compiles");
+            assert_eq!(frame.skipped_glyphs, 1, "frame {frame_index}");
+            compiler.acknowledge_glyph_clears();
+            compiler.acknowledge_glyph_replay();
+        }
+        assert_eq!(
+            compiler.bitmap_productions(),
+            1,
+            "the refusal is remembered rather than produced every frame"
+        );
+        assert_eq!(compiler.glyph_atlas_entries(), 0);
+    }
+
+    /// A `CBLC` holding one strike whose one index subtable (`format`, image
+    /// format 17) covers glyphs 0..=10 with `fields` after its header.
+    fn cblc(format: u16, fields: &[u8]) -> Vec<u8> {
+        let mut table = Vec::new();
+        table.extend_from_slice(&0x0003_0000_u32.to_be_bytes());
+        table.extend_from_slice(&1_u32.to_be_bytes());
+        let array = 8 + 48;
+        let mut size = [0_u8; 48];
+        size[0..4].copy_from_slice(&(array as u32).to_be_bytes());
+        size[8..12].copy_from_slice(&1_u32.to_be_bytes());
+        size[44] = 109;
+        size[45] = 109;
+        size[46] = 32;
+        table.extend_from_slice(&size);
+        // The subtable array: glyphs 0..=10, the header right after it.
+        table.extend_from_slice(&0_u16.to_be_bytes());
+        table.extend_from_slice(&10_u16.to_be_bytes());
+        table.extend_from_slice(&8_u32.to_be_bytes());
+        table.extend_from_slice(&format.to_be_bytes());
+        table.extend_from_slice(&17_u16.to_be_bytes());
+        table.extend_from_slice(&0_u32.to_be_bytes());
+        table.extend_from_slice(fields);
+        table
+    }
+
+    fn bdt_face<'a>(strikes: &'a [u8], images: &'a [u8]) -> Face<'a> {
+        Face {
+            kind: StrikeTable::Cbdt,
+            strikes,
+            images,
+            glyphs: 11,
+            upem: 2048,
+            hmtx: &[],
+            long_metrics: 0,
+            outlines: None,
+        }
+    }
+
+    /// An index subtable whose image offsets leave the table's 32-bit offset
+    /// space is refused rather than wrapped onto another record; the same
+    /// subtable with in-range sizes locates its image.
+    #[test]
+    fn an_index_subtable_whose_offsets_overflow_is_refused() {
+        let images = vec![7_u8; 64];
+        // Format 2: one image size for every glyph, then big metrics.
+        let format2 = |image_size: u32| {
+            let mut fields = image_size.to_be_bytes().to_vec();
+            fields.extend_from_slice(&[0; 8]);
+            cblc(2, &fields)
+        };
+        let sane = format2(4);
+        let found = bdt_face(&sane, &images)
+            .bdt_location(8, 3)
+            .expect("in range");
+        assert_eq!(found.bytes.len(), 4);
+        // Glyph 2's image starts at 2 * 2^31: past `u32`.
+        let wrapping = format2(0x8000_0000);
+        assert!(bdt_face(&wrapping, &images).bdt_location(8, 2).is_none());
+        // Its end does too, for glyph 1.
+        let ending = format2(0x8000_0001);
+        assert!(bdt_face(&ending, &images).bdt_location(8, 1).is_none());
+
+        // Format 5: an image size, big metrics, then the glyph id list.
+        let format5 = |image_size: u32| {
+            let mut fields = image_size.to_be_bytes().to_vec();
+            fields.extend_from_slice(&[0; 8]);
+            fields.extend_from_slice(&3_u32.to_be_bytes());
+            for id in [4_u16, 5, 6] {
+                fields.extend_from_slice(&id.to_be_bytes());
+            }
+            cblc(5, &fields)
+        };
+        let sane = format5(4);
+        assert!(bdt_face(&sane, &images).bdt_location(8, 6).is_some());
+        let wrapping = format5(0xFFFF_FFFF);
+        assert!(bdt_face(&wrapping, &images).bdt_location(8, 6).is_none());
+
+        // A subtable header past the 32-bit offset space.
+        let mut far = cblc(1, &[0; 48]);
+        far[8 + 48 + 4..8 + 48 + 8].copy_from_slice(&0xFFFF_FFF0_u32.to_be_bytes());
+        assert!(bdt_face(&far, &images).bdt_location(8, 1).is_none());
+        // And a strike record index that cannot be addressed.
+        assert!(
+            bdt_face(&far, &images)
+                .bdt_image(usize::MAX / 2, 1)
+                .is_err()
+        );
     }
 }

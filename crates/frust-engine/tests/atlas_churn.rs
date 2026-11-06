@@ -3749,3 +3749,149 @@ fn a_faux_bold_paragraph_over_budget_under_scale_jitter_needs_every_site_to_agre
         );
     }
 }
+
+/// Noto Color Emoji, subsetted to U+1F600 with its `CBDT`/`CBLC` strike kept:
+/// a bitmap-first face, drawn by the frust-side bitmap route and charged its
+/// strike's exact padded slot.
+const CBDT_FONT: &[u8] = include_bytes!("../../../testing/fonts/NotoColorEmoji-CBDT-Subset.ttf");
+
+/// [`CBDT_FONT`]'s U+1F600.
+const GRINNING_FACE: u32 = 1;
+
+/// A scene of `latin` — every glyph of each face in all four subpixel buckets
+/// at [`WIRED_SIZE`] — and one 32 px emoji of each face in `emoji`.
+fn mixed_scene(latin: &[FontHandle], emoji: &[FontHandle]) -> Scene {
+    let mut scene = Scene::new();
+    let mut builder = SceneBuilder::new(&mut scene);
+    for (line, face) in latin.iter().enumerate() {
+        builder.draw_glyph_run(GlyphRun {
+            font: face.clone(),
+            font_size: WIRED_SIZE,
+            brush: Brush::Solid(BLACK),
+            transform: Affine::translate((4.0, 40.0 + 30.0 * line as f64)),
+            glyphs: (1..GLYPHS_IN_LATIN_FONT)
+                .flat_map(|id| {
+                    (0..4).map(move |bucket| Glyph {
+                        id,
+                        x: id as f32 * 5.0 + bucket as f32 * 0.25,
+                        y: 0.0,
+                    })
+                })
+                .collect(),
+        });
+    }
+    for (index, face) in emoji.iter().enumerate() {
+        builder.draw_glyph_run(GlyphRun {
+            font: face.clone(),
+            font_size: 32.0,
+            brush: Brush::Solid(BLACK),
+            transform: Affine::translate((
+                4.0 + 40.0 * (index % 12) as f64,
+                200.0 + 40.0 * (index / 12) as f64,
+            )),
+            glyphs: vec![Glyph {
+                id: GRINNING_FACE,
+                x: 0.0,
+                y: 0.0,
+            }],
+        });
+    }
+    scene
+}
+
+/// A fresh emoji face: its own blob, so its strike is a new atlas entry.
+fn fresh_emoji() -> FontHandle {
+    FontHandle::new(FontData::new(Blob::new(Arc::new(CBDT_FONT)), 0))
+}
+
+/// On the mobile geometry, outline text drawn on every frame beside repeated
+/// cycles of large emoji strikes — each cycle inserted once and left to age
+/// out — keeps the charged total within what the live entries are really
+/// charged: a reaped strike takes its whole charge with it rather than leaving
+/// it spread over the text that survived it. So the total does not grow from
+/// one cycle to the next, and a new emoji still draws after many of them.
+#[test]
+fn a_reaped_strike_refunds_its_charge_however_long_text_outlives_it() {
+    const EMOJI_PER_CYCLE: usize = 24;
+    const CYCLES: usize = 12;
+    let viewport = (512_u16, 640_u16);
+    let mut compiler =
+        SceneCompiler::with_atlas_budget(viewport.0, viewport.1, AtlasBudget::MOBILE);
+    compiler.set_hint_text(false);
+    let latin: Vec<FontHandle> = (0..2)
+        .map(|_| FontHandle::new(FontData::new(Blob::new(Arc::new(LATIN_FONT)), 0)))
+        .collect();
+    let serviced = |compiler: &mut SceneCompiler, scene: &Scene| {
+        let frame = compiler
+            .compile(scene, Affine::IDENTITY, viewport)
+            .expect("an in-range scene compiles");
+        let uploads: Vec<_> = compiler.glyph_atlas_mut().drain_pending_uploads().collect();
+        compiler.acknowledge_glyph_clears();
+        compiler.acknowledge_glyph_replay();
+        (frame, uploads)
+    };
+
+    let text_only = mixed_scene(&latin, &[]);
+    for _ in 0..(SETTLE_FRAMES + 4) {
+        serviced(&mut compiler, &text_only);
+    }
+    let outlines = compiler.glyph_atlas_entries();
+    let outline_price = glyph_texels_at(WIRED_SIZE);
+    let text_charge = outlines as u64 * outline_price;
+    assert!(
+        outlines >= 160,
+        "fixture precondition: {outlines} text entries"
+    );
+    assert_eq!(
+        compiler.glyph_resident_texels(),
+        text_charge,
+        "fixture precondition: the text alone is charged its entries' price"
+    );
+
+    for cycle in 0..CYCLES {
+        let emoji: Vec<FontHandle> = (0..EMOJI_PER_CYCLE).map(|_| fresh_emoji()).collect();
+        let (frame, uploads) = serviced(&mut compiler, &mixed_scene(&latin, &emoji));
+        assert_eq!(frame.skipped_glyphs, 0, "cycle {cycle}: every emoji draws");
+        assert_eq!(uploads.len(), EMOJI_PER_CYCLE, "cycle {cycle}");
+        assert_eq!(compiler.glyph_atlas_entries(), outlines + EMOJI_PER_CYCLE);
+        let strikes: u64 = uploads
+            .iter()
+            .map(|upload| {
+                let pad = u64::from(glifo::GLYPH_PADDING) * 2;
+                (u64::from(upload.atlas_slot.width) + pad)
+                    * (u64::from(upload.atlas_slot.height) + pad)
+            })
+            .sum();
+        assert!(
+            compiler.glyph_resident_texels() <= text_charge + strikes,
+            "cycle {cycle}: {} charged with the strikes live, their true sum is {}",
+            compiler.glyph_resident_texels(),
+            text_charge + strikes
+        );
+
+        // The strikes go undrawn until the LRU reaps them; the text is drawn
+        // throughout.
+        for _ in 0..(MAX_ENTRY_AGE + EVICTION_FREQUENCY + 2) {
+            serviced(&mut compiler, &text_only);
+        }
+        assert_eq!(
+            compiler.glyph_atlas_entries(),
+            outlines,
+            "cycle {cycle}: the strikes were reaped and the text kept"
+        );
+        assert!(
+            compiler.glyph_resident_texels() <= text_charge,
+            "cycle {cycle}: {} charged for text whose live entries are charged {text_charge}",
+            compiler.glyph_resident_texels()
+        );
+        assert_eq!(
+            compiler.glyph_resident_texels(),
+            text_charge,
+            "cycle {cycle}: the total does not grow from one cycle to the next"
+        );
+    }
+
+    let (frame, uploads) = serviced(&mut compiler, &mixed_scene(&latin, &[fresh_emoji()]));
+    assert_eq!(frame.skipped_glyphs, 0, "a new emoji still draws");
+    assert_eq!(uploads.len(), 1);
+}

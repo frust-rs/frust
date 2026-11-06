@@ -3647,6 +3647,16 @@ mod tests {
 
     use frust_scene::{FillRule, SceneBuilder};
 
+    impl SceneCompiler {
+        /// How many bitmap-strike images the bitmap route has tried to
+        /// produce — the observable that a refused strike is produced once,
+        /// not per frame (see [`crate::text::bitmap_route`]).
+        #[must_use]
+        pub(crate) fn bitmap_productions(&self) -> u64 {
+            self.glyph_atlas.bitmap_productions()
+        }
+    }
+
     #[test]
     fn the_hvgl_unavailable_warning_fires_once_and_names_no_text() {
         let once = Once::new();

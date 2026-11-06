@@ -150,9 +150,13 @@
 //! A bitmap-first face ([`font_is_bitmap_first`]: colour emoji strikes) never
 //! reaches `glifo` either. Its run is drawn by [`bitmap_route`]: each glyph's
 //! strike is keyed as `glifo` keys a bitmap, produced on a miss (CoreText on
-//! iOS, the font's own PNG record elsewhere), inserted and charged its real
-//! slot, and drawn from the atlas; a glyph the atlas cannot serve is counted
-//! skipped. Such a run takes neither the resident-run cache nor glyph quads.
+//! iOS, falling back to the font's own PNG record when CoreText refuses; the
+//! PNG record elsewhere, its header checked against a size cap before it is
+//! decoded), inserted and charged its real slot, and drawn from the atlas; a
+//! glyph the atlas cannot serve is counted skipped, and one whose production
+//! failed is remembered and not produced again. Such a run takes neither the
+//! resident-run cache nor glyph quads. `glifo` itself decodes no strike: a
+//! face with outlines as well as strikes draws its outlines.
 //!
 //! # The font gate
 //!
@@ -877,11 +881,13 @@ fn table_directory(data: &[u8], index: u32) -> Option<usize> {
 /// colour glyphs through `skrifa`'s `color_glyphs()`, which reads COLRv0/v1 and
 /// nothing else. A bitmap-first face's strikes reach the atlas through
 /// [`bitmap_route`] as pre-rasterized pixmaps on the upload queue rather than
-/// as recorded commands, so they dirty no page and need no gate; a PNG strike
-/// of a face with outlines too is decoded by `glifo` (its `png` feature is on
-/// for this crate) on the same terms, and counted skipped on the outline
-/// route. BGRA and mask strikes are never decoded, and an `SVG ` table is not
-/// a path this backend takes at all.
+/// as recorded commands, so they dirty no page and need no gate. A face with
+/// outlines as well as strikes is `glifo`'s, and `glifo` decodes none of its
+/// strikes — its `png` feature is off for this crate, because it sizes the
+/// decode from the image header unchecked — so such a face draws its outlines
+/// (or nothing, for a glyph without one). Only [`bitmap_route`] decodes a PNG
+/// strike, behind its own header cap. BGRA and mask strikes are never decoded,
+/// and an `SVG ` table is not a path this backend takes at all.
 ///
 /// Answers per face, not per glyph: `glifo` decides colour-glyph caching from
 /// the presence of a cacher, so there is no way to offer a run's outlines the
