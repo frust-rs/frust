@@ -258,7 +258,9 @@ impl HeadlessRenderer {
         };
         crate::tier::engine_support(&caps).map_err(|refusal| anyhow!(refusal.to_string()))?;
 
-        let required_features = adapter.features() & crate::context::optional_device_features();
+        let required_features = adapter.features()
+            & (crate::context::optional_device_features()
+                | frust_gpu::requested_optional_features());
         let required_limits =
             crate::context::effective_limits(adapter.limits(), crate::context::is_ios_simulator());
         let (device, queue) = adapter
