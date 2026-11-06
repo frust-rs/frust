@@ -110,12 +110,12 @@
 //!   outlined variant's stroke where the floated label crosses it; the Dart
 //!   source floats the label *inside* the container for both variants and
 //!   strokes an unbroken border, which is what is ported here.
-//! - **The editable's glyphs use the baseline's default family**, not the
-//!   theme's Roboto Flex: `TextInputView::text_style` is all-or-nothing and
-//!   setting it would also freeze the glyph color, losing the baseline's
-//!   themed `on_surface` resolution (the same trade `frust_shadcn::input`
-//!   documents). The catalog-owned label and supporting runs *do* shape in
-//!   the theme's type scale.
+//! - **The editable's glyphs take the theme's body-large family.** The
+//!   editable opts into `Theme::type_scale.body_large` through
+//!   `TextInputView::themed_family`, so its text shapes in the theme's family
+//!   (Roboto Flex under the baseline), while its size and color keep the
+//!   baseline's own resolution. The catalog-owned label and supporting runs
+//!   shape in the same type scale.
 //! - **Single-line only.** The decoration box is a fixed
 //!   `DECORATION_HEIGHT`, so the Dart source's `maxLines` (and with it the
 //!   baseline's `multiline` mode) is not exposed; neither are its
@@ -132,7 +132,8 @@ use frust::authoring::Role;
 use frust::authoring::text::{TextContext, TextLayout, TextStyle};
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CursorIcon, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, ThemeTextType, View,
+    Widget,
 };
 use frust::{AnimationController, Theme, text_input};
 use kurbo::{Point, RoundedRect, Shape, Size};
@@ -382,6 +383,7 @@ impl<State: 'static> TextFieldView<State> {
         let mut field = text_input(self.value.clone(), move |state: &mut State, text| {
             on_change(state, text)
         })
+        .themed_family(ThemeTextType::BodyLarge)
         .enabled(self.enabled)
         .obscured(self.obscured)
         .padding(self.text_left(), self.text_top())
@@ -1773,5 +1775,45 @@ mod tests {
         state = false;
         root.rebuild(&mut logic, &mut state);
         root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+    }
+
+    // ---- Typeface: the editable follows the theme's body-large role ----
+
+    /// The baseline theme with only `body_large` naming Roboto Mono, so an
+    /// editable that takes any other role's family paints Roboto Flex instead.
+    #[cfg(feature = "bundled-fonts")]
+    fn body_large_mono_theme() -> Theme {
+        use frust::authoring::text::{FontFamily, GenericSlot};
+        let mut theme = crate::baseline();
+        theme.type_scale.body_large.family = FontFamily::stack_with_generic(
+            [crate::tokens::ROBOTO_MONO_FAMILY],
+            GenericSlot::Monospace,
+        );
+        theme
+    }
+
+    /// A field with typed text and no label, so the editable's glyphs are the
+    /// only text in the paint.
+    #[cfg(feature = "bundled-fonts")]
+    fn valued_field(_: &mut ()) -> TextFieldView<()> {
+        text_field("Hello", |_: &mut (), _: String| {})
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_editable_text_paints_in_the_body_large_family() {
+        use crate::appbar::top::typeface_probe::{Face, assert_paints_only_in};
+        let (flex, mono) = (crate::tokens::font_data()[0], crate::tokens::font_data()[1]);
+        assert_paints_only_in(
+            "the text field's editable",
+            valued_field,
+            body_large_mono_theme(),
+            &[flex, mono],
+            WINDOW,
+            Face {
+                bytes: mono,
+                name: "Roboto Mono",
+            },
+        );
     }
 }

@@ -690,8 +690,8 @@ impl<State: 'static> QuestionnaireView<State> {
     /// where the standalone control is `h-9 rounded-md px-3`, so only the wrapped
     /// baseline field is shared, not the chrome.
     ///
-    /// Its typed text keeps the system UI family: `text_input` takes a style
-    /// only at build and has no theme-resolved family to opt into.
+    /// Its typed text and placeholder take the theme's `BodyMedium` family, the
+    /// body role the questionnaire's other answer text sits in.
     // erasure: keep pushed into a heterogeneous Vec<AnyView> row list
     fn input_view(&self, item: &QuestionnaireItem, placeholder: &str) -> AnyView<State> {
         let on_answer = self.on_answer.clone();
@@ -719,6 +719,7 @@ impl<State: 'static> QuestionnaireView<State> {
             },
         )
         .placeholder(placeholder.to_string())
+        .themed_family(ThemeTextType::BodyMedium)
         .padding(INPUT_PAD_X, INPUT_PAD_Y)
         .border_width(0.0)
         .focus_ring_width(0.0)
@@ -3036,8 +3037,8 @@ mod tests {
     /// line, the current item's title and description, choice labels with and
     /// without a description, and the Previous/Skip/Submit labels (the second
     /// item is current and optional). It leaves out the shortcut badges, which
-    /// are monospace by design, and the free-text field, which is the baseline
-    /// `text_input` (see `QuestionnaireView::input_view`).
+    /// are monospace by design, and the free-text field, which has its own test
+    /// (see `the_free_text_field_follows_the_theme`).
     #[cfg(feature = "bundled-fonts")]
     fn themed_flow(_: &mut ()) -> QuestionnaireView<()> {
         questionnaire(
@@ -3071,6 +3072,30 @@ mod tests {
         crate::text::typeface_probe::assert_follows_a_live_theme_swap(
             "a questionnaire's text",
             themed_flow,
+        );
+    }
+
+    /// A free-text item with no answer yet: its placeholder is the field's
+    /// glyph run, and the title is the only other text.
+    #[cfg(feature = "bundled-fonts")]
+    fn themed_free_text(_: &mut ()) -> QuestionnaireView<()> {
+        questionnaire(
+            vec![questionnaire_item("notes", "Anything else?").input("Describe another signal")],
+            0,
+            Vec::new(),
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_free_text_field_follows_the_theme() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "a questionnaire's free-text field",
+            themed_free_text,
+        );
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "a questionnaire's free-text field",
+            themed_free_text,
         );
     }
 

@@ -267,14 +267,15 @@ impl<State: 'static> CommandView<State> {
     /// The wrapped baseline search field, with its own chrome suppressed (this
     /// widget paints the row's rule and icon).
     ///
-    /// Its query text keeps the system UI family: `text_input` takes a style
-    /// only at build and has no theme-resolved family to opt into.
+    /// Its query text and placeholder take the theme's `BodyMedium` family,
+    /// the body role shadcn's `CommandInput` text sits in.
     fn input(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_change.clone();
         text_input(self.query.clone(), move |state: &mut State, text| {
             on_change(state, text)
         })
         .placeholder(self.placeholder.clone())
+        .themed_family(ThemeTextType::BodyMedium)
         .padding(0.0, 0.0)
         .border_width(0.0)
         .corner_radius(0.0)
@@ -1515,8 +1516,7 @@ mod tests {
 
     /// Every text row the palette builds: a heading, an item with a shortcut, a
     /// disabled item, and the empty row. The palette's search field is not
-    /// here: it is the baseline `text_input`, which has no theme-resolved
-    /// family to opt into (see `CommandView::input`).
+    /// here: it has its own test (see `the_search_field_follows_the_theme`).
     #[cfg(feature = "bundled-fonts")]
     fn palette_rows(_: &mut ()) -> frust::FlexView<()> {
         frust::column()
@@ -1541,6 +1541,31 @@ mod tests {
         crate::text::typeface_probe::assert_follows_a_live_theme_swap(
             "the palette's rows",
             palette_rows,
+        );
+    }
+
+    /// The palette with a typed query and no items: the search field's query
+    /// run is the field text under test, and the empty row is the only other run.
+    #[cfg(feature = "bundled-fonts")]
+    fn palette_search(_: &mut ()) -> CommandView<()> {
+        command(
+            Vec::new(),
+            "Cal",
+            |_: &mut (), _: String| {},
+            |_: &mut (), _: usize| {},
+        )
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_search_field_follows_the_theme() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "the palette's search field",
+            palette_search,
+        );
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "the palette's search field",
+            palette_search,
         );
     }
 }
