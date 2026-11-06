@@ -102,6 +102,11 @@ pub use frust_gpu::missing_requested_features;
 pub use external_pass::{
     ExternalFrame, ExternalPass, register_external_pass, unregister_external_pass,
 };
+// The drain half, for a renderer of this crate's own (and its tests) driving
+// the identical path against an engine it holds; hidden for the same reason
+// `external_pass::run_external_passes` is.
+#[doc(hidden)]
+pub use external_pass::{ExternalPassDrain, run_external_passes};
 // A shell with no `/proc/meminfo` (iOS) reports its physical memory here before
 // the first renderer is created, so the glyph-atlas and retained-page tiers can
 // take the large budget — `frust-engine` owns the rule.

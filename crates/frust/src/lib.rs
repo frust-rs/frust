@@ -1185,13 +1185,13 @@ pub mod authoring {
 ///    `on_cleanup` for reactive state, never a hand-rolled `Drop`
 ///    (`docs/CODE_STANDARDS.md`'s State & Reactivity rule: `Drop` order
 ///    across a component's state/element/owner triple is not a contract,
-///    `on_cleanup`/`teardown` are). The next *drained* frame clears the
-///    engine's binding for that id before it runs any pass, so no view is
-///    kept alive for a texture whose owner is gone — though unregistering is
-///    not itself a barrier: a drain already mid-flight when it runs may still
-///    call this pass's `record` once more, and the unbind
-///    lands only once a frame is actually drained, not while the surface is
-///    idle.
+///    `on_cleanup`/`teardown` are). Every surface that ran the pass clears
+///    its own engine's binding for that id on its next *drained* frame,
+///    before it runs any pass, so no view is kept alive for a texture whose
+///    owner is gone — though unregistering is not itself a barrier: a drain
+///    already mid-flight when it runs may still call this pass's `record`
+///    once more, and the unbind lands only once a frame is actually drained,
+///    not while the surface is idle.
 ///
 /// A widget whose texture is *animating* asks for the next frame exactly as
 /// any other animating widget does — `PaintCtx::request_frame` (or
@@ -1244,21 +1244,34 @@ pub mod authoring {
 ///   binds only once that target genuinely holds something, rather than
 ///   relying on the frame that was meant to fill it having been accepted.
 ///
-/// The registry itself is shell-agnostic — a process-wide map with no device,
-/// window or platform in it, registerable from anywhere at any time. The
-/// gate is which frame path drains it: any engine-tier `SurfaceRenderer`
-/// frame, `submit` and `submit_deferred` alike, which is what the Android and
-/// iOS shells call exactly as desktop does — a registered pass is not
-/// desktop-only by construction, and [`with_context`] answers on every shell
-/// once a surface exists. Only the desktop headless path has actually been
-/// *exercised* so far (`docs/LIMITATIONS.md`'s
-/// `facade-external-pass-desktop-only`) — mobile is wired and compiles the
-/// seam, but no registered pass has been driven through either shell's own
-/// frame loop yet.
+/// Threading: `record` runs on the draining surface's render thread (the UI
+/// thread when a shell renders inline, `FRUST_NO_RENDER_THREAD`), and may
+/// move between threads across frames. It is **never called concurrently for
+/// the same registration** — two surfaces presenting at once take turns on
+/// it — but may run concurrently with other registrations' passes.
+/// [`register_external_pass`]/[`unregister_external_pass`] are callable from
+/// any thread, `record` included. Keep cross-frame state in the pass behind
+/// interior mutability; state that belongs to one surface is keyed by
+/// [`ExternalFrame::drain_id`], and device-owned resources are rebuilt when
+/// [`ExternalFrame::device_generation`] changes.
 ///
-/// A panic inside `record` is caught in a debug build: the pass is reported,
-/// unregistered and unbound, and the frame is recorded without it. The
-/// workspace's `release` profile is `panic = "abort"`, so that is a
+/// The registry itself is shell-agnostic — a process-wide map with no device,
+/// window or platform in it, registerable from anywhere at any time: one
+/// registration records on every engine-tier surface that drains, binding
+/// into each surface's own engine. The gate is which frame path drains it:
+/// any engine-tier `SurfaceRenderer` frame, `submit` and `submit_deferred`
+/// alike, which is what the Android and iOS shells call exactly as desktop
+/// does — a registered pass is not desktop-only by construction, and
+/// [`with_context`] answers on every shell once a surface exists. Only the
+/// desktop headless path has actually been *exercised* so far
+/// (`docs/LIMITATIONS.md`'s `facade-external-pass-desktop-only`) — mobile is
+/// wired and compiles the seam, but no registered pass has been driven
+/// through either shell's own frame loop yet.
+///
+/// A panic inside `record` is caught in a debug build: the pass is reported
+/// and unregistered, the surface that caught it unbinds it at once (every
+/// other surface on its next frame), and the frame is recorded without it.
+/// The workspace's `release` profile is `panic = "abort"`, so that is a
 /// development net rather than a shipped guarantee — a pass must not panic.
 #[cfg(feature = "gpu")]
 pub mod gpu {
