@@ -842,10 +842,12 @@ fn table_directory(data: &[u8], index: u32) -> Option<usize> {
 ///
 /// `COLR` alone, because `COLR` alone is what `glifo` looks at: it resolves
 /// colour glyphs through `skrifa`'s `color_glyphs()`, which reads COLRv0/v1 and
-/// nothing else. A bitmap strike (`CBDT`/`sbix`) reaches the atlas as a
+/// nothing else. A PNG bitmap strike (`CBDT`/`sbix`) is decoded by `glifo`
+/// (its `png` feature is enabled for this crate) and reaches the atlas as a
 /// pre-rasterized pixmap through the upload queue rather than as recorded
-/// commands, so it dirties no page and needs no gate; an `SVG ` table is not a
-/// path this backend takes at all.
+/// commands, so it dirties no page and needs no gate; on the outline route it
+/// is counted skipped instead. BGRA and mask strikes are never decoded, and an
+/// `SVG ` table is not a path this backend takes at all.
 ///
 /// Answers per face, not per glyph: `glifo` decides colour-glyph caching from
 /// the presence of a cacher, so there is no way to offer a run's outlines the
