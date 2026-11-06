@@ -467,6 +467,18 @@ macro_rules! android_app {
             $crate::jni_glue::native_set_reduce_motion(handle, reduce)
         }
 
+        /// JNI `nativeSetTextScale`: apply the platform's font-size preference
+        /// (effective scale at body size) to the active theme's type scale.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeSetTextScale<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            scale: $crate::__jni::jfloat,
+        ) {
+            $crate::jni_glue::native_set_text_scale(handle, scale)
+        }
+
         /// JNI `nativeOnDeepLink`: deliver a platform deep link (cold-start or
         /// running) into the process-wide deep-link source.
         ///
