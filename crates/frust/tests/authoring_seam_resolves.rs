@@ -129,3 +129,16 @@ fn image_data_accessor_resolves_through_facade() {
     let _ = std::mem::size_of::<ImageSource>();
     let _ = std::mem::size_of::<ImageData>();
 }
+
+/// The press-state detail types are nameable through the facade, so a
+/// press-callback closure can annotate its argument.
+#[test]
+fn press_detail_types_resolve_through_the_facade() {
+    let down = |d: frust::TapDownDetails| d.local_position;
+    let up = |d: frust::TapUpDetails| d.local_position;
+    let _ = (down, up);
+    let _view = frust::GestureDetector::<(), _>(frust::text("hi"))
+        .on_tap_down(|_: &mut (), _: frust::TapDownDetails| {})
+        .on_tap_up(|_: &mut (), _: frust::TapUpDetails| {})
+        .on_tap_cancel(|_: &mut ()| {});
+}
