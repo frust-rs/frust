@@ -8,7 +8,7 @@
 //! queued pixmap into a real atlas array is `#[ignore]`d and runs with
 //! `cargo test -p frust-engine --test text_bitmap_strike -- --ignored`.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use frust_engine::cache::images::ImageResidency;
 use frust_engine::compile::CompiledFrame;
@@ -34,10 +34,20 @@ const VIEWPORT: (u16, u16) = (128, 128);
 /// scaled rather than matched.
 const SIZE: f32 = 32.0;
 
+/// One blob for the whole file: `glifo` keys its cache on the blob's
+/// process-unique id, so a face rebuilt per frame is a new font every frame
+/// and nothing it drew is ever resident.
+static FACE: LazyLock<FontData> =
+    LazyLock::new(|| FontData::new(Blob::new(Arc::new(CBDT_FONT)), 0));
+
 fn run() -> GlyphRun {
+    run_at(SIZE)
+}
+
+fn run_at(size: f32) -> GlyphRun {
     GlyphRun {
-        font: FontHandle::new(FontData::new(Blob::new(Arc::new(CBDT_FONT)), 0)),
-        font_size: SIZE,
+        font: FontHandle::new(FACE.clone()),
+        font_size: size,
         brush: Brush::Solid(RED),
         transform: Affine::translate((8.0, 64.0)),
         glyphs: vec![Glyph {
@@ -49,8 +59,12 @@ fn run() -> GlyphRun {
 }
 
 fn scene() -> Scene {
+    scene_of(run())
+}
+
+fn scene_of(run: GlyphRun) -> Scene {
     let mut scene = Scene::new();
-    SceneBuilder::new(&mut scene).draw_glyph_run(run());
+    SceneBuilder::new(&mut scene).draw_glyph_run(run);
     scene
 }
 
@@ -151,6 +165,74 @@ fn an_outline_routed_bitmap_glyph_is_still_counted_skipped() {
         compiler.glyph_atlas_mut().drain_pending_uploads().count(),
         0,
         "and nothing is queued for the atlas"
+    );
+}
+
+#[test]
+fn a_96_px_bitmap_glyph_is_drawn_from_the_atlas() {
+    let mut compiler = atlas_compiler();
+    let frame = compiler
+        .compile(&scene_of(run_at(96.0)), Affine::IDENTITY, (256, 256))
+        .expect("an in-range scene compiles");
+
+    assert_eq!(
+        frame.skipped_glyphs, 0,
+        "a 96 px strike glyph is not refused"
+    );
+    assert_eq!(frame.glyph_draws, 1);
+    assert_eq!(
+        compiler.glyph_atlas_mut().drain_pending_uploads().count(),
+        1,
+        "its strike is uploaded once"
+    );
+}
+
+/// Past the outline path's 128 px ceiling: only the bitmap-only exemption keeps
+/// it on the atlas.
+#[test]
+fn a_bitmap_glyph_far_past_the_cached_size_ceiling_is_still_drawn_from_the_atlas() {
+    let mut compiler = atlas_compiler();
+    let frame = compiler
+        .compile(&scene_of(run_at(160.0)), Affine::IDENTITY, (256, 256))
+        .expect("an in-range scene compiles");
+
+    assert_eq!(frame.skipped_glyphs, 0);
+    assert_eq!(frame.glyph_draws, 1);
+    assert_eq!(
+        compiler.glyph_atlas_mut().drain_pending_uploads().count(),
+        1
+    );
+}
+
+#[test]
+fn a_bitmap_glyph_whose_size_animates_is_drawn_every_frame() {
+    let mut compiler = atlas_compiler();
+    for step in 0..8_u8 {
+        let size = 24.0 + f32::from(step) * 6.0;
+        let frame = compiler
+            .compile(&scene_of(run_at(size)), Affine::IDENTITY, (256, 256))
+            .expect("an in-range scene compiles");
+        assert_eq!(frame.skipped_glyphs, 0, "step {step} at {size} px");
+        assert_eq!(frame.glyph_draws, 1);
+    }
+}
+
+#[test]
+fn a_resident_bitmap_glyph_queues_no_second_upload() {
+    let mut compiler = atlas_compiler();
+    compile(&mut compiler);
+    assert_eq!(
+        compiler.glyph_atlas_mut().drain_pending_uploads().count(),
+        1,
+        "the first draw uploads the strike"
+    );
+
+    let frame = compile(&mut compiler);
+    assert_eq!(frame.skipped_glyphs, 0);
+    assert_eq!(
+        compiler.glyph_atlas_mut().drain_pending_uploads().count(),
+        0,
+        "the glyph is resident: a drained queue is not refilled"
     );
 }
 

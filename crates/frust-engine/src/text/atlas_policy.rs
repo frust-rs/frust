@@ -337,6 +337,16 @@ pub(crate) const EVICTION_FREQUENCY: u64 = 64;
 /// cheaper and unbounded. Also `glifo`'s own default.
 pub(crate) const MAX_CACHED_FONT_SIZE: f32 = 128.0;
 
+/// Largest run size, in pixels, a bitmap-only face is still offered the atlas
+/// at, and so the size `glifo` is told it may cache bitmap strikes up to.
+///
+/// A strike is cached at its own ppem whatever the run's size, so unlike an
+/// outline glyph its entry does not grow with the run: the ceiling bounds only
+/// how large a run `glifo` will scale a cached strike to. It never admits an
+/// outline glyph, which the policy routes by [`MAX_CACHED_FONT_SIZE`] before
+/// `glifo` sees it.
+pub(crate) const MAX_BITMAP_RUN_SIZE: f32 = 1024.0;
+
 /// Below what magnitude a transform coefficient counts as zero.
 ///
 /// `glifo`'s own `SCALAR_NEARLY_ZERO_F64` — a twelfth of a binary order, i.e.
@@ -575,7 +585,7 @@ pub(crate) fn glyph_cache_config() -> GlyphCacheConfig {
     GlyphCacheConfig {
         max_entry_age: MAX_ENTRY_AGE,
         eviction_frequency: EVICTION_FREQUENCY,
-        max_cached_font_size: MAX_CACHED_FONT_SIZE,
+        max_cached_font_size: MAX_BITMAP_RUN_SIZE,
     }
 }
 
@@ -1108,6 +1118,15 @@ pub(crate) struct RunKey<'g> {
     /// classified on its own merits and collected
     /// ([`AtlasPolicy::collect_run`]).
     pub(crate) color_font: bool,
+    /// Whether the run's face is bitmap-only (`CBDT`/`sbix` strikes and no
+    /// outlines; see `crate::text::font_is_bitmap_only`). `glifo` caches a
+    /// bitmap strike at the strike's own ppem, not the run's size, so the two
+    /// size-based outline reasons ([`OutlineReason::SizeTooLarge`],
+    /// [`OutlineReason::SizeAnimating`]) say nothing about such a run: an
+    /// outline route would hand its glyphs to the pixmap path as inline
+    /// pixmaps, which outlines cannot draw. A *routing* input: it reaches no
+    /// cache key.
+    pub(crate) bitmap_only: bool,
     /// The context colour a COLR glyph resolves against.
     pub(crate) context_color: AlphaColor<Srgb>,
     /// The variation coordinates and faux-bold stroke the run is drawn with,
@@ -1181,6 +1200,7 @@ impl<'g> RunKey<'g> {
             transform,
             hinted,
             color_font,
+            bitmap_only: basis.bitmap_only,
             context_color,
             synthesis: Synthesis::new(run.font.normalized_coords(), embolden),
             oblique,
@@ -1203,6 +1223,7 @@ impl<'g> RunKey<'g> {
         let basis = RunBasis {
             upem: 0.0,
             synthetic_oblique: false,
+            bitmap_only: false,
         };
         Self::for_run_with(
             run,
@@ -1224,6 +1245,8 @@ pub(crate) struct RunBasis {
     pub(crate) upem: f32,
     /// `SceneCompiler::synthetic_oblique_enabled`.
     pub(crate) synthetic_oblique: bool,
+    /// The face is bitmap-only (see [`RunKey::bitmap_only`]).
+    pub(crate) bitmap_only: bool,
 }
 
 /// Scratch a run's distinct glyph ids are counted in — what
@@ -1785,10 +1808,23 @@ impl AtlasPolicy {
         // the same terms `glifo` compares its own ceiling against the absorbed
         // size: a run just over the line must not be admitted by rounding down
         // to it.
-        if device_size > MAX_CACHED_FONT_SIZE {
+        //
+        // A bitmap-only face is exempt from the animation reason and has the
+        // higher `MAX_BITMAP_RUN_SIZE` ceiling: its strike is cached at the
+        // strike's ppem whatever size the run is drawn at, so a headline or
+        // an animating emoji stays on the atlas. Every other
+        // reason above and below still applies. Residency is charged at the
+        // run size (`glyph_texels_at`), which over-states a strike's real
+        // texels and so errs toward refusing, never toward overspending.
+        let ceiling = if run.bitmap_only {
+            MAX_BITMAP_RUN_SIZE
+        } else {
+            MAX_CACHED_FONT_SIZE
+        };
+        if device_size > ceiling {
             return RunRoute::Outline(OutlineReason::SizeTooLarge);
         }
-        if animating {
+        if animating && !run.bitmap_only {
             return RunRoute::Outline(OutlineReason::SizeAnimating);
         }
         // Last, because it is the only answer that depends on what other runs
@@ -3423,6 +3459,7 @@ mod trace_tests {
             transform: Affine::IDENTITY,
             hinted: false,
             color_font: false,
+            bitmap_only: false,
             context_color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 1.0]),
             synthesis: Some(Synthesis::NONE),
             oblique: false,
@@ -3491,6 +3528,7 @@ mod settle_tests {
             transform: Affine::IDENTITY,
             hinted: false,
             color_font: false,
+            bitmap_only: false,
             context_color: AlphaColor::<Srgb>::new([0.0, 0.0, 0.0, 1.0]),
             synthesis: Some(Synthesis::NONE),
             oblique: false,
@@ -3508,6 +3546,126 @@ mod settle_tests {
         policy.end_frame(images);
         policy.acknowledge_replay();
         cached
+    }
+
+    /// One frame's route for `key`, built and closed like [`cached`].
+    fn route_of(policy: &mut AtlasPolicy, images: &mut ImageCache, key: &RunKey) -> RunRoute {
+        policy.begin_frame();
+        let route = policy.classify_run(key);
+        policy.build(images, |_| None);
+        policy.acknowledge_clears();
+        policy.end_frame(images);
+        policy.acknowledge_replay();
+        route
+    }
+
+    fn fresh() -> (ImageCache, AtlasPolicy) {
+        let images = ImageCache::new_with_config(AtlasConfig {
+            initial_atlas_count: 0,
+            max_atlases: 4,
+            atlas_size: (1024, 1024),
+            auto_grow: true,
+            allocation_strategy: AllocationStrategy::FirstFit,
+        });
+        let policy = AtlasPolicy::new(&images, false);
+        (images, policy)
+    }
+
+    /// A bitmap-only face past `MAX_CACHED_FONT_SIZE` stays on the atlas; an
+    /// outline face at the same size goes to outlines.
+    #[test]
+    fn a_bitmap_only_face_past_the_size_ceiling_is_routed_to_the_atlas() {
+        let size = MAX_CACHED_FONT_SIZE + 32.0;
+        let (mut images, mut policy) = fresh();
+        let bitmap = RunKey {
+            bitmap_only: true,
+            ..run_key(size)
+        };
+        assert!(
+            route_of(&mut policy, &mut images, &bitmap)
+                .atlas()
+                .is_some()
+        );
+        let outline = run_key(size);
+        assert_eq!(
+            route_of(&mut policy, &mut images, &outline).outline_reason(),
+            Some(OutlineReason::SizeTooLarge)
+        );
+    }
+
+    /// A bitmap-only face whose size keeps changing stays on the atlas; an
+    /// outline face animated the same way is routed to outlines.
+    #[test]
+    fn a_bitmap_only_face_during_a_size_animation_is_routed_to_the_atlas() {
+        let (mut images, mut policy) = fresh();
+        let mut bitmap_cached = 0;
+        let mut outline_animating = 0;
+        for step in 0..6_u8 {
+            let size = 20.0 + f32::from(step) * 4.0;
+            let bitmap = RunKey {
+                bitmap_only: true,
+                font_id: 0xb17_0001,
+                ..run_key(size)
+            };
+            let outline = RunKey {
+                font_id: 0xb17_0002,
+                ..run_key(size)
+            };
+            bitmap_cached += usize::from(
+                route_of(&mut policy, &mut images, &bitmap)
+                    .atlas()
+                    .is_some(),
+            );
+            outline_animating += usize::from(
+                route_of(&mut policy, &mut images, &outline).outline_reason()
+                    == Some(OutlineReason::SizeAnimating),
+            );
+        }
+        assert_eq!(bitmap_cached, 6, "every animation step is served");
+        assert!(
+            outline_animating >= 5,
+            "the control animates: {outline_animating}"
+        );
+    }
+
+    /// The other reasons still apply to a bitmap-only face: colour and
+    /// unusable sizes.
+    #[test]
+    fn a_bitmap_only_face_still_takes_the_other_outline_reasons() {
+        let (mut images, mut policy) = fresh();
+        let colr = RunKey {
+            bitmap_only: true,
+            color_font: true,
+            ..run_key(MAX_CACHED_FONT_SIZE + 32.0)
+        };
+        assert_eq!(
+            route_of(&mut policy, &mut images, &colr).outline_reason(),
+            Some(OutlineReason::ColorFont)
+        );
+        let colr_only = RunKey {
+            color_font: true,
+            ..run_key(MAX_CACHED_FONT_SIZE + 32.0)
+        };
+        assert_eq!(
+            route_of(&mut policy, &mut images, &colr_only).outline_reason(),
+            Some(OutlineReason::ColorFont)
+        );
+        let huge = RunKey {
+            bitmap_only: true,
+            ..run_key(MAX_BITMAP_RUN_SIZE + 64.0)
+        };
+        assert_eq!(
+            route_of(&mut policy, &mut images, &huge).outline_reason(),
+            Some(OutlineReason::SizeTooLarge)
+        );
+        let unusable = RunKey {
+            bitmap_only: true,
+            ..run_key(0.0)
+        };
+        assert_eq!(
+            route_of(&mut policy, &mut images, &unusable).outline_reason(),
+            Some(OutlineReason::UnusableSize)
+        );
     }
 
     /// Two sizes that alternate every ten frames (longer than the settle

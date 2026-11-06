@@ -2062,6 +2062,7 @@ impl SceneCompiler {
                             RunBasis {
                                 upem: f32::from(facts.upem),
                                 synthetic_oblique: self.synthetic_oblique,
+                                bitmap_only: facts.bitmap_only,
                             },
                         );
                         self.glyph_atlas.classify_run(&key)
@@ -2105,6 +2106,7 @@ impl SceneCompiler {
             RunBasis {
                 upem: f32::from(upem),
                 synthetic_oblique: false,
+                bitmap_only: false,
             },
         );
         key.font_id = face;

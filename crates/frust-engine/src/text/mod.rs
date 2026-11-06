@@ -656,6 +656,8 @@ pub(crate) struct FaceFacts {
     pub(crate) readable: bool,
     /// [`font_has_color_glyphs`]'s answer.
     pub(crate) color: bool,
+    /// [`font_is_bitmap_only`]'s answer.
+    pub(crate) bitmap_only: bool,
     /// [`hvgl::font_needs_hvgl_provider`]'s answer.
     pub(crate) hvgl: bool,
     /// The face's units-per-em (`0` when unreadable): the basis of
@@ -700,6 +702,7 @@ impl FontFacts {
         let facts = FaceFacts {
             readable: font_is_readable(font),
             color: font_has_color_glyphs(font),
+            bitmap_only: font_is_bitmap_only(font),
             hvgl: hvgl::font_needs_hvgl_provider(font),
             upem: font_units_per_em(font),
         };
@@ -727,6 +730,12 @@ const HEAD_TAG: [u8; 4] = *b"head";
 /// `COLR`, on the same terms — the colour-glyph table
 /// [`font_has_color_glyphs`] looks for.
 const COLR_TAG: [u8; 4] = *b"COLR";
+/// The bitmap-strike tables [`font_is_bitmap_only`] looks for: Google's
+/// colour bitmap data and Apple's standard bitmap graphics.
+const BITMAP_TAGS: [[u8; 4]; 2] = [*b"CBDT", *b"sbix"];
+/// Every outline table: TrueType, CFF and CFF2. A face carrying any is not
+/// bitmap-only.
+const OUTLINE_TAGS: [[u8; 4]; 3] = [*b"glyf", *b"CFF ", *b"CFF2"];
 /// A font collection's own file tag.
 const TTC_TAG: [u8; 4] = *b"ttcf";
 /// Byte offset of a collection header's major version. Only versions 1 and 2
@@ -861,6 +870,22 @@ pub(crate) fn font_has_color_glyphs(font: &FontData) -> bool {
         .is_some()
 }
 
+/// Whether `font` draws only from bitmap strikes: it has a `CBDT` or `sbix`
+/// table and no `glyf`, `CFF ` or `CFF2` outlines.
+///
+/// `glifo` caches a strike at the strike's own ppem rather than the run's
+/// size, so the size-based outline reasons do not apply to such a face (see
+/// `RunKey::bitmap_only`). A face with outlines as well is not bitmap-only:
+/// its outline glyphs are cached by run size like any other face's.
+pub(crate) fn font_is_bitmap_only(font: &FontData) -> bool {
+    let data = font.data.data();
+    let Some(directory) = table_directory(data, font.index) else {
+        return false;
+    };
+    let has = |tag: [u8; 4]| table_record(data, directory, tag).is_some();
+    BITMAP_TAGS.into_iter().any(has) && !OUTLINE_TAGS.into_iter().any(has)
+}
+
 /// Where the record for `tag` starts inside the table directory at
 /// `directory`, or `None` when the directory names no such table.
 ///
@@ -911,4 +936,43 @@ fn read_u16(data: &[u8], at: usize) -> Option<u16> {
 fn read_u32(data: &[u8], at: usize) -> Option<u32> {
     let bytes: [u8; 4] = data.get(at..at.checked_add(4)?)?.try_into().ok()?;
     Some(u32::from_be_bytes(bytes))
+}
+
+#[cfg(test)]
+mod bitmap_only_tests {
+    use super::*;
+    use peniko::Blob;
+    use std::sync::Arc;
+
+    fn face(bytes: &'static [u8]) -> FontData {
+        FontData::new(Blob::new(Arc::new(bytes)), 0)
+    }
+
+    #[test]
+    fn a_cbdt_face_without_outlines_is_bitmap_only() {
+        let font = face(include_bytes!(
+            "../../../../testing/fonts/NotoColorEmoji-CBDT-Subset.ttf"
+        ));
+        assert!(font_is_bitmap_only(&font));
+        assert!(!font_has_color_glyphs(&font));
+        assert!(FontFacts::default().of(&font).bitmap_only);
+    }
+
+    #[test]
+    fn outline_and_colr_faces_are_not_bitmap_only() {
+        let outline = face(include_bytes!(
+            "../../../../testing/fonts/NotoSans-Subset.ttf"
+        ));
+        let colr = face(include_bytes!(
+            "../../../../testing/fonts/NotoEmoji-COLRv1-Subset.ttf"
+        ));
+        assert!(!font_is_bitmap_only(&outline));
+        assert!(!font_is_bitmap_only(&colr));
+        assert!(font_has_color_glyphs(&colr));
+    }
+
+    #[test]
+    fn an_unparseable_blob_is_not_bitmap_only() {
+        assert!(!font_is_bitmap_only(&face(b"not a font")));
+    }
 }
