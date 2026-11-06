@@ -164,7 +164,7 @@ use frust_shell_common::{
     WindowMetricsPublisher, sanitize_scale,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, Theme};
+use frust_theme::{Brightness, Theme, TypeScale};
 
 use crate::accessibility::IosA11yAdapter;
 
@@ -285,6 +285,17 @@ pub struct IosAppHandle {
     /// of it — without this, turning the OS setting back off would have to
     /// guess what the theme originally asked for.
     authored_reduce_motion: bool,
+    /// The platform's last-reported text scale (Dynamic Type content size,
+    /// delivered by `frust_set_text_scale` → [`Self::set_text_scale`]),
+    /// unclamped as reported. Tracked independently of the theme so a theme
+    /// swap can re-apply it. Starts `1.0` (no report yet).
+    os_text_scale: f32,
+    /// The **active theme's own** unscaled `type_scale`, captured every time a
+    /// whole `Theme` is installed ([`Self::new`]'s seed and the override-poll
+    /// arm). `Theme::with_text_scale` derives the live scale from this and
+    /// [`Self::os_text_scale`], so re-applying never compounds and `1.0`
+    /// restores the authored scale exactly.
+    authored_type_scale: TypeScale,
     /// The last window insets pushed to the render root, in logical px. Retained
     /// so [`Self::set_insets`] / [`Self::set_corner_insets`] skip a no-op push
     /// (`WindowInsets` is `PartialEq`) — both the relayout and the app-side
@@ -567,6 +578,9 @@ impl IosAppHandle {
         // later theme swap) can re-derive the effective value instead of
         // guessing what the theme asked for — see `authored_reduce_motion`.
         let authored_reduce_motion = theme.motion.reduce_motion;
+        // The base's own type scale, kept for the same reason: the OS text
+        // scale is applied over it, never accumulated into it.
+        let authored_type_scale = theme.type_scale.clone();
 
         app.set_theme(Box::new(theme.clone()));
         // Thread the surface's RESOLVED translucency into the render root and
@@ -634,6 +648,8 @@ impl IosAppHandle {
             // above needs no fix-up.
             os_reduce_motion: false,
             authored_reduce_motion,
+            os_text_scale: 1.0,
+            authored_type_scale,
             insets: WindowInsets::default(),
             window_metrics,
             // Attached later, on the first layout, via `frust_init_accessibility`

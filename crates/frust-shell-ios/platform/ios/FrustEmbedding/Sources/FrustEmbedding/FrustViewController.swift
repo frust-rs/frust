@@ -409,6 +409,16 @@ open class FrustViewController: UIViewController {
             name: UIAccessibility.reduceMotionStatusDidChangeNotification,
             object: nil
         )
+
+        // Dynamic Type: the content size category changes live from Settings
+        // or Control Center. The initial value is seeded in `updateSurface`
+        // once a handle exists (`pushTextScale` needs one).
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(contentSizeCategoryDidChange),
+            name: UIContentSizeCategory.didChangeNotification,
+            object: nil
+        )
     }
 
     public override func viewDidLayoutSubviews() {
@@ -574,6 +584,9 @@ open class FrustViewController: UIViewController {
             // `reduceMotionStatusDidChangeNotification` (see `viewDidLoad`),
             // never via `traitCollectionDidChange`.
             pushReduceMotion()
+            // Seed the Dynamic Type text scale the same way; live changes
+            // arrive via `UIContentSizeCategory.didChangeNotification`.
+            pushTextScale()
             // Push the initial insets — the first
             // `viewSafeAreaInsetsDidChange` may have already fired before
             // `handle` existed, so `pushInsets()`'s guard silently dropped
@@ -1376,6 +1389,9 @@ open class FrustViewController: UIViewController {
         // leave for Settings to flip it, so this is a routine path, not an
         // edge case).
         pushReduceMotion()
+        // Same for Dynamic Type: the content-size notification may not be
+        // delivered while suspended.
+        pushTextScale()
     }
 
     /// The platform's light/dark appearance preference changed —
@@ -1403,6 +1419,22 @@ open class FrustViewController: UIViewController {
     private func pushReduceMotion() {
         guard let handle else { return }
         frust_set_reduce_motion(handle, UIAccessibility.isReduceMotionEnabled ? 1 : 0)
+    }
+
+    /// The Dynamic Type content size changed
+    /// (`UIContentSizeCategory.didChangeNotification`) — re-push the scale so
+    /// the theme's type scale follows live.
+    @objc private func contentSizeCategoryDidChange() {
+        pushTextScale()
+    }
+
+    /// Push the Dynamic Type scale to Rust: how much larger (or smaller) the
+    /// user's content size makes the 17 pt default body size. A missing handle
+    /// is a no-op — `updateSurface` pushes once `frust_init` has returned one.
+    private func pushTextScale() {
+        guard let handle else { return }
+        let scale = UIFontMetrics.default.scaledValue(for: 17, compatibleWith: traitCollection) / 17
+        frust_set_text_scale(handle, Float(scale))
     }
 
     deinit {

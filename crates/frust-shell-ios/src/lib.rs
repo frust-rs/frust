@@ -97,6 +97,8 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// `frust_set_reduce_motion` (the reduced-motion accessibility export — the
 /// same transport over a different sensor: `UIAccessibility`, not
 /// `UITraitCollection`),
+/// `frust_set_text_scale` (the Dynamic Type content-size export, a third
+/// sensor on the same transport),
 /// `frust_on_deep_link` (cold-start/running deep-link delivery),
 /// `frust_init_accessibility` (the accesskit adapter
 /// attach — the one export whose UIView pointer the CAMetalLayer-only
@@ -413,6 +415,15 @@ macro_rules! ios_app {
         #[unsafe(no_mangle)]
         pub extern "C" fn frust_set_reduce_motion(handle: *mut ::core::ffi::c_void, reduce: u8) {
             $crate::ffi_glue::set_reduce_motion(handle, reduce)
+        }
+
+        /// `frust_set_text_scale`: apply the platform's Dynamic Type content
+        /// size as a text scale factor (1.0 = default body size) to the
+        /// active theme's type scale.
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn frust_set_text_scale(handle: *mut ::core::ffi::c_void, scale: f32) {
+            $crate::ffi_glue::set_text_scale(handle, scale)
         }
 
         /// `frust_set_insets`: deliver the platform window insets
