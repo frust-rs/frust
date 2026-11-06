@@ -1009,11 +1009,12 @@ pub mod authoring {
     /// nested here rather than flattened avoids the glob collision a flat
     /// re-export of both would cause.
     pub mod text {
-        pub use frust_text::{EditOp, EditingState, EditingStateBytes, TextEditor};
         pub use frust_text::{
-            FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, OverflowWrap,
-            TextAlign, TextContext, TextLayout, TextOverflow, TextStyle,
+            DecorationKind, DecorationRect, FamilyName, FontFamily, FontStyle, FontWeight,
+            GenericSlot, LineHeight, OverflowWrap, TextAlign, TextContext, TextDecoration,
+            TextLayout, TextOverflow, TextStyle,
         };
+        pub use frust_text::{EditOp, EditingState, EditingStateBytes, TextEditor};
         /// Types named in [`TextContext`]'s own public signatures —
         /// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>`,
         /// `shape_cache_stats() -> ShapeCacheStats` and

@@ -12,11 +12,11 @@ use frust_core::{
     Widget,
 };
 use frust_text::{
-    FontFamily, FontStyle, FontWeight, LineHeight, LocaleStamp, OverflowWrap, TextAlign,
-    TextContext, TextLayout, TextOverflow, TextStyle,
+    DecorationKind, FontFamily, FontStyle, FontWeight, LineHeight, LocaleStamp, OverflowWrap,
+    TextAlign, TextContext, TextDecoration, TextLayout, TextOverflow, TextStyle,
 };
 use frust_theme::{Theme, TypeScale};
-use kurbo::Size;
+use kurbo::{Point, Size};
 use peniko::Color;
 
 /// Which themed color role a text's glyphs default to when no explicit
@@ -304,6 +304,28 @@ impl TextView {
         self
     }
 
+    /// Underline the text, using the font's own underline position and
+    /// thickness. Keeps any line-through, colour and thickness already set.
+    pub fn underline(mut self) -> Self {
+        self.style.decoration.underline = true;
+        self
+    }
+
+    /// Strike a line through the text, using the font's own strikeout
+    /// position and thickness. Keeps any underline, colour and thickness
+    /// already set.
+    pub fn line_through(mut self) -> Self {
+        self.style.decoration.line_through = true;
+        self
+    }
+
+    /// Replace the text's decoration (underline, line-through, colour and
+    /// thickness) wholesale.
+    pub fn decoration(mut self, decoration: TextDecoration) -> Self {
+        self.style.decoration = decoration;
+        self
+    }
+
     /// Tag the text with a BCP 47 locale (`"ja"`, `"th"`, `"zh-Hant"`): it
     /// steers font fallback, language-specific shaping and CJK line breaking.
     ///
@@ -582,11 +604,25 @@ impl Widget for TextWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for run in layout.to_scene_runs(ctx.origin()) {
-                scene.draw_glyph_run(run);
+        let Some(layout) = &self.layout else {
+            return;
+        };
+        let origin = ctx.origin();
+        let rects = layout.decoration_rects(origin);
+        let fill = |scene: &mut dyn PaintScene, kind: DecorationKind| {
+            for d in rects.iter().filter(|d| d.kind == kind) {
+                scene.fill_rect(
+                    Point::new(d.rect.x0, d.rect.y0),
+                    Size::new(d.rect.width(), d.rect.height()),
+                    d.color,
+                );
             }
+        };
+        fill(scene, DecorationKind::Underline);
+        for run in layout.to_scene_runs(origin) {
+            scene.draw_glyph_run(run);
         }
+        fill(scene, DecorationKind::LineThrough);
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -1440,5 +1476,87 @@ mod tests {
             "a bare type-scale family swap must re-shape the opted-in text in the \
              new family"
         );
+    }
+
+    /// One recorded paint operation, in order.
+    #[derive(Debug, PartialEq)]
+    enum Op {
+        Rect(Point, Size, Color),
+        Glyphs,
+    }
+
+    #[derive(Default)]
+    struct OrderRecorder(Vec<Op>);
+
+    impl PaintScene for OrderRecorder {
+        fn fill_rect(&mut self, o: Point, s: Size, c: Color) {
+            self.0.push(Op::Rect(o, s, c));
+        }
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, _run: GlyphRun) {
+            self.0.push(Op::Glyphs);
+        }
+    }
+
+    fn painted_ops(view: TextView) -> Vec<Op> {
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+        let mut rec = OrderRecorder::default();
+        let mut pctx = PaintCtx::new(Point::new(4.0, 6.0), Size::new(300.0, 100.0));
+        widget.paint(&mut pctx, &mut rec);
+        rec.0
+    }
+
+    #[test]
+    fn underline_fills_a_rect_before_the_glyph_run() {
+        let ops = painted_ops(text("link").underline());
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        assert!(matches!(ops[0], Op::Rect(..)), "{ops:?}");
+        assert_eq!(ops[1], Op::Glyphs);
+        let Op::Rect(origin, size, _) = ops[0] else {
+            unreachable!()
+        };
+        assert!(origin.x >= 4.0 && origin.y > 6.0, "placed at the origin");
+        assert!(size.width > 0.0 && size.height > 0.0);
+    }
+
+    #[test]
+    fn line_through_fills_a_rect_after_the_glyph_run() {
+        let ops = painted_ops(text("done").line_through());
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        assert_eq!(ops[0], Op::Glyphs);
+        assert!(matches!(ops[1], Op::Rect(..)), "{ops:?}");
+    }
+
+    #[test]
+    fn both_decorations_bracket_the_glyph_run() {
+        let red = Color::from_rgb8(200, 0, 0);
+        let ops = painted_ops(
+            text("x")
+                .decoration(TextDecoration::underline().with_color(red))
+                .line_through(),
+        );
+        assert!(matches!(ops[0], Op::Rect(_, _, c) if c == red), "{ops:?}");
+        assert_eq!(ops[1], Op::Glyphs);
+        assert!(matches!(ops[2], Op::Rect(_, _, c) if c == red), "{ops:?}");
+    }
+
+    #[test]
+    fn undecorated_text_fills_no_rect() {
+        assert_eq!(painted_ops(text("plain")), vec![Op::Glyphs]);
+    }
+
+    #[test]
+    fn decoration_builders_set_the_style() {
+        let view = text("x").underline().line_through();
+        assert_eq!(view.style.decoration, {
+            let mut both = TextDecoration::underline();
+            both.line_through = true;
+            both
+        });
+        let replaced = view.decoration(TextDecoration::none());
+        assert!(replaced.style.decoration.is_none());
     }
 }

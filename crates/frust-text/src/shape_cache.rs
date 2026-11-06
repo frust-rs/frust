@@ -24,7 +24,8 @@ use crate::convert::{NotdefCounter, RunMemo};
 use crate::layout::{LineTable, Paragraph, TextLayout, lay_out};
 use crate::shape::Shaped;
 use crate::style::{
-    FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, OverflowWrap, TextAlign, TextStyle,
+    FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, OverflowWrap, TextAlign,
+    TextDecoration, TextStyle,
 };
 
 /// Default cache capacity, mirroring Flutter's SkParagraph LRU paragraph cache
@@ -84,6 +85,7 @@ pub(crate) struct ShapeKey {
     line_height: LineHeightBits,
     align: TextAlign,
     overflow_wrap: OverflowWrap,
+    decoration: DecorationBits,
 }
 
 impl ShapeKey {
@@ -118,6 +120,29 @@ impl ShapeKey {
             line_height: LineHeightBits::from(style.line_height),
             align: style.align,
             overflow_wrap: style.overflow_wrap,
+            decoration: DecorationBits::from(style.decoration),
+        }
+    }
+}
+
+/// A [`TextDecoration`] keyed by bit pattern. The cached layout paints its
+/// decoration rects from the styles it keeps, so a decoration change must miss
+/// the cache just as a colour change does.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct DecorationBits {
+    underline: bool,
+    line_through: bool,
+    color: Option<[u32; 4]>,
+    thickness: Option<u32>,
+}
+
+impl From<TextDecoration> for DecorationBits {
+    fn from(d: TextDecoration) -> Self {
+        Self {
+            underline: d.underline,
+            line_through: d.line_through,
+            color: d.color.map(|c| c.components.map(f32::to_bits)),
+            thickness: d.thickness.map(f32::to_bits),
         }
     }
 }
@@ -430,6 +455,32 @@ mod tests {
             },
         );
         assert_ne!(start, center);
+    }
+
+    #[test]
+    fn key_distinguishes_decoration_and_leaves_plain_text_alone() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let base = TextStyle::new(16.0, Color::BLACK);
+        let plain = ShapeKey::new("link", &base);
+        assert_eq!(
+            plain,
+            ShapeKey::new(
+                "link",
+                &base.clone().with_decoration(TextDecoration::none())
+            )
+        );
+        let underlined = ShapeKey::new(
+            "link",
+            &base.clone().with_decoration(TextDecoration::underline()),
+        );
+        let thick = ShapeKey::new(
+            "link",
+            &base
+                .clone()
+                .with_decoration(TextDecoration::underline().with_thickness(2.0)),
+        );
+        assert_ne!(plain, underlined);
+        assert_ne!(underlined, thick);
     }
 
     #[test]
