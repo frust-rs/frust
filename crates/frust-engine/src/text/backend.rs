@@ -110,14 +110,18 @@
 //!
 //! # What is not drawn
 //!
-//! An *uncached* bitmap-strike glyph reaches the sink as a pixmap image paint,
-//! which is pixels travelling with the draw rather than a handle into the
-//! atlas, and the engine has no encoding for one: the sink records nothing for
-//! it and counts it, which keeps a bitmap-emoji run to missing glyphs rather
-//! than wrongly-coloured ones. `glifo`'s `png` feature is deliberately left off
-//! — the workspace decodes PNG in one place already — so a PNG strike is
-//! refused by `glifo` before it ever reaches here, and the other two strike
-//! encodings it never decodes at all.
+//! `glifo`'s `png` feature is on, so it decodes a PNG bitmap strike (`sbix`
+//! `png ` and `CBDT`/`CBLC` PNG) itself. A strike glyph the atlas caches is
+//! uploaded as a decoded pixmap through `glifo`'s pending-upload queue and
+//! drawn as an atlas rectangle like any other cached glyph, so it never reaches
+//! this sink as a pixmap. An *uncached* one (the outline route: an animating
+//! size, a full atlas, `FRUST_ENGINE_NO_ATLAS`) reaches the sink as a pixmap
+//! image paint, which is pixels travelling with the draw rather than a handle
+//! into the atlas, and the engine has no encoding for one: the sink records
+//! nothing for it and counts it, which keeps that bitmap-emoji run to missing
+//! glyphs rather than wrongly-coloured ones. The other two strike encodings
+//! (BGRA and mask) are never decoded upstream, so they are never drawn on
+//! either route.
 //!
 //! Stroked glyphs are refused on the same terms: the display list has no
 //! stroked-glyph command, so the sink carries no stroke state to widen an

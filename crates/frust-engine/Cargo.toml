@@ -20,7 +20,8 @@ web-time = { workspace = true }
 frust-gpu.workspace = true
 frust-scene.workspace = true
 vello_common.workspace = true
-glifo.workspace = true
+# `png` decodes sbix/CBDT PNG bitmap strikes inside glifo (the same `png` crate `image` already pulls in).
+glifo = { workspace = true, features = ["png"] }
 wgpu.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 kurbo.workspace = true
