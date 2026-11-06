@@ -314,6 +314,29 @@ impl TextView {
         self
     }
 
+    /// Set one OpenType feature (`font_feature(*b"tnum", 1)`, or
+    /// `font_feature(*b"liga", 0)` to switch ligatures off), appended after
+    /// any already set; a later setting of the same tag wins. A feature the
+    /// resolved face lacks is ignored.
+    pub fn font_feature(mut self, tag: [u8; 4], value: u16) -> Self {
+        self.style.features.push((tag, value));
+        self
+    }
+
+    /// Replace the OpenType feature settings with `features` (`(tag, value)`
+    /// pairs, a later setting of the same tag wins).
+    pub fn font_features(mut self, features: impl IntoIterator<Item = ([u8; 4], u16)>) -> Self {
+        self.style.features = features.into_iter().collect();
+        self
+    }
+
+    /// Use tabular (fixed-width) figures, the `tnum` feature: digits share one
+    /// advance, so prices and timers do not jitter as they change. A face
+    /// without tabular figures renders as before.
+    pub fn tabular_figures(self) -> Self {
+        self.font_feature(*b"tnum", 1)
+    }
+
     /// Replace the whole style in one call. Treated as an explicit color and
     /// family choice (the supplied style carries its own of both), so it wins
     /// over the themed color default and any [`Self::themed_family`] role.
@@ -918,6 +941,41 @@ mod tests {
             anywhere.len() > 1,
             "Anywhere must break the token across lines: {anywhere:?}"
         );
+    }
+
+    #[test]
+    fn feature_builders_fill_the_style_without_marking_color_or_family_explicit() {
+        let view = text("x").font_feature(*b"liga", 0).tabular_figures();
+        assert_eq!(view.style.features, vec![(*b"liga", 0), (*b"tnum", 1)]);
+        assert!(!view.color_explicit);
+        assert!(!view.family_explicit);
+        let replaced = view.font_features([(*b"smcp", 1)]);
+        assert_eq!(replaced.style.features, vec![(*b"smcp", 1)]);
+    }
+
+    /// Geist carries `tnum`; the same face the shaper's own tests use.
+    const GEIST: &[u8] = include_bytes!("../../../plugins/beui/fonts/geist/Geist-Variable.ttf");
+
+    #[test]
+    fn tabular_figures_reach_the_shaped_layout() {
+        let slot = crate::test_support::LocaleSlotGuard::hold();
+        let mut tcx = TextContext::new();
+        tcx.register_fonts(GEIST.to_vec())
+            .expect("the Geist test face registers");
+        // The x of the last of four digits is three digit advances.
+        let mut last_x = |content: &str, tabular: bool| {
+            let mut view = text(content).family(FontFamily::named("Geist"));
+            if tabular {
+                view = view.tabular_figures();
+            }
+            let runs = painted_runs_in(&view, None, &mut tcx);
+            runs.iter().flat_map(|r| r.glyphs.iter()).last().unwrap().x
+        };
+        let (tab_ones, tab_eights) = (last_x("1111", true), last_x("8888", true));
+        let (ones, eights) = (last_x("1111", false), last_x("8888", false));
+        assert_eq!(tab_ones, tab_eights);
+        assert_ne!(ones, eights);
+        drop(slot);
     }
 
     #[test]
