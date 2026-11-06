@@ -23,6 +23,17 @@ Never enable the `effects` feature of `clean-signals`; the version requirement
 must stay identical across every crate in your graph so they share one crate
 identity.
 
+## Localized failure text
+
+`async_view` and `use_failure_listener` never render failure text themselves;
+the closure you pass decides. `Failure::user_message()` is the non-localized
+default (the failure's `Display`). To localize, read your i18n handle in the
+component's `build`, move it into the closure, and render through an
+app-defined method, for example
+`move |f: AppFailure| toasts.error(f.localized(&i18n))`, where `localized` maps
+each variant to a message key and resolves it with `i18n.t(..)`. This crate
+takes no i18n dependency.
+
 ## Scaffolding
 
 `frust create --arch clean-signals` generates a project with these dependency

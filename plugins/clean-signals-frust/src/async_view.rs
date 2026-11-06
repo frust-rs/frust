@@ -78,9 +78,26 @@ use frust::{AnyView, View};
 ///     |messages: Vec<Message>| {
 ///         column().children(views::<(), _>(messages.into_iter().map(|m| text(m.subject))))
 ///     },
+///     // `user_message()` is the non-localized default (the failure's `Display`).
 ///     |failure: AppFailure| text(failure.user_message()),
 /// )
 /// # }
+/// ```
+///
+/// `async_view` never renders failure text itself: the `error` closure decides
+/// what the user sees. To localize it, read the i18n handle in the component's
+/// `build`, move it into the closure, and render through an app-defined
+/// method. `AppFailure::localized` here is the app's own mapping from each
+/// variant to a message key, resolved with `i18n.t(..)`.
+///
+/// ```rust,ignore
+/// let i18n = use_i18n();
+/// async_view(
+///     snapshot,
+///     || text(i18n.t("inbox-loading")),
+///     |messages: Vec<Message>| inbox_list(messages),
+///     move |failure: AppFailure| text(failure.localized(&i18n)),
+/// )
 /// ```
 pub fn async_view<S, T, F, L, D, E>(
     state: AsyncState<T, F>,
