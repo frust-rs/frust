@@ -1,6 +1,7 @@
-//! This gallery's own page goldens: four representative Material 3 Expressive
+//! This gallery's own page goldens: five representative Material 3 Expressive
 //! screens captured GPU-free and compared against the framework's committed
-//! `cpu/` golden class.
+//! `cpu/` golden class. One of them is the selection dialog under the `th`
+//! locale, shaped by the bundled Thai face.
 //!
 //! ```text
 //! (cd examples/material3-demo && cargo test --test page_goldens)
@@ -48,7 +49,7 @@
 //! it here directly.
 
 use frust::authoring::text::FontFamily;
-use frust::{Color, CrossAxisAlignment, View};
+use frust::{Color, CrossAxisAlignment, Theme, View};
 use frust_i18n::{I18n, Locale, LocaleSet};
 use frust_material as m3;
 use frust_material_i18n::localized_theme;
@@ -56,7 +57,7 @@ use frust_testing::case::Tolerance;
 use frust_testing::corpus::CorpusCase;
 use frust_testing::frame::{
     FrameSpec, SAMPLE_TEXT, SAMPLE_TEXT_LONG, foreign_font_runs, glyph_run_count, physical_case,
-    pin_type_scale, pinned_text_style, record_view, test_text_context,
+    pin_type_scale, pinned_text_style, record_view, scene_fingerprint, test_text_context,
 };
 use frust_testing::{Scene, run_cpu_goldens};
 
@@ -77,6 +78,7 @@ fn m3demo_cases() -> Vec<CorpusCase> {
         buttons(),
         selection(),
         progress_and_cards(),
+        thai_dialog(),
     ]
 }
 
@@ -308,10 +310,52 @@ fn progress_and_cards() -> CorpusCase {
     }
 }
 
+/// The Thai title and its one option. Every codepoint sits inside the bundled
+/// Thai subset (`testing/fonts/LICENSES.md`), so the bundled face shapes all of
+/// it with no `.notdef`.
+const THAI_TITLE: &str = "สวัสดีครับ";
+
+/// The Thai dialog's type-scale family: the bundled Latin face, then the
+/// bundled Thai face for the codepoints Latin lacks.
+///
+/// The Latin face alone is not enough. Shaped under a Latin-only pin, the Thai
+/// strings fall back to a 7.8 MB host font, which [`foreign_font_runs`] rejects,
+/// so the stack names the Thai face explicitly. The Latin name comes from
+/// [`test_text_context`], and the Thai name is the `name`-table family
+/// `register_test_fonts` reports for the bundled Thai face.
+fn thai_family() -> FontFamily {
+    let (_, latin) = test_text_context();
+    let FontFamily::Named(mut names) = latin else {
+        panic!("test_text_context names its Latin family");
+    };
+    names.push("Noto Sans Thai".to_owned());
+    FontFamily::Named(names)
+}
+
+/// The selection dialog under the `th` locale: Thai Cancel and OK from the
+/// Thai Material table, and a Thai title and option, all shaped by the bundled
+/// Thai face through [`thai_family`].
+fn thai_dialog() -> CorpusCase {
+    fn record(scene: &mut Scene) {
+        record_dialog(scene, "th", THAI_TITLE, &thai_family());
+    }
+    CorpusCase {
+        spec: case("page-m3demo-dialog-th"),
+        record,
+        probes: &[],
+        eroded_interior: false,
+        about: "the selection dialog under the th locale: Thai Cancel/OK actions and a \
+                Thai title, shaped by the bundled Thai face",
+    }
+}
+
 /// Records the selection dialog under the Material strings of `tag`, the way
 /// the app localizes its theme (`localized_theme` over the pinned baseline).
-fn record_dialog(scene: &mut Scene, tag: &str) {
-    let (mut tcx, family) = test_text_context();
+///
+/// The dialog's title and its one option both read `title`, and the theme's
+/// type scale is pinned to `family`.
+fn record_dialog(scene: &mut Scene, tag: &str, title: &'static str, family: &FontFamily) {
+    let (mut tcx, _) = test_text_context();
     let active: Locale = tag.parse().expect("`tag` is a valid BCP-47 tag");
     let english: Locale = "en".parse().expect("`en` is a valid BCP-47 tag");
     let thai: Locale = "th".parse().expect("`th` is a valid BCP-47 tag");
@@ -319,13 +363,47 @@ fn record_dialog(scene: &mut Scene, tag: &str) {
         .with_locale(english, [("app.ftl", "")])
         .with_locale(thai, [("app.ftl", "")]);
     let i18n = I18n::new(set, &[active]).expect("the empty catalogs parse");
-    let theme = localized_theme(pin_type_scale(m3::baseline(), &family), &i18n);
-    record_view(scene, &FrameSpec::phone(), theme, &mut tcx, || {
-        m3::selection_dialog::<()>("Hello", vec!["Hello".into()]).selected(vec!["Hello".into()])
-    });
+    let theme = localized_theme(pin_type_scale(m3::baseline(), family), &i18n);
+    record_view(
+        scene,
+        &FrameSpec::phone(),
+        theme.clone(),
+        &mut tcx,
+        move || {
+            frust::component(ThemedDialog {
+                theme: theme.clone(),
+                title,
+            })
+        },
+    );
 }
 
-/// The gate: all four pages against their committed `cpu/` baselines.
+/// Hosts the selection dialog with `theme` as the ambient `Theme` context.
+///
+/// The dialog reads its strings from the ambient context during `build`.
+/// [`record_view`] installs its theme on the root for layout and paint only,
+/// so without this host the dialog falls back to the English table and a Thai
+/// recording shows English actions. The app gets the same context through
+/// `provide_localized_strings`, and the dialog's own tests host it this way.
+struct ThemedDialog {
+    theme: Theme,
+    title: &'static str,
+}
+
+impl frust::Component for ThemedDialog {
+    type State = ();
+
+    fn init(&self) {}
+
+    fn build(&self, _state: &mut ()) -> impl View<()> {
+        frust::provide_context(self.theme.clone());
+        m3::selection_dialog::<()>(self.title, vec![self.title.into()])
+            .selected(vec![self.title.into()])
+    }
+}
+
+/// The gate: every page in [`m3demo_cases`] against its committed `cpu/`
+/// baseline.
 #[test]
 fn the_gallery_pages_match_their_goldens() {
     let cases = m3demo_cases();
@@ -404,23 +482,32 @@ fn every_page_records_commands_and_shapes_text() {
     }
 }
 
-/// The Thai Material strings reach a real dialog: its Cancel and OK actions
-/// record different text than under English.
+/// The `th` locale reaches the selection dialog: under the same title and the
+/// same family, its recording differs from the `en` one.
 ///
-/// Not a golden. The Thai actions can only be shaped against a host font (the
-/// bundled test faces carry no Thai), which `foreign_font_runs` refuses to
-/// promote as a portable baseline, so the localized rendering is pinned by
-/// comparing the two recordings instead.
+/// The `page-m3demo-dialog-th` golden pins the Thai pixels; this states the
+/// locale plumbing on its own, with no baseline. Both sides share
+/// [`thai_family`], so a family difference cannot make the check pass.
 #[test]
 fn thai_strings_reach_the_selection_dialog() {
+    let family = thai_family();
     let mut english = Scene::new();
-    record_dialog(&mut english, "en");
+    record_dialog(&mut english, "en", "Hello", &family);
+    let mut english_again = Scene::new();
+    record_dialog(&mut english_again, "en", "Hello", &family);
     let mut thai = Scene::new();
-    record_dialog(&mut thai, "th");
+    record_dialog(&mut thai, "th", "Hello", &family);
     assert!(glyph_run_count(&thai) > 0, "the Thai dialog shaped no text");
+    // `Debug` on the command list embeds per-run `Blob` ids, so it differs
+    // between two identical recordings; the fingerprint is the stable form.
+    assert_eq!(
+        scene_fingerprint(&english),
+        scene_fingerprint(&english_again),
+        "two English recordings of the dialog must match"
+    );
     assert_ne!(
-        format!("{:?}", english.commands()),
-        format!("{:?}", thai.commands()),
+        scene_fingerprint(&english),
+        scene_fingerprint(&thai),
         "the Thai strings did not change what the dialog paints"
     );
 }

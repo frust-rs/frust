@@ -92,6 +92,16 @@ fn text_align_and_overflow_resolve_through_the_facade() {
     let _: TextOverflow = TextOverflow::Ellipsis;
 }
 
+/// `frust::authoring::text::OverflowWrap` must be nameable, so an app can
+/// pass it to `TextView::overflow_wrap` and `TextStyle::with_overflow_wrap`.
+#[test]
+fn overflow_wrap_resolves_through_the_facade() {
+    use frust::authoring::text::{OverflowWrap, TextStyle};
+    let style = TextStyle::default().with_overflow_wrap(OverflowWrap::Anywhere);
+    assert_eq!(style.overflow_wrap, OverflowWrap::Anywhere);
+    let _view = frust::text("https://example.com").overflow_wrap(OverflowWrap::Anywhere);
+}
+
 /// `TextView::max_lines`/`::overflow` are reachable through the flat
 /// `frust::text`/`frust::TextView` facade surface (not just `authoring`),
 /// composed with `.align()` — the exact combination `TextAlign`'s

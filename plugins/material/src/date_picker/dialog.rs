@@ -616,11 +616,9 @@ impl HeaderRun {
 
     /// The style the run shapes with.
     fn style(&self) -> TextStyle {
-        TextStyle {
-            family: self.family.clone(),
-            weight: self.weight,
-            ..TextStyle::new(self.size, SHAPING_INK)
-        }
+        TextStyle::new(self.size, SHAPING_INK)
+            .with_family(self.family.clone())
+            .with_weight(self.weight)
     }
 
     fn set_content(&mut self, content: &str) {
@@ -1377,17 +1375,11 @@ mod tests {
         layout_header(&mut w, &mut tcx, None);
         assert_eq!(
             w.help.style(),
-            TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(HELP_TEXT_SIZE, SHAPING_INK)
-            }
+            TextStyle::new(HELP_TEXT_SIZE, SHAPING_INK).with_weight(FontWeight::MEDIUM)
         );
         assert_eq!(
             w.headline.style(),
-            TextStyle {
-                weight: FontWeight::REGULAR,
-                ..TextStyle::new(HEADLINE_TEXT_SIZE, SHAPING_INK)
-            }
+            TextStyle::new(HEADLINE_TEXT_SIZE, SHAPING_INK).with_weight(FontWeight::REGULAR)
         );
     }
 

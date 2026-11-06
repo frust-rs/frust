@@ -230,11 +230,9 @@ fn ui_face() -> FontFamily {
 /// A label's style: weight/size are Glyph-authored constants, the family is
 /// the theme's `titleSmall` role; `color` varies per tab.
 fn tab_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(TAB_FONT_SIZE, color)
-    }
+    TextStyle::new(TAB_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.title_small.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// Component-wise lerp of an `(x, width)` indicator geometry.

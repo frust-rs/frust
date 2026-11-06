@@ -252,11 +252,9 @@ fn ui_face() -> FontFamily {
 /// A label's style: fixed size/weight, family from the theme's `labelLarge`
 /// role.
 fn seg_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(SEG_FONT_SIZE, color)
-    }
+    TextStyle::new(SEG_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_large.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// The retained widget for a [`SegmentedControlView`].

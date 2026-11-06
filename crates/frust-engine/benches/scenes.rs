@@ -122,10 +122,7 @@ impl BenchText {
     }
 
     fn style(&self, size: f32, color: Color) -> TextStyle {
-        TextStyle {
-            family: self.family.clone(),
-            ..TextStyle::new(size, color)
-        }
+        TextStyle::new(size, color).with_family(self.family.clone())
     }
 
     /// Shapes `text` once at `size`, returning its runs at the origin.

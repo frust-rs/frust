@@ -5,12 +5,13 @@
 //! so a golden/host test that shapes text against it is runner-local (a
 //! different installed font package changes the pixels) and not a portable
 //! reference image. This module is the bundled-font registration path that
-//! closes that gap: four subsetted faces (`testing/fonts/`, full provenance
+//! closes that gap: five subsetted faces (`testing/fonts/`, full provenance
 //! and license text in `testing/fonts/LICENSES.md`) covering Latin +
-//! combining marks, Arabic (RTL + joining), CJK, and COLRv1 colour emoji —
-//! together enough to shape every script exercised by
-//! `tests::shapes_every_bundled_script_with_no_system_font` below with
-//! zero dependency on what the host happens to have installed.
+//! combining marks, Arabic (RTL + joining), CJK, COLRv1 colour emoji, and
+//! Thai — together enough to shape every script exercised by
+//! `tests::shapes_every_bundled_script_with_no_system_font` and
+//! `tests::bundled_thai_face_shapes_thai_with_no_notdef` below with zero
+//! dependency on what the host happens to have installed.
 //!
 //! [`test_fonts`] exposes the raw bytes (e.g. for a caller that wants its own
 //! registration order or subset), and [`register_test_fonts`] is the usual
@@ -28,6 +29,9 @@ const ARABIC: &[u8] = include_bytes!("../../../testing/fonts/NotoSansArabic-Subs
 const CJK: &[u8] = include_bytes!("../../../testing/fonts/NotoSansJP-Subset.otf");
 /// COLRv1 colour emoji (`😀`, U+1F600) — Apache License 2.0.
 const EMOJI: &[u8] = include_bytes!("../../../testing/fonts/NotoEmoji-COLRv1-Subset.ttf");
+/// Thai (`สวัสดีครับไก่ต้มยำ`, U+0E01-U+0E3A and U+0E3F-U+0E5B) — Noto Sans
+/// Thai, SIL OFL 1.1.
+const THAI: &[u8] = include_bytes!("../../../testing/fonts/NotoSansThai-Subset.ttf");
 
 /// Every bundled test font's raw bytes, paired with a short label
 /// identifying it (for a panic/assertion message, not parsed by any caller).
@@ -35,14 +39,19 @@ const EMOJI: &[u8] = include_bytes!("../../../testing/fonts/NotoEmoji-COLRv1-Sub
 /// Order matters to a caller that registers these into a
 /// [`frust_text::FontFamily::stack`] fallback list: earlier entries win font
 /// selection for a codepoint both cover, and this order (Latin, Arabic, CJK,
-/// emoji) is a no-op for the disjoint scripts these four subsets actually
-/// carry — see `testing/fonts/LICENSES.md` for the exact codepoint sets.
+/// emoji, Thai) is a no-op for the disjoint scripts these five subsets
+/// actually carry — see `testing/fonts/LICENSES.md` for the exact codepoint
+/// sets. The Thai face is appended last so the earlier entries and their
+/// goldens are unchanged by its addition, so the order is load-bearing. A space
+/// in Thai sample text resolves to the Latin face, which comes first in the
+/// stack, so Thai-only assertions use unspaced text.
 pub fn test_fonts() -> Vec<(&'static str, &'static [u8])> {
     vec![
         ("Noto Sans (Latin + combining marks)", LATIN),
         ("Noto Sans Arabic (RTL + joining)", ARABIC),
         ("Noto Sans JP (CJK)", CJK),
         ("Frust Test Emoji COLR (COLRv1 colour emoji)", EMOJI),
+        ("Noto Sans Thai (Thai)", THAI),
     ]
 }
 
@@ -79,8 +88,14 @@ mod tests {
     /// Latin, Arabic, CJK, a stacked combining-mark case, and a COLRv1 emoji.
     const SAMPLE: &str = "Hello, مرحبا, 日本語, é\u{0302} , 😀";
 
+    /// A Thai sentence with a leading vowel (U+0E44 ไ), tone marks (U+0E48,
+    /// U+0E49) and sara am (U+0E33). It carries no ASCII
+    /// space: U+0020 is also in the Latin face, which sits first in the
+    /// fallback stack, so a space would split the run onto a non-Thai face.
+    const THAI_SAMPLE: &str = "สวัสดีครับไก่ต้มยำ";
+
     /// A run's font resolved to bundled bytes identical to one of
-    /// [`test_fonts`]'s four entries — the "no system font consulted" check:
+    /// [`test_fonts`]'s entries — the "no system font consulted" check:
     /// every run's `FontHandle` must round-trip to exactly one of these
     /// fixed byte slices, never some other (system) font's bytes.
     fn resolved_label(run_font_bytes: &[u8]) -> Option<&'static str> {
@@ -102,7 +117,8 @@ mod tests {
                 "Noto Sans",
                 "Noto Sans Arabic",
                 "Noto Sans JP",
-                "Frust Test Emoji COLR"
+                "Frust Test Emoji COLR",
+                "Noto Sans Thai"
             ],
             "register_test_fonts must report the resolved family name for \
              every bundled face, in test_fonts() order"
@@ -122,10 +138,7 @@ mod tests {
         let registered = register_test_fonts(&mut cx);
         let family_stack = FontFamily::stack(registered.iter().map(|f| f.name.clone()));
 
-        let style = TextStyle {
-            family: family_stack,
-            ..TextStyle::new(32.0, Color::BLACK)
-        };
+        let style = TextStyle::new(32.0, Color::BLACK).with_family(family_stack);
         let layout = cx.layout(SAMPLE, &style, None);
         let runs = layout.to_scene_runs(Point::ORIGIN);
 
@@ -143,7 +156,7 @@ mod tests {
             let font_bytes = run.font.font().data.as_ref();
             let label = resolved_label(font_bytes).unwrap_or_else(|| {
                 panic!(
-                    "a glyph run resolved to font bytes matching none of the four \
+                    "a glyph run resolved to font bytes matching none of the \
                      bundled test fonts — a system font was consulted instead of \
                      one of {:?}",
                     test_fonts().into_iter().map(|(l, _)| l).collect::<Vec<_>>()
@@ -164,5 +177,36 @@ mod tests {
                  resolved against {resolved_labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn bundled_thai_face_shapes_thai_with_no_notdef() {
+        let mut cx = TextContext::new();
+        let registered = register_test_fonts(&mut cx);
+        let family_stack = FontFamily::stack(registered.iter().map(|f| f.name.clone()));
+
+        let style = TextStyle::new(32.0, Color::BLACK).with_family(family_stack);
+        let layout = cx.layout(THAI_SAMPLE, &style, None);
+        let runs = layout.to_scene_runs(Point::ORIGIN);
+
+        assert!(
+            !runs.is_empty(),
+            "expected at least one glyph run shaping {THAI_SAMPLE:?}"
+        );
+        for run in &runs {
+            let label = resolved_label(run.font.font().data.as_ref());
+            assert_eq!(
+                label,
+                Some("Noto Sans Thai (Thai)"),
+                "every run of {THAI_SAMPLE:?} must resolve to the bundled Thai \
+                 face, got {label:?}"
+            );
+        }
+        assert_eq!(
+            cx.notdef_glyph_count(),
+            0,
+            "the bundled Thai face must cover every codepoint of {THAI_SAMPLE:?}; \
+             a non-zero count means a glyph shaped to .notdef"
+        );
     }
 }

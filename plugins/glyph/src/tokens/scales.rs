@@ -54,14 +54,12 @@ const GLYPH_MICRO: GlyphToken = (9.5, 14.0, 0.475, FontWeight::MEDIUM, Face::Ui)
 
 fn apply_glyph(base: &TextStyle, token: GlyphToken) -> TextStyle {
     let (size, line_height_px, letter_spacing, weight, face) = token;
-    TextStyle {
-        family: face.family(),
-        size,
-        weight,
-        letter_spacing,
-        line_height: LineHeight::Absolute(line_height_px),
-        ..base.clone()
-    }
+    base.clone()
+        .with_family(face.family())
+        .with_size(size)
+        .with_weight(weight)
+        .with_letter_spacing(letter_spacing)
+        .with_line_height(LineHeight::Absolute(line_height_px))
 }
 
 /// Steps a Glyph token's weight up one rung for the `_emphasized` sibling
@@ -427,10 +425,8 @@ mod tests {
 
     #[test]
     fn glyph_type_preserves_base_color_but_overrides_family() {
-        let b = TextStyle {
-            family: FontFamily::named("Roboto"),
-            ..TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
-        };
+        let b = TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
+            .with_family(FontFamily::named("Roboto"));
         let s = type_scale(&b);
         assert_ne!(s.body_large.family, b.family); // Glyph chooses the face
         assert_eq!(s.body_large.color, b.color);

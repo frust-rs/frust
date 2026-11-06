@@ -322,12 +322,10 @@ fn ui_face() -> FontFamily {
 /// unthemed (see the module docs' Typeface section); `color` varies per
 /// variant.
 fn badge_label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()),
-        weight: FontWeight::MEDIUM,
-        letter_spacing: BADGE_LETTER_SPACING,
-        ..TextStyle::new(BADGE_FONT_SIZE, color)
-    }
+    TextStyle::new(BADGE_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
+        .with_letter_spacing(BADGE_LETTER_SPACING)
 }
 
 /// Resolve `(background, foreground, border)` for `variant` — see the module

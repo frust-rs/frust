@@ -636,13 +636,13 @@ mod app {
                     state.filter = value;
                 })
                 .placeholder("filter by slug or title (keyboard input) ...")
-                .text_style(frust::authoring::text::TextStyle {
-                    family: FontFamily::named(LABEL_FAMILY),
-                    ..frust::authoring::text::TextStyle::new(
+                .text_style(
+                    frust::authoring::text::TextStyle::new(
                         16.0,
                         Color::from_rgb8(0xe6, 0xed, 0xf5),
                     )
-                }),
+                    .with_family(FontFamily::named(LABEL_FAMILY)),
+                ),
             );
 
         let list = list_view(shown, 44.0, move |index| {

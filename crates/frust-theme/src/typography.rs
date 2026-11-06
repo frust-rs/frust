@@ -149,13 +149,11 @@ const LABEL_SMALL_EMPHASIZED: Token = (11.0, 16.0, 0.5, FontWeight::BOLD);
 
 fn apply(base: &TextStyle, token: Token) -> TextStyle {
     let (size, line_height_px, letter_spacing, weight) = token;
-    TextStyle {
-        size,
-        weight,
-        letter_spacing,
-        line_height: LineHeight::Absolute(line_height_px),
-        ..base.clone()
-    }
+    base.clone()
+        .with_size(size)
+        .with_weight(weight)
+        .with_letter_spacing(letter_spacing)
+        .with_line_height(LineHeight::Absolute(line_height_px))
 }
 
 impl TypeScale {
@@ -176,10 +174,7 @@ impl TypeScale {
     pub fn neutral(base: &TextStyle) -> Self {
         let family =
             FontFamily::stack_with_generic(std::iter::empty::<&str>(), GenericSlot::SansSerif);
-        let base = TextStyle {
-            family,
-            ..base.clone()
-        };
+        let base = base.clone().with_family(family);
         Self {
             display_large: apply(&base, DISPLAY_LARGE),
             display_medium: apply(&base, DISPLAY_MEDIUM),
@@ -375,10 +370,8 @@ mod tests {
 
     #[test]
     fn neutral_preserves_base_color_but_overrides_family() {
-        let base = TextStyle {
-            family: FontFamily::named("Roboto"),
-            ..TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
-        };
+        let base = TextStyle::new(16.0, Color::from_rgb8(1, 2, 3))
+            .with_family(FontFamily::named("Roboto"));
         let scale = TypeScale::neutral(&base);
         assert_ne!(scale.body_large.family, base.family);
         assert_eq!(scale.body_large.color, base.color);

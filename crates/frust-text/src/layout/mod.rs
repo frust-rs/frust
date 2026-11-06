@@ -33,8 +33,8 @@ use frust_scene::GlyphRun;
 
 use crate::convert::RunMemo;
 use crate::shape::{Shaped, ShapedCluster, ShapedRun};
-use crate::style::TextStyle;
-use r#break::{BreakReason, BrokenLine, OverflowWrap, break_lines};
+use crate::style::{OverflowWrap, TextStyle};
+use r#break::{BreakReason, BrokenLine, break_lines};
 pub(crate) use metrics::LineMetrics;
 pub(crate) use truncate::ELLIPSIS;
 
@@ -116,8 +116,8 @@ pub(crate) struct Paragraph<'a> {
     pub(crate) shaped: &'a Shaped,
     pub(crate) styles: &'a [TextStyle],
     pub(crate) ellipsis: Option<&'a Ellipsis>,
-    /// What a word wider than the line does: always [`OverflowWrap::Normal`]
-    /// outside tests until a style knob selects otherwise.
+    /// What a word wider than the line does: the first span's
+    /// [`TextStyle::overflow_wrap`], a paragraph-level knob like `align`.
     pub(crate) overflow_wrap: OverflowWrap,
 }
 
@@ -145,7 +145,7 @@ impl<'a> Paragraph<'a> {
             shaped,
             styles,
             ellipsis,
-            overflow_wrap: OverflowWrap::Normal,
+            overflow_wrap: styles[0].overflow_wrap,
         }
     }
 

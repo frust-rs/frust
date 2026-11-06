@@ -333,10 +333,7 @@ impl Widget for ButtonWidget {
         let paint = self.variant.resolve(theme);
         let ink = disabled_tint(paint.ink, self.disabled);
         let style = themed_family(
-            TextStyle {
-                weight: FontWeight::MEDIUM,
-                ..TextStyle::new(self.size.font_size() as f32, ink)
-            },
+            TextStyle::new(self.size.font_size() as f32, ink).with_weight(FontWeight::MEDIUM),
             theme,
             ThemeTextType::LabelLarge,
         );

@@ -8,6 +8,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `complex-scripts` cargo feature on `frust-text` and `frust-ui`, default on: it carries the
+  dictionary line and word segmentation (about 3 MB per app). An app opts out with
+  `frust-ui = { version = "...", default-features = false }` (or `frust-text` likewise); unspaced
+  Thai/Lao/Khmer/Myanmar text then overflows a line instead of wrapping, and Chinese/Japanese word
+  motion falls back to per-character stops. Cargo unifies features across the graph, so every
+  library in the app's dependency graph must also leave `frust-ui`/`frust-text` default features
+  off; frust's own plugins do.
+- `TextStyle` `with_<field>` builders for every field (`with_family`, `with_weight`, `with_style`,
+  `with_width`, `with_size`, `with_color`, `with_letter_spacing`, `with_line_height`,
+  `with_align`, `with_overflow_wrap`, `with_locale`, `with_variation(s)`), chained from
+  `TextStyle::new(size, color)` or `Default`.
 - `glass_surface(child)` (`GlassSurfaceView`, flat from `frust`): a baseline widget that paints one
   tier of the theme's glass scale behind its child (shadow cast outside the surface, rounded clip, backdrop blur and washes,
   child, specular hairline). `.tier(GlassTier)` picks `Control`, `Bar` (default) or `Chrome` from the
@@ -189,6 +200,21 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   input only while open, semantics only while visible. Reversing a duration ramp is value-continuous
   and a spring value- and velocity-continuous; `on_exited` is delivered on the next frame's
   Housekeeping event, and only once an exit has painted. Under `reduce_motion` it runs a linear reduced fade.
+- With the default-on `complex-scripts` feature, dictionary line and word segmentation
+  (`parley_engine`): unspaced
+  Thai/Lao/Khmer/Myanmar text wraps and word-moves at dictionary word boundaries, and the
+  Chinese/Japanese word dictionary drives CJ word motion. A line overflows only when a run has no
+  break opportunity (one long word, a URL) unless `overflow_wrap` says otherwise.
+- Untagged text shapes (`locl`) and line-breaks in the app default locale; ja/zh spans (style
+  locale, else the default) get the ja/zh line-break tailoring, so small kana and the prolonged
+  sound mark may start a line while kinsoku still keeps 。、， off line starts. An explicit
+  `TextStyle` locale always wins.
+- `OverflowWrap` (`Normal`, `Anywhere`; `frust::authoring::text`), `TextStyle::with_overflow_wrap`
+  and `TextView::overflow_wrap`; paragraph-level and part of the shape-cache key.
+- `TextView::locale(..)` tags a paragraph without marking color or family explicit, so it keeps
+  theme defaults and the OS text-scale rule.
+- A bundled Thai test face (`testing/fonts/NotoSansThai-Subset.ttf`, OFL), registered by
+  `frust_testing::fonts::test_fonts()`.
 
 ### Changed
 
@@ -284,6 +310,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `AnimatedOpacity` and `card_switcher`) runs for `MotionExtras::reduced_fade` (120 ms by default; 0
   snaps with no frame request) instead of a fixed 120 ms. The `network_image` fade-in therefore
   collapses to that reduced fade under reduce-motion.
+- `TextStyle` gains a public field `overflow_wrap`, and is now `#[non_exhaustive]`: build it with
+  `TextStyle::new` / `Default` plus the new `with_*` builders (struct literals no longer compile
+  outside `frust-text`). ja/zh text now uses Normal line-break strictness (small kana may start a
+  line). Release size grows by about 3 MB per app with the segmentation dictionaries (see
+  `docs/PERFORMANCE_BASELINES.md`).
 
 ### Fixed
 

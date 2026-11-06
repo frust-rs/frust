@@ -510,24 +510,25 @@ impl CellStyle {
     /// The shaping style for this run's text at the derived `font_size` (see the
     /// module docs' width-derived cell geometry).
     fn text_style(self, font_size: f32, color: Color) -> TextStyle {
-        TextStyle {
-            family: FontFamily::stack_with_generic(["IBM Plex Mono"], GenericSlot::Monospace),
+        TextStyle::new(font_size, color)
+            .with_family(FontFamily::stack_with_generic(
+                ["IBM Plex Mono"],
+                GenericSlot::Monospace,
+            ))
             // The bundled IBM Plex Mono ships Regular/Medium/SemiBold/Italic;
             // 600 is its heaviest real face, so asking for it avoids parley
             // synthesizing a bold from Regular.
-            weight: if self.bold {
+            .with_weight(if self.bold {
                 FontWeight::SEMI_BOLD
             } else {
                 FontWeight::REGULAR
-            },
-            style: if self.italic {
+            })
+            .with_style(if self.italic {
                 FontStyle::Italic
             } else {
                 FontStyle::Normal
-            },
-            line_height: LineHeight::FontSizeRelative(LINE_HEIGHT),
-            ..TextStyle::new(font_size, color)
-        }
+            })
+            .with_line_height(LineHeight::FontSizeRelative(LINE_HEIGHT))
     }
 }
 

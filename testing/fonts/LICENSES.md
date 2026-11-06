@@ -2,12 +2,14 @@
 
 Every font under `testing/fonts/` is permissively licensed (SIL OFL 1.1 or Apache License
 2.0), subsetted with `pyftsubset` (fonttools) down to only the codepoints the acceptance
-test in `crates/frust-testing/src/fonts.rs` shapes: `'Hello, مرحبا, 日本語, é̂ , 😀'`
+tests in `crates/frust-testing/src/fonts.rs` shape: `'Hello, مرحبا, 日本語, é̂ , 😀'`
 (Latin ASCII + U+00E9/U+0302 combining marks, the Arabic word مرحبا, the CJK word 日本語,
-and the U+1F600 grinning-face emoji). No system font is consulted by that test — these are
-the *only* fonts registered into its `TextContext`.
+and the U+1F600 grinning-face emoji), plus the Thai sentence `'สวัสดีครับไก่ต้มยำ'` (U+0E01-U+0E3A
+and U+0E3F-U+0E5B, with the ASCII space U+0020). No system font is consulted by those tests —
+these are the *only* fonts registered into their `TextContext`.
 
-Total bundle size: 56 KB (`du -sh testing/fonts` on this checkout), far under the 4 MB cap.
+Total bundle size: 96 KB (`du -sh testing/fonts` on this checkout; the five font files total
+61 KB of bytes), far under the 4 MB cap.
 
 ## Files
 
@@ -17,6 +19,7 @@ Total bundle size: 56 KB (`du -sh testing/fonts` on this checkout), far under th
 | `NotoSansArabic-Subset.ttf` | Arabic RTL + joining (`مرحبا`) | https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf | `7b32dd87900309cb7dfd1360f4c1341b8f32b789ce56b460db426dae3d94db16` |
 | `NotoSansJP-Subset.otf` | CJK (`日本語`) | https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/SubsetOTF/JP/NotoSansJP-Regular.otf | `6e575a05281f779b88658bc8dae06364dffb1aa1ae63175ce660325654bed660` |
 | `NotoEmoji-COLRv1-Subset.ttf` | COLRv1 colour emoji (`😀`, U+1F600) | https://raw.githubusercontent.com/googlefonts/color-fonts/main/fonts/noto_noflags-glyf_colr_1.ttf | `7badb39593ac1871c57a54de53e73a862e9497f61ddd343dc9b5b333e0d716e6` |
+| `NotoSansThai-Subset.ttf` | Thai (`สวัสดีครับไก่ต้มยำ`) | https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf | `bc4e89b8a72aac6e3617f0a3bcea495d63abbdfbe345d9367afd6489a1c54ce3` |
 
 Upstream (pre-subset) file identity, for provenance/reproducibility of the subset commands
 below:
@@ -27,6 +30,7 @@ below:
 | `NotoSansArabic-Regular.ttf` | `bdff3e5659d67e67def05b33f749683b9376ae819d65d3dd62ac4640b3aaef48` |
 | `NotoSansJP-Regular.otf` | `dff723ba59d57d136764a04b9b2d03205544f7cd785a711442d6d2d085ac5073` |
 | `noto_noflags-glyf_colr_1.ttf` | `d4080b4e69f9d7b3fc71b418eb4eb7afae69eaec04b98bfd46477ec4fdc02829` |
+| `NotoSansThai-Regular.ttf` | `61cf814eec46b294d6ea4401ac295d0cecd5207bd2331dcc5a15e7301d30ee44` |
 
 ## Subset commands
 
@@ -58,7 +62,17 @@ pyftsubset noto_noflags-glyf_colr_1.ttf --output-file=NotoEmoji-COLRv1-Subset-un
   --layout-features='*' \
   --glyph-names --symbol-cmap --legacy-cmap --notdef-glyph --notdef-outline \
   --recommended-glyphs --name-IDs='*' --name-legacy --name-languages='*'
+
+pyftsubset NotoSansThai-Regular.ttf --output-file=NotoSansThai-Subset.ttf \
+  --unicodes="U+0020,U+0E01-0E3A,U+0E3F-0E5B" \
+  --layout-features='*' --glyph-names --symbol-cmap --legacy-cmap \
+  --notdef-glyph --notdef-outline --recommended-glyphs \
+  --name-IDs='*' --name-legacy --name-languages='*'
 ```
+
+The Thai subset keeps the upstream family name (`Noto Sans Thai`) unchanged: it is a pure
+codepoint subset of the OFL face with no renaming, so its `name` table and GSUB/GPOS
+(`--layout-features='*'`, needed for Thai mark placement) are the upstream ones.
 
 The subsetted emoji face's `name` table records were then rewritten (family/full/PostScript
 name records, Windows and Mac platforms) from the test-fixture-derived
@@ -86,13 +100,13 @@ f.save("NotoEmoji-COLRv1-Subset.ttf")
 
 ## Copyright and license text
 
-### `NotoSans-Subset.ttf`, `NotoSansArabic-Subset.ttf`, `NotoSansJP-Subset.otf`
+### `NotoSans-Subset.ttf`, `NotoSansArabic-Subset.ttf`, `NotoSansJP-Subset.otf`, `NotoSansThai-Subset.ttf`
 
 Copyright 2022 The Noto Project Authors (Latin: https://github.com/notofonts/latin-greek-cyrillic;
-Arabic: https://github.com/notofonts/arabic); Noto Sans JP additionally carries
-`© 2014-2021 Adobe (http://www.adobe.com/)` in its embedded `name` table (Source Han Sans
-lineage, distributed as Noto Sans CJK/JP by the Noto Project — see
-https://github.com/notofonts/noto-cjk). All three are licensed under the SIL Open Font
+Arabic: https://github.com/notofonts/arabic; Thai: https://github.com/notofonts/thai); Noto
+Sans JP additionally carries `© 2014-2021 Adobe (http://www.adobe.com/)` in its embedded
+`name` table (Source Han Sans lineage, distributed as Noto Sans CJK/JP by the Noto Project —
+see https://github.com/notofonts/noto-cjk). All four are licensed under the SIL Open Font
 License, Version 1.1, full text below.
 
 ```

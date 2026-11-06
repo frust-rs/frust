@@ -21,7 +21,7 @@ description = "Frust integration for clean-signals: component-scoped controllers
 # resolves (docs/DEVELOPMENT.md § Version-Pin Policy). Never enable `effects`.
 clean-signals = "0.1"
 # Facade package is `frust-ui` (lib name `frust`): https://github.com/lloydmeta/frunk/issues/258
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.5" }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.5", default-features = false }
 
 # Headless tests drive `RenderRoot` directly. kurbo/peniko are pinned to Frust's
 # rendering-stack versions so geometry/color types unify.
@@ -30,7 +30,7 @@ clean-signals = { version = "0.1", features = ["test-fixtures"] }
 frust-core = { path = "../../crates/frust-core" }
 frust-reactive = { path = "../../crates/frust-reactive" }
 frust-scene = { path = "../../crates/frust-scene" }
-frust-text = { path = "../../crates/frust-text" }
+frust-text = { path = "../../crates/frust-text", default-features = false }
 reactive_graph = "0.2"
 kurbo = "0.13.1"
 peniko = "0.6.1"

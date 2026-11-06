@@ -29,7 +29,7 @@ mod selector;
 use std::ops::Range;
 
 use fontique::Language;
-use parlance::{FontVariation, Tag};
+use parlance::{FontVariation, LineBreak, Tag};
 use parley_engine::itemize::Item;
 use parley_engine::shape::Whitespace as EngineWhitespace;
 use parley_engine::{
@@ -321,12 +321,25 @@ impl ShapeContext {
                 ..Shaped::default()
             };
         }
+        // One snapshot of the app's default locale per call: the line-break language and the
+        // item shaping language of an untagged style both come from it, so they agree.
+        let default = crate::locale::default_locale();
+        let default = default.as_deref();
         let line_break: Vec<(Range<usize>, LineBreakConfig)> = spans
             .iter()
             .filter_map(|(range, style)| {
-                let language = Language::parse(style.locale.as_deref()?).ok()?;
+                let language = Language::parse(style.locale.as_deref().or(default)?).ok()?;
+                // Only `Normal` and `Loose` apply the ja / zh tailoring (small kana, the
+                // prolonged sound mark); the default `Strict` ignores the language. Every other
+                // language keeps `Strict`.
+                let line_break = if matches!(language.language(), "ja" | "zh") {
+                    LineBreak::Normal
+                } else {
+                    LineBreak::Strict
+                };
                 let config = LineBreakConfig {
                     language: Some(language),
+                    line_break,
                     ..LineBreakConfig::default()
                 };
                 Some((range.clone(), config))
@@ -352,12 +365,12 @@ impl ShapeContext {
             })
             .collect();
         self.selector.begin_shape();
-        self.run_pass(oracle, text, &itemized, &queries, &pass);
+        self.run_pass(oracle, text, &itemized, &queries, &pass, default);
         let char_count = self.analysis.char_info().len();
         if self.shaped.characters().len() == char_count && self.selector.any_coords() {
             let pass = self.coordinate_items(&itemized);
             self.selector.begin_replay();
-            self.run_pass(oracle, text, &itemized, &queries, &pass);
+            self.run_pass(oracle, text, &itemized, &queries, &pass, default);
         }
         let complete = self.shaped.characters().len() == char_count;
         self.convert(text, &itemized, complete)
@@ -382,6 +395,7 @@ impl ShapeContext {
         itemized: &Itemized,
         queries: &[StyleQuery],
         pass: &[PassItem],
+        default_locale: Option<&str>,
     ) {
         let variations: Vec<Vec<FontVariation>> = pass
             .iter()
@@ -398,7 +412,11 @@ impl ShapeContext {
                 char_end: p.char_end,
                 options: ShapeOptions {
                     font_size: spec.font_size,
-                    language: spec.locale.as_deref().and_then(|l| Language::parse(l).ok()),
+                    language: spec
+                        .locale
+                        .as_deref()
+                        .or(default_locale)
+                        .and_then(|l| Language::parse(l).ok()),
                     features: &[],
                     variations,
                 },
@@ -663,6 +681,7 @@ fn push_graphemes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::test_support::DefaultLocale;
     use crate::oracle::synthetic::{FaceSpec, SyntheticBackend};
     use crate::oracle::{FaceSource, RenderCapabilities};
     use crate::style::{FontFamily, FontWeight, GenericSlot};
@@ -673,12 +692,40 @@ mod tests {
     const GEIST_VARIABLE: &[u8] =
         include_bytes!("../../../../plugins/beui/fonts/geist/Geist-Variable.ttf");
 
-    fn oracle_over(backend: SyntheticBackend) -> Oracle {
+    /// An oracle that also holds the default-locale slot at `None` for as long as it lives, so a
+    /// test that shapes through it never sees a locale another test left behind.
+    struct FixtureOracle {
+        oracle: Oracle,
+        _locale: DefaultLocale,
+    }
+
+    impl std::ops::Deref for FixtureOracle {
+        type Target = Oracle;
+        fn deref(&self) -> &Oracle {
+            &self.oracle
+        }
+    }
+
+    impl std::ops::DerefMut for FixtureOracle {
+        fn deref_mut(&mut self) -> &mut Oracle {
+            &mut self.oracle
+        }
+    }
+
+    fn bare_oracle(backend: SyntheticBackend) -> Oracle {
         Oracle::new(Box::new(backend), RenderCapabilities::default(), None)
     }
 
-    /// An oracle whose only system font is `bytes`, the default for every slot.
-    fn oracle_with(bytes: &[u8]) -> (Oracle, Blob<u8>) {
+    fn oracle_over(backend: SyntheticBackend) -> FixtureOracle {
+        let _locale = DefaultLocale::set(None);
+        FixtureOracle {
+            oracle: bare_oracle(backend),
+            _locale,
+        }
+    }
+
+    /// A backend whose only system font is `bytes`, the default for every slot.
+    fn backend_with(bytes: &[u8]) -> (SyntheticBackend, Blob<u8>) {
         let blob = Blob::from(bytes.to_vec());
         let mut backend = SyntheticBackend::new("shape-tests");
         for slot in [GenericSlot::SystemUi, GenericSlot::SansSerif] {
@@ -686,6 +733,12 @@ mod tests {
         }
         let all: String = (' '..='\u{FFFF}').collect();
         backend.cover(&blob, &all);
+        (backend, blob)
+    }
+
+    /// A fixture oracle over `backend_with(bytes)`.
+    fn oracle_with(bytes: &[u8]) -> (FixtureOracle, Blob<u8>) {
+        let (backend, blob) = backend_with(bytes);
         (oracle_over(backend), blob)
     }
 
@@ -789,7 +842,7 @@ mod tests {
         assert!(shaped.glyphs.iter().any(|g| g.id == 0), "中 is .notdef");
     }
 
-    fn geist_oracle() -> Oracle {
+    fn geist_oracle() -> FixtureOracle {
         let mut oracle = oracle_over(SyntheticBackend::new("geist"));
         oracle
             .registry_mut()
@@ -1039,5 +1092,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The languages the runs of `text` were shaped with.
+    fn run_languages(text: &str, style: &TextStyle) -> Vec<Option<String>> {
+        let mut oracle = bare_oracle(backend_with(NOTO_SANS).0);
+        let shaped = ShapeContext::default().shape(&mut oracle, text, style);
+        shaped.runs.iter().map(|r| r.language.clone()).collect()
+    }
+
+    fn tagged(size: f32, locale: &str) -> TextStyle {
+        TextStyle {
+            locale: Some(locale.to_owned()),
+            ..style(size)
+        }
+    }
+
+    #[test]
+    fn default_locale_feeds_item_language() {
+        let guard = DefaultLocale::set(None);
+        let text = "漢字";
+        // Observed through `ShapedRun::language`, the language handed to the shaper for the item.
+        assert_eq!(run_languages(text, &style(16.0)), vec![None]);
+        crate::locale::set_default_locale(Some("ja"));
+        let by_default = run_languages(text, &style(16.0));
+        assert_eq!(by_default, vec![Some("ja".to_owned())]);
+        assert_eq!(by_default, run_languages(text, &tagged(16.0, "ja")));
+        // An explicit style locale overrides the default.
+        assert_eq!(
+            run_languages(text, &tagged(16.0, "zh-Hans")),
+            vec![Some("zh-Hans".to_owned())]
+        );
+        drop(guard);
     }
 }

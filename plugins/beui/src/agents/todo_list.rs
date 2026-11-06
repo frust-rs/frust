@@ -462,33 +462,27 @@ const COUNT_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
 /// A row's own text style: `text-sm leading-5`, regular weight. The family
 /// here is the unthemed base; `layout` shapes in [`ROW_ROLE`]'s family.
 fn row_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_SM as f32,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_SM as f32)
 }
 
 /// The header's title style: `text-sm font-medium`. The family here is the
 /// unthemed base; `layout` shapes in [`HEADER_ROLE`]'s family.
 fn header_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_SM as f32,
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_SM as f32)
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// The count's style: `text-xs font-medium tabular-nums`. The family here is
 /// the unthemed base; `layout` shapes in [`COUNT_ROLE`]'s family.
 fn count_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_XS as f32,
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_XS as f32)
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// One retained task row.

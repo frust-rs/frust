@@ -602,22 +602,18 @@ const SUMMARY_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 /// A row's own text style: `text-sm leading-5`. The family here is the
 /// unthemed base; `layout` shapes in [`ROW_ROLE`]'s family.
 fn row_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_SM as f32,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_SM as f32)
 }
 
 /// The summary row's style: `text-sm font-medium`. The family here is the
 /// unthemed base; `layout` shapes in [`SUMMARY_ROLE`]'s family.
 fn summary_style() -> TextStyle {
-    TextStyle {
-        family: sans_family(),
-        size: style::TEXT_SM as f32,
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::default()
-    }
+    TextStyle::default()
+        .with_family(sans_family())
+        .with_size(style::TEXT_SM as f32)
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// One retained activity row.

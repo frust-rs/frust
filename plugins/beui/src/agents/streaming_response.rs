@@ -265,10 +265,9 @@ impl StreamingResponseWidget {
     /// keys the shaped run on it, so a theme swap that changes the family
     /// reshapes the body.
     fn body_style(&self, theme: Option<&Theme>, ink: Color) -> TextStyle {
-        let style = TextStyle {
-            line_height: frust::authoring::text::LineHeight::Absolute(STREAM_LINE_HEIGHT as f32),
-            ..TextStyle::new(self.size, ink)
-        };
+        let style = TextStyle::new(self.size, ink).with_line_height(
+            frust::authoring::text::LineHeight::Absolute(STREAM_LINE_HEIGHT as f32),
+        );
         themed_style(style, ThemeTextType::BodyMedium, theme)
     }
 

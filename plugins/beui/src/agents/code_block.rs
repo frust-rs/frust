@@ -343,11 +343,9 @@ pub fn code_palette(theme: Option<&Theme>) -> CodePalette {
 /// (`--font-mono`, Geist Mono) at `size`, in the shared shaping ink so the
 /// shape cache never keys on the color a span is re-brushed to.
 pub fn code_style(size: f64) -> TextStyle {
-    TextStyle {
+    TextStyle::new(size as f32, SHAPING_INK)
         // Explicit: `TypeScale` has no monospace role to take this from.
-        family: crate::tokens::mono_family(),
-        ..TextStyle::new(size as f32, SHAPING_INK)
-    }
+        .with_family(crate::tokens::mono_family())
 }
 
 /// The type-scale role the chrome labels (language tag, status) take their
@@ -359,11 +357,9 @@ const CHROME_ROLE: ThemeTextType = ThemeTextType::LabelSmall;
 /// unthemed base: the code block shapes its own chrome in the live theme's
 /// `label_small` family instead.
 pub fn chrome_style(size: f64) -> TextStyle {
-    TextStyle {
-        family: crate::tokens::sans_family(),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(size as f32, SHAPING_INK)
-    }
+    TextStyle::new(size as f32, SHAPING_INK)
+        .with_family(crate::tokens::sans_family())
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// A view-held callback, erased on build.

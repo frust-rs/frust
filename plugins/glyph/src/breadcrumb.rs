@@ -167,11 +167,9 @@ fn ui_face() -> FontFamily {
 /// The crumb/separator style: fixed weight/size, family from the theme's
 /// `labelMedium` role; color varies per run.
 fn crumb_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(CRUMB_FONT_SIZE, color)
-    }
+    TextStyle::new(CRUMB_FONT_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()))
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// The retained widget for a [`BreadcrumbView`].

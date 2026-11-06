@@ -24,7 +24,7 @@ use crate::convert::{NotdefCounter, RunMemo};
 use crate::layout::{LineTable, Paragraph, TextLayout, lay_out};
 use crate::shape::Shaped;
 use crate::style::{
-    FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, TextAlign, TextStyle,
+    FamilyName, FontFamily, FontStyle, GenericSlot, LineHeight, OverflowWrap, TextAlign, TextStyle,
 };
 
 /// Default cache capacity, mirroring Flutter's SkParagraph LRU paragraph cache
@@ -65,6 +65,8 @@ pub struct ShapeCacheStats {
 /// width change), so two texts differing only in alignment must not collide
 /// on the same cache entry: a collision would make the second text's request
 /// silently reuse and repaint the first text's aligned line positions.
+/// `overflow_wrap` is keyed for the same reason: the cached line table is
+/// broken under it, so texts differing only there must not share an entry.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ShapeKey {
     text: String,
@@ -80,6 +82,7 @@ pub(crate) struct ShapeKey {
     letter_spacing: u32,
     line_height: LineHeightBits,
     align: TextAlign,
+    overflow_wrap: OverflowWrap,
 }
 
 impl ShapeKey {
@@ -98,8 +101,11 @@ impl ShapeKey {
                 .map(|&(tag, value)| (tag, value.to_bits()))
                 .collect(),
             locale: style.locale.clone(),
-            // The app default locale decides untagged Han fallback, so a style without a
-            // locale carries it; a style with one is independent of it.
+            // For untagged text the app default locale decides three things: the Han fallback
+            // face, the shaping language (`locl`) together with the line-break language, and
+            // the line-break strictness (`ja`/`zh` use `LineBreak::Normal`, see
+            // `shape::ShapeContext::shape_spans`). So every untagged style carries it in the
+            // key and a tagged style never does: a tag fixes all three itself.
             app_locale: match style.locale {
                 Some(_) => None,
                 None => crate::default_locale(),
@@ -109,6 +115,7 @@ impl ShapeKey {
             letter_spacing: style.letter_spacing.to_bits(),
             line_height: LineHeightBits::from(style.line_height),
             align: style.align,
+            overflow_wrap: style.overflow_wrap,
         }
     }
 }
@@ -421,6 +428,18 @@ mod tests {
             },
         );
         assert_ne!(start, center);
+    }
+
+    #[test]
+    fn key_distinguishes_overflow_wrap() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let base = TextStyle::new(16.0, Color::BLACK);
+        let normal = ShapeKey::new("https://example.com", &base);
+        let anywhere = ShapeKey::new(
+            "https://example.com",
+            &base.clone().with_overflow_wrap(OverflowWrap::Anywhere),
+        );
+        assert_ne!(normal, anywhere);
     }
 
     #[test]

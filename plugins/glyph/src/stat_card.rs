@@ -260,30 +260,26 @@ fn display_face() -> FontFamily {
 
 /// The label's style; family from the theme's `labelSmall` role.
 fn label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()),
-        weight: FontWeight::MEDIUM,
-        letter_spacing: STAT_LABEL_TRACKING,
-        ..TextStyle::new(STAT_LABEL_SIZE, color)
-    }
+    TextStyle::new(STAT_LABEL_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
+        .with_letter_spacing(STAT_LABEL_TRACKING)
 }
 
 /// The value's style; family from the theme's `headlineLarge` role.
 fn value_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(display_face, |t| t.type_scale.headline_large.family.clone()),
-        weight: FontWeight::BOLD,
-        ..TextStyle::new(STAT_VALUE_SIZE, color)
-    }
+    TextStyle::new(STAT_VALUE_SIZE, color)
+        .with_family(
+            theme.map_or_else(display_face, |t| t.type_scale.headline_large.family.clone()),
+        )
+        .with_weight(FontWeight::BOLD)
 }
 
 /// The delta's style; family from the theme's `labelMedium` role.
 fn delta_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(STAT_DELTA_SIZE, color)
-    }
+    TextStyle::new(STAT_DELTA_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_medium.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
 }
 
 /// Resolve `(bg, border, label, value)` chrome/text colors.

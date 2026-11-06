@@ -12,8 +12,8 @@ use frust_core::{
     Widget,
 };
 use frust_text::{
-    FontFamily, FontStyle, FontWeight, LineHeight, LocaleStamp, TextAlign, TextContext, TextLayout,
-    TextOverflow, TextStyle,
+    FontFamily, FontStyle, FontWeight, LineHeight, LocaleStamp, OverflowWrap, TextAlign,
+    TextContext, TextLayout, TextOverflow, TextStyle,
 };
 use frust_theme::{Theme, TypeScale};
 use kurbo::Size;
@@ -291,6 +291,26 @@ impl TextView {
     /// the default ([`TextAlign::Start`]).
     pub fn align(mut self, align: TextAlign) -> Self {
         self.style.align = align;
+        self
+    }
+
+    /// Set what a word wider than the line does (CSS `overflow-wrap`).
+    ///
+    /// [`OverflowWrap::Normal`] (the default) lets an overlong token such as
+    /// a URL overflow the line; [`OverflowWrap::Anywhere`] breaks it between
+    /// characters so it wraps inside the available width.
+    pub fn overflow_wrap(mut self, overflow_wrap: OverflowWrap) -> Self {
+        self.style.overflow_wrap = overflow_wrap;
+        self
+    }
+
+    /// Tag the text with a BCP 47 locale (`"ja"`, `"th"`, `"zh-Hant"`): it
+    /// steers font fallback, language-specific shaping and CJK line breaking.
+    ///
+    /// Unlike [`Self::style`], this touches only the locale, so the color,
+    /// family and size keep resolving as if it had not been called.
+    pub fn locale(mut self, locale: impl Into<String>) -> Self {
+        self.style.locale = Some(locale.into());
         self
     }
 
@@ -595,10 +615,7 @@ mod tests {
 
     #[test]
     fn bulk_style_setter_replaces_whole_style() {
-        let custom = TextStyle {
-            size: 40.0,
-            ..TextStyle::default()
-        };
+        let custom = TextStyle::default().with_size(40.0);
         let view = text("x").style(custom.clone());
         assert_eq!(view.style, custom);
     }
@@ -883,6 +900,32 @@ mod tests {
             right_x[0] > right_x[1] + 1.0,
             "the shorter line's right-aligned left edge must sit further right: {right_x:?}"
         );
+    }
+
+    #[test]
+    fn overflow_wrap_anywhere_wraps_an_overlong_token() {
+        let content = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0";
+        let bc = BoxConstraints::loose(Size::new(100.0, 400.0));
+
+        let normal = line_min_x(&painted_runs(text(content), bc));
+        let anywhere = line_min_x(&painted_runs(
+            text(content).overflow_wrap(OverflowWrap::Anywhere),
+            bc,
+        ));
+
+        assert_eq!(normal.len(), 1, "the unbroken token overflows one line");
+        assert!(
+            anywhere.len() > 1,
+            "Anywhere must break the token across lines: {anywhere:?}"
+        );
+    }
+
+    #[test]
+    fn locale_builder_tags_the_style_without_marking_color_or_family_explicit() {
+        let view = text("x").locale("ja");
+        assert_eq!(view.style.locale.as_deref(), Some("ja"));
+        assert!(!view.color_explicit);
+        assert!(!view.family_explicit);
     }
 
     // --- max_lines / TextOverflow, end-to-end through the widget ---
@@ -1193,10 +1236,7 @@ mod tests {
                 .family(tuffy.clone())
                 .themed_family(ThemeTextType::BodyLarge),
             text("Hello")
-                .style(TextStyle {
-                    family: tuffy.clone(),
-                    ..TextStyle::default()
-                })
+                .style(TextStyle::default().with_family(tuffy.clone()))
                 .themed_family(ThemeTextType::BodyLarge),
         ];
         for (i, view) in views.iter().enumerate() {

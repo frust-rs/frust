@@ -517,21 +517,16 @@ impl LoadingStatesWidget {
     /// The status run's style: `text-sm font-medium` in the theme's
     /// `body_medium` family, shaped in `ink`.
     fn text_style(&self, theme: Option<&Theme>, ink: Color) -> TextStyle {
-        let style = TextStyle {
-            weight: FontWeight::MEDIUM,
-            ..TextStyle::new(style::TEXT_SM as f32, ink)
-        };
+        let style = TextStyle::new(style::TEXT_SM as f32, ink).with_weight(FontWeight::MEDIUM);
         themed_style(style, ThemeTextType::BodyMedium, theme)
     }
 
     /// The timer's style: `font-mono tabular-nums`, one alpha step dimmer than
     /// the label (`text-muted-foreground/70`).
     fn timer_style(&self, ink: Color) -> TextStyle {
-        TextStyle {
+        TextStyle::new(style::TEXT_SM as f32, scale_alpha(ink, 0.7))
             // Explicit: `TypeScale` has no monospace role to take this from.
-            family: mono_family(),
-            ..TextStyle::new(style::TEXT_SM as f32, scale_alpha(ink, 0.7))
-        }
+            .with_family(mono_family())
     }
 
     /// The settled ink: the theme's dimmed on-surface role, else the beUI-light

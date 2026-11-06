@@ -145,10 +145,7 @@ pub(super) const EDGE_INSETS: Case = Case {
 /// place that cannot defer to the theme; see [`BODY_INK`] for how the values
 /// were picked.
 fn text_style_case() -> impl View<()> {
-    let heading = TextStyle {
-        weight: FontWeight::BOLD,
-        ..TextStyle::new(26.0, CARD_A)
-    };
+    let heading = TextStyle::new(26.0, CARD_A).with_weight(FontWeight::BOLD);
     let body = TextStyle::new(16.0, BODY_INK);
     let mut caption = TextStyle::new(13.0, CAPTION_INK);
     caption.letter_spacing = 2.0;

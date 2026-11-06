@@ -289,19 +289,14 @@ fn item_style(theme: Option<&Theme>) -> TextStyle {
 /// A shortcut's style (`text-[10px] font-medium`), in the theme's
 /// `label_small` family.
 fn shortcut_style(theme: Option<&Theme>) -> TextStyle {
-    let style = TextStyle {
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(CONTEXT_MENU_SMALL_TEXT as f32, crate::text::SHAPING_INK)
-    };
+    let style = TextStyle::new(CONTEXT_MENU_SMALL_TEXT as f32, crate::text::SHAPING_INK)
+        .with_weight(FontWeight::MEDIUM);
     themed_style(style, ThemeTextType::LabelSmall, theme)
 }
 
 /// A section label's style (`text-[10px] font-semibold`).
 fn section_style(theme: Option<&Theme>) -> TextStyle {
-    TextStyle {
-        weight: FontWeight::SEMI_BOLD,
-        ..shortcut_style(theme)
-    }
+    shortcut_style(theme).with_weight(FontWeight::SEMI_BOLD)
 }
 
 // ---- The component ---------------------------------------------------------

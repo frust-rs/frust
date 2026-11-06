@@ -391,8 +391,15 @@ impl TextContext {
     /// with no glyph runs, zero width and one line of the style's height.
     ///
     /// `style.align` positions every line within the layout's width (the
-    /// widest line's when `max_width` is unbounded). A word wider than
-    /// `max_width` overflows its line rather than breaking (parley's default).
+    /// widest line's when `max_width` is unbounded). A run with no break
+    /// opportunity wider than `max_width` (one long word, a URL) overflows its
+    /// line rather than breaking, unless `style.overflow_wrap` is
+    /// [`OverflowWrap::Anywhere`](crate::OverflowWrap::Anywhere), which breaks
+    /// it between characters. With the default-on `complex-scripts` feature,
+    /// Thai, Lao, Khmer and Myanmar text without spaces is not such a run:
+    /// dictionary segmentation supplies its break opportunities, so it wraps
+    /// between words. Without the feature such text overflows like any other
+    /// unbreakable run.
     ///
     /// Shaping goes through the shape cache: the same (text, style) shapes
     /// once, and a width change re-runs only the line layout on the cached
@@ -432,7 +439,8 @@ impl TextContext {
     ///   not that number when the text ends in `\n`.
     /// - **an overrun**: exactly `max_lines` lines came out, but the last
     ///   visible one is itself wider than `max_width` — a run with no break
-    ///   opportunity (one long unspaced word) overflows rather than breaking.
+    ///   opportunity under the dictionaries (one long word, a URL) overflows
+    ///   rather than breaking (under [`OverflowWrap::Normal`](crate::OverflowWrap::Normal)).
     ///
     /// Neither condition holds → the text already fits (this is also why an
     /// exact-fit line, width `== max_width`, never gets truncated: the
@@ -682,6 +690,184 @@ mod tests {
             &crate::FontFamily::SystemUi,
             RenderCapabilities::default(),
         )
+    }
+
+    const JP_FACE: &[u8] = include_bytes!("../../../testing/fonts/NotoSansJP-Subset.otf");
+
+    /// Byte offsets at which each wrapped line of `text` starts, at `width`.
+    fn wrapped_line_starts(
+        cx: &mut TextContext,
+        text: &str,
+        style: &TextStyle,
+        width: f32,
+    ) -> Vec<usize> {
+        let layout = cx.layout(text, style, Some(width));
+        (0..layout.line_count())
+            .map(|i| layout.line_info(i).expect("line").range.start)
+            .collect()
+    }
+
+    /// Small kana: the class `ja` line-break tailoring lets start a line and `Strict` does not.
+    const SMALL_KANA: &str = "あぁいぃうぅえぇおぉ";
+
+    fn jp_cx() -> TextContext {
+        let mut cx = test_cx();
+        cx.register_fonts(JP_FACE.to_vec())
+            .expect("bundled face registers");
+        cx
+    }
+
+    fn untagged() -> TextStyle {
+        TextStyle::new(20.0, Color::BLACK)
+    }
+
+    fn starts_with_small_kana(text: &str, starts: &[usize]) -> bool {
+        starts[1..].iter().any(|&s| {
+            matches!(
+                text[s..].chars().next(),
+                Some('ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ')
+            )
+        })
+    }
+
+    /// The widths [`wrapped_line_starts`] is swept over: every 5px from 10px to 200px, so the
+    /// assertions hold whatever advance the host's kana face gives (no bundled face covers kana).
+    fn sweep_widths() -> impl Iterator<Item = f32> {
+        (2..=40).map(|n| n as f32 * 5.0)
+    }
+
+    #[test]
+    fn default_locale_feeds_line_break_config() {
+        let guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = jp_cx();
+        // Strict keeps a small kana off a line start; the ja tailoring lets one start a line.
+        // Some width in the sweep puts a small kana right after a full line, so the two
+        // rules must disagree there.
+        let ja = untagged().with_locale(Some("ja"));
+        let mut differs = false;
+        for width in sweep_widths() {
+            crate::locale::set_default_locale(None);
+            let cleared = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            let tagged = wrapped_line_starts(&mut cx, SMALL_KANA, &ja, width);
+            let explicit_en = wrapped_line_starts(
+                &mut cx,
+                SMALL_KANA,
+                &untagged().with_locale(Some("en")),
+                width,
+            );
+            crate::locale::set_default_locale(Some("ja"));
+            let by_default = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            crate::locale::set_default_locale(Some("ja-JP"));
+            let by_region = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            // An explicit locale beats the default.
+            let explicit_under_ja = wrapped_line_starts(
+                &mut cx,
+                SMALL_KANA,
+                &untagged().with_locale(Some("en")),
+                width,
+            );
+            assert_eq!(
+                by_default, tagged,
+                "default ja == style locale ja at {width}px"
+            );
+            assert_eq!(
+                by_region, by_default,
+                "region subtags do not matter at {width}px"
+            );
+            assert_eq!(
+                explicit_under_ja, explicit_en,
+                "an explicit en beats the default at {width}px"
+            );
+            assert!(
+                !starts_with_small_kana(SMALL_KANA, &cleared),
+                "Strict at {width}px"
+            );
+            if by_default != cleared {
+                assert!(
+                    starts_with_small_kana(SMALL_KANA, &by_default),
+                    "ja at {width}px"
+                );
+                differs = true;
+            }
+        }
+        assert!(
+            differs,
+            "the default ja reaches the line breaker at some width"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn an_untagged_non_cjk_span_keeps_strict_line_breaking() {
+        let guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = jp_cx();
+        for width in sweep_widths() {
+            crate::locale::set_default_locale(None);
+            let cleared = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+            for default in ["en", "th", "ko-KR"] {
+                crate::locale::set_default_locale(Some(default));
+                let starts = wrapped_line_starts(&mut cx, SMALL_KANA, &untagged(), width);
+                assert_eq!(starts, cleared, "default {default} at {width}px");
+                assert!(!starts_with_small_kana(SMALL_KANA, &starts));
+            }
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn kinsoku_still_holds_under_the_cjk_line_break_rule() {
+        let guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = jp_cx();
+        for (default, text, closers) in [
+            (
+                "ja",
+                "今日は、天気がいい。明日も、晴れ。",
+                ['、', '。', '、', '。'],
+            ),
+            (
+                "zh-Hant-TW",
+                "我们是朋友，欢迎来到这里。今天天气很好。",
+                ['，', '。', '，', '。'],
+            ),
+        ] {
+            crate::locale::set_default_locale(Some(default));
+            let mut wrapped = false;
+            for n in 1..=12 {
+                let starts = wrapped_line_starts(&mut cx, text, &untagged(), n as f32 * 10.0);
+                wrapped |= starts.len() > 1;
+                for &s in &starts[1..] {
+                    let c = text[s..].chars().next().expect("a char");
+                    assert!(
+                        !closers.contains(&c),
+                        "{default} width {n}0: line starts with {c}"
+                    );
+                }
+            }
+            assert!(wrapped, "{default}: the sweep never wrapped");
+        }
+        drop(guard);
+    }
+
+    #[test]
+    fn a_default_locale_change_reshapes_untagged_text_but_not_tagged_text() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = test_cx();
+        let untagged = TextStyle::new(16.0, Color::BLACK);
+        let tagged = TextStyle::new(16.0, Color::BLACK).with_locale(Some("ja"));
+        let text = "漢字かな";
+        let _ = cx.layout(text, &untagged, None);
+        let _ = cx.layout(text, &tagged, None);
+        let after_first = cx.shape_cache_stats();
+        assert_eq!(after_first.shapes, 2);
+
+        crate::locale::set_default_locale(Some("ja"));
+        let _ = cx.layout(text, &untagged, None);
+        let after_untagged = cx.shape_cache_stats();
+        assert_eq!(after_untagged.shapes, after_first.shapes + 1);
+        let _ = cx.layout(text, &tagged, None);
+        let after_tagged = cx.shape_cache_stats();
+        assert_eq!(after_tagged.shapes, after_untagged.shapes);
+        assert_eq!(after_tagged.hits, after_untagged.hits + 1);
     }
 
     #[test]
@@ -1123,6 +1309,154 @@ mod tests {
         assert_eq!(stats.shapes, 1, "shaping must run exactly once");
         assert_eq!(stats.line_breaks, 1, "the differing width re-breaks once");
         assert_eq!(stats.hits, 1, "the repeated width is a full reuse");
+    }
+
+    #[test]
+    fn overflow_wrap_anywhere_breaks_an_overlong_token_that_normal_overflows() {
+        let mut cx = test_cx();
+        let url = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0";
+        assert_eq!(url.len(), 40);
+        let normal = style(16.0);
+        let anywhere = normal
+            .clone()
+            .with_overflow_wrap(crate::OverflowWrap::Anywhere);
+
+        let overflowing = cx.layout(url, &normal, Some(100.0));
+        assert_eq!(overflowing.line_count(), 1, "Normal keeps the token whole");
+        assert!(overflowing.size().width > 100.0);
+
+        let broken = cx.layout(url, &anywhere, Some(100.0));
+        assert!(broken.line_count() > 1, "Anywhere breaks inside the token");
+        for i in 0..broken.line_count() {
+            let info = broken.line_info(i).expect("line");
+            assert!(
+                info.width <= 100.0 + 0.01,
+                "line {i} is {} wide, past the 100px box",
+                info.width
+            );
+        }
+    }
+
+    /// Lays `text` out at `width` with `spans` (byte ranges tiling it) as its styles.
+    fn layout_spans(
+        cx: &mut TextContext,
+        text: &str,
+        spans: &[(std::ops::Range<usize>, &TextStyle)],
+        width: f32,
+    ) -> TextLayout {
+        use crate::layout::{Paragraph, lay_out};
+        let shaped = Arc::new(cx.shape_cx.shape_spans(&mut cx.oracle, text, spans));
+        let styles: Arc<[TextStyle]> = spans.iter().map(|(_, s)| (*s).clone()).collect();
+        let lines = lay_out(&Paragraph::new(&shaped, &styles, None), Some(width), None);
+        TextLayout::new(
+            Arc::from(text),
+            shaped,
+            styles,
+            Some(width),
+            Arc::new(lines),
+            crate::convert::RunMemo::default(),
+        )
+    }
+
+    fn line_starts(layout: &TextLayout) -> Vec<usize> {
+        (0..layout.line_count())
+            .map(|i| layout.line_info(i).expect("line").range.start)
+            .collect()
+    }
+
+    #[test]
+    fn overflow_wrap_is_decided_by_the_first_span_only() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, normal) = noto_cx();
+        let anywhere = normal
+            .clone()
+            .with_overflow_wrap(crate::OverflowWrap::Anywhere);
+        let text = "ab a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0";
+        let width = 100.0;
+
+        let single = layout_spans(&mut cx, text, &[(0..text.len(), &normal)], width);
+        let mixed = layout_spans(
+            &mut cx,
+            text,
+            &[(0..3, &normal), (3..text.len(), &anywhere)],
+            width,
+        );
+        assert_eq!(
+            single.line_count(),
+            2,
+            "the token sits whole on its own line"
+        );
+        assert!(mixed.size().width > f64::from(width), "the token overflows");
+        assert_eq!(line_starts(&mixed), line_starts(&single));
+
+        let flipped = layout_spans(
+            &mut cx,
+            text,
+            &[(0..3, &anywhere), (3..text.len(), &normal)],
+            width,
+        );
+        assert!(
+            flipped.line_count() > single.line_count(),
+            "the first span's Anywhere breaks the token"
+        );
+    }
+
+    /// Byte offsets at which a grapheme cluster starts in `text`, plus its length.
+    fn grapheme_starts(cx: &mut TextContext, text: &str, style: &TextStyle) -> Vec<usize> {
+        let shaped = cx.shape(text, style);
+        let mut starts: Vec<usize> = shaped
+            .chars
+            .iter()
+            .filter(|c| c.grapheme_start)
+            .map(|c| c.byte_start as usize)
+            .collect();
+        starts.push(text.len());
+        starts
+    }
+
+    /// Under `Anywhere` at a width no cluster fits, every line still starts on a grapheme boundary.
+    fn assert_lines_start_on_graphemes(cx: &mut TextContext, text: &str, style: &TextStyle) {
+        let anywhere = style
+            .clone()
+            .with_overflow_wrap(crate::OverflowWrap::Anywhere);
+        let boundaries = grapheme_starts(cx, text, &anywhere);
+        let layout = cx.layout(text, &anywhere, Some(1.0));
+        let starts = line_starts(&layout);
+        assert!(starts.len() > 1, "the narrow width breaks {text:?}");
+        for start in starts {
+            assert!(
+                boundaries.contains(&start),
+                "a line of {text:?} starts inside a grapheme at byte {start}"
+            );
+        }
+    }
+
+    #[test]
+    fn anywhere_never_starts_a_line_inside_a_grapheme_cluster() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, latin) = noto_cx();
+        assert_lines_start_on_graphemes(&mut cx, &"e\u{0302}\u{0301}".repeat(4), &latin);
+
+        let families = cx
+            .register_fonts(
+                include_bytes!("../../../testing/fonts/NotoSansThai-Subset.ttf").to_vec(),
+            )
+            .expect("the Thai subset registers");
+        let thai = TextStyle {
+            family: crate::FontFamily::named(families[0].name.clone()),
+            ..style(18.0)
+        };
+        assert_lines_start_on_graphemes(&mut cx, "สวัสดีครับไก่ต้มยำ", &thai);
+
+        // Shaped against whatever emoji face the host has: only the boundary property is asserted.
+        let host = style(18.0);
+        let zwj = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}";
+        assert_lines_start_on_graphemes(&mut cx, &format!("{zwj}{zwj}{zwj}"), &host);
+        assert_lines_start_on_graphemes(
+            &mut cx,
+            "\u{1F1EF}\u{1F1F5}\u{1F1FA}\u{1F1F8}\u{1F1EB}\u{1F1F7}",
+            &host,
+        );
     }
 
     /// A context holding the bundled Latin subset as an app font, and its family.

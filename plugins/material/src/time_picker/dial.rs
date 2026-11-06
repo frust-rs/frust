@@ -406,11 +406,9 @@ impl Run {
 
     /// The style the run shapes with.
     fn style(&self) -> TextStyle {
-        TextStyle {
-            family: self.family.clone(),
-            weight: self.weight,
-            ..TextStyle::new(self.size, Color::BLACK)
-        }
+        TextStyle::new(self.size, Color::BLACK)
+            .with_family(self.family.clone())
+            .with_weight(self.weight)
     }
 
     /// Shape (or reuse) the run in `family`, returning its measured size.
@@ -1269,27 +1267,19 @@ mod tests {
     #[test]
     fn without_a_theme_the_runs_keep_the_unthemed_styles() {
         let (widget, _tcx) = mount(TimeOfDay::new(10, 30), false);
-        let header = TextStyle {
-            weight: FontWeight::REGULAR,
-            ..TextStyle::new(HEADER_FONT_SIZE, Color::BLACK)
-        };
+        let header =
+            TextStyle::new(HEADER_FONT_SIZE, Color::BLACK).with_weight(FontWeight::REGULAR);
         assert_eq!(widget.hour_run.style(), header);
         assert_eq!(widget.colon_run.style(), header);
         assert_eq!(widget.minute_run.style(), header);
         assert_eq!(
             widget.am_run.style(),
-            TextStyle {
-                weight: PERIOD_FONT_WEIGHT,
-                ..TextStyle::new(PERIOD_FONT_SIZE, Color::BLACK)
-            }
+            TextStyle::new(PERIOD_FONT_SIZE, Color::BLACK).with_weight(PERIOD_FONT_WEIGHT)
         );
         for run in ring_runs(&widget) {
             assert_eq!(
                 run.style(),
-                TextStyle {
-                    weight: FontWeight::MEDIUM,
-                    ..TextStyle::new(DIAL_LABEL_FONT_SIZE, Color::BLACK)
-                }
+                TextStyle::new(DIAL_LABEL_FONT_SIZE, Color::BLACK).with_weight(FontWeight::MEDIUM)
             );
         }
     }

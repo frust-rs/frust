@@ -285,20 +285,16 @@ fn ui_face() -> FontFamily {
 /// The glyph face style (larger, `.bottom-nav-glyph`); family from the
 /// theme's `titleMedium` role.
 fn glyph_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.title_medium.family.clone()),
-        weight: FontWeight::REGULAR,
-        ..TextStyle::new(NAV_GLYPH_SIZE, color)
-    }
+    TextStyle::new(NAV_GLYPH_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.title_medium.family.clone()))
+        .with_weight(FontWeight::REGULAR)
 }
 
 /// The micro-label style; family from the theme's `labelSmall` role.
 fn label_style(theme: Option<&Theme>, color: Color) -> TextStyle {
-    TextStyle {
-        family: theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()),
-        weight: FontWeight::MEDIUM,
-        ..TextStyle::new(NAV_LABEL_SIZE, color)
-    }
+    TextStyle::new(NAV_LABEL_SIZE, color)
+        .with_family(theme.map_or_else(ui_face, |t| t.type_scale.label_small.family.clone()))
+        .with_weight(FontWeight::MEDIUM)
 }
 
 fn build_items(items: &[GlyphNavItem]) -> Vec<NavEntry> {
