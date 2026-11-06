@@ -1553,8 +1553,8 @@ pub(crate) fn render_loop(
                     }
                 }
                 RenderCommand::Resume => {}
-                // Android sends no trim yet (`onTrimMemory` is unwired).
-                RenderCommand::TrimMemory => {}
+                // `onTrimMemory` at a critical level (`native_on_trim_memory`).
+                RenderCommand::TrimMemory => renderer.trim_memory(),
             }
         }
 
@@ -2406,6 +2406,35 @@ pub fn native_on_stop(handle: jlong) {
                     started.elapsed().as_secs_f64() * 1e3
                 );
             }
+        }
+    });
+}
+
+/// `nativeOnTrimMemory`: `onTrimMemory`/`onLowMemory` on the UI thread. Maps the
+/// `ComponentCallbacks2` level (`ffi_support::trim_level_to_pressure`),
+/// pushes it as the app-facing
+/// [`MemoryPressure`](frust_reactive::MemoryPressure) event (the reactive queue
+/// is pumped first and after, so listeners and the work they spawn see a
+/// current runtime), and on `Critical` also trims the renderer's caches on the
+/// render side, the same trim iOS runs on a memory warning. A level that maps
+/// to nothing (`UI_HIDDEN`, unknown) does nothing here.
+pub fn native_on_trim_memory(handle: jlong, level: jint) {
+    guard("nativeOnTrimMemory", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        let Some(app) = (unsafe { handle_mut(handle) }) else {
+            return;
+        };
+        use crate::ffi_support::TrimPressure;
+        let pressure = match crate::ffi_support::trim_level_to_pressure(level) {
+            Some(TrimPressure::Moderate) => frust_reactive::MemoryPressure::Moderate,
+            Some(TrimPressure::Critical) => frust_reactive::MemoryPressure::Critical,
+            None => return,
+        };
+        pump_reactive_runtime();
+        frust_reactive::push_memory_pressure(pressure);
+        pump_reactive_runtime();
+        if pressure == frust_reactive::MemoryPressure::Critical {
+            app.trim_memory();
         }
     });
 }

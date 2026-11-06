@@ -25,6 +25,35 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
+/// The host-testable mirror of the app-facing `frust_reactive::MemoryPressure`
+/// (that crate is an Android-only dependency of this one);
+/// [`crate::jni_glue`] converts it one-to-one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrimPressure {
+    /// Trim caches that are cheap to rebuild.
+    Moderate,
+    /// Release everything that is not on screen.
+    Critical,
+}
+
+/// Map an Android `ComponentCallbacks2` trim level to a [`TrimPressure`].
+///
+/// `RUNNING_MODERATE` (5), `RUNNING_LOW` (10), `BACKGROUND` (40) and
+/// `MODERATE` (60) are `Moderate`; `RUNNING_CRITICAL` (15) and `COMPLETE`
+/// (80, and anything above) are `Critical`. `UI_HIDDEN` (20) is `None`: the
+/// lifecycle already reports it as `Hidden`. Unknown levels are `None`.
+/// `onLowMemory` is forwarded as 80. API 34+ delivers only `UI_HIDDEN` and
+/// `BACKGROUND`; the others are deprecated there.
+pub(crate) fn trim_level_to_pressure(level: i32) -> Option<TrimPressure> {
+    use TrimPressure::{Critical, Moderate};
+    match level {
+        5 | 10 | 40 | 60 => Some(Moderate),
+        15 => Some(Critical),
+        l if l >= 80 => Some(Critical),
+        _ => None,
+    }
+}
+
 /// Whether an opaque handle from the JVM points at a live native side.
 ///
 /// Kotlin initialises `handle` to `0` and every native call is guarded on it
@@ -1067,6 +1096,22 @@ impl FrameSyncLatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use TrimPressure::{Critical, Moderate};
+
+    #[test]
+    fn trim_levels_map_to_pressure() {
+        assert_eq!(trim_level_to_pressure(5), Some(Moderate));
+        assert_eq!(trim_level_to_pressure(10), Some(Moderate));
+        assert_eq!(trim_level_to_pressure(15), Some(Critical));
+        assert_eq!(trim_level_to_pressure(20), None);
+        assert_eq!(trim_level_to_pressure(40), Some(Moderate));
+        assert_eq!(trim_level_to_pressure(60), Some(Moderate));
+        assert_eq!(trim_level_to_pressure(80), Some(Critical));
+        assert_eq!(trim_level_to_pressure(100), Some(Critical));
+        assert_eq!(trim_level_to_pressure(0), None);
+        assert_eq!(trim_level_to_pressure(7), None);
+        assert_eq!(trim_level_to_pressure(-1), None);
+    }
     use std::sync::atomic::AtomicBool;
 
     #[test]
