@@ -1426,7 +1426,10 @@ impl<State: 'static> NavigatorWidget<State> {
     ///
     /// A page whose key matches an old page retains it: pod, widget state,
     /// `on_result`, back policy, barrier, opacity, visibility and reach all stay,
-    /// and the page takes the new builder, route and stored transition. Every other
+    /// and the page takes the new builder, route and stored transition. A shell
+    /// page keeps its route, which goes on naming the location that placed it: what
+    /// happens inside a shell is the inner navigator's to publish, so a navigation
+    /// within one changes nothing on this stack. Every other
     /// old page is removed, top to bottom, with its `on_result` firing empty now
     /// rather than at settle. New pages build before anything is torn down, so a
     /// controller shared between an old and a new page never reads as unmounted.
@@ -1465,8 +1468,7 @@ impl<State: 'static> NavigatorWidget<State> {
         let from_depth = self.pages.len();
         // Read before `cancel_top` drops it (see `top_pod_focused`).
         let outgoing_focused = self.top_pod_focused();
-        // Keys only, so safe before `finalize_transition`'s effects are gone; it
-        // must precede `cancel_top`, which a retained top skips.
+        // Matching precedes `cancel_top`, because a retained top skips it.
         let matches = match_retained(&specs, &self.pages);
         let old_top_stays_top = from_depth > 0
             && matches[specs.len() - 1].is_some_and(|old_index| old_index + 1 == from_depth);
@@ -1498,7 +1500,9 @@ impl<State: 'static> NavigatorWidget<State> {
                         .take()
                         .expect("match_retained uses each key once");
                     entry.builder = spec.builder;
-                    entry.route = spec.route;
+                    if !matches!(spec.key, Some(PageKey::Shell(_))) {
+                        entry.route = spec.route;
+                    }
                     entry.transition = transition;
                     entry
                 }

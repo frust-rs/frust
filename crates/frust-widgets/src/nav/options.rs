@@ -374,9 +374,6 @@ impl<State: 'static> PushOptions<State> {
     }
 
     /// Key this page so a later [`NavOp::SetPages`] can retain it.
-    // rr-02 (`Router::go`'s shell pages) is the first non-test caller and removes
-    // this allow.
-    #[allow(dead_code)]
     pub(super) fn key(mut self, key: PageKey) -> Self {
         self.key = Some(key);
         self
@@ -430,9 +427,6 @@ impl ReplaceOptions {
     }
 
     /// Key the replacement page so a later [`NavOp::SetPages`] can retain it.
-    // rr-02 (`Router::go`'s shell pages) is the first non-test caller and removes
-    // this allow.
-    #[allow(dead_code)]
     pub(super) fn key(mut self, key: PageKey) -> Self {
         self.key = Some(key);
         self
@@ -441,19 +435,16 @@ impl ReplaceOptions {
 
 /// The identity [`NavOp::SetPages`] reconciles a page by: a new page with the same
 /// key as a page already on the stack keeps that page's pod and state.
-// rr-02 (`Router::go`) is the first non-test constructor and removes this allow.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum PageKey {
     /// A page for this concrete path.
     Path(String),
-    /// A shell page hosting the navigator with this id.
+    /// A shell page hosting the navigator with this id. A page retained by this
+    /// key keeps the route it was placed with.
     Shell(NavigatorId),
 }
 
 /// One page of the list [`NavOp::SetPages`] makes the stack into.
-// rr-02 (`Router::go`) is the first non-test constructor and removes this allow.
-#[allow(dead_code)]
 pub(super) struct PageSpec<State: 'static> {
     /// What to match an existing page by. `None` never matches: the page always
     /// builds fresh.
@@ -463,6 +454,7 @@ pub(super) struct PageSpec<State: 'static> {
     pub(super) opaque: bool,
     /// Per-page transition override (`None` → the navigator's default).
     pub(super) transition: Option<TransitionSpec>,
+    /// The route to publish. A page retained by a [`PageKey::Shell`] ignores this.
     pub(super) route: Option<Location>,
 }
 

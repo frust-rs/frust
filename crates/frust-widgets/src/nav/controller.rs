@@ -543,8 +543,8 @@ impl<State: 'static> NavigatorController<State> {
 
     /// Replace the top page with an explicit [`ReplaceOptions`] — the
     /// full-control variant carrying a route identity alongside opacity
-    /// and transition. [`Router::go`](super::router::Router::go)/
-    /// [`Router::replace`](super::router::Router::replace) push through this.
+    /// and transition. [`Router::replace`](super::router::Router::replace) goes
+    /// through this.
     pub fn replace_with_options<V: View<State>>(
         &self,
         builder: impl Fn() -> V + 'static,
@@ -562,19 +562,40 @@ impl<State: 'static> NavigatorController<State> {
     /// Make the stack exactly `pages`, bottom to top, retaining every page whose
     /// [`PageKey`](super::options::PageKey) the list names. `pages` must not be
     /// empty: a navigator always keeps one page.
-    // rr-02 (`Router::go`) is the first non-test caller and removes this allow.
-    #[allow(dead_code)]
+    ///
+    /// Supersedes every op still queued that would only add a page and owes no
+    /// callback: the list decides what the stack holds, so such a page would be
+    /// built just to leave unpainted, and an earlier list would drop pages this one
+    /// retains. A page pushed with a result callback still lands, so that its
+    /// callback fires.
     pub(super) fn set_pages(&self, pages: Vec<PageSpec<State>>) {
         debug_assert!(!pages.is_empty(), "a navigator always keeps one page");
+        // Through `drain`, so a dropped op's closures run with the queue unborrowed.
+        let (superseded, kept): (Vec<_>, Vec<_>) = self.drain().into_iter().partition(|op| {
+            matches!(
+                op,
+                NavOp::SetPages { .. }
+                    | NavOp::Replace { .. }
+                    | NavOp::Push {
+                        on_result: None,
+                        ..
+                    }
+            )
+        });
+        *self.ops.borrow_mut() = kept;
+        drop(superseded);
         self.enqueue(NavOp::SetPages { pages });
     }
 
     /// Drop every op queued and not yet applied.
-    // rr-02 (`Router::go`) is the first non-test caller and removes this allow.
-    #[allow(dead_code)]
     pub(super) fn discard_queued(&self) {
         // Through `drain`, so an op's closures drop with the queue unborrowed.
         drop(self.drain());
+    }
+
+    /// Whether any op is queued and not yet applied.
+    pub(super) fn has_queued(&self) -> bool {
+        !self.ops.borrow().is_empty()
     }
 
     /// Record `op`, then raise [`frust_core::mark_pending_result_flush`] so the
