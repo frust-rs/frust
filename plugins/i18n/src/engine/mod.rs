@@ -37,6 +37,7 @@
 
 mod bundles;
 mod negotiate;
+pub(crate) use negotiate::likely_script;
 mod resolve;
 
 use std::sync::Arc;

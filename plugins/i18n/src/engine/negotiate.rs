@@ -11,12 +11,47 @@
 //! `fluent-langneg`'s `cldr` feature (full CLDR likely-subtags) is off, so
 //! step 3/5 of its algorithm uses the crate's built-in approximation table.
 //! Turning it on would mean enabling `unic-langid/likelysubtags`, a
-//! workspace-level pin decision rather than a local one.
+//! workspace-level pin decision rather than a local one, so neither is
+//! touched. Script awareness comes from a small frust-owned table instead
+//! ([`likely_script`]): before negotiating, every request without a script
+//! gets its likely one filled in (`zh-TW` becomes `zh-Hant-TW`), and after
+//! negotiating, any available bundle whose script contradicts the request's
+//! is dropped. Without this, `fluent-langneg`'s built-in table does not
+//! maximize `zh-TW`/`zh-HK`/`zh-MO`, and the language-only match hands a
+//! Traditional-Chinese request a `zh-Hans` bundle. The declared fallback is
+//! exempt, so a script mismatch ends at the app's fallback.
+//!
+//! A script-less available bundle (e.g. `zh`) stays a language-wide match for
+//! every request of that language; name bundles with a script (`zh-Hans`,
+//! `zh-Hant`) to get script-aware behaviour.
 
 use fluent_langneg::{NegotiationStrategy, negotiate_languages};
 use unic_langid::LanguageIdentifier;
+use unic_langid::subtags::{Language, Region, Script};
 
 use crate::Locale;
+
+/// The likely script of `language` in `region`, for the languages where the
+/// script decides whether text is readable. `None` means "no opinion" and
+/// leaves negotiation on language and region alone.
+///
+/// A deliberate subset, not CLDR's full likely-subtags data:
+///
+/// - `zh`: `TW`/`HK`/`MO` give `Hant`; `CN`/`SG` or no region give `Hans`.
+/// - `sr`: no region, or `RS`/`ME`/`BA`, gives `Cyrl`.
+///
+/// To extend it, add a row here for another language whose shipped bundles
+/// are split by script, plus a test row in this module.
+pub(crate) fn likely_script(language: Language, region: Option<Region>) -> Option<Script> {
+    let region = region.as_ref().map(Region::as_str);
+    let script = match (language.as_str(), region) {
+        ("zh", Some("TW" | "HK" | "MO")) => "Hant",
+        ("zh", None | Some("CN" | "SG")) => "Hans",
+        ("sr", None | Some("RS" | "ME" | "BA")) => "Cyrl",
+        _ => return None,
+    };
+    script.parse().ok()
+}
 
 /// Resolves `requested` against `available`, returning the fallback chain.
 ///
@@ -27,7 +62,16 @@ pub fn negotiate(
     available: &[LanguageIdentifier],
     fallback: &LanguageIdentifier,
 ) -> Vec<Locale> {
-    let requested: Vec<LanguageIdentifier> = requested.iter().map(super::lang_id).collect();
+    let requested: Vec<LanguageIdentifier> = requested
+        .iter()
+        .map(super::lang_id)
+        .map(|mut id| {
+            if id.script.is_none() {
+                id.script = likely_script(id.language, id.region);
+            }
+            id
+        })
+        .collect();
 
     negotiate_languages(
         &requested,
@@ -36,9 +80,25 @@ pub fn negotiate(
         NegotiationStrategy::Filtering,
     )
     .into_iter()
+    .filter(|candidate| *candidate == fallback || script_compatible(candidate, &requested))
     .cloned()
     .map(Locale::from)
     .collect()
+}
+
+/// Whether `candidate` may serve at least one request of its language. A
+/// candidate without a script, or sharing none of its language with the
+/// requests, is never rejected here.
+fn script_compatible(candidate: &LanguageIdentifier, requested: &[LanguageIdentifier]) -> bool {
+    let Some(script) = candidate.script else {
+        return true;
+    };
+    let mut same_language = requested
+        .iter()
+        .filter(|request| request.language == candidate.language)
+        .peekable();
+    same_language.peek().is_none()
+        || same_language.any(|request| request.script.is_none_or(|wanted| wanted == script))
 }
 
 #[cfg(test)]
@@ -107,5 +167,73 @@ mod tests {
     #[test]
     fn a_fallback_already_matched_is_not_repeated() {
         assert_eq!(chain(&["en-GB"], &["en", "de"], "en"), ["en"]);
+    }
+
+    const BUNDLES: [&str; 5] = ["en", "ja", "zh-Hans", "th", "vi"];
+
+    #[test]
+    fn traditional_chinese_requests_never_reach_a_simplified_bundle() {
+        for request in ["zh-TW", "zh-HK", "zh-MO", "zh-Hant", "zh-Hant-TW"] {
+            assert_eq!(chain(&[request], &BUNDLES, "en"), ["en"], "{request}");
+        }
+    }
+
+    #[test]
+    fn simplified_chinese_requests_reach_the_simplified_bundle() {
+        for request in ["zh-CN", "zh", "zh-SG", "zh-Hans-CN"] {
+            assert_eq!(
+                chain(&[request], &BUNDLES, "en"),
+                ["zh-Hans", "en"],
+                "{request}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_script_split_bundle_pair_is_chosen_by_the_request_script() {
+        let available = ["zh-Hant", "zh-Hans", "en"];
+        assert_eq!(chain(&["zh-TW"], &available, "en"), ["zh-Hant", "en"]);
+        assert_eq!(chain(&["zh-CN"], &available, "en"), ["zh-Hans", "en"]);
+    }
+
+    #[test]
+    fn a_script_mismatched_request_is_skipped_not_the_whole_list() {
+        assert_eq!(
+            chain(&["zh-TW", "ja-JP"], &["en", "ja", "zh-Hans"], "en"),
+            ["ja", "en"]
+        );
+    }
+
+    #[test]
+    fn a_script_less_bundle_matches_every_request_of_its_language() {
+        assert_eq!(chain(&["zh-TW"], &["zh", "en"], "en"), ["zh", "en"]);
+    }
+
+    #[test]
+    fn a_fallback_with_a_different_script_still_closes_the_chain() {
+        assert_eq!(
+            chain(&["zh-TW"], &["zh-Hans", "en"], "zh-Hans"),
+            ["zh-Hans"]
+        );
+    }
+
+    #[test]
+    fn likely_script_table_rows() {
+        let script = |tag: &str| {
+            let locale: Locale = tag.parse().expect("valid locale");
+            likely_script(locale.language(), locale.region()).map(|s| s.to_string())
+        };
+        assert_eq!(script("zh-TW").as_deref(), Some("Hant"));
+        assert_eq!(script("zh-HK").as_deref(), Some("Hant"));
+        assert_eq!(script("zh-MO").as_deref(), Some("Hant"));
+        assert_eq!(script("zh-CN").as_deref(), Some("Hans"));
+        assert_eq!(script("zh-SG").as_deref(), Some("Hans"));
+        assert_eq!(script("zh").as_deref(), Some("Hans"));
+        assert_eq!(script("zh-US").as_deref(), None);
+        assert_eq!(script("sr").as_deref(), Some("Cyrl"));
+        assert_eq!(script("sr-RS").as_deref(), Some("Cyrl"));
+        assert_eq!(script("sr-ME").as_deref(), Some("Cyrl"));
+        assert_eq!(script("sr-BA").as_deref(), Some("Cyrl"));
+        assert_eq!(script("de-AT"), None);
     }
 }
