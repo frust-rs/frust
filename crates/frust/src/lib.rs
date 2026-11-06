@@ -1138,10 +1138,11 @@ pub mod authoring {
 /// changes, and treat [`DeviceHandle::is_lost`] as the signal that the device
 /// you hold is gone.
 ///
-/// Only the desktop shell installs one today; the two mobile shells forward
-/// the `gpu` feature but do not install yet (an accepted gap — see
-/// `frust-shell-android`/`frust-shell-ios`'s own crate docs), so
-/// `with_context` always answers `None` there for now.
+/// Every shell (desktop, Android, iOS) publishes its live device after each
+/// successful surface install and withdraws it when its render owner exits,
+/// so `with_context` answers `Some` once a surface exists and `None` before
+/// the first one or after the owner is gone (on mobile, an Activity or view
+/// teardown). A recreated device publishes under a new generation.
 ///
 /// ```
 /// // No device exists in this doctest process, so `with_context` answers
@@ -1248,9 +1249,8 @@ pub mod authoring {
 /// gate is which frame path drains it: any engine-tier `SurfaceRenderer`
 /// frame, `submit` and `submit_deferred` alike, which is what the Android and
 /// iOS shells call exactly as desktop does — a registered pass is not
-/// desktop-only by construction, unlike [`with_context`], which genuinely
-/// does answer `None` on mobile today (no shell there has installed a
-/// [`DeviceHandle`] yet). Only the desktop headless path has actually been
+/// desktop-only by construction, and [`with_context`] answers on every shell
+/// once a surface exists. Only the desktop headless path has actually been
 /// *exercised* so far (`docs/LIMITATIONS.md`'s
 /// `facade-external-pass-desktop-only`) — mobile is wired and compiles the
 /// seam, but no registered pass has been driven through either shell's own

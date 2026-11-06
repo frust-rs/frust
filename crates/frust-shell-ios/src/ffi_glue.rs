@@ -511,6 +511,46 @@ impl SendableMetalLayer {
     }
 }
 
+/// The device owner's write access to the process-wide GPU-device slot
+/// (`frust_shell_common::gpu`) the facade's `frust::gpu::with_context` reads
+/// through. One publisher per `RenderContext` owner; dropping it withdraws the
+/// device it published. A zero-sized stand-in under a default (non-`gpu`)
+/// build.
+#[cfg(feature = "gpu")]
+pub(crate) type DevicePublisher = frust_shell_common::gpu::GpuPublisher;
+
+#[cfg(not(feature = "gpu"))]
+pub(crate) struct DevicePublisher;
+
+#[cfg(not(feature = "gpu"))]
+impl DevicePublisher {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+}
+
+/// Publish this render context's live GPU device, tagged with its
+/// generation. Call only after a successful surface install (`device_handle`
+/// panics before a device exists) and only on the thread that owns
+/// `render_cx`. Republishing an unchanged generation is a no-op; a rebuilt
+/// device replaces the old one. Compiled to nothing under a default
+/// (non-`gpu`) build.
+#[cfg(feature = "gpu")]
+pub(crate) fn publish_gpu_handle(
+    publisher: &mut DevicePublisher,
+    render_cx: &frust_render::RenderContext,
+) {
+    let handle = render_cx.device_handle();
+    publisher.publish(handle.generation(), || handle.clone());
+}
+
+#[cfg(not(feature = "gpu"))]
+pub(crate) fn publish_gpu_handle(
+    _publisher: &mut DevicePublisher,
+    _render_cx: &frust_render::RenderContext,
+) {
+}
+
 /// Install (or reinstall) a `wgpu::Surface` on `renderer` from the raw
 /// `CAMetalLayer*` `metal_layer`, on the render thread. On the
 /// **first** install it also records the adapter/device/renderer startup spans,
@@ -688,6 +728,10 @@ pub(crate) fn render_loop(
     schedule_render_thread();
 
     let mut render_cx = RenderContext::new();
+    // Declared after `render_cx` so it drops first: the device is withdrawn
+    // from the process-wide slot when this loop exits (the `RenderSender`
+    // dropped), before the context itself goes.
+    let mut gpu_publisher = DevicePublisher::new();
     let mut renderer = SurfaceRenderer::new();
     let mut frame_stats = FrameStats::new();
     let mut phase = RenderPhase::NoSurface;
@@ -742,6 +786,8 @@ pub(crate) fn render_loop(
                             // scale so a later change is recognised.
                             note_scale(&mut renderer, sanitize_scale(size.scale as f32));
                             publish_ledger(&mut renderer);
+                            // Strictly after the successful install.
+                            publish_gpu_handle(&mut gpu_publisher, &render_cx);
                         }
                         Err(err) => {
                             // A failed (re)install leaves no surface whose
@@ -923,6 +969,9 @@ pub(crate) fn render_loop(
                             // reinstall flag above forces one) must name none
                             // of the lost engine's pages.
                             publish_ledger(&mut renderer);
+                            // A self-heal may have rebuilt the device: the
+                            // new generation replaces the old one.
+                            publish_gpu_handle(&mut gpu_publisher, &render_cx);
                         }
                         Err(err) => {
                             // Same clear-on-failure contract as the install arm

@@ -122,8 +122,8 @@ hotpatch = [
     "frust-shell-android/hotpatch",
     "frust-shell-ios/hotpatch",
 ]
-# Opt-in `frust::gpu` seam. `frust-shell-common/gpu` is the device slot `with_context` reads; only the
-# desktop shell installs into it yet (Android/iOS: accepted gap, see their crate docs).
+# Opt-in `frust::gpu` seam. `frust-shell-common/gpu` is the device slot `with_context` reads; every shell
+# (desktop, Android, iOS) publishes its live device into it after each surface install.
 gpu = [
     "dep:frust-gpu",
     "dep:wgpu",

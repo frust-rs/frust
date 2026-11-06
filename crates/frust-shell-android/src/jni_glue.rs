@@ -1094,6 +1094,50 @@ impl SendableWindowPtr {
     }
 }
 
+/// The device owner's write access to the process-wide GPU-device slot
+/// (`frust_shell_common::gpu`) the facade's `frust::gpu::with_context` reads
+/// through. One publisher per `RenderContext` owner; dropping it withdraws the
+/// device it published. A zero-sized stand-in under a default (non-`gpu`)
+/// build.
+#[cfg(feature = "gpu")]
+pub(crate) type DevicePublisher = frust_shell_common::gpu::GpuPublisher;
+
+#[cfg(not(feature = "gpu"))]
+pub(crate) struct DevicePublisher;
+
+#[cfg(not(feature = "gpu"))]
+impl DevicePublisher {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+}
+
+/// Publish this render context's live GPU device, tagged with its
+/// generation. Call only after a successful surface install (`device_handle`
+/// panics before a device exists) and only on the thread that owns
+/// `render_cx`. Republishing an unchanged generation is a no-op; a rebuilt
+/// device replaces the old one. Compiled to nothing under a default
+/// (non-`gpu`) build.
+///
+/// `take_preinit_context` can hand an owner a context whose device already
+/// exists before any surface is installed; that device is deliberately not
+/// published until the first install succeeds.
+#[cfg(feature = "gpu")]
+pub(crate) fn publish_gpu_handle(
+    publisher: &mut DevicePublisher,
+    render_cx: &frust_render::RenderContext,
+) {
+    let handle = render_cx.device_handle();
+    publisher.publish(handle.generation(), || handle.clone());
+}
+
+#[cfg(not(feature = "gpu"))]
+pub(crate) fn publish_gpu_handle(
+    _publisher: &mut DevicePublisher,
+    _render_cx: &frust_render::RenderContext,
+) {
+}
+
 /// Install (or reinstall) a `wgpu::Surface` on `renderer` from the raw
 /// `ANativeWindow*` `window_ptr`, on the render thread. On the
 /// **first** install it also loads + seeds the pipeline cache — handing the
@@ -1343,6 +1387,11 @@ pub(crate) fn render_loop(
     if let Some(spans) = startup_spans.as_mut() {
         spans.record(SPAN_PREINIT_JOINED);
     }
+    // Declared after `render_cx` so it drops first: the device is withdrawn
+    // from the process-wide slot when this loop exits (the `RenderSender`
+    // dropped with its Activity), before the context itself goes. A next
+    // Activity builds a fresh context and publishes its new generation.
+    let mut gpu_publisher = DevicePublisher::new();
 
     let mut renderer = frust_render::SurfaceRenderer::new();
     let mut frame_stats = FrameStats::new();
@@ -1387,6 +1436,10 @@ pub(crate) fn render_loop(
                             // density so a later change is recognised.
                             renderer.note_device_scale(sanitize_scale(size.scale as f32));
                             publish_cleared_ledger(&mut renderer);
+                            // Strictly after the successful install (a
+                            // pre-init context has a device before any
+                            // surface, but is not published until here).
+                            publish_gpu_handle(&mut gpu_publisher, &render_cx);
                         }
                         Err(err) => {
                             // A failed (re)install leaves no surface whose

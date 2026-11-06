@@ -28,13 +28,14 @@
 //! `DeviceHandle` re-export — see `frust-shell-common`'s `gpu` module and
 //! `crates/frust/src/lib.rs`'s `gpu` module), the same seam
 //! `frust-shell-desktop`'s render executor installs its live device into.
-//! **This shell does not install one yet** — its render-thread device
-//! creation lives in `jni_glue`'s pre-init/`create_handle` path and the
-//! `app::executor` render loop, wiring an install call there is a
-//! render-thread-split-aware change of its own, not a one-line addition —
-//! so `frust::gpu::with_context` currently answers `None` on Android even
-//! with `--features gpu` on. An accepted, explicitly tracked gap rather than
-//! a half-built accessor.
+//! This shell publishes its live device into that slot after every
+//! successful surface install, from the render thread's loop (`jni_glue::render_loop`
+//! split) and from the inline executor, and withdraws it when the owner goes
+//! away: one device per render context, so a recreated context (a new
+//! Activity) publishes a fresh generation and the old device is
+//! withdrawn when its loop exits. `frust::gpu::with_context` therefore
+//! answers `Some` once a surface exists. A default (non-`gpu`) build carries
+//! a zero-sized stand-in and is unchanged.
 //!
 //! # Unsafe
 //!
