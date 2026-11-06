@@ -4322,9 +4322,8 @@ tests (`gpu_fx::card3d`/`cylinder`/`fan`/`quad3d` test modules) and by a manual 
 `examples/beui-demo`'s GPU Effects page on 2026-09-04 (every 3D pane live, the tilt face
 foreshortens on hover, the wallet switcher fans). Metal is expected to behave the same — the
 substrate reaches the GPU only through `frust::gpu`, with no backend-specific code of its own — but
-unverified until a Mac runs it. Acquisition answers `None` on Android and iOS today because no
-mobile shell installs a `DeviceHandle` yet (`facade-gpu-context-desktop-only` above), so every
-gpu-effects variant renders its 2D path there regardless of the opt-in.
+unverified until a Mac runs it. Acquisition on Android and iOS is published but not yet device-run
+(`facade-gpu-context-desktop-only` above), so those variants are unverified there.
 
 **Evidence**: `plugins/beui/src/components/tilt_card.rs`, `wheel_picker.rs`,
 `cylinder_carousel.rs`, `plugins/beui/src/blocks/project_folder.rs`, `wallet_card.rs` module docs'
@@ -6895,22 +6894,37 @@ the first real 3D consumer.
 **Trigger for removal**: a colour load-op on `EngineTarget` proven by the
 shared-encoder tests in both recording orders.
 
-### `facade-gpu-context-desktop-only` — `frust::gpu::with_context` answers `None` on Android and iOS
+### `facade-gpu-context-desktop-only` — `frust::gpu::with_context` is installed on every shell, but only desktop has read it back on a device
 
-**Observed** (evidence: `crates/frust-shell-desktop/src/render.rs`
-`publish_gpu_handle` installs the shared `DeviceHandle` at both
-device-creation sites; `crates/frust-shell-android/src/lib.rs` and
-`crates/frust-shell-ios/src/lib.rs` forward the `gpu` feature but never call
-`frust_shell_common::gpu::install_gpu_handle`): a `gpu`-feature app reaches
-the shared device on desktop only. The mobile shells' device-creation sites
-(their JNI/FFI glue and executors) are not yet wired to the slot.
+**Observed** (evidence: `crates/frust-shell-desktop/src/render.rs`, `crates/frust-shell-android/src/jni_glue.rs`
+and `crates/frust-shell-ios/src/ffi_glue.rs` each publish their live `DeviceHandle` through
+`frust_shell_common::gpu::GpuPublisher` after every successful surface install and withdraw it when
+their render owner exits): the Android and iOS publication paths have had no device run: no
+Pixel or iPhone run has yet read the device back through `with_context`, or seen a new generation
+after an Activity recreate.
 
-**Accepted because**: the seam's first consumers are desktop-first; the slot
-and the facade accessor are platform-free, so wiring a mobile shell is a
-local change at its device-creation site.
+**Accepted because**: the slot and the facade accessor are platform-free and covered by host tests;
+only the device run is outstanding.
 
-**Trigger for removal**: both mobile shells install the handle and a device
-run (Pixel 5, iPhone) reads it back through `with_context`.
+**Trigger for removal**: a device run (Pixel 5, iPhone) reads the handle back through `with_context`
+and observes a changed `device_generation()` after a surface or Activity rebuild; remove this entry
+then.
+
+### `gpu-feature-request-forfeits-android-preinit` — an app that requests optional GPU features loses the Android pre-init overlap
+
+**Observed** (evidence: `crates/frust-shell-android/src/ffi_support.rs`'s `resolve_preinit`,
+`crates/frust-shell-android/src/jni_glue.rs`'s `preinit_has_requested_features`,
+`crates/frust-gpu/src/context.rs`'s `missing_requested_features`): the load-time pre-init device is
+built before the app's `@pre_init` request can shape it, so it is kept only when it already has every
+requested feature its adapter offers. Otherwise the shell logs once at info and builds a fresh device
+synchronously, which means an app using `app!(.., gpu_features = {..})` pays the full device build on
+the first frame of every Android launch.
+
+**Accepted because**: correctness (the requested feature is present) outranks the overlap, and an
+app that requests nothing keeps the overlap.
+
+**Trigger for removal**: building the pre-init device with the request already known (or an
+asynchronous rebuild that does not block the first frame).
 
 ### `facade-external-pass-desktop-only` — an `ExternalPass` has only ever run against a headless target, on desktop
 
@@ -6928,8 +6942,8 @@ drain→encode→submit sequence directly — against a `HeadlessTarget`, not a 
 NVIDIA T400 4GB/Vulkan adapter on 2026-09-03: a pass-rendered 64×64 solid target composited at its
 registered destination with the base colour intact outside it, and unregistering it stopped the draw
 the next frame. No windowed run of any kind, and no mobile device run of any kind, has registered and
-driven a real pass yet — that is an untested surface, not a gated one; the `frust::gpu::with_context`/
-`install_gpu_handle` desktop-only slot (`facade-gpu-context-desktop-only` above) is the shared
+driven a real pass yet — that is an untested surface, not a gated one; the `frust::gpu::with_context`
+slot (`facade-gpu-context-desktop-only` above) is the shared
 `DeviceHandle` facade accessor, a separate mechanism that `run_external_passes` does not consult and
 so does not gate this drain. `HeadlessRenderer` never drains the registry at all (see the module
 docs). Output is always blended, never opaque (`engine-scene-texture-always-blended` above) — the
