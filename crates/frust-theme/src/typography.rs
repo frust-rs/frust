@@ -212,6 +212,32 @@ impl TypeScale {
     }
 }
 
+/// The monospace family a design system attaches as a
+/// [`crate::extensions::ThemeExtensions`] payload, for code and numeric text.
+///
+/// It lives beside [`TypeScale`] rather than inside it: the 30 type-scale
+/// slots stay a pure size/weight ladder. Read it with
+/// [`Theme::monospace_family`], which falls back to the generic monospace
+/// family when nothing is attached. Note that extension equality compares the
+/// set of attached types, not their values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MonospaceFamily {
+    /// The family code and numeric text shapes with.
+    pub family: FontFamily,
+}
+
+impl Theme {
+    /// The theme's monospace family: the attached [`MonospaceFamily`], else
+    /// the generic monospace family.
+    pub fn monospace_family(&self) -> FontFamily {
+        self.extension::<MonospaceFamily>()
+            .map(|m| m.family.clone())
+            .unwrap_or_else(|| {
+                FontFamily::NamedWithGeneric(vec![FamilyName::Generic(GenericSlot::Monospace)])
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,32 +403,6 @@ mod tests {
         let scale = TypeScale::neutral(&base);
         assert_ne!(scale.body_large.family, base.family);
         assert_eq!(scale.body_large.color, base.color);
-    }
-}
-
-/// The monospace family a design system attaches as a
-/// [`crate::extensions::ThemeExtensions`] payload, for code and numeric text.
-///
-/// It lives beside [`TypeScale`] rather than inside it: the 30 type-scale
-/// slots stay a pure size/weight ladder. Read it with
-/// [`Theme::monospace_family`], which falls back to the generic monospace
-/// family when nothing is attached. Note that extension equality compares the
-/// set of attached types, not their values.
-#[derive(Clone, Debug, PartialEq)]
-pub struct MonospaceFamily {
-    /// The family code and numeric text shapes with.
-    pub family: FontFamily,
-}
-
-impl Theme {
-    /// The theme's monospace family: the attached [`MonospaceFamily`], else
-    /// the generic monospace family.
-    pub fn monospace_family(&self) -> FontFamily {
-        self.extension::<MonospaceFamily>()
-            .map(|m| m.family.clone())
-            .unwrap_or_else(|| {
-                FontFamily::NamedWithGeneric(vec![FamilyName::Generic(GenericSlot::Monospace)])
-            })
     }
 }
 
