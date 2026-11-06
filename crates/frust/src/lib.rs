@@ -1422,8 +1422,8 @@ pub mod texture {
     pub use frust_render::texture_bus::take_frame_owed;
     pub use frust_render::texture_bus::{
         MAX_RETIRING, NativeHandle, NativeHandleKind, NativeImporter, SourceFormat, SourceFrame,
-        SourcePayload, TextureRegistration, native_importer_installed, register_texture_source,
-        request_frame,
+        SourcePayload, TextureRegistration, UpdateRegion, native_importer_installed,
+        register_texture_source, request_frame,
     };
 }
 

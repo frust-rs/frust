@@ -137,6 +137,18 @@
 //! opaque — it cannot read the texels to know (`docs/LIMITATIONS.md`'s
 //! `engine-scene-texture-always-blended`), and the bus inherits that.
 //!
+//! [`SourceFormat::Bgra8`] frames are the same layout in BGRA byte order and
+//! still sample in RGBA order; the GL backend swizzles them on the CPU.
+//!
+//! # Partial updates
+//!
+//! [`SourceFrame::with_update_region`] turns a CPU frame into a rectangle
+//! write into the texture already shown: the frame's `width`/`height` stay
+//! the full extent and the payload holds just the region's texels. It needs a
+//! shown texture of the same extent and format; otherwise (and for an empty or
+//! out-of-extent region, a wrong byte count, or a native payload) it is
+//! refused, released at once, and the previous content stays.
+//!
 //! # Where it runs
 //!
 //! Exactly where external passes run: every engine-tier `SurfaceRenderer`
@@ -201,6 +213,59 @@ static NEXT_SOURCE: AtomicU64 = AtomicU64::new(1);
 pub enum SourceFormat {
     /// 8-bit premultiplied RGBA, tightly packed (see the module docs).
     Rgba8,
+    /// 8-bit premultiplied BGRA, tightly packed. Sampling reads back in RGBA
+    /// order. On every backend except GL the bus uploads it as a
+    /// `Bgra8Unorm` texture as-is; on GL, where a BGRA upload is not
+    /// dependable, it swizzles to RGBA on the CPU first (a per-frame cost
+    /// proportional to the uploaded bytes). A shown texture is reused only
+    /// while both extent and format match, so a format change needs a full
+    /// frame.
+    Bgra8,
+}
+
+/// A rectangle of a CPU texture, in texels from its top-left corner, that a
+/// partial update replaces (see [`SourceFrame::with_update_region`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateRegion {
+    /// Left edge.
+    pub x: u32,
+    /// Top edge.
+    pub y: u32,
+    /// Width in texels.
+    pub width: u32,
+    /// Height in texels.
+    pub height: u32,
+}
+
+impl UpdateRegion {
+    /// Why this region cannot update a texture of `extent` from `byte_len`
+    /// bytes of 4-byte texels, or `None` when it can. Pure, so the rules are
+    /// testable without a device.
+    fn refusal(self, extent: (u32, u32), byte_len: usize) -> Option<&'static str> {
+        if self.width == 0 || self.height == 0 {
+            return Some("the update region is empty");
+        }
+        let right = u64::from(self.x) + u64::from(self.width);
+        let bottom = u64::from(self.y) + u64::from(self.height);
+        if right > u64::from(extent.0) || bottom > u64::from(extent.1) {
+            return Some("the update region is not inside the texture");
+        }
+        if byte_len as u64 != u64::from(self.width) * u64::from(self.height) * 4 {
+            return Some("the update region's byte count does not match its extent");
+        }
+        None
+    }
+}
+
+/// `bgra` (4-byte texels) with the red and blue channels swapped: the CPU
+/// swizzle the GL backend needs for a [`SourceFormat::Bgra8`] frame. A
+/// trailing partial texel is dropped.
+fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bgra.len() - bgra.len() % 4);
+    for texel in bgra.as_chunks::<4>().0 {
+        out.extend_from_slice(&[texel[2], texel[1], texel[0], texel[3]]);
+    }
+    out
 }
 
 /// Which platform object a [`NativeHandle`] points at — the key a
@@ -338,6 +403,8 @@ pub struct SourceFrame {
     /// buffer from this point on (see the module docs). A frame dropped while
     /// still holding it runs it then.
     release: Option<ReleaseCallback>,
+    /// The rectangle a partial CPU update replaces; `None` for a full frame.
+    region: Option<UpdateRegion>,
 }
 
 /// The stand-in payload left behind by [`SourceFrame::into_parts`]. It is
@@ -356,7 +423,27 @@ impl SourceFrame {
             format,
             payload,
             release: None,
+            region: None,
         }
+    }
+
+    /// Makes this a partial update: `width`/`height` stay the full texture
+    /// extent and the CPU payload holds exactly `region.width * region.height`
+    /// tightly packed texels, written at `region`'s origin into the texture
+    /// already shown. Refused (and released at once, keeping the previous
+    /// content) when no texture of the same extent and format is shown yet,
+    /// the region is empty or outside the extent, the byte count mismatches,
+    /// or the payload is native.
+    #[must_use]
+    pub fn with_update_region(mut self, region: UpdateRegion) -> Self {
+        self.region = Some(region);
+        self
+    }
+
+    /// The rectangle of a partial update, or `None` for a full frame.
+    #[must_use]
+    pub fn update_region(&self) -> Option<UpdateRegion> {
+        self.region
     }
 
     /// A CPU frame of tightly packed premultiplied RGBA8 with no release
@@ -455,6 +542,7 @@ impl fmt::Debug for SourceFrame {
             .field("format", &self.format)
             .field("payload", &self.payload)
             .field("release", &self.release.is_some())
+            .field("region", &self.region)
             .finish()
     }
 }
@@ -779,8 +867,10 @@ struct Shown {
     view: wgpu::TextureView,
     size: (u32, u32),
     /// The bus's own upload texture behind `view`, reused by the next CPU
-    /// frame of the same extent; `None` for an imported view.
+    /// frame of the same extent and format; `None` for an imported view.
     upload: Option<wgpu::Texture>,
+    /// The source format `upload` was made for; `None` for an imported view.
+    format: Option<SourceFormat>,
     /// The imported frame's release, held until the view is retired and
     /// fenced; `None` for a bus upload.
     native: Option<NativeHold>,
@@ -908,6 +998,7 @@ fn replace_shown(state: &mut PassState, new: Shown) {
 #[derive(Default)]
 struct Warned {
     malformed: bool,
+    region: bool,
     missing_importer: bool,
     import_failed: bool,
     backlog: bool,
@@ -958,6 +1049,7 @@ impl ExternalPass for SourcePass {
             // runs it on every path out (drop included) or hands it to an
             // import that owes the call; the handle never leaves this scope
             // apart from that import.
+            let region = source_frame.update_region();
             let (meta, payload, release) = unsafe { source_frame.into_parts() };
             // Until the release callback is handed on, a panic below drops it
             // with this frame's locals and so still runs it.
@@ -965,13 +1057,26 @@ impl ExternalPass for SourcePass {
             rebind = match payload {
                 SourcePayload::Cpu(pixels) => {
                     let size = (meta.width, meta.height);
-                    let changed = upload(state, frame, size, meta.format, &pixels);
+                    let changed = upload(state, frame, size, meta.format, region, &pixels);
                     // The queue copied the pixels into staging: nothing reads
                     // the payload again.
                     release.release();
                     changed
                 }
-                SourcePayload::Native(handle) => import(state, frame, handle, release),
+                SourcePayload::Native(handle) => {
+                    if region.is_some() {
+                        let id = frame.id().get();
+                        report(
+                            &mut state.warned.region,
+                            id,
+                            format_args!("refused a partial update of a native frame"),
+                        );
+                        release.release();
+                        false
+                    } else {
+                        import(state, frame, handle, release)
+                    }
+                }
             };
         }
 
@@ -993,11 +1098,19 @@ fn upload(
     frame: &mut ExternalFrame<'_>,
     size: (u32, u32),
     format: SourceFormat,
+    region: Option<UpdateRegion>,
     pixels: &[u8],
 ) -> bool {
     let id = frame.id().get();
     let (width, height) = size;
-    let SourceFormat::Rgba8 = format;
+    // GL cannot be trusted with a BGRA upload (wgpu-hal maps it to an RGBA8
+    // internal format with a BGRA transfer format), so it swizzles on the CPU.
+    let gl = frame.device().adapter_info().backend == wgpu::Backend::Gl;
+    let (texture_format, swizzle) = match format {
+        SourceFormat::Rgba8 => (wgpu::TextureFormat::Rgba8Unorm, false),
+        SourceFormat::Bgra8 if gl => (wgpu::TextureFormat::Rgba8Unorm, true),
+        SourceFormat::Bgra8 => (wgpu::TextureFormat::Bgra8Unorm, false),
+    };
     let max = frame.device().limits().max_texture_dimension_2d;
     if width == 0 || height == 0 || width > max || height > max {
         report(
@@ -1008,7 +1121,7 @@ fn upload(
         return false;
     }
     let expected = u64::from(width) * u64::from(height) * 4;
-    if pixels.len() as u64 != expected {
+    if region.is_none() && pixels.len() as u64 != expected {
         report(
             &mut state.warned.malformed,
             id,
@@ -1021,10 +1134,26 @@ fn upload(
         return false;
     }
 
-    let reusable = state
-        .shown
-        .as_ref()
-        .and_then(|shown| shown.upload.as_ref().filter(|_| shown.size == size));
+    let reusable = state.shown.as_ref().and_then(|shown| {
+        shown
+            .upload
+            .as_ref()
+            .filter(|_| shown.size == size && shown.format == Some(format))
+    });
+    if let Some(region) = region {
+        let refusal = match reusable {
+            None => Some("a partial update needs a full frame of the same extent and format first"),
+            Some(_) => region.refusal(size, pixels.len()),
+        };
+        if let Some(refusal) = refusal {
+            report(
+                &mut state.warned.region,
+                id,
+                format_args!("refused a partial update of a {width}x{height} frame: {refusal}"),
+            );
+            return false;
+        }
+    }
     let (texture, changed) = match reusable {
         Some(texture) => (texture.clone(), false),
         None => {
@@ -1038,7 +1167,7 @@ fn upload(
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
+                format: texture_format,
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             });
@@ -1046,24 +1175,43 @@ fn upload(
         }
     };
 
+    let (origin, copy_width, copy_height) = match region {
+        Some(r) => (
+            wgpu::Origin3d {
+                x: r.x,
+                y: r.y,
+                z: 0,
+            },
+            r.width,
+            r.height,
+        ),
+        None => (wgpu::Origin3d::ZERO, width, height),
+    };
+    let swizzled;
+    let pixels = if swizzle {
+        swizzled = bgra_to_rgba(pixels);
+        &swizzled[..]
+    } else {
+        pixels
+    };
     // Staged on the queue, so it lands ahead of the frame's own command
     // buffer when the frame submits.
     frame.queue().write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: &texture,
             mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
+            origin,
             aspect: wgpu::TextureAspect::All,
         },
         pixels,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(width * 4),
-            rows_per_image: Some(height),
+            bytes_per_row: Some(copy_width * 4),
+            rows_per_image: Some(copy_height),
         },
         wgpu::Extent3d {
-            width,
-            height,
+            width: copy_width,
+            height: copy_height,
             depth_or_array_layers: 1,
         },
     );
@@ -1077,6 +1225,7 @@ fn upload(
                 view,
                 size,
                 upload: Some(texture),
+                format: Some(format),
                 native: None,
             },
         );
@@ -1196,6 +1345,7 @@ fn import(
                     view: imported.view,
                     size: imported.size,
                     upload: None,
+                    format: None,
                     native: Some(hold),
                 },
             );
@@ -1218,6 +1368,37 @@ fn import(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_gl_swizzle_swaps_red_and_blue_and_keeps_alpha() {
+        assert_eq!(bgra_to_rgba(&[1, 2, 3, 4]), [3, 2, 1, 4]);
+        // An odd width: three texels in a row.
+        let row = [10, 20, 30, 40, 11, 21, 31, 41, 12, 22, 32, 42];
+        assert_eq!(
+            bgra_to_rgba(&row),
+            [30, 20, 10, 40, 31, 21, 11, 41, 32, 22, 12, 42]
+        );
+        assert!(bgra_to_rgba(&[]).is_empty());
+    }
+
+    #[test]
+    fn region_validation_covers_inside_outside_empty_and_byte_count() {
+        let r = |x, y, width, height| UpdateRegion {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert_eq!(r(2, 2, 4, 4).refusal((8, 8), 64), None);
+        assert_eq!(r(0, 0, 8, 8).refusal((8, 8), 256), None);
+        assert!(r(0, 0, 0, 4).refusal((8, 8), 0).is_some());
+        assert!(r(0, 0, 4, 0).refusal((8, 8), 0).is_some());
+        assert!(r(5, 0, 4, 4).refusal((8, 8), 64).is_some());
+        assert!(r(0, 5, 4, 4).refusal((8, 8), 64).is_some());
+        assert!(r(u32::MAX, 0, 2, 1).refusal((8, 8), 8).is_some());
+        assert!(r(2, 2, 4, 4).refusal((8, 8), 63).is_some());
+        assert!(r(2, 2, 4, 4).refusal((8, 8), 68).is_some());
+    }
 
     /// A hook counting its calls, and the counter.
     fn counting_hook() -> (FrameRequestHook, Arc<AtomicU64>) {
