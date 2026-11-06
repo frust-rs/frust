@@ -63,8 +63,8 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   shell owns the active `Theme`; widgets recover it type-erased from paint/layout context so
   `frust-core` stays theme-agnostic, while app code reads a cloned `Theme` via reactive context.
 - Widget resolution precedence: explicit builder value > theme token > unthemed-fallback constant,
-  generally re-resolved every paint; `Text`/`TextInput` instead bake the resolved color at layout
-  time, and `Text` also bakes the font family of an opted-in type-scale role (`.themed_family`).
+  generally re-resolved every paint; `Text`/`TextInput` instead bake the resolved color and a themed
+  family (`.themed_family`/`.themed_mono_family`) at layout: `Text` yields to an explicit `.family()`/`.style()`, `TextInput` does not.
 - Introspection flow: a container implements `Widget::visit_children` (CORE unit) via the
   authoring toolkit's `VisitPods` trait and `visit_children!` macro (one line naming its
   `ChildPod` fields) so `RenderRoot::inspect()` can enumerate its children; a hand-rolled child
@@ -352,7 +352,7 @@ facade (`router_glue.rs`, `back_glue.rs`), and nav state sits in plain `Rc<Cell<
 ### Text Widget Alignment
 `TextInput` honours `TextStyle::align` within the wrap width on a multi-line field; a single-line
 field has no wrap width and draws as Start. `TextView` honors `align`, `.max_lines` and
-`.overflow(TextOverflow)`, `.overflow_wrap(OverflowWrap)` and `.locale(..)` (tags the paragraph without marking color/family explicit). Any cached `TextLayout` (`Text`, `TextInput`, and the plugin widgets' private ones) stores a
+`.overflow(TextOverflow)`, `.overflow_wrap(OverflowWrap)`, `.locale(..)` (tags the paragraph without marking color/family explicit), `.font_feature(s)`/`.tabular_figures()` and `.underline()`/`.line_through()`/`.decoration(..)` (painted as rectangle fills). Any cached `TextLayout` (`Text`, `TextInput`, and the plugin widgets' private ones) stores a
 `LocaleStamp` (`frust::authoring::text`) read before shaping and is reused only while `is_current`, so a locale switch re-faces untagged text; the plugin caches exempt a style with an explicit locale, but `Text` and `TextInput` stamp `for_style(None)` and reshape even a tagged style on a default-locale change. `TextInput` defers editor rebuilds (locale,
 font, theme) while an editor-owned preedit is live, firing them on the first layout after it ends.
 

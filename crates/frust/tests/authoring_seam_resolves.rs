@@ -102,6 +102,17 @@ fn overflow_wrap_resolves_through_the_facade() {
     let _view = frust::text("https://example.com").overflow_wrap(OverflowWrap::Anywhere);
 }
 
+/// `frust::authoring::text::TextDecoration` must be nameable, so an app can
+/// pass it to `TextView::decoration` and `TextStyle::with_decoration`.
+#[test]
+fn text_decoration_resolves_through_the_facade() {
+    use frust::authoring::text::{TextDecoration, TextStyle};
+    let underline = TextDecoration::underline();
+    let style = TextStyle::default().with_decoration(underline);
+    assert_eq!(style.decoration, underline);
+    let _view = frust::text("linked").decoration(TextDecoration::line_through());
+}
+
 /// `TextView::max_lines`/`::overflow` are reachable through the flat
 /// `frust::text`/`frust::TextView` facade surface (not just `authoring`),
 /// composed with `.align()` — the exact combination `TextAlign`'s

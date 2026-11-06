@@ -22,6 +22,7 @@ pub(super) struct ItemSpec {
     pub(super) font_size: f32,
     pub(super) locale: Option<String>,
     pub(super) variations: Vec<([u8; 4], f32)>,
+    pub(super) features: Vec<([u8; 4], u16)>,
     pub(super) letter_spacing: f32,
     /// Always `0.0`: [`TextStyle`] has no word-spacing knob yet.
     pub(super) word_spacing: f32,
@@ -35,6 +36,7 @@ impl ItemSpec {
             font_size: style.size,
             locale: style.locale.clone(),
             variations: style.variations.clone(),
+            features: style.features.clone(),
             letter_spacing: style.letter_spacing,
             word_spacing: 0.0,
         }
@@ -45,6 +47,7 @@ impl ItemSpec {
         self.font_size == other.font_size
             && self.locale == other.locale
             && self.variations == other.variations
+            && self.features == other.features
             && self.letter_spacing == other.letter_spacing
             && self.word_spacing == other.word_spacing
     }
@@ -161,6 +164,7 @@ mod tests {
         for other in [
             base.clone().with_locale(Some("ja")),
             base.clone().with_variation(*b"wght", 500.0),
+            base.clone().with_feature(*b"tnum", 1),
             TextStyle {
                 letter_spacing: 1.0,
                 ..base.clone()

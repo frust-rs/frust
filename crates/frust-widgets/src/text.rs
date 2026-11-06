@@ -12,11 +12,11 @@ use frust_core::{
     Widget,
 };
 use frust_text::{
-    FontFamily, FontStyle, FontWeight, LineHeight, LocaleStamp, OverflowWrap, TextAlign,
-    TextContext, TextLayout, TextOverflow, TextStyle,
+    DecorationKind, FontFamily, FontStyle, FontWeight, LineHeight, LocaleStamp, OverflowWrap,
+    TextAlign, TextContext, TextDecoration, TextLayout, TextOverflow, TextStyle,
 };
 use frust_theme::{Theme, TypeScale};
-use kurbo::Size;
+use kurbo::{Point, Size};
 use peniko::Color;
 
 /// Which themed color role a text's glyphs default to when no explicit
@@ -180,6 +180,15 @@ impl ThemeTextType {
     }
 }
 
+/// Where an opted-in themed family resolves from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum FamilySource {
+    /// The family of a type-scale slot ([`TextView::themed_family`]).
+    Role(ThemeTextType),
+    /// The theme's monospace family ([`TextView::themed_mono_family`]).
+    Monospace,
+}
+
 /// A declarative description of a run of text.
 ///
 /// Content does not read application state in v0 — the build closure interpolates the
@@ -206,11 +215,12 @@ pub struct TextView {
     /// The themed default color role used when `color_explicit` is `false`.
     role: ThemeTextColor,
     /// Whether the app set the font family explicitly (via
-    /// `.family()`/`.style()`). When `true`, `family_role` is never consulted.
+    /// `.family()`/`.style()`). When `true`, `family_source` is never consulted.
     family_explicit: bool,
-    /// The type-scale role the family resolves from at layout, set via
-    /// [`Self::themed_family`]. `None` (default) keeps the style's own family.
-    family_role: Option<ThemeTextType>,
+    /// Where the family resolves from at layout, set via
+    /// [`Self::themed_family`] or [`Self::themed_mono_family`]. `None`
+    /// (default) keeps the style's own family.
+    family_source: Option<FamilySource>,
     /// The maximum number of lines to render, set via [`Self::max_lines`].
     /// `None` (default) is unbounded — today's behavior.
     max_lines: Option<usize>,
@@ -230,7 +240,7 @@ pub fn text(content: impl Into<String>) -> TextView {
         color_explicit: false,
         role: ThemeTextColor::OnSurface,
         family_explicit: false,
-        family_role: None,
+        family_source: None,
         max_lines: None,
         overflow: TextOverflow::default(),
     }
@@ -304,6 +314,28 @@ impl TextView {
         self
     }
 
+    /// Underline the text, using the font's own underline position and
+    /// thickness. Keeps any line-through, colour and thickness already set.
+    pub fn underline(mut self) -> Self {
+        self.style.decoration.underline = true;
+        self
+    }
+
+    /// Strike a line through the text, using the font's own strikeout
+    /// position and thickness. Keeps any underline, colour and thickness
+    /// already set.
+    pub fn line_through(mut self) -> Self {
+        self.style.decoration.line_through = true;
+        self
+    }
+
+    /// Replace the text's decoration (underline, line-through, colour and
+    /// thickness) wholesale.
+    pub fn decoration(mut self, decoration: TextDecoration) -> Self {
+        self.style.decoration = decoration;
+        self
+    }
+
     /// Tag the text with a BCP 47 locale (`"ja"`, `"th"`, `"zh-Hant"`): it
     /// steers font fallback, language-specific shaping and CJK line breaking.
     ///
@@ -312,6 +344,29 @@ impl TextView {
     pub fn locale(mut self, locale: impl Into<String>) -> Self {
         self.style.locale = Some(locale.into());
         self
+    }
+
+    /// Set one OpenType feature (`font_feature(*b"tnum", 1)`, or
+    /// `font_feature(*b"liga", 0)` to switch ligatures off), appended after
+    /// any already set; a later setting of the same tag wins. A feature the
+    /// resolved face lacks is ignored.
+    pub fn font_feature(mut self, tag: [u8; 4], value: u16) -> Self {
+        self.style.features.push((tag, value));
+        self
+    }
+
+    /// Replace the OpenType feature settings with `features` (`(tag, value)`
+    /// pairs, a later setting of the same tag wins).
+    pub fn font_features(mut self, features: impl IntoIterator<Item = ([u8; 4], u16)>) -> Self {
+        self.style.features = features.into_iter().collect();
+        self
+    }
+
+    /// Use tabular (fixed-width) figures, the `tnum` feature: digits share one
+    /// advance, so prices and timers do not jitter as they change. A face
+    /// without tabular figures renders as before.
+    pub fn tabular_figures(self) -> Self {
+        self.font_feature(*b"tnum", 1)
     }
 
     /// Replace the whole style in one call. Treated as an explicit color and
@@ -364,7 +419,23 @@ impl TextView {
     /// Part of the widget-authoring toolkit (see [`crate::authoring`]),
     /// alongside [`Self::themed_role`].
     pub fn themed_family(mut self, role: ThemeTextType) -> Self {
-        self.family_role = Some(role);
+        self.family_source = Some(FamilySource::Role(role));
+        self
+    }
+
+    /// Resolve the font family from the active theme's monospace family
+    /// ([`Theme::monospace_family`]) at layout — the family only; size,
+    /// weight, line height and tracking stay as this view sets them.
+    ///
+    /// Opt-in, with the same precedence as [`Self::themed_family`]: an
+    /// explicit [`Self::family`]/[`Self::style`] wins regardless of call
+    /// order, and with no theme threaded in the style's own family is used
+    /// unchanged. A theme that attaches no `MonospaceFamily` resolves to the
+    /// generic monospace family.
+    ///
+    /// Part of the widget-authoring toolkit (see [`crate::authoring`]).
+    pub fn themed_mono_family(mut self) -> Self {
+        self.family_source = Some(FamilySource::Monospace);
         self
     }
 }
@@ -379,7 +450,7 @@ impl<State: 'static> View<State> for TextView {
             color_explicit: self.color_explicit,
             role: self.role,
             family_explicit: self.family_explicit,
-            family_role: self.family_role,
+            family_source: self.family_source,
             max_lines: self.max_lines,
             overflow: self.overflow,
             layout: None,
@@ -416,9 +487,10 @@ impl<State: 'static> View<State> for TextView {
         }
         // The themed family is resolved at layout and shaped with, exactly like
         // the themed color above — a role change must reshape.
-        if prev.family_explicit != self.family_explicit || prev.family_role != self.family_role {
+        if prev.family_explicit != self.family_explicit || prev.family_source != self.family_source
+        {
             element.family_explicit = self.family_explicit;
-            element.family_role = self.family_role;
+            element.family_source = self.family_source;
             element.layout = None;
             flags |= ChangeFlags::LAYOUT;
         }
@@ -446,9 +518,9 @@ pub struct TextWidget {
     role: ThemeTextColor,
     /// Whether the app set the font family explicitly — see [`TextView`].
     family_explicit: bool,
-    /// The type-scale role the family resolves from when `family_explicit`
-    /// is `false` — see [`TextView::themed_family`].
-    family_role: Option<ThemeTextType>,
+    /// Where the family resolves from when `family_explicit` is `false` —
+    /// see [`TextView::themed_family`] and [`TextView::themed_mono_family`].
+    family_source: Option<FamilySource>,
     /// The maximum rendered line count — see [`TextView::max_lines`].
     max_lines: Option<usize>,
     /// How content past `max_lines` is handled — see [`TextView::overflow`].
@@ -500,9 +572,12 @@ impl TextWidget {
             };
         }
         if !self.family_explicit
-            && let Some(role) = self.family_role
+            && let Some(source) = self.family_source
         {
-            style.family = role.style_in(&theme.type_scale).family.clone();
+            style.family = match source {
+                FamilySource::Role(role) => role.style_in(&theme.type_scale).family.clone(),
+                FamilySource::Monospace => theme.monospace_family(),
+            };
         }
         style
     }
@@ -559,11 +634,25 @@ impl Widget for TextWidget {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, scene: &mut dyn PaintScene) {
-        if let Some(layout) = &self.layout {
-            for run in layout.to_scene_runs(ctx.origin()) {
-                scene.draw_glyph_run(run);
+        let Some(layout) = &self.layout else {
+            return;
+        };
+        let origin = ctx.origin();
+        let rects = layout.decoration_rects(origin);
+        let fill = |scene: &mut dyn PaintScene, kind: DecorationKind| {
+            for d in rects.iter().filter(|d| d.kind == kind) {
+                scene.fill_rect(
+                    Point::new(d.rect.x0, d.rect.y0),
+                    Size::new(d.rect.width(), d.rect.height()),
+                    d.color,
+                );
             }
+        };
+        fill(scene, DecorationKind::Underline);
+        for run in layout.to_scene_runs(origin) {
+            scene.draw_glyph_run(run);
         }
+        fill(scene, DecorationKind::LineThrough);
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -918,6 +1007,41 @@ mod tests {
             anywhere.len() > 1,
             "Anywhere must break the token across lines: {anywhere:?}"
         );
+    }
+
+    #[test]
+    fn feature_builders_fill_the_style_without_marking_color_or_family_explicit() {
+        let view = text("x").font_feature(*b"liga", 0).tabular_figures();
+        assert_eq!(view.style.features, vec![(*b"liga", 0), (*b"tnum", 1)]);
+        assert!(!view.color_explicit);
+        assert!(!view.family_explicit);
+        let replaced = view.font_features([(*b"smcp", 1)]);
+        assert_eq!(replaced.style.features, vec![(*b"smcp", 1)]);
+    }
+
+    /// Geist carries `tnum`; the same face the shaper's own tests use.
+    const GEIST: &[u8] = include_bytes!("../../../plugins/beui/fonts/geist/Geist-Variable.ttf");
+
+    #[test]
+    fn tabular_figures_reach_the_shaped_layout() {
+        let slot = crate::test_support::LocaleSlotGuard::hold();
+        let mut tcx = TextContext::new();
+        tcx.register_fonts(GEIST.to_vec())
+            .expect("the Geist test face registers");
+        // The x of the last of four digits is three digit advances.
+        let mut last_x = |content: &str, tabular: bool| {
+            let mut view = text(content).family(FontFamily::named("Geist"));
+            if tabular {
+                view = view.tabular_figures();
+            }
+            let runs = painted_runs_in(&view, None, &mut tcx);
+            runs.iter().flat_map(|r| r.glyphs.iter()).last().unwrap().x
+        };
+        let (tab_ones, tab_eights) = (last_x("1111", true), last_x("8888", true));
+        let (ones, eights) = (last_x("1111", false), last_x("8888", false));
+        assert_eq!(tab_ones, tab_eights);
+        assert_ne!(ones, eights);
+        drop(slot);
     }
 
     #[test]
@@ -1306,6 +1430,48 @@ mod tests {
     }
 
     #[test]
+    fn themed_mono_family_resolves_extension_generic_fallback_or_style_family() {
+        let build =
+            |view: TextView| View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mono = FontFamily::named("Acme Mono");
+        let attached = Theme::builder(Theme::neutral())
+            .extension(frust_theme::MonospaceFamily {
+                family: mono.clone(),
+            })
+            .build();
+        let bare = Theme::neutral();
+        let generic = FontFamily::NamedWithGeneric(vec![frust_text::FamilyName::Generic(
+            frust_text::GenericSlot::Monospace,
+        )]);
+
+        let widget = build(text("1").themed_mono_family());
+        assert_eq!(widget.effective_style(Some(&attached)).family, mono);
+        assert_eq!(widget.effective_style(Some(&bare)).family, generic);
+        assert_eq!(widget.effective_style(None).family, FontFamily::SystemUi);
+
+        // An explicit family wins in either call order.
+        let explicit = FontFamily::named("Explicit");
+        let a = build(text("1").themed_mono_family().family(explicit.clone()));
+        let b = build(text("1").family(explicit.clone()).themed_mono_family());
+        assert_eq!(a.effective_style(Some(&attached)).family, explicit);
+        assert_eq!(b.effective_style(Some(&attached)).family, explicit);
+    }
+
+    #[test]
+    fn switching_between_role_and_mono_family_on_rebuild_requests_layout() {
+        let view_a = text("1").themed_family(ThemeTextType::BodyLarge);
+        let view_b = text("1").themed_mono_family();
+        let mut widget = View::<()>::build(&view_a, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let flags = View::<()>::rebuild(
+            &view_b,
+            &view_a,
+            &mut widget,
+            &mut frust_core::BuildCtx::new(&mut 0u64),
+        );
+        assert!(flags.needs_layout());
+    }
+
+    #[test]
     fn changing_the_family_role_on_rebuild_invalidates_the_cached_shape() {
         let theme = role_theme(UNREGISTERED, "Tuffy");
         let (mut tcx, _slot) = tuffy_context();
@@ -1350,17 +1516,6 @@ mod tests {
         fn logic(_state: &mut ()) -> TextView {
             text("label").themed_family(ThemeTextType::BodyLarge)
         }
-        #[derive(Default)]
-        struct FaceRecorder {
-            faces: Vec<Vec<u8>>,
-        }
-        impl PaintScene for FaceRecorder {
-            fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
-            fn draw_text(&mut self, _o: Point, _t: &str) {}
-            fn draw_glyph_run(&mut self, run: GlyphRun) {
-                self.faces.push(run.font.font().data.as_ref().to_vec());
-            }
-        }
         let paint_faces = |root: &mut RenderRoot<(), TextView>, tcx: &mut TextContext| {
             root.layout_with_text(Size::new(200.0, 100.0), tcx as &mut dyn Any);
             let mut rec = FaceRecorder::default();
@@ -1382,5 +1537,144 @@ mod tests {
             "a bare type-scale family swap must re-shape the opted-in text in the \
              new family"
         );
+    }
+
+    /// Records the font bytes of every painted glyph run, in paint order.
+    #[derive(Default)]
+    struct FaceRecorder {
+        faces: Vec<Vec<u8>>,
+    }
+
+    impl PaintScene for FaceRecorder {
+        fn fill_rect(&mut self, _o: Point, _s: Size, _c: Color) {}
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, run: GlyphRun) {
+            self.faces.push(run.font.font().data.as_ref().to_vec());
+        }
+    }
+
+    #[test]
+    fn a_monospace_only_theme_swap_re_faces_the_text() {
+        // Two themes identical except for the `MonospaceFamily` value. The
+        // extension set is the same type either way, so only the effective
+        // style can tell them apart: the text must re-shape in the new family.
+        use frust_core::{FrameTime, RenderRoot};
+
+        fn logic(_state: &mut ()) -> TextView {
+            text("0123456789").themed_mono_family()
+        }
+        let with_mono = |family: &str| {
+            Theme::builder(Theme::neutral())
+                .extension(frust_theme::MonospaceFamily {
+                    family: FontFamily::named(family),
+                })
+                .build()
+        };
+        let paint_faces = |root: &mut RenderRoot<(), TextView>, tcx: &mut TextContext| {
+            root.layout_with_text(Size::new(200.0, 100.0), tcx as &mut dyn Any);
+            let mut rec = FaceRecorder::default();
+            root.paint(&mut rec, FrameTime::ZERO);
+            rec.faces
+        };
+
+        let (mut tcx, _slot) = tuffy_context();
+        let mut root: RenderRoot<(), TextView> = RenderRoot::new();
+        root.set_theme(Box::new(with_mono("Tuffy")));
+        root.rebuild(&mut logic, &mut ());
+        let before = paint_faces(&mut root, &mut tcx);
+        assert!(
+            !before.is_empty() && before.iter().all(|f| f == TUFFY),
+            "before the monospace-only swap the text shapes in the theme's mono face"
+        );
+
+        root.set_theme(Box::new(with_mono(UNREGISTERED)));
+        let after = paint_faces(&mut root, &mut tcx);
+        assert!(
+            !after.is_empty() && after.iter().all(|f| f != TUFFY),
+            "a monospace-only swap must re-shape the text in the new mono family, \
+             not replay the cached face"
+        );
+    }
+
+    /// One recorded paint operation, in order.
+    #[derive(Debug, PartialEq)]
+    enum Op {
+        Rect(Point, Size, Color),
+        Glyphs,
+    }
+
+    #[derive(Default)]
+    struct OrderRecorder(Vec<Op>);
+
+    impl PaintScene for OrderRecorder {
+        fn fill_rect(&mut self, o: Point, s: Size, c: Color) {
+            self.0.push(Op::Rect(o, s, c));
+        }
+        fn draw_text(&mut self, _o: Point, _t: &str) {}
+        fn draw_glyph_run(&mut self, _run: GlyphRun) {
+            self.0.push(Op::Glyphs);
+        }
+    }
+
+    fn painted_ops(view: TextView) -> Vec<Op> {
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), None);
+        widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 100.0)));
+        let mut rec = OrderRecorder::default();
+        let mut pctx = PaintCtx::new(Point::new(4.0, 6.0), Size::new(300.0, 100.0));
+        widget.paint(&mut pctx, &mut rec);
+        rec.0
+    }
+
+    #[test]
+    fn underline_fills_a_rect_before_the_glyph_run() {
+        let ops = painted_ops(text("link").underline());
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        assert!(matches!(ops[0], Op::Rect(..)), "{ops:?}");
+        assert_eq!(ops[1], Op::Glyphs);
+        let Op::Rect(origin, size, _) = ops[0] else {
+            unreachable!()
+        };
+        assert!(origin.x >= 4.0 && origin.y > 6.0, "placed at the origin");
+        assert!(size.width > 0.0 && size.height > 0.0);
+    }
+
+    #[test]
+    fn line_through_fills_a_rect_after_the_glyph_run() {
+        let ops = painted_ops(text("done").line_through());
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        assert_eq!(ops[0], Op::Glyphs);
+        assert!(matches!(ops[1], Op::Rect(..)), "{ops:?}");
+    }
+
+    #[test]
+    fn both_decorations_bracket_the_glyph_run() {
+        let red = Color::from_rgb8(200, 0, 0);
+        let ops = painted_ops(
+            text("x")
+                .decoration(TextDecoration::underline().with_color(red))
+                .line_through(),
+        );
+        assert!(matches!(ops[0], Op::Rect(_, _, c) if c == red), "{ops:?}");
+        assert_eq!(ops[1], Op::Glyphs);
+        assert!(matches!(ops[2], Op::Rect(_, _, c) if c == red), "{ops:?}");
+    }
+
+    #[test]
+    fn undecorated_text_fills_no_rect() {
+        assert_eq!(painted_ops(text("plain")), vec![Op::Glyphs]);
+    }
+
+    #[test]
+    fn decoration_builders_set_the_style() {
+        let view = text("x").underline().line_through();
+        assert_eq!(view.style.decoration, {
+            let mut both = TextDecoration::underline();
+            both.line_through = true;
+            both
+        });
+        let replaced = view.decoration(TextDecoration::none());
+        assert!(replaced.style.decoration.is_none());
     }
 }

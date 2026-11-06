@@ -1224,6 +1224,8 @@ mod authoring_surface_tests {
             crate::TextView,
             crate::authoring::ThemeTextType,
         ) -> crate::TextView = crate::TextView::themed_family;
+        let _themed_mono_family: fn(crate::TextView) -> crate::TextView =
+            crate::TextView::themed_mono_family;
 
         // The shared press-overlay opacity.
         let _pressed: f32 = crate::authoring::PRESSED_OPACITY;

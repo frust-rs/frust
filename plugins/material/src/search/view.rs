@@ -62,9 +62,9 @@ use std::rc::Rc;
 
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, CornerRadii, EventCtx, EventResult,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, View, Widget, any,
-    build_child, rebuild_child, rebuild_children, route_event, route_event_single, teardown_child,
-    visit_children,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, Role, SemanticsCtx, ThemeTextType, View, Widget,
+    any, build_child, rebuild_child, rebuild_children, route_event, route_event_single,
+    teardown_child, visit_children,
 };
 use frust::{NavigatorController, PopResult, Theme, icon, text_input};
 use kurbo::{Point, Size};
@@ -374,13 +374,15 @@ struct SearchViewContentView<State: 'static> {
 impl<State: 'static> SearchViewContentView<State> {
     /// The header's live editable: the framework's baseline field with its own
     /// border and focus ring suppressed, spanning the header band, its glyphs
-    /// inset clear of the back slot.
+    /// inset clear of the back slot. Its query and hint take the theme's
+    /// body-large family.
     fn field_view(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_changed.clone();
         let (hpad, _) = self.mode.header_padding();
         let mut field = text_input(self.query.clone(), move |state: &mut State, text| {
             on_change(state, text)
         })
+        .themed_family(ThemeTextType::BodyLarge)
         .border_width(0.0)
         .focus_ring_width(0.0)
         .corner_radius(0.0)
@@ -1666,5 +1668,49 @@ mod tests {
             assert!(has(&got, "Wipe"));
             assert!(!has(&got, "ย้อนกลับ"));
         }
+    }
+}
+
+#[cfg(all(test, feature = "bundled-fonts"))]
+mod typeface_tests {
+    use super::*;
+    use crate::appbar::top::typeface_probe::{Face, assert_paints_only_in};
+    use frust::authoring::text::{FontFamily, GenericSlot};
+
+    /// A compact (phone-shaped) window, the full-screen header's home.
+    const COMPACT: Size = Size::new(392.0, 800.0);
+
+    /// The full-screen header over a typed query, with a hint for the empty case.
+    fn header(_: &mut ()) -> SearchViewContentView<()> {
+        search_view("Hello", |_: &mut (), _: String| {})
+            .hint("Search")
+            .into_content(SearchViewMode::FullScreen, None)
+    }
+
+    /// The baseline theme with only `body_large` naming Roboto Mono, so a header
+    /// field that takes any other role's family paints Roboto Flex instead.
+    fn body_large_mono_theme() -> Theme {
+        let mut theme = crate::baseline();
+        theme.type_scale.body_large.family = FontFamily::stack_with_generic(
+            [crate::tokens::ROBOTO_MONO_FAMILY],
+            GenericSlot::Monospace,
+        );
+        theme
+    }
+
+    #[test]
+    fn the_header_field_paints_in_the_body_large_family() {
+        let (flex, mono) = (crate::tokens::font_data()[0], crate::tokens::font_data()[1]);
+        assert_paints_only_in(
+            "the search header's field",
+            header,
+            body_large_mono_theme(),
+            &[flex, mono],
+            COMPACT,
+            Face {
+                bytes: mono,
+                name: "Roboto Mono",
+            },
+        );
     }
 }

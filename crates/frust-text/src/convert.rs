@@ -47,8 +47,102 @@ use peniko::{Brush, FontData};
 
 use frust_scene::{FontHandle, Glyph, GlyphRun};
 
-use crate::layout::{ELLIPSIS, LineTable, Paragraph, Source};
-use crate::shape::{Shaped, ShapedFace, faux_bold_em_fraction};
+use crate::layout::{ELLIPSIS, LineItem, LineTable, Paragraph, Source};
+use crate::shape::{
+    Shaped, ShapedChar, ShapedCluster, ShapedFace, ShapedRun, faux_bold_em_fraction,
+};
+
+/// One step of [`walk_clusters`], in glyph emission order.
+pub(crate) enum Step<'a> {
+    /// A line item (a span of one shaped run) starts.
+    BeginItem {
+        item: &'a LineItem,
+        run: &'a ShapedRun,
+        face: &'a ShapedFace,
+    },
+    /// A cluster of the current item, in visual order.
+    Cluster(ClusterStep<'a>),
+    /// The current item ends.
+    EndItem,
+}
+
+/// A cluster and its pen extent on its line.
+pub(crate) struct ClusterStep<'a> {
+    /// Index of the cluster's line in the table.
+    pub(crate) line_index: usize,
+    pub(crate) item: &'a LineItem,
+    pub(crate) shaped: &'a Shaped,
+    pub(crate) run: &'a ShapedRun,
+    pub(crate) cluster: &'a ShapedCluster,
+    /// The cluster's first character.
+    pub(crate) first_char: Option<&'a ShapedChar>,
+    /// The span (style) index of the cluster's first character.
+    pub(crate) style: u16,
+    /// The line's baseline.
+    pub(crate) baseline: f32,
+    /// The pen position before the cluster's first glyph.
+    pub(crate) pen: f32,
+    /// The pen position after the cluster, a justified space's stretch included.
+    pub(crate) end: f32,
+}
+
+/// Walks every cluster of `table`'s lines over `paragraph` in visual order,
+/// tracking the pen: the line's alignment offset plus every glyph advance
+/// (and every justified space's stretch) before it.
+///
+/// The one place the pen is advanced, so the glyph positions
+/// [`lines_to_scene_runs`] emits and the extents the text decorations span
+/// cannot drift apart (bidi order, justification, the ellipsis).
+pub(crate) fn walk_clusters<'a>(
+    paragraph: &Paragraph<'a>,
+    table: &'a LineTable,
+    mut visit: impl FnMut(Step<'a>),
+) {
+    for (line_index, line) in table.lines.iter().enumerate() {
+        let baseline = line.metrics.baseline;
+        let mut pen = line.metrics.offset;
+        for item in &table.items[line.items.clone()] {
+            let shaped: &'a Shaped = paragraph.source(item.source);
+            let run = &shaped.runs[item.run];
+            let face = &shaped.faces[run.face];
+            visit(Step::BeginItem { item, run, face });
+            let clusters = item.clusters.clone();
+            let visual: Box<dyn Iterator<Item = usize>> = if item.bidi_level % 2 == 1 {
+                Box::new(clusters.rev())
+            } else {
+                Box::new(clusters)
+            };
+            for ci in visual {
+                let cluster = &shaped.clusters[ci];
+                let first_char = shaped.chars.get(cluster.chars.start as usize);
+                let start = pen;
+                let ids =
+                    &shaped.glyphs[cluster.glyphs.start as usize..cluster.glyphs.end as usize];
+                pen += ids.iter().map(|g| g.advance).sum::<f32>();
+                if ids.is_empty() {
+                    pen += cluster.advance;
+                }
+                if item.source == Source::Text && line.stretched.binary_search(&(ci as u32)).is_ok()
+                {
+                    pen += line.justify;
+                }
+                visit(Step::Cluster(ClusterStep {
+                    line_index,
+                    item,
+                    shaped,
+                    run,
+                    cluster,
+                    first_char,
+                    style: first_char.map_or(0, |c| c.style_index),
+                    baseline,
+                    pen: start,
+                    end: pen,
+                }));
+            }
+            visit(Step::EndItem);
+        }
+    }
+}
 
 /// Walks `table`'s lines over `paragraph` (whose text is `text`), emitting
 /// glyph runs at the layout origin (an identity transform) and adding the
@@ -66,90 +160,85 @@ pub(crate) fn lines_to_scene_runs(
     let ellipsis_text: &str = ELLIPSIS.encode_utf8(&mut ellipsis_text);
     let mut runs = Vec::new();
     let mut scan = NotdefScan::default();
+    // The open item's font handle and size, and the glyph run being built.
+    let mut open: Option<(FontHandle, f32)> = None;
+    let mut current: Option<(u16, Vec<Glyph>)> = None;
+    let mut source = Source::Text;
 
-    for line in &table.lines {
-        let baseline = line.metrics.baseline;
-        let mut pen = line.metrics.offset;
-        for item in &table.items[line.items.clone()] {
-            let shaped: &Shaped = paragraph.source(item.source);
-            let source_text = match item.source {
-                Source::Text => text,
-                Source::Ellipsis => ellipsis_text,
-            };
-            let run = &shaped.runs[item.run];
-            let face = &shaped.faces[run.face];
+    let flush = |open: &Option<(FontHandle, f32)>,
+                 current: &mut Option<(u16, Vec<Glyph>)>,
+                 source: Source,
+                 runs: &mut Vec<GlyphRun>| {
+        let Some((style, glyphs)) = current.take() else {
+            return;
+        };
+        let Some((font, font_size)) = open else {
+            return;
+        };
+        if glyphs.is_empty() {
+            return;
+        }
+        let style = paragraph.style(source, style);
+        runs.push(GlyphRun {
+            font: font.clone(),
+            font_size: *font_size,
+            brush: Brush::Solid(style.color),
+            transform,
+            glyphs,
+        });
+    };
+
+    walk_clusters(paragraph, table, |step| match step {
+        Step::BeginItem { item, run, face } => {
             let data = FontData::new(face.blob.clone(), face.index);
             // The variation instance the shaper chose (a requested weight on
             // a variable face); all-zero coords name the default and are dropped.
             // The face identity the oracle resolved (PostScript name, hidden
             // flag), so the renderer opens the face the oracle chose rather
             // than re-deriving who it is from the blob.
-            let font = font_handle(data, &run.coords, face, run.font_size);
-            let mut current: Option<(u16, Vec<Glyph>)> = None;
-            let flush = |current: &mut Option<(u16, Vec<Glyph>)>, runs: &mut Vec<GlyphRun>| {
-                let Some((style, glyphs)) = current.take() else {
-                    return;
-                };
-                if glyphs.is_empty() {
-                    return;
-                }
-                let style = paragraph.style(item.source, style);
-                runs.push(GlyphRun {
-                    font: font.clone(),
-                    font_size: run.font_size,
-                    brush: Brush::Solid(style.color),
-                    transform,
-                    glyphs,
+            open = Some((
+                font_handle(data, &run.coords, face, run.font_size),
+                run.font_size,
+            ));
+            source = item.source;
+        }
+        Step::Cluster(c) => {
+            if current.as_ref().is_some_and(|(s, _)| *s != c.style) {
+                flush(&open, &mut current, source, &mut runs);
+            }
+            let glyphs = &mut current.get_or_insert_with(|| (c.style, Vec::new())).1;
+            let ids =
+                &c.shaped.glyphs[c.cluster.glyphs.start as usize..c.cluster.glyphs.end as usize];
+            let mut pen = c.pen;
+            let mut missing = 0u64;
+            for g in ids {
+                glyphs.push(Glyph {
+                    id: g.id,
+                    x: pen + g.x,
+                    y: c.baseline + g.y,
                 });
-            };
-            let clusters = item.clusters.clone();
-            let visual: Box<dyn Iterator<Item = usize>> = if item.bidi_level % 2 == 1 {
-                Box::new(clusters.rev())
-            } else {
-                Box::new(clusters)
-            };
-            for ci in visual {
-                let cluster = &shaped.clusters[ci];
-                let first = shaped.chars.get(cluster.chars.start as usize);
-                let style = first.map_or(0, |c| c.style_index);
-                if current.as_ref().is_some_and(|(s, _)| *s != style) {
-                    flush(&mut current, &mut runs);
-                }
-                let glyphs = &mut current.get_or_insert_with(|| (style, Vec::new())).1;
-                let ids =
-                    &shaped.glyphs[cluster.glyphs.start as usize..cluster.glyphs.end as usize];
-                let mut missing = 0u64;
-                for g in ids {
-                    glyphs.push(Glyph {
-                        id: g.id,
-                        x: pen + g.x,
-                        y: baseline + g.y,
-                    });
-                    pen += g.advance;
-                    missing += u64::from(g.id == 0);
-                }
-                if ids.is_empty() {
-                    pen += cluster.advance;
-                }
-                if item.source == Source::Text && line.stretched.binary_search(&(ci as u32)).is_ok()
-                {
-                    pen += line.justify;
-                }
-                if missing > 0 {
-                    // Only a cluster holding glyph 0 decodes its first char,
-                    // and only to classify it: nothing of the text is kept.
-                    let visible = first
-                        .and_then(|c| source_text.get(c.byte_start as usize..))
-                        .and_then(|rest| rest.chars().next())
-                        .is_some_and(is_visible);
-                    if visible {
-                        scan.record(item.source, run.face, run.script, missing);
-                    }
+                pen += g.advance;
+                missing += u64::from(g.id == 0);
+            }
+            if missing > 0 {
+                // Only a cluster holding glyph 0 decodes its first char,
+                // and only to classify it: nothing of the text is kept.
+                let source_text = match c.item.source {
+                    Source::Text => text,
+                    Source::Ellipsis => ellipsis_text,
+                };
+                let visible = c
+                    .first_char
+                    .and_then(|ch| source_text.get(ch.byte_start as usize..))
+                    .and_then(|rest| rest.chars().next())
+                    .is_some_and(is_visible);
+                if visible {
+                    scan.record(c.item.source, c.run.face, c.run.script, missing);
                 }
             }
-            flush(&mut current, &mut runs);
         }
-    }
+        Step::EndItem => flush(&open, &mut current, source, &mut runs),
+    });
 
     scan.report(paragraph, notdef);
     runs

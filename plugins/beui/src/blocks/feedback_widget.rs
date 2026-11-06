@@ -438,11 +438,11 @@ impl<State: 'static> FeedbackWidgetView<State> {
     /// chrome suppressed (see the [module docs](self)).
     fn field_view(&self) -> impl View<State> + use<State> {
         let on_change = self.on_message_change.clone();
-        // Not themed: the baseline `text_input` has no themed-family opt-in.
         text_input(self.message.clone(), move |state: &mut State, text| {
             on_change(state, text);
         })
         .placeholder(self.placeholder.clone())
+        .themed_family(MESSAGE_FIELD_ROLE)
         .enabled(!self.status.is_busy())
         .multiline(3)
         .submit_on_enter(false)
@@ -730,6 +730,10 @@ const TITLE_ROLE: ThemeTextType = ThemeTextType::TitleSmall;
 /// The type-scale role the sent and error bodies take their family from at
 /// layout.
 const BODY_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// The type-scale role the message field's family (typed text and placeholder)
+/// resolves from at layout.
+const MESSAGE_FIELD_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
 
 /// `font-semibold` at `size`. The family here is the unthemed base; `layout`
 /// shapes in [`TITLE_ROLE`]'s family.
@@ -2015,9 +2019,10 @@ mod tests {
     const PROBE_WINDOW: Size = Size::new(600.0, 600.0);
 
     /// The block open on `status`'s view. The message, placeholder and button
-    /// labels are empty: the wrapped baseline field has no themed-family
-    /// opt-in and the buttons are `button`'s own text, so neither is what
-    /// these tests pin.
+    /// labels are empty: the message field paints no run here, and the buttons
+    /// are `button`'s own text, so neither is what these tests pin. The
+    /// message field's placeholder is pinned by
+    /// [`message_placeholder_follows_the_theme_body_family`].
     fn probe_logic(status: FeedbackStatus) -> impl FnMut(&mut ()) -> FeedbackWidgetView<()> {
         move |_: &mut ()| {
             feedback_widget::<(), _, _>(status, "", |_: &mut (), _| {}, |_: &mut (), _| {})
@@ -2053,5 +2058,25 @@ mod tests {
         for (status, what, _) in VIEWS {
             assert_follows_a_live_family_swap(what, probe_logic(status), PROBE_WINDOW);
         }
+    }
+
+    /// The open form with only the message field's placeholder set beside its
+    /// title.
+    fn placeholder_logic(_: &mut ()) -> FeedbackWidgetView<()> {
+        feedback_widget::<(), _, _>(
+            FeedbackStatus::Open,
+            "",
+            |_: &mut (), _| {},
+            |_: &mut (), _| {},
+        )
+        .placeholder("Tell us more")
+        .action_labels("", "")
+    }
+
+    #[test]
+    fn message_placeholder_follows_the_theme_body_family() {
+        let what = "the message field's placeholder";
+        assert_paints_only_in_geist(what, placeholder_logic, PROBE_WINDOW);
+        assert_follows_a_live_family_swap(what, placeholder_logic, PROBE_WINDOW);
     }
 }

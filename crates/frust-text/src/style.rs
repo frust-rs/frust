@@ -263,6 +263,73 @@ impl LineHeight {
     }
 }
 
+/// Lines drawn over a run of text: an underline and/or a line-through.
+///
+/// The lines are placed from the font's own underline and strikeout metrics
+/// (see [`crate::TextLayout::decoration_rects`]); [`Self::with_thickness`]
+/// overrides the stroke thickness and [`Self::with_color`] the colour, which
+/// otherwise follows the text.
+///
+/// ```
+/// use frust_text::TextDecoration;
+///
+/// let link = TextDecoration::underline();
+/// assert!(link.underline && !link.line_through);
+/// assert_eq!(TextDecoration::default(), TextDecoration::none());
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct TextDecoration {
+    /// Draw a line under the text.
+    pub underline: bool,
+    /// Draw a line through the middle of the text.
+    pub line_through: bool,
+    /// The line colour; `None` follows the text colour.
+    pub color: Option<Color>,
+    /// The line thickness in logical pixels; `None` takes the font's metric.
+    pub thickness: Option<f32>,
+}
+
+impl TextDecoration {
+    /// No decoration. The [`Default`].
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// An underline.
+    pub fn underline() -> Self {
+        Self {
+            underline: true,
+            ..Self::default()
+        }
+    }
+
+    /// A line through the text.
+    pub fn line_through() -> Self {
+        Self {
+            line_through: true,
+            ..Self::default()
+        }
+    }
+
+    /// This decoration drawn in `color` rather than the text colour.
+    pub fn with_color(mut self, color: Color) -> Self {
+        self.color = Some(color);
+        self
+    }
+
+    /// This decoration with its lines `thickness` logical pixels thick.
+    pub fn with_thickness(mut self, thickness: f32) -> Self {
+        self.thickness = Some(thickness);
+        self
+    }
+
+    /// Whether any line is drawn.
+    pub fn is_none(&self) -> bool {
+        !self.underline && !self.line_through
+    }
+}
+
 /// What a line does with a word wider than itself (CSS `overflow-wrap`).
 ///
 /// A paragraph-level knob, like [`TextAlign`]: the first span's style decides
@@ -325,6 +392,10 @@ pub struct TextStyle {
     /// applied over whatever weight/width/slant synthesis chose, in order; a
     /// later setting of the same tag wins. Axes a face lacks are ignored.
     pub variations: Vec<([u8; 4], f32)>,
+    /// OpenType feature settings (`(tag, value)`, e.g. `(*b"tnum", 1)` for
+    /// tabular figures or `(*b"liga", 0)` to disable ligatures), in order; a
+    /// later setting of the same tag wins. Features a face lacks are ignored.
+    pub features: Vec<([u8; 4], u16)>,
     /// BCP 47 locale of the text (`"ja"`, `"zh-Hant"`, ...): steers font
     /// fallback, language-specific shaping and CJK line breaking.
     pub locale: Option<String>,
@@ -341,6 +412,11 @@ pub struct TextStyle {
     /// What a word wider than the line does. Defaults to
     /// [`OverflowWrap::Normal`].
     pub overflow_wrap: OverflowWrap,
+    /// Underline and line-through. Defaults to none.
+    ///
+    /// Decorations are painted by `TextView` (`text(..)`) only; a `TextInput`'s
+    /// content and placeholder ignore this field.
+    pub decoration: TextDecoration,
 }
 
 impl TextStyle {
@@ -372,11 +448,34 @@ impl TextStyle {
         self
     }
 
+    /// This style with one more OpenType feature setting appended (a later
+    /// setting of the same tag wins).
+    pub fn with_feature(mut self, tag: [u8; 4], value: u16) -> Self {
+        self.features.push((tag, value));
+        self
+    }
+
+    /// This style with its OpenType feature settings replaced by `features`
+    /// (a later setting of the same tag wins).
+    pub fn with_features(mut self, features: impl IntoIterator<Item = ([u8; 4], u16)>) -> Self {
+        self.features = features.into_iter().collect();
+        self
+    }
+
     /// This style with the given [`OverflowWrap`] behavior.
     ///
     /// Paragraph-level: the first style decides; later spans' values are ignored.
     pub fn with_overflow_wrap(mut self, overflow_wrap: OverflowWrap) -> Self {
         self.overflow_wrap = overflow_wrap;
+        self
+    }
+
+    /// This style with the given [`TextDecoration`].
+    ///
+    /// Painted by `TextView` (`text(..)`) only; a `TextInput`'s content and
+    /// placeholder ignore the decoration.
+    pub fn with_decoration(mut self, decoration: TextDecoration) -> Self {
+        self.decoration = decoration;
         self
     }
 
@@ -446,6 +545,7 @@ impl Default for TextStyle {
             style: FontStyle::default(),
             width: 1.0,
             variations: Vec::new(),
+            features: Vec::new(),
             locale: None,
             size: 16.0,
             color: Color::BLACK,
@@ -453,6 +553,7 @@ impl Default for TextStyle {
             line_height: LineHeight::default(),
             align: TextAlign::default(),
             overflow_wrap: OverflowWrap::default(),
+            decoration: TextDecoration::default(),
         }
     }
 }
@@ -503,18 +604,21 @@ mod tests {
             .with_style(FontStyle::Italic)
             .with_width(0.5)
             .with_variation(*b"GRAD", 50.0)
+            .with_feature(*b"tnum", 1)
             .with_locale(Some("ja"))
             .with_size(20.0)
             .with_color(color)
             .with_letter_spacing(1.5)
             .with_line_height(LineHeight::Absolute(24.0))
             .with_align(TextAlign::Center)
-            .with_overflow_wrap(OverflowWrap::Anywhere);
+            .with_overflow_wrap(OverflowWrap::Anywhere)
+            .with_decoration(TextDecoration::underline().with_thickness(2.0));
         assert_eq!(style.family, FontFamily::Named(vec!["Inter".to_string()]));
         assert_eq!(style.weight, FontWeight::BOLD);
         assert_eq!(style.style, FontStyle::Italic);
         assert_eq!(style.width, 0.5);
         assert_eq!(style.variations, vec![(*b"GRAD", 50.0)]);
+        assert_eq!(style.features, vec![(*b"tnum", 1)]);
         assert_eq!(style.locale.as_deref(), Some("ja"));
         assert_eq!(style.size, 20.0);
         assert_eq!(style.color, color);
@@ -522,6 +626,10 @@ mod tests {
         assert_eq!(style.line_height, LineHeight::Absolute(24.0));
         assert_eq!(style.align, TextAlign::Center);
         assert_eq!(style.overflow_wrap, OverflowWrap::Anywhere);
+        assert_eq!(
+            style.decoration,
+            TextDecoration::underline().with_thickness(2.0)
+        );
     }
 
     #[test]
@@ -533,6 +641,7 @@ mod tests {
             style: FontStyle::Oblique(Some(12.0)),
             width: 0.75,
             variations: vec![(*b"wght", 650.0)],
+            features: vec![(*b"liga", 0), (*b"ss01", 1)],
             locale: Some("zh-Hant".to_string()),
             size: 14.0,
             color,
@@ -540,6 +649,7 @@ mod tests {
             line_height: LineHeight::FontSizeRelative(1.5),
             align: TextAlign::Justify,
             overflow_wrap: OverflowWrap::Anywhere,
+            decoration: TextDecoration::line_through().with_color(color),
         };
         let built = TextStyle::default()
             .with_family(FontFamily::named("Inter"))
@@ -547,13 +657,15 @@ mod tests {
             .with_style(FontStyle::Oblique(Some(12.0)))
             .with_width(0.75)
             .with_variations([(*b"wght", 650.0)])
+            .with_features([(*b"liga", 0), (*b"ss01", 1)])
             .with_locale(Some("zh-Hant"))
             .with_size(14.0)
             .with_color(color)
             .with_letter_spacing(0.25)
             .with_line_height(LineHeight::FontSizeRelative(1.5))
             .with_align(TextAlign::Justify)
-            .with_overflow_wrap(OverflowWrap::Anywhere);
+            .with_overflow_wrap(OverflowWrap::Anywhere)
+            .with_decoration(TextDecoration::line_through().with_color(color));
         assert_eq!(built, literal);
     }
 

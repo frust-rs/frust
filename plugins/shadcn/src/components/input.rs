@@ -49,11 +49,12 @@
 //! [`style::TEXT_BASE`] (16px) is the size the baseline's default `TextStyle`
 //! already carries, so the field is left on it: shadcn authors `text-base` with a
 //! `md:text-sm` step down, and this port keeps the mobile-first rung
-//! ([`style::TEXT_BASE`]'s own note). The *family* stays the baseline's system
-//! sans rather than the theme's bundled Inter — `TextInputView::text_style` is
-//! all-or-nothing (setting it marks the glyph color explicit, which would freeze
-//! a light-mode ink color into a dark-mode field), so keeping the theme's
-//! `on_surface` resolution is worth the family.
+//! ([`style::TEXT_BASE`]'s own note). The *family* comes from the theme's
+//! `BodyMedium` role through [`TextInputView::themed_family`], so the typed text
+//! and placeholder follow the live theme's type scale. The field does not use
+//! [`TextInputView::text_style`], which is all-or-nothing and would freeze a
+//! light-mode ink color into a dark-mode field; the color keeps its theme
+//! `on_surface` resolution.
 //!
 //! [`TextEditor`]: frust::authoring::text::TextEditor
 //! [`ShadcnRadius::md`]: crate::ShadcnRadius::md
@@ -63,8 +64,8 @@ use std::rc::Rc;
 use frust::authoring::{
     BoxConstraints, Brush, BuildCtx, ChangeFlags, ChildPod, Color, CursorIcon, EventCtx,
     EventResult, InputEvent, LayoutCtx, PaintCtx, PaintScene, Point, PointerPhase, Rect,
-    RoundedRect, SemanticsCtx, Shape, Size, View, Widget, build_child, rebuild_child,
-    route_event_single, teardown_child, visit_children,
+    RoundedRect, SemanticsCtx, Shape, Size, ThemeTextType, View, Widget, build_child,
+    rebuild_child, route_event_single, teardown_child, visit_children,
 };
 use frust::{Theme, text_input};
 
@@ -330,6 +331,7 @@ impl<State: 'static> InputView<State> {
         .placeholder(self.placeholder.clone())
         .enabled(!self.disabled)
         .obscured(self.password)
+        .themed_family(ThemeTextType::BodyMedium)
         .padding(style::spacing(3.0), style::spacing(1.0))
         .border_width(0.0)
         .corner_radius(ShadcnRadius::shadcn().md);
@@ -845,6 +847,33 @@ mod tests {
                 .iter()
                 .any(|(_, n)| n.role() == frust::authoring::Role::TextInput),
             "the wrapped editable's node reaches the tree through the chrome"
+        );
+    }
+
+    // ---- Typeface: the field text follows the theme's body role ----
+
+    /// A field with typed text and a placeholder, the two runs the family
+    /// applies to.
+    #[cfg(feature = "bundled-fonts")]
+    fn themed_field(_: &mut ()) -> InputView<()> {
+        input("Hello", |_: &mut (), _: String| {}).placeholder("Email")
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_field_text_paints_in_the_theme_face() {
+        crate::text::typeface_probe::assert_paints_in_the_theme_face(
+            "the input's text",
+            themed_field,
+        );
+    }
+
+    #[cfg(feature = "bundled-fonts")]
+    #[test]
+    fn the_field_text_follows_a_live_theme_swap() {
+        crate::text::typeface_probe::assert_follows_a_live_theme_swap(
+            "the input's text",
+            themed_field,
         );
     }
 }

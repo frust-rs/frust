@@ -841,16 +841,20 @@ impl Row {
     }
 }
 
+/// The type-scale role the filter field's family (typed text and placeholder)
+/// resolves from at layout.
+const FILTER_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
+
 impl<State: 'static> PalettePanelView<State> {
-    /// The wrapped baseline filter field, with its own chrome suppressed (this
+    /// The wrapped filter field, with its own chrome suppressed (this
     /// widget paints the row's rule, mark and key cap).
     fn field(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_change.clone();
-        // Not themed: the baseline `text_input` has no themed-family opt-in.
         text_input(self.query.clone(), move |state: &mut State, text| {
             on_change(state, text)
         })
         .placeholder(self.config.borrow().placeholder.clone())
+        .themed_family(FILTER_ROLE)
         .padding(0.0, 0.0)
         .border_width(0.0)
         .corner_radius(0.0)
@@ -1922,9 +1926,9 @@ mod tests {
     };
 
     /// The open palette with two headings, two rows (one with an ASCII hint),
-    /// and the key cap. The query and placeholder are empty: the wrapped baseline field has
-    /// no themed-family opt-in, so its own text would paint the system face and
-    /// is not what these tests pin.
+    /// and the key cap. The query and placeholder are empty, so the filter
+    /// field paints no run here; its placeholder is pinned by
+    /// [`filter_placeholder_follows_the_theme_body_family`].
     fn probe_view(_: &mut ()) -> frust::StackView<()> {
         frust::stack().child(
             command_palette::<(), _, _>(
@@ -1956,5 +1960,32 @@ mod tests {
     #[test]
     fn palette_text_follows_a_live_theme_family_swap() {
         assert_follows_a_live_family_swap("the palette's text", probe_view, WINDOW);
+    }
+
+    /// A palette whose only run is its filter field's placeholder.
+    fn filter_placeholder_view(_: &mut ()) -> frust::StackView<()> {
+        frust::stack().child(
+            command_palette::<(), _, _>(
+                vec![command_palette_item("Open File")],
+                "",
+                |_: &mut (), _| {},
+                |_: &mut (), _| {},
+            )
+            .placeholder("Search commands"),
+        )
+    }
+
+    #[test]
+    fn filter_placeholder_follows_the_theme_body_family() {
+        assert_paints_only_in_geist(
+            "the palette's filter placeholder",
+            filter_placeholder_view,
+            WINDOW,
+        );
+        assert_follows_a_live_family_swap(
+            "the palette's filter placeholder",
+            filter_placeholder_view,
+            WINDOW,
+        );
     }
 }

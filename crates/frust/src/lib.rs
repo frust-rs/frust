@@ -1009,11 +1009,12 @@ pub mod authoring {
     /// nested here rather than flattened avoids the glob collision a flat
     /// re-export of both would cause.
     pub mod text {
-        pub use frust_text::{EditOp, EditingState, EditingStateBytes, TextEditor};
         pub use frust_text::{
-            FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, OverflowWrap,
-            TextAlign, TextContext, TextLayout, TextOverflow, TextStyle,
+            DecorationKind, DecorationRect, FamilyName, FontFamily, FontStyle, FontWeight,
+            GenericSlot, LineHeight, OverflowWrap, TextAlign, TextContext, TextDecoration,
+            TextLayout, TextOverflow, TextStyle,
         };
+        pub use frust_text::{EditOp, EditingState, EditingStateBytes, TextEditor};
         /// Types named in [`TextContext`]'s own public signatures —
         /// `register_fonts() -> Result<Vec<RegisteredFamily>, FontError>`,
         /// `shape_cache_stats() -> ShapeCacheStats` and
@@ -1894,9 +1895,10 @@ pub use route_state::RouteObserver;
 /// app (or a design-system plugin) authors a theme against `frust::*` alone.
 pub use frust_theme::{
     Brightness, ColorScheme, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation,
-    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, GlassTier, MotionDurations,
-    MotionExtras, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec, ShapeScale,
-    StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions, TypeScale,
+    ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, GlassTier, MonospaceFamily,
+    MotionDurations, MotionExtras, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions,
+    TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in

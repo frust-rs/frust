@@ -118,13 +118,13 @@ strings. The canonical example is `crates/frust-drive/templates/app/src/lib.rs.t
   `Label`/`LabelRun`/`WrappedRun::layout_themed`, are the same opt-in for a catalog's
   self-shaped runs, each resolving the role's slot with
   `ThemeTextType::style_in(&theme.type_scale)` — the same lookup `.themed_family(..)` makes —
-  instead of keeping its own copy of the role-to-slot table). A build-time `.family(..)` or a
-  hardcoded font stack is a legitimate choice too — `TypeScale` has no monospace slot, so mono
-  text has no role to name — but neither a live theme swap nor
-  `frust_testing::frame::pin_type_scale` can redirect it. A baseline `TextInput` has no
-  themed-family seam at all — its `effective_style` resolves only color from the theme, never
-  family — so a field keeps whatever explicit or system family it was built with
-  (`textinput-no-themed-family` in [LIMITATIONS.md](LIMITATIONS.md)).
+  instead of keeping its own copy of the role-to-slot table). Monospace text names no type-scale
+  role: `.themed_mono_family()` takes `Theme::monospace_family()` (the `MonospaceFamily` theme
+  extension, else the generic monospace fallback) with the same precedence. `TextInput` opts in the
+  same way (`.themed_family(role)` / `.themed_mono_family()`) for its content and placeholder, and
+  the theme's family wins over a `text_style` family. A build-time `.family(..)` or a hardcoded
+  font stack is a legitimate choice too, but neither a live theme swap nor
+  `frust_testing::frame::pin_type_scale` can redirect it.
 - **Token-not-hardcode: a widget authors against a `Theme` field first; a bare local
   constant is the documented fallback, not the default.** A hardcoded metric/color is a
   defect once a matching `ColorScheme`/`ShapeScale`/`Elevation`/`GlassScale`/`MotionScheme`

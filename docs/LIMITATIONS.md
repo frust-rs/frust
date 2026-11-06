@@ -3837,6 +3837,30 @@ focus.
 
 ---
 
+### `textinput-no-text-decoration` — a text field draws no underline or line-through
+
+**Observed**: `TextStyle.decoration` (underline, line-through) is painted only by `TextView`. A
+`TextInputView` accepts a decorated style for its content and its placeholder, but its paint path
+never asks the layout for decoration rectangles, so no line is drawn under or through the text.
+
+**Applies to**: every `frust::TextInputView` and every design-system field wrapping one, on every
+platform.
+
+**Workaround**: draw the line with a separate `TextView` over a read-only presentation, or leave the
+field undecorated.
+
+**Why accepted**: a decoration line crosses the caret, the selection highlight and the composing
+underline, and which layer wins at each crossing is an open design question rather than a missing
+call.
+
+**Evidence**: `crates/frust-widgets/src/text.rs` (`TextWidget` paints `TextLayout::decoration_rects`)
+against `crates/frust-widgets/src/textinput.rs`, which has no decoration paint.
+
+**Trigger for removal**: the field paints `TextLayout::decoration_rects` for its content and
+placeholder, with the caret and selection interplay settled.
+
+---
+
 ### `selection-verbs-advertised-not-invocable` — the field publishes Copy/Cut/Paste/Select all to a screen reader, and none of them can be invoked
 
 **Observed**: the floated toolbar is a pointer affordance and the portal publishes no semantics for
@@ -7944,20 +7968,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Why accepted**: `cargo metadata` is what lets the phase resolve the real target directory correctly under a `.cargo/config.toml` `[build] target-dir` override or a `CARGO_TARGET_DIR` env var, instead of assuming the default; its cost (a workspace manifest walk, no compilation) is negligible next to the `cargo build` step the same script already runs first.
 
 **Evidence**: `crates/frust-drive/templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s build-phase `shellScript`.
-
----
-
-### `textinput-no-themed-family` — a baseline `TextInput` field never takes its font family from the theme
-
-**Observed**: `TextInputWidget::effective_style` (`crates/frust-widgets/src/textinput.rs` ~1230) resolves only the field's ink COLOR from the theme (`Theme::scheme().on_surface`, further dimmed while disabled) — it never touches `style.family`. A field's family is therefore whatever it was built with: the caller's own explicit `.text_style(..)`, or, absent that, `TextStyle::default()`'s `FontFamily::SystemUi`. Neither a runtime theme swap nor `frust_testing::frame::pin_type_scale` can redirect it, unlike the design-system catalogs' own label/button/title text, which resolves FAMILY from a `Theme::type_scale` role (see [TESTING.md](TESTING.md)'s Deterministic Inputs section).
-
-**Applies to**: every baseline `TextInput` field, and every catalog control built on it that does not itself override the family — shadcn's `input`/`textarea` and the `command` palette's search field; Glyph's `command_palette` query field; and beUI's `input`, `combobox`, `multi_select` and `prompt_input` fields, plus the `command_palette`, `feedback_widget`, `morphing_search` and `signup_form` blocks' fields, all of which are built on beUI's own `input`.
-
-**Why accepted**: closing the gap means giving `TextInput` a themed-family seam mirroring `Text`'s `.themed_family(..)` opt-in (a new branch in `effective_style`, plus each affected catalog field wiring into it) — a `frust-widgets` API change not yet built, so an app that swaps themes or a font scale at runtime sees every field's chrome and ink follow the theme while its typed text keeps the system font.
-
-**Trigger for removal**: `TextInput` grows a themed-family option (an opt-in analogous to `Text::themed_family`) and the fields listed above are wired through it.
-
-**Evidence**: `crates/frust-widgets/src/textinput.rs` (`effective_style`); [TESTING.md](TESTING.md)'s pinnable-text paragraph; `crates/frust-testing/src/corpus/page.rs` module docs.
 
 ---
 
