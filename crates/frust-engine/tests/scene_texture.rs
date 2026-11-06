@@ -43,8 +43,8 @@ use frust_engine::{
 use frust_gpu::{HeadlessTarget, SceneTextureId, Texture, TextureDesc, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
-use peniko::Color;
 use peniko::color::palette::css::{BLACK, BLUE, GREEN, RED};
+use peniko::{Brush, Color};
 
 /// Target extent every case renders at.
 const SIZE: u32 = 64;
@@ -523,6 +523,67 @@ fn an_opaque_hint_routes_through_the_opaque_pass() {
     );
     assert_checkerboard(&frame, RED, BLUE);
     assert_only_dest_painted(&frame);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test scene_texture -- --ignored`"]
+fn interleaved_opaque_external_bindings_each_draw_their_own_texture() {
+    let _guard = render_lock();
+    let mut harness = Harness::new();
+    harness.renderer.set_pass_merge(false);
+    // Two distinct solid textures, both asserted opaque.
+    let a = upload(&harness.device, &harness.queue, &checkerboard(RED, RED));
+    let b = upload(&harness.device, &harness.queue, &checkerboard(BLUE, BLUE));
+    let hints = SceneTextureHints::new().assume_opaque(true);
+    let a_id = harness.bind_with(&a, hints);
+    let b_id = harness.bind_with(&b, hints);
+
+    let white = Color::from_rgb8(255, 255, 255);
+    let yellow = Color::from_rgb8(255, 255, 0);
+    // Painter order: rect, A, rect, B, A. The first A overlaps the first rect
+    // (x 16..32) and is later, so it occludes it there; the other
+    // destinations are disjoint.
+    let first_rect = Rect::new(0.0, 0.0, 32.0, 16.0);
+    let first_a = Rect::new(16.0, 0.0, 48.0, 16.0);
+    let second_rect = Rect::new(0.0, 20.0, 16.0, 36.0);
+    let only_b = Rect::new(20.0, 20.0, 44.0, 36.0);
+    let second_a = Rect::new(0.0, 44.0, 32.0, 60.0);
+    let scene = scene_of(|builder| {
+        builder.fill_rect(first_rect, Brush::Solid(white));
+        builder.scene_texture(a_id.get(), first_a);
+        builder.fill_rect(second_rect, Brush::Solid(yellow));
+        builder.scene_texture(b_id.get(), only_b);
+        builder.scene_texture(a_id.get(), second_a);
+    });
+
+    let frame = harness.render(&scene);
+
+    assert_eq!(
+        pixel(&frame, 8, 8),
+        rgba(white),
+        "the first rect, unoccluded"
+    );
+    assert_eq!(
+        pixel(&frame, 24, 8),
+        rgba(RED),
+        "the first A draw occludes the painter-earlier rect"
+    );
+    assert_eq!(pixel(&frame, 40, 8), rgba(RED), "the first A draw");
+    assert_eq!(pixel(&frame, 8, 28), rgba(yellow), "the second rect");
+    assert_eq!(pixel(&frame, 32, 28), rgba(BLUE), "B draws its own texture");
+    assert_eq!(
+        pixel(&frame, 16, 52),
+        rgba(RED),
+        "the second A draw is A's colour, not B's"
+    );
+    assert!(
+        harness
+            .renderer
+            .last_frame_passes()
+            .contains(&FramePass::Opaque),
+        "the externals drew in the opaque pass: {:?}",
+        harness.renderer.last_frame_passes()
+    );
 }
 
 #[test]

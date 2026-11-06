@@ -27,7 +27,7 @@
 use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, OnceLock, PoisonError};
 
 use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
 use frust_gpu::{HeadlessTarget, SceneTextureId, TierCaps};
@@ -265,6 +265,8 @@ fn drain_error_scope(device: &wgpu::Device, scope: wgpu::ErrorScopeGuard) -> Opt
     }
 }
 
+static INSTANCE: OnceLock<wgpu::Instance> = OnceLock::new();
+
 /// One case's device, engine and read-back target.
 struct Harness {
     device: wgpu::Device,
@@ -282,9 +284,15 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let (device, queue, caps) = block_on(async {
-            let instance = wgpu::Instance::new(
-                wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
-            );
+            // One instance for the process: device identity is per instance,
+            // so devices from separate instances can compare equal.
+            let instance = INSTANCE
+                .get_or_init(|| {
+                    wgpu::Instance::new(
+                        wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+                    )
+                })
+                .clone();
             let adapter = wgpu::util::initialize_adapter_from_env_or_default(&instance, None)
                 .await
                 .expect("no compatible GPU adapter");
@@ -683,6 +691,64 @@ fn a_sub_rect_before_any_full_frame_is_refused_and_released() {
 
     drop(registration);
     settle(&mut harness);
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test texture_bus -- --ignored --test-threads=1`"]
+fn a_device_change_makes_frame_size_none_until_a_full_frame() {
+    let _serial = serial();
+    let mut first = Harness::new();
+    let queue = Queue::default();
+    let releases = Releases::default();
+    let registration = register_texture_source(queue.source());
+    let scene = scene_drawing(registration.scene_texture_id(), DEST);
+
+    queue.push(solid(FRAME, FRAME, RED).on_release(releases.callback(0)));
+    let drawn = first.frame(&scene);
+    assert_dest_is(&drawn, RED, "the full frame is shown");
+    assert_eq!(registration.frame_size(), Some((FRAME, FRAME)));
+
+    // A second harness is a second device and engine: the same registration's
+    // pass now sees a frame from a device other than the one it showed on,
+    // which is what an Activity recreate or a GPU reset looks like to it.
+    let mut second = Harness::new();
+    let drawn = second.frame(&scene);
+    assert_ne!(first.device, second.device, "a second, distinct device");
+    assert_dest_is(&drawn, BASE, "nothing carries over to the new device");
+    assert_eq!(
+        registration.frame_size(),
+        None,
+        "the reset clears the reported size"
+    );
+
+    queue.push(partial(SourceFormat::Rgba8, PATCH, GREEN).on_release(releases.callback(1)));
+    let drawn = second.frame(&scene);
+    assert_dest_is(&drawn, BASE, "a region frame has nothing to update");
+    assert_eq!(
+        releases.counts(),
+        vec![1, 1],
+        "the refused frame is released"
+    );
+    assert_eq!(registration.frame_size(), None);
+
+    queue.push(solid(FRAME, FRAME, BLUE).on_release(releases.callback(2)));
+    let drawn = second.frame(&scene);
+    assert_dest_is(&drawn, BLUE, "a full frame recovers");
+    assert_eq!(registration.frame_size(), Some((FRAME, FRAME)));
+
+    queue.push(partial(SourceFormat::Rgba8, PATCH, GREEN).on_release(releases.callback(3)));
+    let drawn = second.frame(&scene);
+    assert_eq!(
+        pixel(&drawn, 20, 20),
+        GREEN,
+        "region frames are accepted again"
+    );
+    assert_eq!(pixel(&drawn, 48, 48), BLUE);
+    assert_eq!(releases.counts(), vec![1, 1, 1, 1]);
+
+    drop(registration);
+    settle(&mut second);
+    settle(&mut first);
 }
 
 #[test]

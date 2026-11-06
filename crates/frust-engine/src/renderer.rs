@@ -5199,7 +5199,8 @@ impl Scratch {
                                 // the alpha region's.
                                 if paint.external != self.opaque_run_external {
                                     let end = self.opaque.len() as u32;
-                                    self.push_opaque_run(end);
+                                    let closing = self.opaque_run_external;
+                                    self.push_opaque_run(end, closing);
                                     self.opaque_run_external = paint.external;
                                 }
                                 mark_class(&mut self.opaque_marks, self.opaque.len() as u32, class);
@@ -5305,11 +5306,14 @@ impl Scratch {
         // The opaque region is the one depth-writing pass's, cut into class
         // runs (and external-binding runs) like any other.
         let end = self.opaque.len() as u32;
-        self.push_opaque_run(end);
+        let closing = self.opaque_run_external;
+        self.push_opaque_run(end, closing);
     }
 
-    /// Closes the open opaque run at `end`, cutting it into class runs.
-    fn push_opaque_run(&mut self, end: u32) {
+    /// Closes the open opaque run at `end`, cutting it into class runs, each
+    /// drawn with `external` (the slot the run being closed was opened with —
+    /// passed in so a reordering of the callers cannot relabel a segment).
+    fn push_opaque_run(&mut self, end: u32, external: Option<u32>) {
         let first = self.opaque_run_start;
         self.opaque_run_start = end;
         if end <= first {
@@ -5323,14 +5327,19 @@ impl Scratch {
             &mut self.class_runs,
         );
         debug_assert!(
+            self.opaque.get(first as usize..end as usize).is_some(),
+            "the opaque run {first}..{end} is out of range of {} instances",
+            self.opaque.len()
+        );
+        debug_assert!(
             self.opaque
                 .get(first as usize..end as usize)
-                .is_some_and(|span| runs_draw(&self.class_runs, span)),
+                .is_none_or(|span| runs_draw(&self.class_runs, span)),
             "the opaque marks disagree with the instances they mark"
         );
         for run in &self.class_runs {
             let at = first.saturating_add(run.first);
-            self.opaque_segments.push(match self.opaque_run_external {
+            self.opaque_segments.push(match external {
                 Some(slot) => Segment::External(at, run.count, slot, run.class),
                 None => Segment::Strips(at, run.count, run.class),
             });
