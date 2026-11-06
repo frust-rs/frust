@@ -1262,11 +1262,10 @@ pub mod authoring {
 /// any engine-tier `SurfaceRenderer` frame, `submit` and `submit_deferred`
 /// alike, which is what the Android and iOS shells call exactly as desktop
 /// does — a registered pass is not desktop-only by construction, and
-/// [`with_context`] answers on every shell once a surface exists. Only the
-/// desktop headless path has actually been *exercised* so far
-/// (`docs/LIMITATIONS.md`'s `facade-external-pass-desktop-only`) — mobile is
-/// wired and compiles the seam, but no registered pass has been driven
-/// through either shell's own frame loop yet.
+/// [`with_context`] answers on every shell once a surface exists. A
+/// registered pass has been driven headless and through the Android shell's
+/// own frame loop on a device; iOS and a windowed desktop run have not yet
+/// (`docs/LIMITATIONS.md`'s `facade-external-pass-desktop-only`).
 ///
 /// A panic inside `record` is caught in a debug build: the pass is reported
 /// and unregistered, the surface that caught it unbinds it at once (every
