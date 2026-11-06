@@ -301,6 +301,7 @@ use crate::compile::CompileSpans;
 use crate::compile::paint::resolve_lut_request;
 use crate::compile::{
     ClearPunch, CompiledFrame, GlyphQuad, PhaseClock, RetainedKind, SceneCompiler,
+    SceneTextureHints,
 };
 use crate::config;
 use crate::diag::{EngineSpan, FrameTimestamps};
@@ -1789,6 +1790,23 @@ impl EngineRenderer {
         size: (u32, u32),
         view: wgpu::TextureView,
     ) -> Option<wgpu::TextureView> {
+        self.bind_texture_with(id, size, view, SceneTextureHints::default())
+    }
+
+    /// [`Self::bind_texture`] with registration-side [`SceneTextureHints`]:
+    /// the sampling filter and the caller's opacity assertion.
+    ///
+    /// The engine never reads the texels, so `opaque` is taken on trust; a
+    /// texture holding alpha below one drawn with it occludes instead of
+    /// blending. Rebinding replaces the hints, and a held plan is dropped when
+    /// either the extent or the hints change.
+    pub fn bind_texture_with(
+        &mut self,
+        id: SceneTextureId,
+        size: (u32, u32),
+        view: wgpu::TextureView,
+        hints: SceneTextureHints,
+    ) -> Option<wgpu::TextureView> {
         // The plan reads an external texture only through the compiler's
         // extent entry for `id` (bound or not, and its `u16` extent): the view
         // and the bind groups naming it are resolved at encode time, past the
@@ -1797,10 +1815,12 @@ impl EngineRenderer {
         // new camera/video frame inside submit) would otherwise force a
         // second compile and schedule after acquire on every frame, and land
         // its plan-stage refusals post-acquire.
-        let before = self.compiler.externals().get(id.get());
+        let before = self.external_registration(id);
         self.resources.forget_external(id.get());
-        let usable = self.compiler.bind_external_texture(id.get(), size);
-        let after = self.compiler.externals().get(id.get());
+        let usable = self
+            .compiler
+            .bind_external_texture_with(id.get(), size, hints);
+        let after = self.external_registration(id);
         if before != after {
             self.prepared = None;
         }
@@ -1808,6 +1828,12 @@ impl EngineRenderer {
             return self.textures.unbind(id);
         }
         self.textures.bind(id, view)
+    }
+
+    /// The compiler-side registration the plan reads for `id`: extent and hints.
+    fn external_registration(&self, id: SceneTextureId) -> Option<((u16, u16), SceneTextureHints)> {
+        let externals = self.compiler.externals();
+        externals.get(id.get()).zip(externals.hints(id.get()))
     }
 
     /// Removes the texture registered under `id`, returning its view.
@@ -3047,6 +3073,12 @@ impl EngineRenderer {
                 pipeline,
                 format,
             );
+            self.resources.ensure_external_groups(
+                device,
+                EnginePipeline::StripOpaque,
+                pipeline,
+                &self.textures,
+            );
         }
         if let Some(pipeline) = frame.page.as_ref().and_then(ClassPipelines::any) {
             self.resources.ensure_bind_groups(
@@ -3231,9 +3263,9 @@ impl EngineRenderer {
                 groups: opaque_groups,
                 resources: &opaque_groups.resources,
                 composites: &[],
-                // An external paint is never claimed opaque, so the
-                // depth-writing pass never holds a run.
-                external_keys: &[],
+                // An external paint the caller asserted opaque draws here,
+                // its run bound like an alpha-pass one.
+                external_keys: self.resources.external_runs.keys(),
                 instances,
                 base: 0,
                 // The whole opaque region, `(0, opaque_count)`, cut into its
@@ -4917,6 +4949,11 @@ struct Scratch {
     alpha_marks: Vec<(u32, PaintClass)>,
     /// The same marks for [`Self::opaque`].
     opaque_marks: Vec<(u32, PaintClass)>,
+    /// First instance of the open run of [`Self::opaque`] drawn with one
+    /// external binding.
+    opaque_run_start: u32,
+    /// The external slot the open opaque run is drawn with.
+    opaque_run_external: Option<u32>,
 }
 
 impl Scratch {
@@ -4971,6 +5008,8 @@ impl Scratch {
         self.opaque_segments.clear();
         self.alpha_marks.clear();
         self.opaque_marks.clear();
+        self.opaque_run_start = 0;
+        self.opaque_run_external = None;
         self.opaque_classes = ClassSet::EMPTY;
         self.surface_classes = ClassSet::EMPTY;
         self.page_classes = ClassSet::EMPTY;
@@ -5156,6 +5195,13 @@ impl Scratch {
                             let class = paint.class;
                             mark_class(&mut self.alpha_marks, self.alpha.len() as u32, class);
                             if to_opaque {
+                                // One external binding per opaque run, like
+                                // the alpha region's.
+                                if paint.external != self.opaque_run_external {
+                                    let end = self.opaque.len() as u32;
+                                    self.push_opaque_run(end);
+                                    self.opaque_run_external = paint.external;
+                                }
                                 mark_class(&mut self.opaque_marks, self.opaque.len() as u32, class);
                             }
 
@@ -5256,22 +5302,38 @@ impl Scratch {
             self.punch = self.push_punches(pending, strips);
         }
 
-        // The opaque region is one segment of the one depth-writing pass, cut
-        // into class runs like any other.
+        // The opaque region is the one depth-writing pass's, cut into class
+        // runs (and external-binding runs) like any other.
+        let end = self.opaque.len() as u32;
+        self.push_opaque_run(end);
+    }
+
+    /// Closes the open opaque run at `end`, cutting it into class runs.
+    fn push_opaque_run(&mut self, end: u32) {
+        let first = self.opaque_run_start;
+        self.opaque_run_start = end;
+        if end <= first {
+            return;
+        }
         self.class_runs.clear();
         merge_class_runs(
-            marked_runs(&self.opaque_marks, 0, self.opaque.len() as u32),
+            marked_runs(&self.opaque_marks, first, end),
             self.routing.min_run,
             self.routing.uber,
             &mut self.class_runs,
         );
         debug_assert!(
-            runs_draw(&self.class_runs, &self.opaque),
+            self.opaque
+                .get(first as usize..end as usize)
+                .is_some_and(|span| runs_draw(&self.class_runs, span)),
             "the opaque marks disagree with the instances they mark"
         );
         for run in &self.class_runs {
-            self.opaque_segments
-                .push(Segment::Strips(run.first, run.count, run.class));
+            let at = first.saturating_add(run.first);
+            self.opaque_segments.push(match self.opaque_run_external {
+                Some(slot) => Segment::External(at, run.count, slot, run.class),
+                None => Segment::Strips(at, run.count, run.class),
+            });
             self.opaque_classes.insert(run.class);
         }
     }
