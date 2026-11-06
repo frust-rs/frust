@@ -441,8 +441,8 @@ impl SourceFrame {
     /// A producer sending regions must send a full frame whenever
     /// [`TextureRegistration::frame_size`] is `None` or differs from its
     /// extent, and after any native frame (an imported view cannot be written
-    /// to). A device change (an Activity recreate, a GPU reset) drops what was
-    /// shown, so nothing stays on screen after one and `frame_size` reads
+    /// to). A device change (an Activity recreate, a GPU reset), detected by the
+    /// device generation the drain stamps, drops what was shown, so nothing stays on screen after one and `frame_size` reads
     /// `None` until the next full frame; region frames sent meanwhile are
     /// refused and released.
     #[must_use]
@@ -878,10 +878,16 @@ struct PassState {
 
 /// The view a registration currently shows.
 struct Shown {
-    /// The device `view` was created on — compared against each frame's, as
-    /// the device-change check. Held only alongside the resources made on it
-    /// and replaced with them.
+    /// The device `view` was created on. Kept so the old queue's fences can
+    /// be drained when the device changes; held only alongside the resources
+    /// made on it and replaced with them.
     device: wgpu::Device,
+    /// The generation of the device `view` was made on, as the drain stamped
+    /// it: the device-change check. Device equality is not enough, since
+    /// `wgpu::Device` compares only its id and ids are allocated per
+    /// `Instance`, so a device on a recreated instance can equal the old one.
+    /// `0` means unknown; see [`device_changed`].
+    generation: u64,
     view: wgpu::TextureView,
     size: (u32, u32),
     /// The bus's own upload texture behind `view`, reused by the next CPU
@@ -1052,6 +1058,15 @@ fn report(flag: &mut bool, id: u64, message: fmt::Arguments<'_>) {
     }
 }
 
+/// Whether `frame` runs on a different device than `shown` was made on.
+/// Generations are process-unique, so any difference is a change. Both the
+/// generation and the device are compared, and either differing counts: a
+/// drain that stamps `0` (unknown) on both sides is still caught by the
+/// device comparison, as far as that is able to see.
+fn device_changed(shown: &Shown, frame: &ExternalFrame<'_>) -> bool {
+    shown.generation != frame.device_generation() || shown.device != *frame.device()
+}
+
 impl ExternalPass for SourcePass {
     fn record(&self, frame: &mut ExternalFrame<'_>) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1062,7 +1077,7 @@ impl ExternalPass for SourcePass {
         if state
             .shown
             .as_ref()
-            .is_some_and(|shown| shown.device != *frame.device())
+            .is_some_and(|shown| device_changed(shown, frame))
         {
             let old_device = state.shown.as_ref().map(|shown| shown.device.clone());
             state.shown = None;
@@ -1144,11 +1159,15 @@ fn upload(
     let (width, height) = size;
     // GL cannot be trusted with a BGRA upload (wgpu-hal maps it to an RGBA8
     // internal format with a BGRA transfer format), so it swizzles on the CPU.
-    let gl = frame.device().adapter_info().backend == wgpu::Backend::Gl;
     let (texture_format, swizzle) = match format {
         SourceFormat::Rgba8 => (wgpu::TextureFormat::Rgba8Unorm, false),
-        SourceFormat::Bgra8 if gl => (wgpu::TextureFormat::Rgba8Unorm, true),
-        SourceFormat::Bgra8 => (wgpu::TextureFormat::Bgra8Unorm, false),
+        SourceFormat::Bgra8 => {
+            if frame.device().adapter_info().backend == wgpu::Backend::Gl {
+                (wgpu::TextureFormat::Rgba8Unorm, true)
+            } else {
+                (wgpu::TextureFormat::Bgra8Unorm, false)
+            }
+        }
     };
     let max = frame.device().limits().max_texture_dimension_2d;
     if width == 0 || height == 0 || width > max || height > max {
@@ -1262,6 +1281,7 @@ fn upload(
             state,
             Shown {
                 device: frame.device().clone(),
+                generation: frame.device_generation(),
                 view,
                 size,
                 upload: Some(texture),
@@ -1382,6 +1402,7 @@ fn import(
                 state,
                 Shown {
                     device: frame.device().clone(),
+                    generation: frame.device_generation(),
                     view: imported.view,
                     size: imported.size,
                     upload: None,
