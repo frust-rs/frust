@@ -6599,30 +6599,30 @@ source line, and the parity test pins it.
 use glifo's own), or an automated macOS run of the parity test on every glifo bump (the CI check above
 acknowledges a bump; it does not run the test).
 
-### `engine-bitmap-glyphs-gap` — bitmap-strike (PNG/BGRA/Mask) emoji do not render on the engine tier; COLR emoji do
+### `engine-bitmap-glyphs-gap` — BGRA/Mask strikes and non-atlas bitmap glyphs do not render on the engine tier
 
-**Observed** (evidence: glifo 0.3.0 `glyph.rs` — `BitmapData::Png` decodes
-only under glifo's `png` feature, `Bgra`/`Mask` return `None` unconditionally;
-`crates/frust-engine/src/text/backend.rs` counts such glyphs in
-`skipped_glyphs`): the engine leaves glifo's `png` feature off because frust
-already ships a PNG decoder (`image` 0.25.10) and a second one is pure
-dependency weight, so a PNG-strike emoji glyph goes missing rather than
-landing wrong; BGRA and Mask strikes are undecoded upstream regardless.
-COLRv1 colour glyphs are the supported emoji path
-(`crates/frust-engine/src/text/color.rs`). Within COLR, a glyph whose paint
-graph needs a shape the engine cannot express exactly — a layer inside an
-isolated blend bracket, or two nested outline clips at once — is dropped
-whole and counted, never half-painted.
+**Observed** (evidence: `crates/frust-engine/tests/text_bitmap_strike.rs`, the Mac (sbix) and
+Android (CBDT) device gates, glifo 0.3.0 `glyph.rs`, and `crates/frust-engine/src/text/backend.rs`):
+`frust-engine` enables glifo's `png` feature (one `png` in the graph, shared with `image`), so sbix
+and CBDT PNG strikes decode and a bitmap-only face's glyphs upload to the atlas at any run size up
+to 1024 px. What remains missing, counted in `skipped_glyphs` rather than drawn wrong:
 
-**Accepted because**: the bundled and platform emoji fonts frust targets ship
-COLR tables; a wrong-pixels approximation of an inexpressible COLR shape
-would violate the backend's never-wrong-pixels invariant; and decoding PNG
-strikes properly belongs to a routing seam that hands glifo frust's own
-decoder rather than enabling a duplicate one.
+- BGRA and Mask strikes, which glifo never decodes.
+- A bitmap glyph on a non-atlas route — `FRUST_ENGINE_NO_ATLAS`, an oblique or skewed transform,
+  residency full, or outside the collect phase — arrives as an inline pixmap and is skipped.
+- A bitmap run past 1024 px.
+- A bitmap-only face that also carries COLR, which routes as `ColorFont`.
 
-**Trigger for removal**: a glifo release taking an external PNG decode hook
-(or decoding BGRA/Mask), or a measured need for a bitmap-strike font on a
-target platform.
+COLRv1 colour glyphs remain drawn by `crates/frust-engine/src/text/color.rs`. Within COLR, a glyph
+whose paint graph needs a shape the engine cannot express exactly — a layer inside an isolated blend
+bracket, or two nested outline clips at once — is dropped whole and counted, never half-painted.
+
+**Accepted because**: a wrong-pixels approximation of an inexpressible shape would violate the
+backend's never-wrong-pixels invariant, and the target platforms' emoji fonts ship PNG strikes or
+COLR.
+
+**Trigger for removal**: a glifo release decoding BGRA/Mask strikes or exposing the inline-pixmap
+path to the engine, or a measured need for a bitmap-strike font on a non-atlas route.
 
 ### `engine-text-hinting-policy` — hinting is desktop-only and vertical-only; the reference oracle never hints
 
