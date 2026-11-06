@@ -26,8 +26,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - Android and iOS publish their live device to `frust::gpu::with_context`, as desktop does.
 - Bitmap-strike colour emoji render on the engine: bitmap-first faces (sbix without outlines, CBDT)
   bypass glifo for an engine-side route, drawn by CoreText on iOS and decoded
-  from PNG/dupe/flip records elsewhere, each strike charged its exact atlas slot, strikes over 512 px
-  refused. BGRA and mask strikes still do not draw.
+  from PNG/dupe/flip records elsewhere, each strike charged and refunded its exact atlas slot, strikes
+  over 512 px refused everywhere. Faces with outlines draw outlines. BGRA and mask strikes still do not draw.
 - `GestureDetector` press callbacks `on_tap_down`, `on_tap_up` (before `on_tap`) and `on_tap_cancel`,
   with `#[non_exhaustive]` `Copy` `TapDownDetails`/`TapUpDetails` (`local_position`) from `frust-ui`.
   Down fires at once; a slop or bounds exit, a stolen or system cancel, or a second Down cancels.

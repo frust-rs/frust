@@ -6603,17 +6603,18 @@ acknowledges a bump; it does not run the test).
 
 **Observed** (evidence: `crates/frust-engine/tests/text_bitmap_strike.rs`,
 `crates/frust-engine/tests/apple_raster.rs`, and the Mac (sbix), Android (CBDT) and iPhone gates; the
-iOS route is covered by iOS-simulator tests, with the iPhone device gate pending at write time):
+iOS route is covered by iOS-simulator tests; the iPhone device gate passed):
 bitmap-first faces (`sbix` with `DRAW_OUTLINES` clear, or `CBDT`/`EBDT` with no outlines) bypass
 glifo for `text::bitmap_route`. CoreText draws every `sbix` glyph on iOS; elsewhere the engine
-decodes png, dupe and flip records, and refuses any strike over 512 px. What remains missing, counted
-in `skipped_glyphs` rather than drawn wrong:
+decodes png, dupe and flip records. Every PNG strike decode is the engine's own and refuses a strike
+over 512 px before decoding (glifo's `png` feature is off). What remains missing, counted in
+`skipped_glyphs` rather than drawn wrong:
 
 - `emjc` and other non-PNG `sbix` records off iOS; non-PNG `EBDT` strikes; BGRA and Mask strikes.
 - A bitmap run under a non-uniform scale or skew draws only already-resident strikes.
 - A bitmap run past 1024 px.
-- An `sbix` face with `DRAW_OUTLINES` set, or a `CBDT` face with outlines, still goes through glifo
-  (128 px limit).
+- A face with outlines and strikes (`sbix` with `DRAW_OUTLINES` set, `CBDT`/`EBDT` with `glyf`/`CFF`,
+  COLR with strikes) draws its outlines, not its strikes.
 
 COLRv1 colour glyphs remain drawn by `crates/frust-engine/src/text/color.rs`. Within COLR, a glyph
 whose paint graph needs a shape the engine cannot express exactly — a layer inside an isolated blend
