@@ -37,8 +37,9 @@ pub mod thread_policy;
 mod tracked;
 
 pub use app_lifecycle::{
-    AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, app_lifecycle,
-    push_app_lifecycle, request_app_exit,
+    AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, MemoryPressure,
+    app_lifecycle, last_memory_pressure, push_app_lifecycle, push_memory_pressure,
+    request_app_exit,
 };
 pub use back::{
     BackPresses, CanPopRegistration, back_presses, clear_can_pop_provider, handles_back,
