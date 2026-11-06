@@ -372,8 +372,8 @@ impl<State: 'static> ComboboxTriggerView<State> {
     /// are assembled.
     fn field_view(&self) -> impl View<State> + use<State> {
         let on_change = self.on_query_change.clone();
-        // The query and placeholder keep the wrapped baseline `text_input`'s own
-        // family: that field has no themed-family seam.
+        // The wrapped input takes the theme's body family for its query and
+        // placeholder.
         input::<State, _>(self.field_text(), move |state: &mut State, text| {
             on_change(state, text);
         })
@@ -1553,9 +1553,8 @@ mod tests {
     const PROBE_WINDOW: Size = Size::new(400.0, 600.0);
 
     /// An open panel filtered by `query`, mounted directly. The wrapped
-    /// trigger field is left out: its baseline text has no themed-family
-    /// opt-in, so it would paint the system face and is not what these tests
-    /// pin.
+    /// trigger field is left out, so it paints no run here; its placeholder is
+    /// pinned by [`trigger_placeholder_follows_the_theme_body_family`].
     fn probe_panel(query: &str) -> ComboboxPanelView<()> {
         ComboboxPanelView {
             options: options(),
@@ -1585,5 +1584,21 @@ mod tests {
     #[test]
     fn panel_text_follows_a_live_theme_family_swap() {
         assert_follows_a_live_family_swap("the combobox panel's text", probe_view, PROBE_WINDOW);
+    }
+
+    /// The closed trigger with only its field's placeholder set: no option is
+    /// selected, so the placeholder is the one run it paints.
+    fn trigger_placeholder_view(_: &mut ()) -> frust::StackView<()> {
+        frust::stack().child(
+            combobox_trigger::<(), _>(&OverlayAnchor::new(), "", |_: &mut (), _| {})
+                .placeholder("Pick a fruit"),
+        )
+    }
+
+    #[test]
+    fn trigger_placeholder_follows_the_theme_body_family() {
+        let what = "the combobox trigger's placeholder";
+        assert_paints_only_in_geist(what, trigger_placeholder_view, PROBE_WINDOW);
+        assert_follows_a_live_family_swap(what, trigger_placeholder_view, PROBE_WINDOW);
     }
 }

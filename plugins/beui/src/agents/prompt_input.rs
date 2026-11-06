@@ -79,8 +79,13 @@ use crate::components::switch::TRACK_COLOR_RAMP;
 use crate::motion::{Presence, Ramp};
 use crate::press::{Lane, inside_inclusive as inside, is_activation_key, lerp_color, presses};
 use crate::style::{self, disabled_tint, scale_alpha, with_alpha};
+use crate::text::ThemeTextType;
 use crate::tokens::motion::{SPRING_PRESS, SPRING_SWAP};
 use crate::tokens::{BEUI_LIGHT, BeuiPalette};
+
+/// The type-scale role the prompt's family (typed text and placeholder)
+/// resolves from at layout.
+const FIELD_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
 
 /// Padding inside the composer's frame, in logical px (`p-2`).
 pub const PROMPT_PADDING: f64 = style::SPACING_UNIT * 2.0;
@@ -327,12 +332,12 @@ impl<State: 'static> PromptInputView<State> {
     /// and the Enter contract set.
     fn field(&self) -> impl View<State> + use<State> {
         let on_change = self.on_change.clone();
-        // The prompt and placeholder keep the baseline `text_input`'s own
-        // family: that field has no themed-family seam.
+        // The prompt and placeholder take the theme's body family at layout.
         let mut field = text_input(self.value.clone(), move |state: &mut State, text| {
             on_change(state, text)
         })
         .placeholder(self.placeholder.clone())
+        .themed_family(FIELD_ROLE)
         // A streaming composer is inert, exactly like a disabled one — the
         // action row's stop square is the only live control.
         .enabled(!self.disabled && !self.loading)
@@ -889,6 +894,23 @@ mod tests {
 
     /// The box every composer test lays itself into.
     const BOX: Size = Size::new(360.0, 240.0);
+
+    // ---- Typeface: the prompt's text and placeholder follow the theme ------
+
+    use crate::text::typeface_probe::{
+        assert_follows_a_live_family_swap, assert_paints_only_in_geist,
+    };
+
+    /// An empty composer with a placeholder: its placeholder is the only run.
+    fn placeholder_view(_: &mut ()) -> PromptInputView<()> {
+        prompt_input::<(), _>("", |_: &mut (), _| {}).placeholder("Ask anything")
+    }
+
+    #[test]
+    fn placeholder_follows_the_theme_body_family() {
+        assert_paints_only_in_geist("the composer's placeholder", placeholder_view, BOX);
+        assert_follows_a_live_family_swap("the composer's placeholder", placeholder_view, BOX);
+    }
 
     /// Records the rounded-rect fills, stroked paths and transforms a composer
     /// paints.

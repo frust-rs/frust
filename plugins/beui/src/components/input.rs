@@ -390,6 +390,7 @@ impl<State: 'static> InputView<State> {
             on_change(state, text)
         })
         .placeholder(self.placeholder.clone())
+        .themed_family(FIELD_ROLE)
         .enabled(!self.disabled)
         .obscured(self.password)
         .padding(style::PADDING_X_INPUT, FIELD_PADDING_Y)
@@ -407,6 +408,10 @@ const LABEL_ROLE: ThemeTextType = ThemeTextType::LabelLarge;
 
 /// The type-scale role the message's family resolves from at layout.
 const MESSAGE_ROLE: ThemeTextType = ThemeTextType::BodySmall;
+
+/// The type-scale role the typed text's and placeholder's family resolves from
+/// at layout.
+const FIELD_ROLE: ThemeTextType = ThemeTextType::BodyMedium;
 
 /// The label's text style: `text-sm font-medium text-foreground`. The family
 /// here is the unthemed base; `layout` shapes in [`LABEL_ROLE`]'s family.
@@ -1436,8 +1441,8 @@ mod tests {
     const PROBE_WINDOW: Size = Size::new(320.0, 200.0);
 
     /// A labelled field with an error message. The value and placeholder are
-    /// empty: the wrapped baseline field has no themed-family opt-in, so its
-    /// own text would paint the system face and is not what these tests pin.
+    /// empty, so the field paints no run here; its own text is pinned by
+    /// [`placeholder_follows_the_theme_body_family`].
     fn probe_view(_: &mut ()) -> InputView<()> {
         input::<(), _>("", |_: &mut (), _| {})
             .label("Email")
@@ -1454,6 +1459,22 @@ mod tests {
         assert_follows_a_live_family_swap(
             "the input's label and message",
             probe_view,
+            PROBE_WINDOW,
+        );
+    }
+
+    /// A bare field whose only run is its placeholder: the typed text takes
+    /// the same themed family, so the placeholder pins it.
+    fn placeholder_view(_: &mut ()) -> InputView<()> {
+        input::<(), _>("", |_: &mut (), _| {}).placeholder("you@example.com")
+    }
+
+    #[test]
+    fn placeholder_follows_the_theme_body_family() {
+        assert_paints_only_in_geist("the input's placeholder", placeholder_view, PROBE_WINDOW);
+        assert_follows_a_live_family_swap(
+            "the input's placeholder",
+            placeholder_view,
             PROBE_WINDOW,
         );
     }

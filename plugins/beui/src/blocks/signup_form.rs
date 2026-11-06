@@ -602,7 +602,8 @@ impl<State: 'static> SignupFormView<State> {
         // has no error of its own.
         let valid = touched && shown_error.is_none() && field.is_filled(&self.values);
 
-        // Value and placeholder not themed: `input`'s baseline field has no opt-in.
+        // The wrapped input takes its value and placeholder family from the
+        // theme's body role.
         let mut view =
             input::<State, _>(field.text(&self.values), move |state: &mut State, text| {
                 let mut next = values.clone();
@@ -2362,8 +2363,7 @@ mod tests {
 
     /// The empty form with a form-level error. The submit label is empty, so
     /// the only runs are the form's own text, the wrapped inputs' labels, and
-    /// the four placeholders the baseline fields paint in the system face (the
-    /// wrapped baseline field has no themed-family opt-in).
+    /// the four placeholders the wrapped inputs paint.
     fn probe_view(_: &mut ()) -> SignupFormView<()> {
         signup_form::<(), _>(SignupValues::default(), |_: &mut (), _| {})
             .submit_label("")
@@ -2374,7 +2374,7 @@ mod tests {
     /// the description, four field labels, the terms label and the error.
     const THEMED_RUNS: usize = 8;
 
-    /// The runs the four wrapped baseline fields paint: their placeholders.
+    /// The runs the four wrapped inputs paint: their placeholders.
     const FIELD_RUNS: usize = 4;
 
     /// How many of `faces` are Geist, Geist Mono and anything else.
@@ -2393,25 +2393,25 @@ mod tests {
         let faces = Probe::new(probe_view, WINDOW, crate::theme()).frame();
         assert_eq!(
             census(&faces),
-            [THEMED_RUNS, 0, FIELD_RUNS],
-            "the form's text in Geist, only the placeholders in the system face: {faces:?}"
+            [THEMED_RUNS + FIELD_RUNS, 0, 0],
+            "the form's text and the placeholders all in Geist: {faces:?}"
         );
     }
 
     #[test]
     fn form_text_follows_a_live_theme_family_swap() {
         let mut probe = Probe::new(probe_view, WINDOW, crate::theme());
-        assert_eq!(census(&probe.frame()), [THEMED_RUNS, 0, FIELD_RUNS]);
+        assert_eq!(census(&probe.frame()), [THEMED_RUNS + FIELD_RUNS, 0, 0]);
         probe.swap_theme(mono_role_theme());
         assert_eq!(
             census(&probe.frame()),
-            [0, THEMED_RUNS, FIELD_RUNS],
-            "every Geist run followed the swap to Geist Mono roles"
+            [0, THEMED_RUNS + FIELD_RUNS, 0],
+            "every Geist run, placeholders included, followed the swap to Geist Mono roles"
         );
         probe.swap_theme(crate::theme());
         assert_eq!(
             census(&probe.frame()),
-            [THEMED_RUNS, 0, FIELD_RUNS],
+            [THEMED_RUNS + FIELD_RUNS, 0, 0],
             "and back"
         );
     }
