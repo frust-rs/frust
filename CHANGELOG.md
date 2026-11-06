@@ -225,7 +225,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - Text decorations: `TextDecoration` (`frust::authoring::text`) on `TextStyle::with_decoration`,
   and `TextView::underline()`, `line_through()` and `decoration(..)`. `TextLayout::decoration_rects`
   places one rectangle per same-style, same-face line segment from the face's run metrics, and
-  `TextView` paints them as plain fills (`TextInput` draws none; see LIMITATIONS); no new scene command.
+  `TextView` paints them as plain fills with no new scene command. `TextInput` draws none (see
+  LIMITATIONS).
 - `MonospaceFamily` theme extension (`Theme::monospace_family()`, falling back to the generic
   monospace family): the shadcn, beUI and Glyph themes attach it, and
   `TextView::themed_mono_family()` resolves it.
