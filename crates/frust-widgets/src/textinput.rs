@@ -449,6 +449,7 @@ use peniko::Color;
 use crate::authoring::presses;
 use crate::gesture::{DOUBLE_TAP_MS, LONG_PRESS_MS};
 use crate::overlay::{OverlayAlign, OverlayAnchor, OverlayPlacement, OverlaySide, OverlaySlot};
+use crate::text::{FamilySource, ThemeTextType};
 
 /// Default corner radius of the field chrome, in logical px. Overridable
 /// per-instance with [`TextInputView::corner_radius`] — see the module docs'
@@ -636,6 +637,10 @@ pub struct TextInputView<State: 'static> {
     /// glyph color resolves from the theme's `on_surface` role; an explicit
     /// style always wins (explicit > theme > black fallback).
     text_style_explicit: bool,
+    /// Where the content family resolves from at layout, when opted in via
+    /// [`TextInputView::themed_family`] or [`TextInputView::themed_mono_family`].
+    /// `None` keeps the declared style's family.
+    family_source: Option<FamilySource>,
     /// `None` = single-line; `Some(n)` = wrapped multi-line capped at `n`
     /// visible lines (see [`TextInputView::multiline`]).
     max_visible_lines: Option<usize>,
@@ -695,6 +700,7 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
         placeholder: String::new(),
         text_style: TextStyle::default(),
         text_style_explicit: false,
+        family_source: None,
         max_visible_lines: None,
         submit_on_enter: None,
         enabled: true,
@@ -744,6 +750,29 @@ impl<State: 'static> TextInputView<State> {
     pub fn text_style(mut self, text_style: TextStyle) -> Self {
         self.text_style = text_style;
         self.text_style_explicit = true;
+        self
+    }
+
+    /// Opt the content (and placeholder) family into the active theme's
+    /// type-scale slot `role`, resolved at layout. Only the family is taken
+    /// from the role; size, weight and color stay as declared.
+    ///
+    /// The role wins over the family of an explicit [`text_style`](Self::text_style)
+    /// in either call order, since the field has no separate family builder:
+    /// this is how a field keeps its own size and weight and still follows
+    /// the theme's family. With no theme active the style's family is kept.
+    pub fn themed_family(mut self, role: ThemeTextType) -> Self {
+        self.family_source = Some(FamilySource::Role(role));
+        self
+    }
+
+    /// Opt the content (and placeholder) family into the active theme's
+    /// monospace family ([`Theme::monospace_family`]), resolved at layout.
+    /// Precedence and the no-theme behavior match
+    /// [`themed_family`](Self::themed_family): the theme's family wins over
+    /// an explicit [`text_style`](Self::text_style) family.
+    pub fn themed_mono_family(mut self) -> Self {
+        self.family_source = Some(FamilySource::Monospace);
         self
     }
 
@@ -978,6 +1007,8 @@ pub struct TextInputWidget {
     style: TextStyle,
     /// Whether the app set the content style explicitly — see [`TextInputView`].
     text_style_explicit: bool,
+    /// The opted-in themed family source — see [`TextInputView`].
+    family_source: Option<FamilySource>,
     /// The style last installed on `editor` (the resolved effective style —
     /// see [`effective_style`](Self::effective_style)). Compared against the
     /// freshly-resolved style at each `layout` to detect a theme swap or a
@@ -1292,6 +1323,12 @@ impl TextInputWidget {
                 None => self.style.clone(),
             }
         };
+        if let (Some(source), Some(theme)) = (self.family_source, theme) {
+            style.family = match source {
+                FamilySource::Role(role) => role.style_in(&theme.type_scale).family.clone(),
+                FamilySource::Monospace => theme.monospace_family(),
+            };
+        }
         if !self.enabled {
             style.color = style.color.multiply_alpha(DISABLED_CONTENT_ALPHA);
         }
@@ -2203,6 +2240,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             text_ctx,
             style: style.clone(),
             text_style_explicit: self.text_style_explicit,
+            family_source: self.family_source,
             applied_style: style,
             applied_locale_stamp: locale_stamp,
             fonts_pending: false,
@@ -2331,6 +2369,12 @@ impl<State: 'static> View<State> for TextInputView<State> {
         {
             element.style = self.text_style.clone();
             element.text_style_explicit = self.text_style_explicit;
+            flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+        }
+        // A changed themed-family source re-resolves the family at the next
+        // layout (`effective_style`), like a changed explicit flag.
+        if prev.family_source != self.family_source {
+            element.family_source = self.family_source;
             flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
         }
         // Controlled reconcile: adopt the app-confirmed value only when it differs
@@ -2617,6 +2661,8 @@ impl Widget for TextInputWidget {
             if !self.placeholder.is_empty() {
                 let mut ph_style = self.style.clone();
                 ph_style.color = chrome.placeholder;
+                // The themed family resolved at layout, not the declared one.
+                ph_style.family = self.applied_style.family.clone();
                 let layout = self.text_ctx.layout(&self.placeholder, &ph_style, None);
                 for run in layout.to_scene_runs(text_origin) {
                     scene.draw_glyph_run(run);
@@ -8444,6 +8490,195 @@ mod tests {
         assert!(widget(&root).hold.is_none(), "and the hold timer with it");
         assert_eq!(widget(&root).gesture, Gesture::None);
         assert!(widget(&root).tap_in_selection.is_none());
+    }
+
+    // --- Themed family ---
+
+    /// A neutral theme whose `body_large`/`label_large` slots name the given
+    /// families.
+    fn family_theme(body_large: &str, label_large: &str) -> Theme {
+        let mut theme = Theme::neutral();
+        theme.type_scale.body_large.family = frust_text::FontFamily::named(body_large);
+        theme.type_scale.label_large.family = frust_text::FontFamily::named(label_large);
+        theme
+    }
+
+    const NO_SUCH_FAMILY: &str = "Frust No Such Family";
+
+    /// Registers the Tuffy face process-wide (as the shell's drain would),
+    /// returning the slot guard that must outlive the assertions.
+    fn register_tuffy() -> crate::test_support::LocaleSlotGuard {
+        let slot = crate::test_support::LocaleSlotGuard::hold();
+        frust_text::TextContext::new()
+            .register_fonts(TUFFY.to_vec())
+            .expect("valid TTF bytes must register");
+        slot
+    }
+
+    /// A laid-out field over `DIGITS` (or the placeholder when `value` is
+    /// empty) built by `make`, under `theme` when `Some`.
+    fn themed_field(
+        value: &str,
+        theme: Option<Theme>,
+        make: impl Fn(TextInputView<AppState>) -> TextInputView<AppState>,
+    ) -> RenderRoot<AppState, TextInputView<AppState>> {
+        let mut state = AppState {
+            value: value.to_string(),
+            ..AppState::default()
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(
+            &mut |s: &mut AppState| {
+                make(
+                    text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
+                        .placeholder(DIGITS),
+                )
+            },
+            &mut state,
+        );
+        if let Some(theme) = theme {
+            root.set_theme(Box::new(theme));
+        }
+        root.layout(Size::new(600.0, 200.0));
+        root
+    }
+
+    #[test]
+    fn themed_family_lays_out_with_the_roles_family() {
+        let _slot = register_tuffy();
+        let theme = family_theme("Tuffy", NO_SUCH_FAMILY);
+        let mut root = themed_field(DIGITS, Some(theme.clone()), |v| {
+            v.themed_family(ThemeTextType::BodyLarge)
+        });
+        let (font, advances) = painted_shaped_run(&mut root);
+        assert_same_font(&font, TUFFY, "content");
+        assert_uniform_advance(
+            &advances,
+            TUFFY_DIGIT_ADVANCE_24PX * 16.0 / 24.0,
+            "content at the default size",
+        );
+
+        // The mapping is per role: a different role reads a different slot.
+        let mut other = themed_field(DIGITS, Some(theme), |v| {
+            v.themed_family(ThemeTextType::LabelLarge)
+        });
+        let (other_font, _) = painted_shaped_run(&mut other);
+        assert_other_font(&other_font, TUFFY, "label_large slot");
+    }
+
+    #[test]
+    fn themed_family_wins_over_a_text_style_family_but_keeps_its_size() {
+        let _slot = register_tuffy();
+        let theme = family_theme("Tuffy", NO_SUCH_FAMILY);
+        let custom = family_style(frust_text::FontFamily::named(NO_SUCH_FAMILY));
+        for themed_first in [false, true] {
+            let style = custom.clone();
+            let mut root = themed_field(DIGITS, Some(theme.clone()), |v| {
+                if themed_first {
+                    v.themed_family(ThemeTextType::BodyLarge)
+                        .text_style(style.clone())
+                } else {
+                    v.text_style(style.clone())
+                        .themed_family(ThemeTextType::BodyLarge)
+                }
+            });
+            let (font, advances) = painted_shaped_run(&mut root);
+            assert_same_font(&font, TUFFY, "role family");
+            assert_uniform_advance(&advances, TUFFY_DIGIT_ADVANCE_24PX, "custom 24px size");
+            assert_eq!(widget(&root).applied_style.size, 24.0);
+        }
+    }
+
+    #[test]
+    fn themed_family_without_a_theme_keeps_the_style_family() {
+        let _slot = register_tuffy();
+        let mut root = themed_field(DIGITS, None, |v| {
+            v.text_style(family_style(frust_text::FontFamily::named("Tuffy")))
+                .themed_family(ThemeTextType::BodyLarge)
+        });
+        let (font, _) = painted_shaped_run(&mut root);
+        assert_same_font(&font, TUFFY, "style family with no theme");
+
+        let mut unthemed = themed_field(DIGITS, None, |v| v.themed_mono_family());
+        assert_eq!(
+            widget(&unthemed).applied_style.family,
+            TextStyle::default().family,
+            "no theme: the default family is untouched"
+        );
+        let _ = painted_shaped_run(&mut unthemed);
+    }
+
+    #[test]
+    fn themed_mono_family_resolves_the_theme_monospace_family() {
+        let mut root = themed_field(DIGITS, Some(Theme::neutral()), |v| v.themed_mono_family());
+        assert_eq!(
+            widget(&root).applied_style.family,
+            Theme::neutral().monospace_family()
+        );
+        let _ = painted_shaped_run(&mut root);
+    }
+
+    #[test]
+    fn placeholder_uses_the_resolved_themed_family() {
+        let _slot = register_tuffy();
+        let mut root = themed_field("", Some(family_theme("Tuffy", NO_SUCH_FAMILY)), |v| {
+            v.themed_family(ThemeTextType::BodyLarge)
+        });
+        let (font, _) = painted_shaped_run(&mut root);
+        assert_same_font(&font, TUFFY, "placeholder");
+    }
+
+    #[test]
+    fn theme_swap_relays_out_with_the_new_family() {
+        let _slot = register_tuffy();
+        let mut root = themed_field(DIGITS, Some(family_theme("Tuffy", NO_SUCH_FAMILY)), |v| {
+            v.themed_family(ThemeTextType::BodyLarge)
+        });
+        let (before, _) = painted_shaped_run(&mut root);
+        assert_same_font(&before, TUFFY, "before the swap");
+
+        root.set_theme(Box::new(family_theme(NO_SUCH_FAMILY, NO_SUCH_FAMILY)));
+        root.layout(Size::new(600.0, 200.0));
+        let (after, _) = painted_shaped_run(&mut root);
+        assert_other_font(&after, TUFFY, "after the swap");
+    }
+
+    #[test]
+    fn changing_the_family_source_across_rebuild_reports_layout() {
+        let mut state = AppState::default();
+        let mut role = |s: &mut AppState| {
+            text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
+                .themed_family(ThemeTextType::BodyLarge)
+        };
+        let mut other_role = |s: &mut AppState| {
+            text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
+                .themed_family(ThemeTextType::LabelLarge)
+        };
+        let mut same_role = |s: &mut AppState| {
+            text_input(s.value.clone(), |_s: &mut AppState, _v: String| {})
+                .themed_family(ThemeTextType::LabelLarge)
+        };
+        let mut mono = |s: &mut AppState| {
+            text_input(s.value.clone(), |_s: &mut AppState, _v: String| {}).themed_mono_family()
+        };
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut role, &mut state);
+        assert!(
+            root.rebuild(&mut other_role, &mut state)
+                .contains(ChangeFlags::LAYOUT),
+            "a changed role reports LAYOUT"
+        );
+        assert!(
+            !root
+                .rebuild(&mut same_role, &mut state)
+                .contains(ChangeFlags::LAYOUT),
+            "an unchanged role does not"
+        );
+        assert!(
+            root.rebuild(&mut mono, &mut state)
+                .contains(ChangeFlags::LAYOUT),
+            "role -> monospace reports LAYOUT"
+        );
     }
 }
 

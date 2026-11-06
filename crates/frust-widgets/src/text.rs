@@ -182,7 +182,7 @@ impl ThemeTextType {
 
 /// Where an opted-in themed family resolves from.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum FamilySource {
+pub(crate) enum FamilySource {
     /// The family of a type-scale slot ([`TextView::themed_family`]).
     Role(ThemeTextType),
     /// The theme's monospace family ([`TextView::themed_mono_family`]).
