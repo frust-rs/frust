@@ -11,6 +11,7 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use frust_gpu::SceneTextureId;
@@ -241,5 +242,109 @@ fn a_panicking_explicit_pass_fails_the_render_and_a_later_render_recovers() {
                 .await
                 .is_err()
         );
+    });
+}
+
+/// A pass that records the frame index it was handed.
+struct Indices(Arc<Mutex<Vec<u64>>>);
+
+impl ExternalPass for Indices {
+    fn record(&self, frame: &mut ExternalFrame<'_>) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(frame.frame_index());
+    }
+}
+
+/// Counts how often it records.
+struct Counts(Arc<AtomicU64>);
+
+impl ExternalPass for Counts {
+    fn record(&self, _frame: &mut ExternalFrame<'_>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test headless_external_pass -- --ignored`"]
+fn explicit_renders_number_frames_per_renderer() {
+    let _serial = serial();
+    pollster::block_on(async {
+        let mut a = renderer().await;
+        let mut b = renderer().await;
+        let id = SceneTextureId::mint();
+        let scene = scene_drawing(id);
+        let spec = HeadlessSpec::new(SIZE, SIZE);
+        let seen_a = Arc::new(Mutex::new(Vec::new()));
+        let seen_b = Arc::new(Mutex::new(Vec::new()));
+        let list_a: Vec<(SceneTextureId, Arc<dyn ExternalPass>)> =
+            vec![(id, Arc::new(Indices(seen_a.clone())))];
+        let list_b: Vec<(SceneTextureId, Arc<dyn ExternalPass>)> =
+            vec![(id, Arc::new(Indices(seen_b.clone())))];
+
+        // A registry drain on `b` advances the process-wide counter between
+        // the explicit renders; it must not leak into either renderer's.
+        let registry_id = SceneTextureId::mint();
+        let registry_hits = Arc::new(AtomicU64::new(0));
+        assert!(register_external_pass(
+            registry_id,
+            Arc::new(Counts(registry_hits.clone()))
+        ));
+
+        a.render_with_passes(&scene, &spec, &list_a)
+            .await
+            .expect("a 0");
+        b.render_draining_registry(&scene, &spec)
+            .await
+            .expect("b drain");
+        b.render_with_passes(&scene, &spec, &list_b)
+            .await
+            .expect("b 0");
+        a.render_with_passes(&scene, &spec, &list_a)
+            .await
+            .expect("a 1");
+        b.render_draining_registry(&scene, &spec)
+            .await
+            .expect("b drain");
+        b.render_with_passes(&scene, &spec, &list_b)
+            .await
+            .expect("b 1");
+
+        assert!(unregister_external_pass(registry_id));
+        assert_eq!(registry_hits.load(Ordering::Relaxed), 2);
+        assert_eq!(*seen_a.lock().unwrap(), vec![0, 1]);
+        assert_eq!(*seen_b.lock().unwrap(), vec![0, 1]);
+    });
+}
+
+#[test]
+#[ignore = "requires a GPU; run with `cargo test -p frust-render --test headless_external_pass -- --ignored`"]
+fn an_explicit_pass_under_a_reserved_id_is_refused_before_anything_records() {
+    let _serial = serial();
+    pollster::block_on(async {
+        let mut headless = renderer().await;
+        let id = SceneTextureId::mint();
+        let scene = scene_drawing(id);
+        let spec = HeadlessSpec::new(SIZE, SIZE);
+        let hits = Arc::new(AtomicU64::new(0));
+        for reserved in [
+            SceneTextureId::for_shader_program(3),
+            SceneTextureId::for_texture_source(3),
+        ] {
+            let passes: Vec<(SceneTextureId, Arc<dyn ExternalPass>)> = vec![
+                (id, Arc::new(Counts(hits.clone()))),
+                (reserved, Arc::new(Counts(hits.clone()))),
+            ];
+            let error = headless
+                .render_with_passes(&scene, &spec, &passes)
+                .await
+                .expect_err("reserved id refused");
+            assert!(
+                error.to_string().contains(&reserved.get().to_string()),
+                "{error}"
+            );
+        }
+        assert_eq!(hits.load(Ordering::Relaxed), 0, "nothing recorded");
     });
 }

@@ -136,8 +136,19 @@
 //! frames and nowhere else. With two engine-tier surfaces live at once, every
 //! pass records into both frames, binding into each surface's own engine, and
 //! each surface unbinds its own engine's view when the pass goes away.
-//! `HeadlessRenderer` drives the engine through its own frame path and does
-//! not drain this registry.
+//! `HeadlessRenderer::render` runs no external passes at all;
+//! `render_with_passes` runs exactly the passes it is handed (explicitly,
+//! never touching the registry, with a per-renderer frame index); and
+//! `render_draining_registry` drains this registry the way a surface does,
+//! with the process-wide frame index.
+//!
+//! # A residual race
+//!
+//! A registered pass that panics is retired by the first surface to catch
+//! it. A second surface that had already snapshotted the registry before that
+//! retirement still records the pass once more for its in-flight frame, so
+//! the panic can be reported one extra time. Unwinding builds only (release
+//! is `panic = "abort"`); no memory-safety impact.
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -278,16 +289,25 @@ impl<'a> ExternalFrame<'a> {
         self.id
     }
 
-    /// How many frames this process has drained passes in, counting from
-    /// zero.
+    /// A frame counter, counting from zero. What it counts depends on the
+    /// path that drained the pass:
     ///
-    /// Advances once per drain that has at least one pass to run, so a pass
-    /// animating off it sees a dense sequence rather than one with the
-    /// pass-free frames of other surfaces punched out of it. It is a frame
-    /// *counter*, not a clock: a pass needing wall-clock time reads one. It
-    /// is process-wide: with two engine-tier surfaces live, their drains
-    /// share the one sequence, so a pass needing a per-surface count keeps
-    /// its own keyed by [`Self::drain_id`].
+    /// - **Surface frames and registry drains**
+    ///   (`HeadlessRenderer::render_draining_registry` included): the count
+    ///   is process-wide. It advances once per drain that has at least one
+    ///   pass to run, so a pass animating off it sees a dense sequence
+    ///   rather than one with the pass-free frames of other surfaces punched
+    ///   out of it. With two engine-tier surfaces live, their drains share
+    ///   the one sequence, so a pass needing a per-surface count keeps its
+    ///   own keyed by [`Self::drain_id`].
+    /// - **Explicit headless renders** (`render_with_passes`): the count is
+    ///   that renderer's own. It counts, from zero, the renderer's explicit
+    ///   renders that ran at least one pass (a render with no passes does not
+    ///   advance it), and reads no process-wide state, so the same sequence of
+    ///   renders on a fresh renderer always observes the same indices.
+    ///
+    /// It is a frame *counter*, not a clock: a pass needing wall-clock time
+    /// reads one.
     #[must_use]
     pub fn frame_index(&self) -> u64 {
         self.stamp.frame_index
@@ -440,6 +460,19 @@ static NEXT_REGISTRATION: AtomicU64 = AtomicU64::new(1);
 /// only ever be collateral.)
 fn registry() -> MutexGuard<'static, Registry> {
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The reserved namespace `id` falls in, if any: what the explicit path
+/// refuses by. [`register_external_pass`] refuses the same two namespaces
+/// with its own inline checks (it logs each refusal once, per namespace).
+fn reserved_namespace(id: SceneTextureId) -> Option<&'static str> {
+    if id.is_shader_program() {
+        Some("shader-program")
+    } else if id.is_texture_source() {
+        Some("texture-source")
+    } else {
+        None
+    }
 }
 
 /// Registers `pass` under `id`, to be recorded every frame until
@@ -602,6 +635,10 @@ pub struct ExternalPassDrain {
     /// allocation alive (not the pass), so the address cannot be reused by a
     /// later pass while this drain still tracks the id.
     pinned: BTreeMap<u64, Weak<dyn ExternalPass>>,
+    /// Explicit renders this drain has stamped so far: the source of
+    /// [`ExternalFrame::frame_index`] on the explicit path, so it depends on
+    /// nothing outside this drain.
+    explicit_frames: u64,
 }
 
 impl ExternalPassDrain {
@@ -615,6 +652,7 @@ impl ExternalPassDrain {
             device_generation,
             bound: BTreeMap::new(),
             pinned: BTreeMap::new(),
+            explicit_frames: 0,
         }
     }
 
@@ -709,7 +747,7 @@ pub fn run_external_passes(
     let Some(due) = snapshot(&registry(), drain) else {
         return;
     };
-    for pass in run_due(device, queue, encoder, engine, drain, due) {
+    for pass in run_due(device, queue, encoder, engine, drain, due, false) {
         if drop_panicking_pass(pass.id, pass.serial, &pass.pass) {
             // The surface that caught the panic clears its own binding at
             // once; every other one does on its next drain, by reconciling.
@@ -738,7 +776,9 @@ pub fn run_external_passes(
 ///
 /// # Errors
 ///
-/// Fails, recording nothing, when two entries share an id; and after
+/// Fails, recording nothing, when an entry's id is inside a reserved
+/// namespace (the same refusal [`register_external_pass`] makes) or when two
+/// entries share an id; and after
 /// recording when any pass panicked.
 #[doc(hidden)]
 pub fn run_explicit_external_passes(
@@ -749,10 +789,25 @@ pub fn run_explicit_external_passes(
     drain: &mut ExternalPassDrain,
     passes: &[(SceneTextureId, Arc<dyn ExternalPass>)],
 ) -> Result<(), String> {
+    if let Some((id, namespace)) = passes
+        .iter()
+        .find_map(|(id, _)| reserved_namespace(*id).map(|namespace| (*id, namespace)))
+    {
+        return Err(format!(
+            "scene texture {} is inside the reserved {namespace} namespace and cannot be \
+             named by an explicit external pass",
+            id.get()
+        ));
+    }
     let mut due: Vec<Due> = passes
         .iter()
         .map(|(id, pass)| Due {
             id: *id,
+            // An explicit pass's identity is its allocation address. It lives
+            // in the same `u64` space as registration serials (small
+            // counters), which cannot collide with a real address, and
+            // `drain.pinned` keeps every tracked explicit allocation alive,
+            // so an address is never reused while this drain still tracks it.
             serial: Arc::as_ptr(pass) as *const () as usize as u64,
             pass: Arc::clone(pass),
             record_lock: None,
@@ -765,7 +820,7 @@ pub fn run_explicit_external_passes(
             pair[0].id.get()
         ));
     }
-    let panicked = run_due(device, queue, encoder, engine, drain, due);
+    let panicked = run_due(device, queue, encoder, engine, drain, due, true);
     // Every id tracked now came from `passes` (reconcile unbound the rest), so
     // pinning exactly this list keeps each tracked identity unique.
     drain.pinned = passes
@@ -789,7 +844,8 @@ pub fn run_explicit_external_passes(
 
 /// The shared core of both drains: reconciles `drain` against `due` (id
 /// order), then records each pass under panic isolation, and answers the
-/// passes that panicked for the caller to retire or report.
+/// passes that panicked for the caller to retire or report. `explicit`
+/// selects the frame index: the drain's own counter, or the process-wide one.
 fn run_due(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -797,6 +853,7 @@ fn run_due(
     engine: &mut frust_engine::EngineRenderer,
     drain: &mut ExternalPassDrain,
     due: Vec<Due>,
+    explicit: bool,
 ) -> Vec<Due> {
     // Before any pass records: an id with no owner — or a new one — keeps no
     // view of a previous owner's alive in this engine. `due` is in id order,
@@ -814,8 +871,15 @@ fn run_due(
         return Vec::new();
     }
 
+    let frame_index = if explicit {
+        let index = drain.explicit_frames;
+        drain.explicit_frames += 1;
+        index
+    } else {
+        FRAME_INDEX.fetch_add(1, Ordering::Relaxed)
+    };
     let stamp = FrameStamp {
-        frame_index: FRAME_INDEX.fetch_add(1, Ordering::Relaxed),
+        frame_index,
         drain_id: drain.drain_id,
         device_generation: drain.device_generation,
     };
@@ -955,6 +1019,19 @@ mod tests {
             .iter()
             .map(|&(id, registration)| (id.get(), Tracked { id, registration }))
             .collect()
+    }
+
+    #[test]
+    fn reserved_namespaces_are_named_and_minted_ids_are_not() {
+        assert_eq!(
+            reserved_namespace(SceneTextureId::for_shader_program(7)),
+            Some("shader-program")
+        );
+        assert_eq!(
+            reserved_namespace(SceneTextureId::for_texture_source(7)),
+            Some("texture-source")
+        );
+        assert_eq!(reserved_namespace(SceneTextureId::mint()), None);
     }
 
     #[test]

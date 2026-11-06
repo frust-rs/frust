@@ -1302,10 +1302,11 @@ pub mod gpu {
     ///
     /// [`render`](headless::HeadlessRenderer::render) runs no pass;
     /// [`render_with_passes`](headless::HeadlessRenderer::render_with_passes)
-    /// runs exactly the passes it is handed (deterministic, no process-wide
-    /// state); and
+    /// runs exactly the passes it is handed (deterministic: no process-wide
+    /// state is read, and the frame index counts that renderer's explicit
+    /// renders with at least one pass, from 0); and
     /// [`render_draining_registry`](headless::HeadlessRenderer::render_draining_registry)
-    /// opts into the registry, whose passes are process-wide.
+    /// opts into the registry, whose passes and frame index are process-wide.
     ///
     /// ```no_run
     /// use std::sync::Arc;
