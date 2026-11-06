@@ -91,6 +91,12 @@ pub use frust_gpu::{
 // (the only one most apps ever produce) at zero new public symbols.
 #[cfg(feature = "gpu")]
 pub use frust_gpu::DeviceHandle;
+// What a shell holding a device built before the app asked for optional
+// features (Android's load-time pre-init) checks to decide whether to rebuild
+// it. Behind the same `gpu` feature for the same reason: only the facade's
+// `gpu` request function can make the answer non-empty.
+#[cfg(feature = "gpu")]
+pub use frust_gpu::missing_requested_features;
 // Flat, alongside every other name a caller reaches this crate by; the module
 // above stays public for its docs.
 pub use external_pass::{
