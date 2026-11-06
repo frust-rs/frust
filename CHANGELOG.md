@@ -215,6 +215,19 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   theme defaults and the OS text-scale rule.
 - A bundled Thai test face (`testing/fonts/NotoSansThai-Subset.ttf`, OFL), registered by
   `frust_testing::fonts::test_fonts()`.
+- OpenType font features: `TextStyle::with_feature(tag, value)` / `with_features(..)` (a later
+  setting of a tag wins), and `TextView::font_feature(s)` and `tabular_figures()` (`tnum`).
+  Features are part of the shape-cache key.
+- Text decorations: `TextDecoration` (`frust::authoring::text`) on `TextStyle::with_decoration`,
+  and `TextView::underline()`, `line_through()` and `decoration(..)`. `TextLayout::decoration_rects`
+  places one rectangle per same-style, same-face line segment from the face's run metrics, and
+  `TextView` paints them as plain fills; there is no new scene command.
+- `MonospaceFamily` theme extension (`Theme::monospace_family()`, falling back to the generic
+  monospace family): the shadcn, beUI and Glyph themes attach it, and
+  `TextView::themed_mono_family()` resolves it.
+- `TextInputView::themed_family(role)` and `themed_mono_family()` take a field's content and
+  placeholder family from the active theme at layout (the theme's family wins over a `text_style`
+  family). The catalogs' text fields use them, so a theme swap re-faces typed text.
 
 ### Changed
 
@@ -315,6 +328,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   outside `frust-text`). ja/zh text now uses Normal line-break strictness (small kana may start a
   line). Release size grows by about 3 MB per app with the segmentation dictionaries (see
   `docs/PERFORMANCE_BASELINES.md`).
+- `TextStyle` gains the public fields `features` and `decoration`; since it is
+  `#[non_exhaustive]`, no struct-literal migration is needed outside `frust-text`.
 
 ### Fixed
 

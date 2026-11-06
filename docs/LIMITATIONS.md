@@ -7947,20 +7947,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `textinput-no-themed-family` — a baseline `TextInput` field never takes its font family from the theme
-
-**Observed**: `TextInputWidget::effective_style` (`crates/frust-widgets/src/textinput.rs` ~1230) resolves only the field's ink COLOR from the theme (`Theme::scheme().on_surface`, further dimmed while disabled) — it never touches `style.family`. A field's family is therefore whatever it was built with: the caller's own explicit `.text_style(..)`, or, absent that, `TextStyle::default()`'s `FontFamily::SystemUi`. Neither a runtime theme swap nor `frust_testing::frame::pin_type_scale` can redirect it, unlike the design-system catalogs' own label/button/title text, which resolves FAMILY from a `Theme::type_scale` role (see [TESTING.md](TESTING.md)'s Deterministic Inputs section).
-
-**Applies to**: every baseline `TextInput` field, and every catalog control built on it that does not itself override the family — shadcn's `input`/`textarea` and the `command` palette's search field; Glyph's `command_palette` query field; and beUI's `input`, `combobox`, `multi_select` and `prompt_input` fields, plus the `command_palette`, `feedback_widget`, `morphing_search` and `signup_form` blocks' fields, all of which are built on beUI's own `input`.
-
-**Why accepted**: closing the gap means giving `TextInput` a themed-family seam mirroring `Text`'s `.themed_family(..)` opt-in (a new branch in `effective_style`, plus each affected catalog field wiring into it) — a `frust-widgets` API change not yet built, so an app that swaps themes or a font scale at runtime sees every field's chrome and ink follow the theme while its typed text keeps the system font.
-
-**Trigger for removal**: `TextInput` grows a themed-family option (an opt-in analogous to `Text::themed_family`) and the fields listed above are wired through it.
-
-**Evidence**: `crates/frust-widgets/src/textinput.rs` (`effective_style`); [TESTING.md](TESTING.md)'s pinnable-text paragraph; `crates/frust-testing/src/corpus/page.rs` module docs.
-
----
-
 ### `url-launcher-ios-open-failure-unobservable` — an iOS launch failure has nothing left to report back to
 
 **Observed**: `UrlLauncher::open_external` on iOS dispatches the lookup-and-open sequence onto `dispatch_get_main_queue()` asynchronously (`DispatchQueue::exec_async`) and returns `Ok(())` immediately, before that closure has run. The closure's own call, `UIApplication::openURL_options_completionHandler`, passes `None` for the completion handler, so even a successful dispatch reports nothing back into Rust once it runs. A "no handler for this URL" or "app suspended" failure on this path is therefore unobservable to the caller — `open_external` always returns `Ok(())` on iOS regardless of what actually happens.
