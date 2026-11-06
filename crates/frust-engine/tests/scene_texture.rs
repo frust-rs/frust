@@ -36,7 +36,10 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use frust_engine::{EngineRenderer, EngineTarget, OutputAlpha};
+use frust_engine::renderer::FramePass;
+use frust_engine::{
+    EngineRenderer, EngineTarget, OutputAlpha, SceneTextureFilter, SceneTextureHints,
+};
 use frust_gpu::{HeadlessTarget, SceneTextureId, Texture, TextureDesc, TierCaps};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::{Affine, Rect};
@@ -172,9 +175,14 @@ fn checkerboard(even: Color, odd: Color) -> Vec<u8> {
 /// Uploads `pixels` into a caller-owned texture — one the engine never sees the
 /// creation of, which is the whole point of the path under test.
 fn upload(device: &wgpu::Device, queue: &wgpu::Queue, pixels: &[u8]) -> Texture {
+    upload_sized(device, queue, TEXTURE, pixels)
+}
+
+/// [`upload`] for a square texture `side` texels across.
+fn upload_sized(device: &wgpu::Device, queue: &wgpu::Queue, side: u32, pixels: &[u8]) -> Texture {
     let desc = TextureDesc {
-        width: TEXTURE,
-        height: TEXTURE,
+        width: side,
+        height: side,
         format: FORMAT,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         label: Some("scene texture source".to_string()),
@@ -198,12 +206,12 @@ fn upload(device: &wgpu::Device, queue: &wgpu::Queue, pixels: &[u8]) -> Texture 
         pixels,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(TEXTURE * 4),
-            rows_per_image: Some(TEXTURE),
+            bytes_per_row: Some(side * 4),
+            rows_per_image: Some(side),
         },
         wgpu::Extent3d {
-            width: TEXTURE,
-            height: TEXTURE,
+            width: side,
+            height: side,
             depth_or_array_layers: 1,
         },
     );
@@ -242,6 +250,15 @@ impl Harness {
         let (width, height) = texture.size();
         self.renderer
             .bind_texture(id, (width, height), texture.view().clone());
+        id
+    }
+
+    /// [`Self::bind`] with registration-side hints.
+    fn bind_with(&mut self, texture: &Texture, hints: SceneTextureHints) -> SceneTextureId {
+        let id = texture.as_scene_texture();
+        let (width, height) = texture.size();
+        self.renderer
+            .bind_texture_with(id, (width, height), texture.view().clone(), hints);
         id
     }
 
@@ -432,4 +449,147 @@ fn two_textures_in_one_frame_each_draw_their_own_pixels() {
         rgba(GREEN),
         "the right rectangle draws the second texture"
     );
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test scene_texture -- --ignored`"]
+fn a_nearest_hint_magnifies_without_filtering() {
+    let _guard = render_lock();
+    let mut harness = Harness::new();
+    // An 8x8 checker of 1-texel squares, drawn at 4x over a 32x32 rectangle.
+    let pixels: Vec<u8> = (0..8_u32)
+        .flat_map(|y| {
+            (0..8_u32).flat_map(move |x| {
+                let color = if (x + y) % 2 == 0 { RED } else { BLUE };
+                color.to_rgba8().to_u8_array()
+            })
+        })
+        .collect();
+    let source = upload_sized(&harness.device, &harness.queue, 8, &pixels);
+    let id = harness.bind_with(
+        &source,
+        SceneTextureHints::new().with_filter(SceneTextureFilter::Nearest),
+    );
+
+    let frame = harness.render(&scene_drawing(id, DEST));
+
+    let (ox, oy) = (DEST.x0 as u32, DEST.y0 as u32);
+    for by in 0..8_u32 {
+        for bx in 0..8_u32 {
+            let expected = rgba(if (bx + by) % 2 == 0 { RED } else { BLUE });
+            for dy in 0..4 {
+                for dx in 0..4 {
+                    assert_eq!(
+                        pixel(&frame, ox + bx * 4 + dx, oy + by * 4 + dy),
+                        expected,
+                        "block ({bx}, {by}) is uniform at offset ({dx}, {dy})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test scene_texture -- --ignored`"]
+fn an_opaque_hint_routes_through_the_opaque_pass() {
+    let _guard = render_lock();
+    let mut harness = Harness::new();
+    let source = upload(&harness.device, &harness.queue, &checkerboard(RED, BLUE));
+    // Unmerged, the opaque strips are a pass of their own and so observable.
+    harness.renderer.set_pass_merge(false);
+
+    let id = harness.bind(&source);
+    let frame = harness.render(&scene_drawing(id, DEST));
+    assert_checkerboard(&frame, RED, BLUE);
+    assert!(
+        !harness
+            .renderer
+            .last_frame_passes()
+            .contains(&FramePass::Opaque),
+        "an unhinted texture is always blended: {:?}",
+        harness.renderer.last_frame_passes()
+    );
+
+    harness.bind_with(&source, SceneTextureHints::new().assume_opaque(true));
+    let frame = harness.render(&scene_drawing(id, DEST));
+    assert!(
+        harness
+            .renderer
+            .last_frame_passes()
+            .contains(&FramePass::Opaque),
+        "an asserted-opaque texture takes the depth-writing pass: {:?}",
+        harness.renderer.last_frame_passes()
+    );
+    assert_checkerboard(&frame, RED, BLUE);
+    assert_only_dest_painted(&frame);
+}
+
+#[test]
+#[ignore = "requires a GPU (Vulkan/Metal); run with `cargo test -p frust-engine --test scene_texture -- --ignored`"]
+fn rebinding_with_new_hints_at_the_same_extent_drops_the_held_plan() {
+    let _guard = render_lock();
+    let mut harness = Harness::new();
+    let source = upload(&harness.device, &harness.queue, &checkerboard(RED, BLUE));
+    let id = harness.bind(&source);
+    let scene = scene_drawing(id, DEST);
+    let usage = harness.target.texture().usage();
+
+    let prepare = |harness: &mut Harness| {
+        harness
+            .renderer
+            .prepare(&scene, SIZE, SIZE, usage, Affine::IDENTITY)
+            .expect("the frame plans");
+    };
+    let encode_prepared = |harness: &mut Harness| {
+        let mut encoder = harness
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frust-engine scene texture prepared frame"),
+            });
+        harness
+            .renderer
+            .encode_prepared(
+                &harness.device,
+                &harness.queue,
+                &mut encoder,
+                &scene,
+                EngineTarget {
+                    view: harness.target.view(),
+                    format: FORMAT,
+                    width: SIZE,
+                    height: SIZE,
+                    depth: None,
+                    output: OutputAlpha::Premultiplied,
+                },
+                BLACK,
+                Affine::IDENTITY,
+            )
+            .expect("a prepared frame encodes");
+        harness.queue.submit([encoder.finish()]);
+        harness.renderer.end_frame(&harness.queue);
+    };
+
+    // The same hints again leave the plan alone.
+    prepare(&mut harness);
+    let planned_at = harness.renderer.retained_frame();
+    harness.bind(&source);
+    encode_prepared(&mut harness);
+    assert_eq!(harness.renderer.retained_frame(), planned_at);
+
+    // New hints at the same extent make it stale: the frame is planned again.
+    for hints in [
+        SceneTextureHints::new().with_filter(SceneTextureFilter::Nearest),
+        SceneTextureHints::new().assume_opaque(true),
+    ] {
+        prepare(&mut harness);
+        let planned_at = harness.renderer.retained_frame();
+        harness.bind_with(&source, hints);
+        encode_prepared(&mut harness);
+        assert_eq!(
+            harness.renderer.retained_frame(),
+            planned_at + 1,
+            "{hints:?} changed what the plan encodes"
+        );
+    }
 }
