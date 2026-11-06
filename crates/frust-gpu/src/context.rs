@@ -132,9 +132,10 @@ static NEXT_DEVICE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// Draws the next process-wide device generation.
 ///
-/// [`create_device`] uses this for every device it makes. A device created
-/// outside it (the headless renderer, a test oracle) calls this directly so all
-/// devices in the process share one strictly increasing counter.
+/// [`create_device`] uses this for every device it makes. It is also the hook
+/// for a device created outside [`create_device`]: such a creator calls this
+/// directly so all devices in the process share one strictly increasing
+/// counter. Nothing outside [`create_device`] calls it yet.
 #[doc(hidden)]
 pub fn next_device_generation() -> u64 {
     NEXT_DEVICE_GENERATION.fetch_add(1, Ordering::Relaxed)
@@ -153,6 +154,12 @@ static REQUESTED_FEATURES: Mutex<wgpu::Features> = Mutex::new(wgpu::Features::em
 /// working adapter into a failed device request. There is deliberately no way
 /// to *require* a feature.
 ///
+/// Experimental features (`wgpu::Features::all_experimental_mask()`) are never
+/// requested: wgpu only accepts them together with an `unsafe`
+/// `ExperimentalFeatures` token that frust never passes, so asking for one
+/// would turn a working adapter into a failed device request. They are dropped
+/// from the request (logged once at warn).
+///
 /// Only features are opt-in. Limits are not: on the full profile the device is
 /// already requested with the adapter's own limits passed through unclamped.
 ///
@@ -162,8 +169,15 @@ pub fn request_optional_features(features: wgpu::Features) {
     let mut guard = REQUESTED_FEATURES
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *guard |= features;
+    let dropped = features & wgpu::Features::all_experimental_mask();
+    if !dropped.is_empty() && !EXPERIMENTAL_DROP_LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!("frust-gpu: experimental GPU features are never requested; dropped {dropped:?}");
+    }
+    *guard |= features & !wgpu::Features::all_experimental_mask();
 }
+
+/// Whether the dropped-experimental-feature warning has been logged already.
+static EXPERIMENTAL_DROP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Everything requested so far through [`request_optional_features`].
 pub fn requested_optional_features() -> wgpu::Features {
@@ -1045,6 +1059,9 @@ fn device_features(
     perf_trace: bool,
     requested: wgpu::Features,
 ) -> wgpu::Features {
+    // Defence in depth: experimental bits need an `unsafe` token frust never
+    // passes, so they are stripped here even if a caller bypassed the request fn.
+    let requested = requested & !wgpu::Features::all_experimental_mask();
     (adapter_features & (optional_device_features() | requested))
         | required_features(caps, perf_trace)
 }
@@ -1297,6 +1314,12 @@ mod tests {
     /// Serialises tests that write the process-wide request slot.
     static REQUEST_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Test-only: put the process-wide request back to `to` (hold
+    /// `REQUEST_LOCK`). There is deliberately no production reset.
+    fn reset_requested_features(to: wgpu::Features) {
+        *REQUESTED_FEATURES.lock().unwrap_or_else(|p| p.into_inner()) = to;
+    }
+
     #[test]
     fn requested_features_are_added_only_when_the_adapter_offers_them() {
         let caps = TierCaps::fake(DownlevelProfile::Full);
@@ -1331,6 +1354,10 @@ mod tests {
                         allowed.contains(got),
                         "{got:?} escapes adapter {adapter:?} + required"
                     );
+                    assert!(
+                        (got & wgpu::Features::all_experimental_mask()).is_empty(),
+                        "{got:?} contains an experimental feature"
+                    );
                 }
             }
         }
@@ -1339,11 +1366,23 @@ mod tests {
     #[test]
     fn requests_union_and_never_shrink() {
         let _guard = REQUEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let before = requested_optional_features();
         request_optional_features(wgpu::Features::SHADER_F16);
         request_optional_features(wgpu::Features::FLOAT32_FILTERABLE);
         request_optional_features(wgpu::Features::empty());
         let got = requested_optional_features();
+        reset_requested_features(before);
         assert!(got.contains(wgpu::Features::SHADER_F16 | wgpu::Features::FLOAT32_FILTERABLE));
+    }
+
+    #[test]
+    fn a_request_never_stores_an_experimental_feature() {
+        let _guard = REQUEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let before = requested_optional_features();
+        request_optional_features(wgpu::Features::all());
+        let got = requested_optional_features();
+        reset_requested_features(before);
+        assert!((got & wgpu::Features::all_experimental_mask()).is_empty());
     }
 
     #[test]

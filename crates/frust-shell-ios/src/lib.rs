@@ -137,9 +137,10 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 ///   factory.
 ///
 /// Either form may be prefixed with `@pre_init $pre;`, where `$pre` is a
-/// `()`-typed expression the generated `frust_init` evaluates first, before
-/// `ffi_glue::init` spawns the render thread that creates the GPU device —
-/// the earliest point app code runs. `frust::app!`'s `gpu_features = { .. }`
+/// `()`-typed expression the generated `frust_init` evaluates first, inside
+/// `ffi_glue::init`'s panic guard and before it spawns the render thread that
+/// creates the GPU device — the earliest point app code runs. A panic in it is
+/// logged and `frust_init` returns null, like a failed init. `frust::app!`'s `gpu_features = { .. }`
 /// key uses it to request optional device features.
 ///
 /// `$build` is the root component's build closure, a `FnMut(&mut State) -> impl View<State>` that returns any `View<State>`; since a `Component::build` result's opaque type captures the borrows, it must be erased with `AnyView::new` before passing it to the macro (`move |s| frust::AnyView::new(root.build(s))`).
@@ -165,8 +166,7 @@ macro_rules! ios_app {
             height: u32,
             scale: f32,
         ) -> *mut ::core::ffi::c_void {
-            $(let () = $pre;)?
-            $crate::ffi_glue::init(metal_layer, width, height, scale, || {
+            $crate::ffi_glue::init(metal_layer, width, height, scale, || { $(let () = $pre;)? }, || {
                 $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
             })
         }

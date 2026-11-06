@@ -38,8 +38,9 @@
 //!
 //! # Who may publish
 //!
-//! Only a shell's render executor, at the point it has a live device (desktop:
-//! `frust-shell-desktop::render`, after each successful surface install). The
+//! Only a shell's render executor, at the point it has a live device: desktop
+//! (`frust-shell-desktop::render`, after each successful surface install),
+//! Android and iOS (their render executors, once the surface's device is up). The
 //! function is `pub` so any shell crate can publish; app code reads through
 //! the facade and never publishes.
 //!

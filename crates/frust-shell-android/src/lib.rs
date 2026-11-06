@@ -184,9 +184,10 @@ pub mod __jni {
 ///   2-arg form delegates to this one.
 ///
 /// Either form may be prefixed with `@pre_init $pre;`, where `$pre` is a
-/// `()`-typed expression the generated `nativeInit` evaluates first, before
-/// `jni_glue::native_init` adopts the GPU device or builds the app — the
-/// earliest point app code runs. `frust::app!`'s `gpu_features = { .. }` key
+/// `()`-typed expression the generated `nativeInit` evaluates first, inside
+/// `jni_glue::native_init`'s panic guard and before it adopts the GPU device or
+/// builds the app — the earliest point app code runs. A panic in it is logged
+/// and `nativeInit` returns `0`, like a failed init. `frust::app!`'s `gpu_features = { .. }` key
 /// uses it to request optional device features. A pre-built device lacking a
 /// requested feature its adapter offers is rebuilt (`gpu` feature).
 ///
@@ -220,8 +221,7 @@ macro_rules! android_app {
             scale: $crate::__jni::jfloat,
             cache_dir: $crate::__jni::JString<'local>,
         ) -> $crate::__jni::jlong {
-            $(let () = $pre;)?
-            $crate::jni_glue::native_init(env, surface, scale, cache_dir, || {
+            $crate::jni_glue::native_init(env, surface, scale, cache_dir, || { $(let () = $pre;)? }, || {
                 $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
             })
         }

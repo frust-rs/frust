@@ -1663,7 +1663,8 @@ unsafe fn handle_mut<'a>(handle: jlong) -> Option<&'a mut AndroidAppHandle> {
 ///
 /// `make_app` is supplied by the macro and erases the app's `State`/`build`;
 /// on any failure (null window, GPU init error, panic) returns `0`, matching
-/// Kotlin's "no native side yet" sentinel.
+/// Kotlin's "no native side yet" sentinel. `pre_init` is the macro's optional
+/// `@pre_init` hook (a no-op closure when absent); a panic in it also returns `0`.
 ///
 /// `cache_dir` is the app's `context.cacheDir.absolutePath`, read into
 /// a Rust `String` up front — before the surface handle is touched below — so
@@ -1676,9 +1677,20 @@ pub fn native_init(
     surface: JObject,
     scale: jfloat,
     cache_dir: JString,
+    pre_init: impl FnOnce(),
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> jlong {
     init_logger_once();
+    // The macro's `@pre_init` hook: app code, so it runs under the same panic
+    // containment as the init itself (an unwind across `extern "system"`
+    // aborts), after the logger so a panic message is visible, and before
+    // anything adopts the GPU device or builds the app.
+    if !guard("nativeInit pre_init", false, || {
+        pre_init();
+        true
+    }) {
+        return 0;
+    }
     // Devtools, compiled in only under this crate's `devtools` feature. Started
     // here — after `init_logger_once` above, never before it — because the
     // service's discovery line (`frust-devtools listening on <port>`) is a

@@ -345,15 +345,26 @@ fn report_device_memory() {
 ///
 /// `make_app` is supplied by the macro and erases the app's `State`/`build`;
 /// on any failure (null layer, GPU init error, panic) returns null, matching
-/// Swift's "no native side yet" sentinel.
+/// Swift's "no native side yet" sentinel. `pre_init` is the macro's optional
+/// `@pre_init` hook (a no-op closure when absent); a panic in it also returns null.
 pub fn init(
     metal_layer: *mut c_void,
     width: u32,
     height: u32,
     scale: f32,
+    pre_init: impl FnOnce(),
     make_app: impl FnOnce() -> Box<dyn AppTree>,
 ) -> *mut c_void {
     init_logger_once();
+    // The macro's `@pre_init` hook: app code, so it runs under the same panic
+    // containment as the init itself (`guard`, i.e. `catch_unwind`), after the
+    // logger and before the render thread that creates the GPU device.
+    if !guard("frust_init pre_init", false, || {
+        pre_init();
+        true
+    }) {
+        return std::ptr::null_mut();
+    }
     report_device_memory();
     // App first, devtools second. `make_app` (run inside `create_handle`) is the
     // `app!` init closure, which registers the hot-patch anchor; the CLI attaches
