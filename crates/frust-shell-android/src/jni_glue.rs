@@ -1554,7 +1554,12 @@ pub(crate) fn render_loop(
                 }
                 RenderCommand::Resume => {}
                 // `onTrimMemory` at a critical level (`native_on_trim_memory`).
-                RenderCommand::TrimMemory => renderer.trim_memory(),
+                RenderCommand::TrimMemory => {
+                    // CPU bookkeeping plus texture drops, no submission. Its
+                    // evictions republish the ledger, as the iOS split loop does.
+                    renderer.trim_memory();
+                    crate::app::publish_ledger(&mut renderer);
+                }
             }
         }
 

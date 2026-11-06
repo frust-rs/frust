@@ -314,9 +314,7 @@ impl ExternalPass for SpinningQuad {
 
         let mut targets = self.targets.lock().unwrap_or_else(PoisonError::into_inner);
         // Memory pressure asked for the targets to go: rebuild them all below.
-        if self.drop_targets.swap(false, Ordering::AcqRel) {
-            targets.clear();
-        }
+        take_drop_request(&self.drop_targets, &mut *targets);
         let rebuild = targets
             .get(&drain)
             .is_none_or(|t| t.generation != generation || t.extent != EXTENT);
@@ -405,6 +403,15 @@ pub struct GpuPassState {
     refreshes: u32,
     pressure: RwSignal<(u32, Option<MemoryPressure>)>,
     _pressure: AppLifecycleListener,
+}
+
+/// Takes a pending drop request: when `flag` was set, clears the per-drain
+/// target map and resets the flag, so a request is honoured exactly once.
+/// Generic over the target type so the test can drive it without a GPU.
+fn take_drop_request<T>(flag: &AtomicBool, targets: &mut HashMap<u64, T>) {
+    if flag.swap(false, Ordering::AcqRel) {
+        targets.clear();
+    }
 }
 
 /// Whether a memory-pressure level asks the pass to drop its per-drain targets.
@@ -567,9 +574,22 @@ mod tests {
     fn drop_flag_is_taken_once() {
         let pass = SpinningQuad::new();
         let flag = pass.drop_targets_flag();
-        assert!(!pass.drop_targets.load(Ordering::Acquire));
+        // Unit targets stand in for the GPU `Target`s the map holds in `record`.
+        let mut targets: HashMap<u64, ()> = HashMap::from([(1, ()), (2, ())]);
+
+        // An unset flag leaves a non-empty map alone.
+        take_drop_request(&pass.drop_targets, &mut targets);
+        assert_eq!(targets.len(), 2);
+
+        // A set flag clears the map once, and is reset by taking it.
         flag.store(true, Ordering::Release);
-        assert!(pass.drop_targets.swap(false, Ordering::AcqRel));
-        assert!(!pass.drop_targets.swap(false, Ordering::AcqRel));
+        take_drop_request(&pass.drop_targets, &mut targets);
+        assert!(targets.is_empty());
+        assert!(!pass.drop_targets.load(Ordering::Acquire));
+
+        // A second take with the flag now clear does not touch a refilled map.
+        targets.insert(3, ());
+        take_drop_request(&pass.drop_targets, &mut targets);
+        assert_eq!(targets.len(), 1);
     }
 }
