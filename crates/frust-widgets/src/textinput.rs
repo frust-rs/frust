@@ -746,7 +746,9 @@ impl<State: 'static> TextInputView<State> {
     /// (explicit > theme > black fallback — see the [module docs](self)).
     /// Default (no call) resolves the color from the active theme's
     /// `on_surface` role, falling back to black with no theme threaded. Does
-    /// not affect the chrome colors or padding/caret constants.
+    /// not affect the chrome colors or padding/caret constants. A decoration
+    /// on the style is not painted: the content and placeholder are drawn by
+    /// the field, and only `text(..)` paints a [`frust_text::TextDecoration`].
     pub fn text_style(mut self, text_style: TextStyle) -> Self {
         self.text_style = text_style;
         self.text_style_explicit = true;
@@ -8626,6 +8628,98 @@ mod tests {
         });
         let (font, _) = painted_shaped_run(&mut root);
         assert_same_font(&font, TUFFY, "placeholder");
+    }
+
+    /// Every paint call in order, rendered as text, so two paints compare
+    /// op-for-op (chrome, content and placeholder glyph runs, caret, selection).
+    #[derive(Default, Debug, PartialEq)]
+    struct PaintTrace(Vec<String>);
+
+    impl PaintScene for PaintTrace {
+        fn fill_rect(&mut self, origin: Point, size: Size, color: Color) {
+            self.0.push(format!("rect {origin:?} {size:?} {color:?}"));
+        }
+        fn draw_text(&mut self, origin: Point, text: &str) {
+            self.0.push(format!("text {origin:?} {text}"));
+        }
+        fn fill_rounded_rect(&mut self, origin: Point, size: Size, radius: f64, color: Color) {
+            self.0
+                .push(format!("rounded {origin:?} {size:?} {radius} {color:?}"));
+        }
+        fn stroke_line(&mut self, p0: Point, p1: Point, width: f64, color: Color) {
+            self.0.push(format!("line {p0:?} {p1:?} {width} {color:?}"));
+        }
+        fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+            let glyphs: Vec<(u32, f32, f32)> =
+                run.glyphs.iter().map(|g| (g.id, g.x, g.y)).collect();
+            self.0.push(format!(
+                "glyphs {} {:?} {glyphs:?}",
+                run.font_size, run.brush
+            ));
+        }
+    }
+
+    #[test]
+    fn a_decorated_text_style_draws_no_decoration_in_a_field() {
+        // Decorations are painted by `text(..)` only (see `text_style`). A field
+        // whose style carries one must paint exactly what its undecorated twin
+        // paints: no underline or strike rect, and the same content and
+        // placeholder glyph runs. The layout half still succeeds.
+        let _slot = register_tuffy();
+        let plain = family_style(frust_text::FontFamily::named("Tuffy"));
+        let red = Color::from_rgb8(200, 0, 0);
+        let decorated = [
+            plain
+                .clone()
+                .with_decoration(frust_text::TextDecoration::underline().with_color(red)),
+            plain
+                .clone()
+                .with_decoration(frust_text::TextDecoration::line_through()),
+        ];
+        for value in [DIGITS, ""] {
+            let trace = |style: TextStyle| {
+                let mut root = themed_field(value, None, |v| v.text_style(style.clone()));
+                let mut rec = PaintTrace::default();
+                root.paint(&mut rec, FrameTime::ZERO);
+                rec
+            };
+            let baseline = trace(plain.clone());
+            assert!(
+                baseline.0.iter().any(|op| op.starts_with("glyphs")),
+                "fixture sanity: the field paints a glyph run for value {value:?}"
+            );
+            for style in decorated.clone() {
+                assert_eq!(
+                    trace(style),
+                    baseline,
+                    "a decorated style must paint the undecorated field's ops \
+                     (value {value:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_monospace_only_theme_swap_re_faces_the_field() {
+        // Two themes identical except for the `MonospaceFamily` value. The
+        // extension set is the same (same type), so only the effective style
+        // can tell them apart: the field must re-shape in the new family.
+        let _slot = register_tuffy();
+        let with_mono = |family: &str| {
+            Theme::builder(Theme::neutral())
+                .extension(frust_theme::MonospaceFamily {
+                    family: frust_text::FontFamily::named(family),
+                })
+                .build()
+        };
+        let mut root = themed_field(DIGITS, Some(with_mono("Tuffy")), |v| v.themed_mono_family());
+        let (before, _) = painted_shaped_run(&mut root);
+        assert_same_font(&before, TUFFY, "before the monospace-only swap");
+
+        root.set_theme(Box::new(with_mono(NO_SUCH_FAMILY)));
+        root.layout(Size::new(600.0, 200.0));
+        let (after, _) = painted_shaped_run(&mut root);
+        assert_other_font(&after, TUFFY, "after the monospace-only swap");
     }
 
     #[test]
