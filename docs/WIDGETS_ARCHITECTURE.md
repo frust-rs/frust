@@ -63,8 +63,8 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   shell owns the active `Theme`; widgets recover it type-erased from paint/layout context so
   `frust-core` stays theme-agnostic, while app code reads a cloned `Theme` via reactive context.
 - Widget resolution precedence: explicit builder value > theme token > unthemed-fallback constant,
-  generally re-resolved every paint; `Text`/`TextInput` instead bake the resolved color at layout
-  time; `Text` and `TextInput` also bake the family of an opted-in type-scale role (`.themed_family`) or the theme's monospace family (`.themed_mono_family`), which wins over a style family.
+  generally re-resolved every paint; `Text`/`TextInput` instead bake the resolved color and a themed
+  family (`.themed_family`/`.themed_mono_family`) at layout: `Text` yields to an explicit `.family()`/`.style()`, `TextInput` does not.
 - Introspection flow: a container implements `Widget::visit_children` (CORE unit) via the
   authoring toolkit's `VisitPods` trait and `visit_children!` macro (one line naming its
   `ChildPod` fields) so `RenderRoot::inspect()` can enumerate its children; a hand-rolled child

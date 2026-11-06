@@ -3837,6 +3837,30 @@ focus.
 
 ---
 
+### `textinput-no-text-decoration` — a text field draws no underline or line-through
+
+**Observed**: `TextStyle.decoration` (underline, line-through) is painted only by `TextView`. A
+`TextInputView` accepts a decorated style for its content and its placeholder, but its paint path
+never asks the layout for decoration rectangles, so no line is drawn under or through the text.
+
+**Applies to**: every `frust::TextInputView` and every design-system field wrapping one, on every
+platform.
+
+**Workaround**: draw the line with a separate `TextView` over a read-only presentation, or leave the
+field undecorated.
+
+**Why accepted**: a decoration line crosses the caret, the selection highlight and the composing
+underline, and which layer wins at each crossing is an open design question rather than a missing
+call.
+
+**Evidence**: `crates/frust-widgets/src/text.rs` (`TextWidget` paints `TextLayout::decoration_rects`)
+against `crates/frust-widgets/src/textinput.rs`, which has no decoration paint.
+
+**Trigger for removal**: the field paints `TextLayout::decoration_rects` for its content and
+placeholder, with the caret and selection interplay settled.
+
+---
+
 ### `selection-verbs-advertised-not-invocable` — the field publishes Copy/Cut/Paste/Select all to a screen reader, and none of them can be invoked
 
 **Observed**: the floated toolbar is a pointer affordance and the portal publishes no semantics for
