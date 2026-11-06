@@ -35,7 +35,21 @@ use frust::on_cleanup;
 ///
 /// ```rust,ignore
 /// use_failure_listener(controller.core().failures(), move |f: AppFailure| {
+///     // `user_message()` is the non-localized default (the failure's `Display`).
 ///     toasts.error(f.user_message());
+/// });
+/// ```
+///
+/// The helper never renders failure text itself: the handler decides what the
+/// user sees. To localize it, read the i18n handle where the listener is
+/// installed, move it into the handler, and render through an app-defined method.
+/// `AppFailure::localized` is the app's own mapping from each variant to a
+/// message key, resolved with `i18n.t(..)`.
+///
+/// ```rust,ignore
+/// let i18n = use_i18n();
+/// use_failure_listener(controller.core().failures(), move |f: AppFailure| {
+///     toasts.error(f.localized(&i18n));
 /// });
 /// ```
 pub fn use_failure_listener<F>(sink: &FailureSink<F>, handler: impl Fn(F) + Send + Sync + 'static)
