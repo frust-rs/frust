@@ -147,7 +147,8 @@
 //! the full extent and the payload holds just the region's texels. It needs a
 //! shown texture of the same extent and format; otherwise (and for an empty or
 //! out-of-extent region, a wrong byte count, or a native payload) it is
-//! refused, released at once, and the previous content stays.
+//! refused, released at once, and the previous content stays (nothing, after a
+//! device change). Warned about once per registration and reason.
 //!
 //! # Where it runs
 //!
@@ -156,7 +157,9 @@
 //! and web shells alike, and nowhere a surface is not presenting. A shell that
 //! rebuilds its engine on the same device (a fresh surface) gets the current
 //! view bound again on its first frame; a *device* change drops what was
-//! shown until the source yields its next frame. With two engine-tier
+//! shown until the source yields its next full frame (`frame_size` reads `None`
+//! meanwhile, and a producer of partial updates must send a full frame then).
+//! With two engine-tier
 //! surfaces live at once, each clears its own binding on its next frame once
 //! the registration is dropped. A source's frame is consumed by whichever
 //! surface drains first, so another surface keeps the view it last bound
@@ -431,9 +434,17 @@ impl SourceFrame {
     /// extent and the CPU payload holds exactly `region.width * region.height`
     /// tightly packed texels, written at `region`'s origin into the texture
     /// already shown. Refused (and released at once, keeping the previous
-    /// content) when no texture of the same extent and format is shown yet,
-    /// the region is empty or outside the extent, the byte count mismatches,
-    /// or the payload is native.
+    /// content, if any) when no bus-uploaded texture of the same extent and
+    /// format is shown, the region is empty or outside the extent, the byte
+    /// count mismatches, or the payload is native.
+    ///
+    /// A producer sending regions must send a full frame whenever
+    /// [`TextureRegistration::frame_size`] is `None` or differs from its
+    /// extent, and after any native frame (an imported view cannot be written
+    /// to). A device change (an Activity recreate, a GPU reset) drops what was
+    /// shown, so nothing stays on screen after one and `frame_size` reads
+    /// `None` until the next full frame; region frames sent meanwhile are
+    /// refused and released.
     #[must_use]
     pub fn with_update_region(mut self, region: UpdateRegion) -> Self {
         self.region = Some(region);
@@ -761,7 +772,14 @@ impl TextureRegistration {
         self.id.get()
     }
 
-    /// The extent of the frame currently shown, `None` before the first one.
+    /// The extent of the frame currently shown, `None` before the first one
+    /// and after a device change dropped it.
+    ///
+    /// A producer of [`SourceFrame::with_update_region`] frames must send a
+    /// full frame whenever this is `None` or differs from its extent; region
+    /// frames sent while it is `None` are refused and released at once.
+    /// After a native frame this reports the imported extent, but only a full
+    /// CPU frame makes region frames acceptable again.
     ///
     /// Read by an app that sizes or fits its view to the content (a video's
     /// aspect ratio); updated on the render thread as frames land.
@@ -998,10 +1016,27 @@ fn replace_shown(state: &mut PassState, new: Shown) {
 #[derive(Default)]
 struct Warned {
     malformed: bool,
-    region: bool,
+    /// Partial-update refusal reasons already warned about: one warning per
+    /// (registration, reason), so a later different reason still surfaces.
+    region: Vec<&'static str>,
     missing_importer: bool,
     import_failed: bool,
     backlog: bool,
+}
+
+/// Logs a partial-update refusal at `warn!` the first time `reason` is seen
+/// for the registration, `debug!` after; a different reason warns on its own.
+fn report_region(
+    seen: &mut Vec<&'static str>,
+    id: u64,
+    reason: &'static str,
+    message: fmt::Arguments<'_>,
+) {
+    let mut flag = seen.contains(&reason);
+    report(&mut flag, id, message);
+    if !seen.contains(&reason) {
+        seen.push(reason);
+    }
 }
 
 /// Logs a refusal at `warn!` the first time `flag` sees it, `debug!` after.
@@ -1031,6 +1066,9 @@ impl ExternalPass for SourcePass {
         {
             let old_device = state.shown.as_ref().map(|shown| shown.device.clone());
             state.shown = None;
+            // Nothing is shown, so no region frame has a texture to target:
+            // `frame_size` must read `None` until a full frame lands.
+            self.status.size.store(0, Ordering::Release);
             // Dropping the view retired it on the OLD queue, whose fences fire
             // only when that device is polled; nothing else will poll it again,
             // so drain both hops here before the device is let go of.
@@ -1066,9 +1104,10 @@ impl ExternalPass for SourcePass {
                 SourcePayload::Native(handle) => {
                     if region.is_some() {
                         let id = frame.id().get();
-                        report(
+                        report_region(
                             &mut state.warned.region,
                             id,
+                            "native",
                             format_args!("refused a partial update of a native frame"),
                         );
                         release.release();
@@ -1146,9 +1185,10 @@ fn upload(
             Some(_) => region.refusal(size, pixels.len()),
         };
         if let Some(refusal) = refusal {
-            report(
+            report_region(
                 &mut state.warned.region,
                 id,
+                refusal,
                 format_args!("refused a partial update of a {width}x{height} frame: {refusal}"),
             );
             return false;
@@ -1593,6 +1633,16 @@ mod tests {
         fake.fire();
         assert_eq!(released.load(Ordering::SeqCst), 1);
         assert_eq!(pending.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn partial_update_refusals_are_remembered_per_reason() {
+        let mut seen = Vec::new();
+        report_region(&mut seen, 1, "first", format_args!("a"));
+        report_region(&mut seen, 1, "first", format_args!("a"));
+        assert_eq!(seen, vec!["first"]);
+        report_region(&mut seen, 1, "second", format_args!("b"));
+        assert_eq!(seen, vec!["first", "second"]);
     }
 
     /// A frame source standing in for a registration's, never polled here.
