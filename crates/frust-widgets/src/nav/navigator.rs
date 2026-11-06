@@ -1431,6 +1431,12 @@ impl<State: 'static> NavigatorWidget<State> {
     /// rather than at settle. New pages build before anything is torn down, so a
     /// controller shared between an old and a new page never reads as unmounted.
     ///
+    /// When the old top is retained as the new top, its focus, pointer capture
+    /// and IME session are untouched, whatever happens to the pages below it.
+    /// When the old top stops being the top, removed or retained and now covered,
+    /// its focus and capture are cancelled and, if it held focus under the full
+    /// gate, the IME surface is cleared. The edge-swipe arm is dropped either way.
+    ///
     /// The flight follows Flutter's `DefaultTransitionDelegate`:
     ///
     /// - **Push:** the new top is fresh and its spec animates. The old top leaves
@@ -1459,12 +1465,18 @@ impl<State: 'static> NavigatorWidget<State> {
         let from_depth = self.pages.len();
         // Read before `cancel_top` drops it (see `top_pod_focused`).
         let outgoing_focused = self.top_pod_focused();
-        self.cancel_top();
+        // Keys only, so safe before `finalize_transition`'s effects are gone; it
+        // must precede `cancel_top`, which a retained top skips.
+        let matches = match_retained(&specs, &self.pages);
+        let old_top_stays_top = from_depth > 0
+            && matches[specs.len() - 1].is_some_and(|old_index| old_index + 1 == from_depth);
+        if !old_top_stays_top {
+            self.cancel_top();
+        }
         // A stack mutation invalidates an arm captured against the old stack.
         self.edge.armed = false;
         self.edge.inner_claimed = false;
 
-        let matches = match_retained(&specs, &self.pages);
         let old_visible_from = self.base_visible_index();
         let mut old: Vec<Option<PageEntry<State>>> = std::mem::take(&mut self.pages)
             .into_iter()
@@ -1543,7 +1555,7 @@ impl<State: 'static> NavigatorWidget<State> {
         // Full gate (`top_pod_focused`): the removed page's own link ANDed with the
         // rebuild-pass chain down to this navigator. `ctx.has_focus()` is unchanged
         // by the `build_child` above: that descent restores the chain on the way out.
-        if old_top_removed && outgoing_focused && ctx.has_focus() {
+        if !old_top_stays_top && outgoing_focused && ctx.has_focus() {
             self.needs_ime_clear = true;
         }
 

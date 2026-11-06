@@ -1142,15 +1142,18 @@ fn field_surface() -> ImeState {
 /// paint while it holds focus, as a real text input does.
 struct Field {
     height: f64,
+    cancels: Option<Rc<Cell<u32>>>,
 }
 struct FieldWidget {
     height: f64,
+    cancels: Option<Rc<Cell<u32>>>,
 }
 impl View<()> for Field {
     type Element = FieldWidget;
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> FieldWidget {
         FieldWidget {
             height: self.height,
+            cancels: self.cancels.clone(),
         }
     }
     fn rebuild(&self, _: &Self, _: &mut FieldWidget, _: &mut BuildCtx<'_>) -> ChangeFlags {
@@ -1168,9 +1171,21 @@ impl Widget for FieldWidget {
     }
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if let InputEvent::Pointer(p) = event
+            && p.phase == PointerPhase::Cancel
+            && let Some(cancels) = &self.cancels
+        {
+            cancels.set(cancels.get() + 1);
+        }
+        if matches!(event, InputEvent::Key(_)) && ctx.has_focus() {
+            return EventResult::Handled;
+        }
+        if let InputEvent::Pointer(p) = event
             && p.phase == PointerPhase::Down
         {
             ctx.request_focus();
+            if self.cancels.is_some() {
+                ctx.capture_pointer();
+            }
             ctx.publish_ime_state(field_surface());
             return EventResult::Handled;
         }
@@ -1179,7 +1194,24 @@ impl Widget for FieldWidget {
 }
 
 fn field(height: f64) -> PageBuilder<()> {
-    Rc::new(move || any(Field { height }))
+    Rc::new(move || {
+        any(Field {
+            height,
+            cancels: None,
+        })
+    })
+}
+
+/// A [`field`] that also captures the pointer on `Down` and counts the
+/// synthetic `Cancel`s it receives.
+fn field_counting(height: f64, cancels: &Rc<Cell<u32>>) -> PageBuilder<()> {
+    let cancels = Rc::clone(cancels);
+    Rc::new(move || {
+        any(Field {
+            height,
+            cancels: Some(Rc::clone(&cancels)),
+        })
+    })
 }
 
 #[test]
@@ -1230,6 +1262,128 @@ fn a_retained_focused_top_raises_no_ime_clear() {
     assert!(!h.nav().needs_ime_clear, "the old top was not removed");
 }
 
+/// A field page on top, tapped so it holds focus, capture and the IME session.
+fn focused_field_top(cancels: &Rc<Cell<u32>>, below: &[&str]) -> Harness {
+    let log = Log::default();
+    let mut h = Harness::new();
+    let mut pages: Vec<_> = below
+        .iter()
+        .map(|p| page(p, probe("u", 40.0, &log)))
+        .collect();
+    pages.push(page("/f", field_counting(100.0, cancels)));
+    h.set(pages, 0);
+    h.root.event(&mut (), &down(50.0, 50.0));
+    h.frame(16);
+    assert!(h.root.is_focus_active());
+    assert!(h.nav().pages.last().unwrap().pod.is_focused());
+    h
+}
+
+fn assert_top_keeps_focus_and_capture(h: &mut Harness, cancels: &Rc<Cell<u32>>) {
+    assert!(h.nav().pages.last().unwrap().pod.is_focused());
+    assert!(
+        h.nav().pages.last().unwrap().pod.is_active(),
+        "capture kept"
+    );
+    assert_eq!(cancels.get(), 0, "no synthetic Cancel reached the top");
+    assert!(!h.nav().needs_ime_clear);
+    h.root.layout(Size::new(100.0, 100.0));
+    h.root
+        .paint(&mut RecordingScene::default(), FrameTime::ZERO);
+    assert!(h.root.is_focus_active(), "the IME session survived");
+    assert!(h.root.ime_state().is_some());
+    let key = InputEvent::Key(frust_core::KeyEvent {
+        key: frust_core::Key::Character("a".to_string()),
+        modifiers: frust_core::Modifiers::default(),
+        repeat: false,
+    });
+    assert!(
+        h.root.event(&mut (), &key).handled,
+        "a key event still reaches the field"
+    );
+}
+
+#[test]
+fn an_unchanged_focused_top_keeps_focus_capture_and_session() {
+    let cancels = Rc::new(Cell::new(0));
+    let mut h = focused_field_top(&cancels, &[]);
+    h.controller.set_pages(vec![page("/f", field(100.0))]);
+    h.root.rebuild(&mut h.app, &mut ());
+    assert_top_keeps_focus_and_capture(&mut h, &cancels);
+}
+
+#[test]
+fn removing_pages_below_a_focused_retained_top_keeps_its_session() {
+    let cancels = Rc::new(Cell::new(0));
+    let mut h = focused_field_top(&cancels, &["/u"]);
+    h.controller.set_pages(vec![page("/f", field(100.0))]);
+    h.root.rebuild(&mut h.app, &mut ());
+    assert_eq!(h.routes(), ["/f"]);
+    assert_top_keeps_focus_and_capture(&mut h, &cancels);
+}
+
+#[test]
+fn a_fresh_page_over_a_focused_retained_top_covers_it_and_clears() {
+    let log = Log::default();
+    let cancels = Rc::new(Cell::new(0));
+    let mut h = focused_field_top(&cancels, &[]);
+    h.controller.set_pages(vec![
+        page("/f", field(100.0)),
+        page("/x", probe("x", 40.0, &log)),
+    ]);
+    h.root.rebuild(&mut h.app, &mut ());
+    assert!(!h.nav().pages[0].pod.is_focused());
+    assert!(!h.nav().pages[0].pod.is_active());
+    assert_eq!(cancels.get(), 1, "the capture was cancelled");
+    assert!(h.nav().needs_ime_clear);
+    h.root.layout(Size::new(100.0, 100.0));
+    h.root
+        .paint(&mut RecordingScene::default(), FrameTime::ZERO);
+    assert!(!h.root.is_focus_active());
+}
+
+#[test]
+fn a_covered_focused_top_raises_no_clear_when_the_navigator_lacks_focus() {
+    let log = Log::default();
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: RenderRoot<(), crate::FlexView<()>> = RenderRoot::new();
+    let mut app = field_above_navigator(&controller, field(40.0));
+    root.rebuild(&mut app, &mut ());
+    root.layout(Size::new(100.0, 100.0));
+    root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+    // Focus the navigator's page, then the sibling field above it.
+    root.event(&mut (), &down(5.0, 50.0));
+    root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+    root.event(&mut (), &down(5.0, 5.0));
+    root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+    let generation = root.focus_ime_generation();
+
+    controller.set_pages(vec![
+        page("/root", field(40.0)),
+        page("/x", probe("x", 40.0, &log)),
+    ]);
+    root.rebuild(&mut app, &mut ());
+    root.layout(Size::new(100.0, 100.0));
+    root.paint(&mut RecordingScene::default(), FrameTime::ZERO);
+    assert!(root.is_focus_active(), "the sibling keeps its session");
+    assert_eq!(root.focus_ime_generation(), generation);
+}
+
+#[test]
+fn reordering_so_the_old_top_is_covered_cancels_and_clears_it() {
+    let log = Log::default();
+    let cancels = Rc::new(Cell::new(0));
+    let mut h = focused_field_top(&cancels, &["/g"]);
+    h.controller.set_pages(vec![
+        page("/f", field_counting(100.0, &cancels)),
+        page("/g", probe("g", 40.0, &log)),
+    ]);
+    h.root.rebuild(&mut h.app, &mut ());
+    assert_eq!(h.routes(), ["/f", "/g"]);
+    assert_eq!(cancels.get(), 1);
+    assert!(h.nav().needs_ime_clear);
+}
+
 /// `Column[field, navigator]`, 40 tall each: a tap at `y < 40` lands in the field,
 /// at `y >= 40` in the navigator's page.
 fn field_above_navigator(
@@ -1240,7 +1394,10 @@ fn field_above_navigator(
     move |_: &mut ()| {
         let page_builder = Rc::clone(&page_builder);
         column()
-            .child(Field { height: 40.0 })
+            .child(Field {
+                height: 40.0,
+                cancels: None,
+            })
             .child(navigator(&ctrl, move || page_builder()))
     }
 }
