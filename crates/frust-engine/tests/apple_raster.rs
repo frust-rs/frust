@@ -22,16 +22,18 @@
 #[path = "../src/text/apple_raster.rs"]
 mod apple_raster;
 
-use apple_raster::{glyph_for_char, rasterize_glyph};
+use apple_raster::{glyph_count, glyph_for_char, rasterize_glyph};
 
 const EMOJI: &str = "AppleColorEmoji";
+const HIDDEN_EMOJI: &str = ".AppleColorEmojiUI";
 
 fn emoji(character: char, ppem: u16, max_dim: u32) -> Option<apple_raster::RasterGlyph> {
     let Some(glyph) = glyph_for_char(EMOJI, character) else {
         eprintln!("AppleColorEmoji does not map {character:?} here; skipping");
         return None;
     };
-    rasterize_glyph(EMOJI, glyph, ppem, max_dim)
+    let count = glyph_count(EMOJI)?;
+    rasterize_glyph(EMOJI, glyph, count, ppem, max_dim)
 }
 
 /// Mean (r, g, b) over the texels that are at least half opaque, as 0..=255.
@@ -120,9 +122,10 @@ fn a_zero_ppem_and_an_inkless_glyph_refuse() {
     let Some(glyph) = glyph_for_char(EMOJI, '\u{1F600}') else {
         return;
     };
-    assert!(rasterize_glyph(EMOJI, glyph, 0, 256).is_none());
+    assert!(rasterize_glyph(EMOJI, glyph, glyph_count(EMOJI).unwrap_or(0), 0, 256).is_none());
     if let Some(space) = glyph_for_char("Helvetica", ' ') {
-        assert!(rasterize_glyph("Helvetica", space, 64, 256).is_none());
+        let count = glyph_count("Helvetica").unwrap_or(0);
+        assert!(rasterize_glyph("Helvetica", space, count, 64, 256).is_none());
     }
 }
 
@@ -132,7 +135,14 @@ fn an_outline_face_yields_black_coverage() {
         eprintln!("Helvetica not available; skipping");
         return;
     };
-    let glyph = rasterize_glyph("Helvetica", a, 48, 256).expect("outline glyph rasterizes");
+    let glyph = rasterize_glyph(
+        "Helvetica",
+        a,
+        glyph_count("Helvetica").unwrap_or(0),
+        48,
+        256,
+    )
+    .expect("outline glyph rasterizes");
     assert!(glyph.pixmap.data().iter().any(|t| t.a == 255));
     assert!(
         glyph
@@ -140,5 +150,60 @@ fn an_outline_face_yields_black_coverage() {
             .data()
             .iter()
             .all(|t| t.r == 0 && t.g == 0 && t.b == 0)
+    );
+}
+
+#[test]
+fn a_name_that_opens_a_different_font_refuses() {
+    let Some(a) = glyph_for_char("Helvetica", 'A') else {
+        return;
+    };
+    let count = glyph_count("Helvetica").unwrap_or(0);
+    assert!(rasterize_glyph("NoSuchFont-Regular", a, count, 48, 256).is_none());
+    assert!(glyph_for_char("NoSuchFont-Regular", 'A').is_none());
+}
+
+#[test]
+fn a_wrong_expected_glyph_count_refuses() {
+    let Some(glyph) = glyph_for_char(EMOJI, '\u{1F600}') else {
+        return;
+    };
+    let count = glyph_count(EMOJI).unwrap_or(0);
+    // A wrong count is refused before any drawing.
+    assert!(rasterize_glyph(HIDDEN_EMOJI, glyph, count.wrapping_add(1), 64, 256).is_none());
+    // An exact name match with the wrong count is refused too.
+    assert!(rasterize_glyph(EMOJI, glyph, count.wrapping_add(1), 64, 256).is_none());
+}
+
+#[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "CoreText sbix bitmap draws fault on macOS; run on iOS"
+)]
+fn the_hidden_emoji_face_draws_through_its_public_sibling() {
+    let Some(glyph) = glyph_for_char(EMOJI, '\u{1F600}') else {
+        return;
+    };
+    let Some(count) = glyph_count(EMOJI) else {
+        return;
+    };
+    let public = rasterize_glyph(EMOJI, glyph, count, 64, 256).expect("public face draws");
+    let hidden = rasterize_glyph(HIDDEN_EMOJI, glyph, count, 64, 256)
+        .expect("hidden face draws via its public sibling");
+    assert_eq!(
+        (public.pixmap.width(), public.pixmap.height()),
+        (hidden.pixmap.width(), hidden.pixmap.height())
+    );
+    assert_eq!(
+        (public.origin_x, public.origin_y),
+        (hidden.origin_x, hidden.origin_y)
+    );
+    assert!(
+        hidden
+            .pixmap
+            .data()
+            .iter()
+            .any(|t| t.a == 255 && t.r.max(t.g).max(t.b) - t.r.min(t.g).min(t.b) > 60),
+        "not coloured"
     );
 }

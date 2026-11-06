@@ -789,7 +789,7 @@ impl RunDraw<'_, '_> {
             return false;
         }
         let key = bitmap_key(self.font.0, self.font.1, glyph, ppem);
-        match self.resolve(key, || rasterize(name, glyph, ppem)) {
+        match self.resolve(key, || rasterize(name, glyph, face.glyphs, ppem)) {
             Ok(Some(slot)) => {
                 let origin = Vec2::new(f64::from(slot.bearing_x), -f64::from(slot.bearing_y));
                 draw_from_atlas(
@@ -805,12 +805,14 @@ impl RunDraw<'_, '_> {
     }
 }
 
-/// CoreText's raster of `glyph` at `ppem`, with its origin as slot bearings.
+/// CoreText's raster of `glyph` at `ppem`, `glyphs` being the face's `maxp`
+/// glyph count (the identity check, see [`super::apple_raster`]), with its origin as slot bearings.
 #[cfg(target_os = "ios")]
-fn rasterize(name: &str, glyph: u32, ppem: u16) -> Option<(Pixmap, (i16, i16))> {
+fn rasterize(name: &str, glyph: u32, glyphs: u16, ppem: u16) -> Option<(Pixmap, (i16, i16))> {
     let raster = super::apple_raster::rasterize_glyph(
         name,
         u16::try_from(glyph).ok()?,
+        glyphs,
         ppem,
         MAX_STRIKE_DIM,
     )?;
@@ -823,7 +825,7 @@ fn rasterize(name: &str, glyph: u32, ppem: u16) -> Option<(Pixmap, (i16, i16))> 
 
 /// Off iOS no glyph is sent to CoreText ([`core_text_face`] answers `None`).
 #[cfg(not(target_os = "ios"))]
-fn rasterize(_name: &str, _glyph: u32, _ppem: u16) -> Option<(Pixmap, (i16, i16))> {
+fn rasterize(_name: &str, _glyph: u32, _glyphs: u16, _ppem: u16) -> Option<(Pixmap, (i16, i16))> {
     None
 }
 
