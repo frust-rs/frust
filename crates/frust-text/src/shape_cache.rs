@@ -75,6 +75,7 @@ pub(crate) struct ShapeKey {
     slant: SlantBits,
     width: u32,
     variations: Vec<([u8; 4], u32)>,
+    features: Vec<([u8; 4], u16)>,
     locale: Option<String>,
     app_locale: Option<Arc<str>>,
     size: u32,
@@ -100,6 +101,7 @@ impl ShapeKey {
                 .iter()
                 .map(|&(tag, value)| (tag, value.to_bits()))
                 .collect(),
+            features: style.features.clone(),
             locale: style.locale.clone(),
             // For untagged text the app default locale decides three things: the Han fallback
             // face, the shaping language (`locl`) together with the line-break language, and
@@ -440,6 +442,21 @@ mod tests {
             &base.clone().with_overflow_wrap(OverflowWrap::Anywhere),
         );
         assert_ne!(normal, anywhere);
+    }
+
+    #[test]
+    fn key_distinguishes_features() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let base = TextStyle::new(16.0, Color::BLACK);
+        let plain = ShapeKey::new("1234", &base);
+        let tabular = ShapeKey::new("1234", &base.clone().with_feature(*b"tnum", 1));
+        let off = ShapeKey::new("1234", &base.clone().with_feature(*b"tnum", 0));
+        assert_ne!(plain, tabular);
+        assert_ne!(tabular, off);
+        assert_eq!(
+            tabular,
+            ShapeKey::new("1234", &base.with_feature(*b"tnum", 1))
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ mod selector;
 use std::ops::Range;
 
 use fontique::Language;
-use parlance::{FontVariation, LineBreak, Tag};
+use parlance::{FontFeature, FontVariation, LineBreak, Tag};
 use parley_engine::itemize::Item;
 use parley_engine::shape::Whitespace as EngineWhitespace;
 use parley_engine::{
@@ -256,6 +256,7 @@ struct PassItem {
     char_end: u32,
     item: usize,
     variations: Vec<([u8; 4], f32)>,
+    features: Vec<([u8; 4], u16)>,
 }
 
 /// The reusable shaping state a [`crate::TextContext`] owns: the engine's
@@ -362,6 +363,7 @@ impl ShapeContext {
                 char_end: spec.char_end,
                 item,
                 variations: spec.variations.clone(),
+                features: spec.features.clone(),
             })
             .collect();
         self.selector.begin_shape();
@@ -406,22 +408,34 @@ impl ShapeContext {
                     .collect()
             })
             .collect();
-        let items = pass.iter().zip(&variations).map(|(p, variations)| {
-            let spec = &itemized.items[p.item];
-            Item {
-                char_end: p.char_end,
-                options: ShapeOptions {
-                    font_size: spec.font_size,
-                    language: spec
-                        .locale
-                        .as_deref()
-                        .or(default_locale)
-                        .and_then(|l| Language::parse(l).ok()),
-                    features: &[],
-                    variations,
-                },
-            }
-        });
+        let features: Vec<Vec<FontFeature>> = pass
+            .iter()
+            .map(|p| {
+                p.features
+                    .iter()
+                    .map(|&(tag, value)| FontFeature::new(Tag::new(&tag), value))
+                    .collect()
+            })
+            .collect();
+        let items =
+            pass.iter()
+                .zip(variations.iter().zip(&features))
+                .map(|(p, (variations, features))| {
+                    let spec = &itemized.items[p.item];
+                    Item {
+                        char_end: p.char_end,
+                        options: ShapeOptions {
+                            font_size: spec.font_size,
+                            language: spec
+                                .locale
+                                .as_deref()
+                                .or(default_locale)
+                                .and_then(|l| Language::parse(l).ok()),
+                            features,
+                            variations,
+                        },
+                    }
+                });
         let adapter = Adapter {
             oracle,
             state: &mut self.selector,
@@ -454,15 +468,21 @@ impl ShapeContext {
                 .map_or(&[][..], |f| faces[f].coords.as_slice());
             let mut variations = coords.to_vec();
             variations.extend_from_slice(&itemized.items[item].variations);
+            let features = itemized.items[item].features.clone();
             let char_end = u32::try_from(run.range.char_range.end).unwrap_or(u32::MAX);
             match out.last_mut() {
-                Some(last) if last.item == item && last.variations == variations => {
+                Some(last)
+                    if last.item == item
+                        && last.variations == variations
+                        && last.features == features =>
+                {
                     last.char_end = char_end;
                 }
                 _ => out.push(PassItem {
                     char_end,
                     item,
                     variations,
+                    features,
                 }),
             }
         }
@@ -893,6 +913,70 @@ mod tests {
         assert!(heavy.runs[0].coords[0] > 0, "{:?}", heavy.runs[0].coords);
         let advance = |s: &Shaped| s.runs[0].advance;
         assert!(advance(&heavy) > advance(&plain), "heavier Geist is wider");
+    }
+
+    fn geist_run(text: &str, style: &TextStyle) -> (f32, usize) {
+        let mut oracle = geist_oracle();
+        let mut cx = ShapeContext::default();
+        let shaped = cx.shape(&mut oracle, text, style);
+        (shaped.runs[0].advance, shaped.glyphs.len())
+    }
+
+    #[test]
+    fn tabular_figures_equalise_digit_advances() {
+        let base = TextStyle {
+            family: FontFamily::named("Geist"),
+            ..style(16.0)
+        };
+        let tabular = base.clone().with_feature(*b"tnum", 1);
+        let (ones, _) = geist_run("1111", &tabular);
+        let (eights, _) = geist_run("8888", &tabular);
+        assert_eq!(ones, eights, "tnum gives every digit the same advance");
+        let (plain_ones, _) = geist_run("1111", &base);
+        let (plain_eights, _) = geist_run("8888", &base);
+        assert_ne!(plain_ones, plain_eights, "proportional digits differ");
+    }
+
+    #[test]
+    fn a_later_feature_setting_wins() {
+        let base = TextStyle {
+            family: FontFamily::named("Geist"),
+            ..style(16.0)
+        };
+        let off = base.clone().with_features([(*b"tnum", 1), (*b"tnum", 0)]);
+        assert_eq!(geist_run("1111", &off), geist_run("1111", &base));
+    }
+
+    #[test]
+    fn disabling_ligatures_changes_the_glyph_count() {
+        let base = TextStyle {
+            family: FontFamily::named("Geist"),
+            ..style(16.0)
+        };
+        let (_, with) = geist_run("ffi", &base);
+        let (_, without) = geist_run("ffi", &base.clone().with_feature(*b"liga", 0));
+        assert_eq!(without, 3);
+        assert!(with < without, "Geist ligates ffi: {with} vs {without}");
+    }
+
+    #[test]
+    fn a_feature_change_splits_the_item_and_survives_the_second_pass() {
+        let mut oracle = geist_oracle();
+        let mut cx = ShapeContext::default();
+        let base = TextStyle {
+            family: FontFamily::named("Geist"),
+            weight: FontWeight::SEMI_BOLD,
+            ..style(16.0)
+        };
+        let tabular = base.clone().with_feature(*b"tnum", 1);
+        let shaped = cx.shape_spans(&mut oracle, "1111 1111", &[(0..5, &base), (5..9, &tabular)]);
+        let advance = |run: &ShapedRun| run.advance;
+        assert!(shaped.runs.len() >= 2);
+        assert!(shaped.runs.iter().all(|r| !r.coords.is_empty()));
+        assert_ne!(
+            advance(&shaped.runs[0]),
+            advance(shaped.runs.last().unwrap())
+        );
     }
 
     #[test]

@@ -325,6 +325,10 @@ pub struct TextStyle {
     /// applied over whatever weight/width/slant synthesis chose, in order; a
     /// later setting of the same tag wins. Axes a face lacks are ignored.
     pub variations: Vec<([u8; 4], f32)>,
+    /// OpenType feature settings (`(tag, value)`, e.g. `(*b"tnum", 1)` for
+    /// tabular figures or `(*b"liga", 0)` to disable ligatures), in order; a
+    /// later setting of the same tag wins. Features a face lacks are ignored.
+    pub features: Vec<([u8; 4], u16)>,
     /// BCP 47 locale of the text (`"ja"`, `"zh-Hant"`, ...): steers font
     /// fallback, language-specific shaping and CJK line breaking.
     pub locale: Option<String>,
@@ -369,6 +373,20 @@ impl TextStyle {
     /// This style with its variation-axis settings replaced by `variations`.
     pub fn with_variations(mut self, variations: impl IntoIterator<Item = ([u8; 4], f32)>) -> Self {
         self.variations = variations.into_iter().collect();
+        self
+    }
+
+    /// This style with one more OpenType feature setting appended (a later
+    /// setting of the same tag wins).
+    pub fn with_feature(mut self, tag: [u8; 4], value: u16) -> Self {
+        self.features.push((tag, value));
+        self
+    }
+
+    /// This style with its OpenType feature settings replaced by `features`
+    /// (a later setting of the same tag wins).
+    pub fn with_features(mut self, features: impl IntoIterator<Item = ([u8; 4], u16)>) -> Self {
+        self.features = features.into_iter().collect();
         self
     }
 
@@ -446,6 +464,7 @@ impl Default for TextStyle {
             style: FontStyle::default(),
             width: 1.0,
             variations: Vec::new(),
+            features: Vec::new(),
             locale: None,
             size: 16.0,
             color: Color::BLACK,
@@ -503,6 +522,7 @@ mod tests {
             .with_style(FontStyle::Italic)
             .with_width(0.5)
             .with_variation(*b"GRAD", 50.0)
+            .with_feature(*b"tnum", 1)
             .with_locale(Some("ja"))
             .with_size(20.0)
             .with_color(color)
@@ -515,6 +535,7 @@ mod tests {
         assert_eq!(style.style, FontStyle::Italic);
         assert_eq!(style.width, 0.5);
         assert_eq!(style.variations, vec![(*b"GRAD", 50.0)]);
+        assert_eq!(style.features, vec![(*b"tnum", 1)]);
         assert_eq!(style.locale.as_deref(), Some("ja"));
         assert_eq!(style.size, 20.0);
         assert_eq!(style.color, color);
@@ -533,6 +554,7 @@ mod tests {
             style: FontStyle::Oblique(Some(12.0)),
             width: 0.75,
             variations: vec![(*b"wght", 650.0)],
+            features: vec![(*b"liga", 0), (*b"ss01", 1)],
             locale: Some("zh-Hant".to_string()),
             size: 14.0,
             color,
@@ -547,6 +569,7 @@ mod tests {
             .with_style(FontStyle::Oblique(Some(12.0)))
             .with_width(0.75)
             .with_variations([(*b"wght", 650.0)])
+            .with_features([(*b"liga", 0), (*b"ss01", 1)])
             .with_locale(Some("zh-Hant"))
             .with_size(14.0)
             .with_color(color)
