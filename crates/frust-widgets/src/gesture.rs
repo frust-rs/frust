@@ -59,6 +59,10 @@
 //!   next pass that carries real state — the `Housekeeping` broadcast of the
 //!   next `RenderRoot::rebuild` (the same rebuild, for a structural cancel), or
 //!   an earlier `Down`. A detector torn down mid-drag fires no `cancel`.
+//!   A release of a non-primary button ends a started drag the same way the
+//!   press ends, but immediately: the `cancel` fires from the `Up` arm, because
+//!   the root releases the pointer capture on that release and the primary's
+//!   own `Up` will not arrive.
 //!
 //! **Inside a scroll view** the scroll sees each `Move` before its child and
 //! claims a drag along its own axis at the same [`TOUCH_SLOP`], sending the
@@ -88,8 +92,11 @@
 //!   resolves as a long-press fires `on_long_press` before `on_tap_up`, so the
 //!   order is always down, long, up — whether the threshold fired from the
 //!   Housekeeping pass or the release arrived first. A release of a
-//!   non-primary button (a chorded secondary press) is not this press's
-//!   release and changes nothing.
+//!   non-primary button (a chorded secondary press) while a press is in flight
+//!   ends it with `on_tap_cancel`, because the root releases the pointer
+//!   capture on any release and this press's own `Up` never arrives; no
+//!   `on_tap_up` or `on_tap` follows. Such a release with no press in flight
+//!   changes nothing. A non-primary `Move` is not a release and never cancels.
 //! - **Cancel by movement.** A `Move` that passes [`TOUCH_SLOP`] from the
 //!   `Down`, or leaves the detector's bounds, fires `on_tap_cancel` at once;
 //!   the later `Up` then fires no `on_tap_up`. This is stricter than `on_tap`:
@@ -830,6 +837,27 @@ impl GestureDetectorWidget {
             ctx.request_redraw();
         }
     }
+
+    /// End the press a non-primary release interrupted: `on_tap_cancel` for an
+    /// active press, the drag `cancel` for a started drag, then back to `Idle`.
+    /// The release is immediate, not owed, because the `Up` arm carries real
+    /// application state. Called only from that arm.
+    fn end_press_on_secondary_release(&mut self, ctx: &mut EventCtx) {
+        let cancelled_drag = match self.state {
+            Recognizer::Dragging { axis, .. } => Some(axis),
+            _ => None,
+        };
+        self.state = Recognizer::Idle;
+        if self.press_active {
+            self.fire_tap_cancel(ctx);
+        }
+        if let Some(axis) = cancelled_drag
+            && let Some(cb) = self.drag_callbacks(axis).cancel.as_mut()
+        {
+            cb(ctx);
+            ctx.request_redraw();
+        }
+    }
 }
 
 impl<State: 'static> View<State> for GestureDetectorView<State> {
@@ -1135,11 +1163,18 @@ impl Widget for GestureDetectorWidget {
                     return EventResult::Handled;
                 }
                 PointerPhase::Up => {
-                    // Only the primary button's release ends a primary press. A
-                    // chorded secondary release belongs to another button: pass it
-                    // on and leave the press armed for its own release.
+                    // The primary button's own release ends a primary press. A
+                    // chorded secondary release also ends one in progress: the root
+                    // drops the pointer capture on any release, so the primary's
+                    // `Up` never reaches this detector. An idle detector passes it on.
                     if !presses(p) {
-                        return self.child.event_child(ctx, event);
+                        if matches!(self.state, Recognizer::Idle) {
+                            return self.child.event_child(ctx, event);
+                        }
+                        self.end_press_on_secondary_release(ctx);
+                        let result = self.child.event_child(ctx, event);
+                        self.child.set_active(false);
+                        return result;
                     }
                     // Resolve at most one recogniser: a held-past-threshold press
                     // releases as a long-press, otherwise a within-slop press is
@@ -2770,7 +2805,7 @@ mod tests {
     }
 
     #[test]
-    fn a_chorded_secondary_release_leaves_the_primary_press_to_its_own_up() {
+    fn a_chorded_secondary_release_cancels_the_primary_press() {
         let mut w = press_widget();
         let mut log = PressLog::default();
         let secondary = frust_core::PointerButton::Secondary;
@@ -2787,9 +2822,29 @@ mod tests {
         );
         assert_eq!(
             log.events,
-            vec!["down 10 10"],
-            "the secondary release ends nothing"
+            vec!["down 10 10", "cancel"],
+            "the secondary release ends the press with a cancel"
         );
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "cancel"],
+            "the primary's later up delivers no up and no tap"
+        );
+    }
+
+    #[test]
+    fn a_chorded_secondary_release_with_no_press_in_flight_ends_nothing() {
+        let mut w = press_widget();
+        let mut log = PressLog::default();
+        let secondary = frust_core::PointerButton::Secondary;
+        send(
+            &mut w,
+            &mut log,
+            &ev_button(PointerPhase::Up, 12.0, 10.0, secondary),
+        );
+        assert!(log.events.is_empty(), "an idle detector ignores it");
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
         send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
         assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
     }
@@ -2813,6 +2868,73 @@ mod tests {
         );
         send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
         assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+    }
+
+    #[test]
+    fn a_secondary_release_through_the_root_cancels_the_press() {
+        // The order a shell can deliver: a secondary Down that nothing captures,
+        // then the primary Down on the detector (which captures), a secondary Up
+        // (the root drops the capture on any release), a primary Move and Up that
+        // no longer reach the detector.
+        let mut root = press_root();
+        let mut log = PressLog::default();
+        let mut sink = NullScene;
+        let secondary = frust_core::PointerButton::Secondary;
+        root.event(
+            &mut log,
+            &ev_button(PointerPhase::Down, 12.0, 10.0, secondary),
+        );
+        assert!(
+            log.events.is_empty(),
+            "an uncaptured secondary down is inert"
+        );
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(
+            &mut log,
+            &ev_button(PointerPhase::Up, 12.0, 10.0, secondary),
+        );
+        assert_eq!(log.events, vec!["down 10 10", "cancel"]);
+        root.event(&mut log, &ev(PointerPhase::Move, 150.0, 150.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 150.0, 150.0));
+        // Frames past the long-press threshold must not resurrect the press.
+        root.paint(&mut sink, ft(0.0));
+        root.paint(&mut sink, ft(600.0));
+        root.rebuild(&mut { press_logic }, &mut log);
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "cancel"],
+            "no up, no tap, and no long press after the cancel"
+        );
+        // The detector is not stuck: a fresh primary press runs its own cycle.
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "cancel", "down 10 10", "up 10 10", "tap"]
+        );
+    }
+
+    #[test]
+    fn a_secondary_release_ends_a_started_drag_with_one_cancel() {
+        let mut root = drag_root(vertical_logic);
+        let mut log = DragLog::default();
+        let secondary = frust_core::PointerButton::Secondary;
+        root.event(&mut log, &ev(PointerPhase::Down, 50.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 50.0, 40.0));
+        assert_eq!(log.starts.len(), 1, "the vertical drag has started");
+        root.event(
+            &mut log,
+            &ev_button(PointerPhase::Up, 50.0, 40.0, secondary),
+        );
+        assert_eq!(log.cancels, vec!["v"], "the drag cancel fires at once");
+        assert!(log.ends.is_empty(), "a cancelled drag never ends");
+        // The primary's own release arrives uncaptured: it is inert, and the
+        // cancel is not repeated by any later pass.
+        root.event(&mut log, &ev(PointerPhase::Up, 50.0, 40.0));
+        root.rebuild(&mut vertical_logic, &mut log);
+        assert_eq!(log.cancels, vec!["v"], "the cancel fires exactly once");
+        assert!(log.ends.is_empty());
+        assert_eq!(log.taps, 0, "a dragged press never taps");
     }
 
     #[test]
