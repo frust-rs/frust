@@ -34,6 +34,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `frust::paths::{data_dir, cache_dir, atomic_write}`: the platform data and cache directories and the
+  write-to-temp-and-rename helper, re-exported from `frust-paths` so an app depending on the facade
+  alone can place caches, sidecars and export staging; the module docs say what each platform backs up.
 - The new `frust-device-info` plugin crate: `DeviceMemory::query()` reports total RAM, the Android
   low-RAM flag, system-available memory (Android/Linux/Windows) and the iOS per-process headroom, so
   an app can size caches on Android 14+ where no foreground trim-memory level is delivered any more.

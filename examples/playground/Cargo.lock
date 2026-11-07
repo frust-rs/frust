@@ -1754,6 +1754,7 @@ dependencies = [
  "console_log",
  "frust-core",
  "frust-gpu",
+ "frust-paths",
  "frust-reactive",
  "frust-render",
  "frust-scene",

@@ -49,6 +49,9 @@ kurbo = { workspace = true }
 frust-shell-android = { workspace = true }
 # Unconditional so `ios_app!` is always re-exported; the crate is inert off-iOS.
 frust-shell-ios = { workspace = true }
+# Re-exported as `frust::paths` so a facade-only app can place caches, sidecars and atomic writes;
+# the CORE leaf, never a plugin.
+frust-paths = { workspace = true }
 anyhow = { workspace = true }
 
 # Off Android/iOS/wasm32 (driven by `android_app!`/`ios_app!`/`web_app!`; the winit graph fails to
