@@ -677,7 +677,7 @@ impl AndroidAppHandle {
         let authored_reduce_motion = theme.motion.reduce_motion;
         // The base's own type scale, kept for the same reason: the OS text
         // scale is applied over it, never assigned over it.
-        let authored_type_scale = theme.type_scale.clone();
+        let authored_type_scale = theme.authored_type_scale();
 
         app.set_theme(Box::new(theme.clone()));
         // Seed both translucency consumers — the render root and the app-facing
@@ -998,7 +998,7 @@ impl AndroidAppHandle {
                 effective_reduce_motion(self.authored_reduce_motion, self.os_reduce_motion);
             // Same for the type scale: re-capture the incoming theme's authored
             // scale and re-apply the OS text scale over it.
-            self.authored_type_scale = theme.type_scale.clone();
+            self.authored_type_scale = theme.authored_type_scale();
             theme = theme.with_text_scale(&self.authored_type_scale, self.os_text_scale);
             self.theme = theme;
             self.theme_override_active = override_active;

@@ -2014,6 +2014,10 @@ pub use peniko::Color;
 /// override, once set, is never overridden back by a live platform dark-mode
 /// flip until [`clear_app_theme`] runs).
 ///
+/// A theme read from context carries the OS text scale and may be handed back
+/// here without compounding it; to change the type scale itself, edit it on the
+/// app's own authored theme.
+///
 /// ```no_run
 /// use frust::{Brightness, Theme, set_app_theme};
 ///

@@ -610,19 +610,16 @@ impl TextWidget {
     }
 }
 
-/// Multiply a default-sized style's size, absolute line height and letter
-/// spacing by the theme's text `factor`. A factor of `1.0` (no text scale
+/// Scale a default-sized style by the theme's text `factor` through the
+/// shared `frust_theme::scale_style` routine. A factor of `1.0` (no text scale
 /// attached) leaves the style untouched, which keeps unscaled output
-/// byte-identical.
+/// byte-identical. The factor is the body-clamped one, so default-sized text
+/// clamps as a body role.
 pub(crate) fn scale_default_size(style: &mut TextStyle, factor: f32) {
     if factor == 1.0 {
         return;
     }
-    style.size *= factor;
-    if let LineHeight::Absolute(px) = style.line_height {
-        style.line_height = LineHeight::Absolute(px * factor);
-    }
-    style.letter_spacing *= factor;
+    *style = frust_theme::scale_style(style, factor);
 }
 
 impl Widget for TextWidget {
