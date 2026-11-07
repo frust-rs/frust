@@ -243,6 +243,21 @@ A device gate for `frust-network-image` (`plugins/network-image`), against the p
 - **Local fixtures:** the *Use local fixtures* toggle serves the same tiles from an in-process
   loopback server (no internet needed), exercising the same fetch, cache and decode path.
 
+## Device-info manual test (desktop + Android + iOS)
+
+A device gate for `frust-device-info` (`plugins/device-info`), against the playground's **Memory**
+section (deep link `frustplay://section/memory`): press *Query* and compare the figures per platform:
+
+- **Android:** `total` from `totalMem`; `low_ram` false on an 8-12 GB phone; `system_available` a
+  fraction of total; `system_low` false; headroom none.
+- **iPhone:** `total` just under 4 GiB on a 4 GB device; headroom positive and well below total;
+  `system_available` none.
+- **Mac:** `total` equals `hw.memsize`; headroom and `system_available` none.
+- **Log:** grep `frust-gate device-memory:` (`adb logcat`, the iOS console, macOS `log show`).
+- **Android re-query:** `adb shell am send-trim-memory <pkg> RUNNING_CRITICAL` produces a
+  `pressure=Critical` line followed by a fresh query line.
+- **Record:** the gate table in `examples/playground/README.md`.
+
 ## Material asset regeneration
 
 `frust-material`'s generated/bundled assets are checked in, not built by `build.rs`; regenerate by
