@@ -37,17 +37,21 @@ use crate::Locale;
 ///
 /// A deliberate subset, not CLDR's full likely-subtags data:
 ///
-/// - `zh`: `TW`/`HK`/`MO` give `Hant`; `CN`/`SG` or no region give `Hans`.
-/// - `sr`: no region, or `RS`/`ME`/`BA`, gives `Cyrl`.
+/// - `zh`: `TW`/`HK`/`MO` give `Hant`, as do `US`/`GB` (the regions
+///   `fluent-langneg`'s built-in table also maximizes to `Hant`); `CN`/`SG` or
+///   no region give `Hans`. Other regions (`zh-AU`) have no opinion.
+/// - `sr`: no region, or `RS`/`BA`, gives `Cyrl`. `ME` is left unanswered:
+///   its likely script is not settled here, and a guess would reject a bundle
+///   of the other script that matched before.
 ///
 /// To extend it, add a row here for another language whose shipped bundles
 /// are split by script, plus a test row in this module.
 pub(crate) fn likely_script(language: Language, region: Option<Region>) -> Option<Script> {
     let region = region.as_ref().map(Region::as_str);
     let script = match (language.as_str(), region) {
-        ("zh", Some("TW" | "HK" | "MO")) => "Hant",
+        ("zh", Some("TW" | "HK" | "MO" | "US" | "GB")) => "Hant",
         ("zh", None | Some("CN" | "SG")) => "Hans",
-        ("sr", None | Some("RS" | "ME" | "BA")) => "Cyrl",
+        ("sr", None | Some("RS" | "BA")) => "Cyrl",
         _ => return None,
     };
     script.parse().ok()
@@ -86,11 +90,20 @@ pub fn negotiate(
     .collect()
 }
 
-/// Whether `candidate` may serve at least one request of its language. A
-/// candidate without a script, or sharing none of its language with the
-/// requests, is never rejected here.
+/// Whether `candidate` may serve at least one request of its language.
+///
+/// The candidate's script is its explicit one, else its likely script when it
+/// names a region (`zh-CN` is Simplified, `zh-TW` Traditional). A bare
+/// language (`zh`) has no script of its own and stays language-wide, as does a
+/// candidate whose likely script is unknown; a candidate sharing no language
+/// with the requests is never rejected here.
 fn script_compatible(candidate: &LanguageIdentifier, requested: &[LanguageIdentifier]) -> bool {
-    let Some(script) = candidate.script else {
+    let script = candidate.script.or_else(|| {
+        candidate
+            .region
+            .and_then(|region| likely_script(candidate.language, Some(region)))
+    });
+    let Some(script) = script else {
         return true;
     };
     let mut same_language = requested
@@ -229,11 +242,62 @@ mod tests {
         assert_eq!(script("zh-CN").as_deref(), Some("Hans"));
         assert_eq!(script("zh-SG").as_deref(), Some("Hans"));
         assert_eq!(script("zh").as_deref(), Some("Hans"));
-        assert_eq!(script("zh-US").as_deref(), None);
+        assert_eq!(script("zh-US").as_deref(), Some("Hant"));
+        assert_eq!(script("zh-GB").as_deref(), Some("Hant"));
+        assert_eq!(script("zh-AU").as_deref(), None);
         assert_eq!(script("sr").as_deref(), Some("Cyrl"));
         assert_eq!(script("sr-RS").as_deref(), Some("Cyrl"));
-        assert_eq!(script("sr-ME").as_deref(), Some("Cyrl"));
+        assert_eq!(script("sr-ME").as_deref(), None);
         assert_eq!(script("sr-BA").as_deref(), Some("Cyrl"));
         assert_eq!(script("de-AT"), None);
+    }
+
+    #[test]
+    fn region_tagged_bundles_are_matched_by_their_likely_script() {
+        assert_eq!(chain(&["zh-TW"], &["zh-CN", "en"], "en"), ["en"]);
+        assert_eq!(chain(&["zh-CN"], &["zh-TW", "en"], "en"), ["en"]);
+        assert_eq!(
+            chain(&["zh-TW"], &["zh-TW", "zh-CN", "en"], "en"),
+            ["zh-TW", "en"]
+        );
+        assert_eq!(chain(&["zh-HK"], &["zh-TW", "en"], "en"), ["zh-TW", "en"]);
+    }
+
+    #[test]
+    fn a_bare_language_request_reaches_a_region_tagged_bundle() {
+        assert_eq!(chain(&["zh"], &["zh-CN", "en"], "en"), ["zh-CN", "en"]);
+    }
+
+    #[test]
+    fn regions_without_a_likely_script_keep_matching_by_language() {
+        assert_eq!(chain(&["de-AT"], &["de-DE", "en"], "en"), ["de-DE", "en"]);
+    }
+
+    #[test]
+    fn serbian_montenegro_matches_either_script_bundle() {
+        assert_eq!(
+            chain(&["sr-ME"], &["sr-Latn", "en"], "en"),
+            ["sr-Latn", "en"]
+        );
+        assert_eq!(
+            chain(&["sr-ME"], &["sr-Cyrl", "en"], "en"),
+            ["sr-Cyrl", "en"]
+        );
+    }
+
+    #[test]
+    fn zh_us_and_zh_gb_negotiate_as_traditional() {
+        for request in ["zh-US", "zh-GB"] {
+            assert_eq!(
+                chain(&[request], &["zh-Hans", "en"], "en"),
+                ["en"],
+                "{request}"
+            );
+            assert_eq!(
+                chain(&[request], &["zh-Hant", "en"], "en"),
+                ["zh-Hant", "en"],
+                "{request}"
+            );
+        }
     }
 }
