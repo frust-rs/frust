@@ -2327,9 +2327,40 @@ pub use frust_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
 /// }
 /// # let _ = Editor;
 /// ```
+///
+/// Memory pressure is a separate one-shot event, delivered by the shell through
+/// [`push_memory_pressure`] on the UI thread to every
+/// [`on_memory_pressure`](AppLifecycleListener::on_memory_pressure) hook; it never changes
+/// the lifecycle state. [`MemoryPressure::Moderate`] asks to trim caches you can cheaply
+/// rebuild, [`MemoryPressure::Critical`] to release everything not on screen:
+///
+/// ```
+/// use std::sync::{Arc, Mutex};
+/// use frust::{AppLifecycleListener, MemoryPressure};
+///
+/// struct PhotoViewer {
+///     thumbnails: Arc<Mutex<Vec<Vec<u8>>>>,
+///     _pressure: AppLifecycleListener,
+/// }
+///
+/// impl PhotoViewer {
+///     fn new() -> Self {
+///         let thumbnails = Arc::new(Mutex::new(Vec::new()));
+///         let cache = Arc::clone(&thumbnails);
+///         let pressure = AppLifecycleListener::new().on_memory_pressure(move |level| {
+///             if level == MemoryPressure::Critical {
+///                 cache.lock().unwrap().clear();
+///             }
+///         });
+///         Self { thumbnails, _pressure: pressure }
+///     }
+/// }
+/// # let _ = PhotoViewer::new().thumbnails;
+/// ```
 pub use frust_reactive::{
-    AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, app_lifecycle,
-    push_app_lifecycle, request_app_exit,
+    AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, MemoryPressure,
+    app_lifecycle, last_memory_pressure, push_app_lifecycle, push_memory_pressure,
+    request_app_exit,
 };
 
 /// The Android back-press source (`frust-reactive`'s

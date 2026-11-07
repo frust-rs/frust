@@ -51,6 +51,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSControl",
     "NSScreen",
 ] }
+# Memory-pressure source: libdispatch `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` plus the handler block.
+# Version literals repeated (the narrowed feature sets match `plugins/connectivity`); keep in step with the root pins.
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }
+block2 = { version = "0.6", default-features = false, features = ["std"] }
 
 # docs.rs builds x86_64 Linux by default; a target-specific crate would document as empty.
 [package.metadata.docs.rs]

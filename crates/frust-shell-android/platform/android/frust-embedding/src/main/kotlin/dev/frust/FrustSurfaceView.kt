@@ -315,6 +315,8 @@ class FrustSurfaceView(
 
     private external fun nativeOnStop(handle: Long)
 
+    private external fun nativeOnTrimMemory(handle: Long, level: Int)
+
     private external fun nativeOnWindowFocusChanged(handle: Long, hasFocus: Boolean)
 
     private external fun nativeOnResume(handle: Long)
@@ -2042,6 +2044,13 @@ class FrustSurfaceView(
         activityStarted = false
         if (handle != 0L) {
             nativeOnStop(handle)
+        }
+    }
+
+    /** Called by `FrustActivity.onTrimMemory`/`onLowMemory` — reports memory pressure. */
+    fun onTrimMemory(level: Int) {
+        if (handle != 0L) {
+            nativeOnTrimMemory(handle, level)
         }
     }
 

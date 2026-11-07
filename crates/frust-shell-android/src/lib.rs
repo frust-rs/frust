@@ -317,6 +317,18 @@ macro_rules! android_app {
             $crate::jni_glue::native_on_stop(handle)
         }
 
+        /// JNI `nativeOnTrimMemory`: `onTrimMemory`/`onLowMemory`; pushes the mapped
+        /// memory-pressure level and trims the render caches on a critical one.
+        #[unsafe(no_mangle)]
+        pub extern "system" fn Java_dev_frust_FrustSurfaceView_nativeOnTrimMemory<'local>(
+            _env: $crate::__jni::EnvUnowned<'local>,
+            _class: $crate::__jni::JClass<'local>,
+            handle: $crate::__jni::jlong,
+            level: $crate::__jni::jint,
+        ) {
+            $crate::jni_glue::native_on_trim_memory(handle, level)
+        }
+
         /// JNI `nativeOnWindowFocusChanged`: window focus gained/lost; pushes the
         /// derived lifecycle state.
         #[unsafe(no_mangle)]
