@@ -567,9 +567,9 @@ impl<State: 'static> NavigatorController<State> {
     /// callback: the list decides what the stack holds, so such a page would be
     /// built just to leave unpainted, and an earlier list would drop pages this one
     /// retains. A page pushed with a result callback still lands, so that its
-    /// callback fires. A pop queued after a dropped push is dropped with it, one
-    /// pop per push, so it cannot reach the keyed page beneath; any other pop
-    /// stays, so its result is still delivered.
+    /// callback fires. A pop queued is resolved against the push it would pop: it is
+    /// dropped with a dropped push or list, so it cannot reach the keyed page beneath;
+    /// any other pop stays, so its result is still delivered.
     pub(super) fn set_pages(&self, pages: Vec<PageSpec<State>>) {
         if pages.is_empty() {
             return;
@@ -577,22 +577,30 @@ impl<State: 'static> NavigatorController<State> {
         // Through `drain`, so a dropped op's closures run with the queue unborrowed.
         let mut superseded = Vec::new();
         let mut kept = Vec::new();
-        // Dropped pushes not yet cancelled by a later pop, in queue order.
-        let mut dropped_pushes = 0usize;
+        // What each queued op put on top that no later pop has taken off yet:
+        // `true` for one this list drops.
+        let mut queued_tops = Vec::new();
         for op in self.drain() {
             match op {
-                NavOp::SetPages { .. } | NavOp::Replace { .. } => superseded.push(op),
-                NavOp::Push {
+                NavOp::SetPages { .. }
+                | NavOp::Push {
                     on_result: None, ..
                 } => {
-                    dropped_pushes += 1;
+                    queued_tops.push(true);
                     superseded.push(op);
                 }
-                NavOp::Pop { .. } | NavOp::RequestBack if dropped_pushes > 0 => {
-                    dropped_pushes -= 1;
-                    superseded.push(op);
+                NavOp::Replace { .. } => superseded.push(op),
+                NavOp::Push { .. } => {
+                    queued_tops.push(false);
+                    kept.push(op);
                 }
-                op => kept.push(op),
+                NavOp::Pop { .. } | NavOp::RequestBack => {
+                    if queued_tops.pop() == Some(true) {
+                        superseded.push(op);
+                    } else {
+                        kept.push(op);
+                    }
+                }
             }
         }
         *self.ops.borrow_mut() = kept;

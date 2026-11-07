@@ -1571,6 +1571,55 @@ fn two_pushes_and_one_pop_then_set_pages_leave_no_pop() {
 }
 
 #[test]
+fn a_pop_is_resolved_against_the_push_it_would_pop() {
+    let log = Log::default();
+    let mut h = Harness::new();
+    let list = || vec![page("/a", probe("a", 10.0, &log))];
+    h.set(list(), 0);
+
+    // The pop targets the second push, whose callback keeps it, so the pop stays
+    // and the payload arrives even though the first push is dropped.
+    let results = Rc::new(RefCell::new(Vec::new()));
+    let seen = results.clone();
+    h.controller.push(|| sized_page(100.0, 40.0));
+    h.controller.push_for_result(
+        || sized_page(100.0, 50.0),
+        move |_, result: PopResult| seen.borrow_mut().push(result.take::<u32>()),
+    );
+    h.controller.pop_with_result(PopResult::of(7u32));
+    h.set(list(), 16);
+
+    assert_eq!(*results.borrow(), [Some(7)]);
+    assert_eq!(h.routes(), ["/a"]);
+    assert_eq!(count(&log, "teardown a"), 0);
+}
+
+#[test]
+fn a_pop_after_a_superseded_list_does_not_reach_the_page_beneath() {
+    let log = Log::default();
+    let mut h = Harness::new();
+    let list = || {
+        vec![
+            page("/a", probe("a", 10.0, &log)),
+            page("/b", probe("b", 20.0, &log)),
+        ]
+    };
+    h.set(list(), 0);
+
+    h.controller
+        .set_pages(vec![page("/x", probe("x", 30.0, &log))]);
+    h.controller.pop();
+    h.set(list(), 16);
+
+    assert_eq!(h.routes(), ["/a", "/b"]);
+    assert_eq!(
+        count(&log, "teardown b"),
+        0,
+        "the keyed page kept its state"
+    );
+}
+
+#[test]
 fn pop_with_result_then_set_pages_in_one_frame_delivers_the_payload_once() {
     let log = Log::default();
     let received = Rc::new(RefCell::new(Vec::<i32>::new()));
