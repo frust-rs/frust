@@ -156,6 +156,9 @@ pub(crate) fn run_conformance_suite(
     migrate_applies_all_and_is_idempotent(tag, open);
     migrate_failing_step_rolls_back_that_step(tag, open);
     migrate_rejects_bad_lists_and_newer_schema(tag, open);
+    migrate_resumes_after_failed_step(tag, open);
+    migrate_version_range_and_empty_list(tag, open);
+    migrate_second_handle_skips_applied_step(tag, open);
     schema_calls_inside_transaction_are_reentrant(tag, open);
     execute_batch_commits_and_rolls_back(tag, open);
 }
@@ -738,9 +741,199 @@ fn migrate_failing_step_rolls_back_that_step(
     assert_eq!(db.schema_version().unwrap(), 1, "{tag}: version after fail");
     must_exec(tag, &db, "INSERT INTO a (id) VALUES (1)", ());
     assert!(
-        db.execute("INSERT INTO b (id) VALUES (1)", ()).is_err(),
+        !table_exists(tag, &db, "b"),
         "{tag}: the failed step's table must have been rolled back"
     );
+}
+
+/// Whether a table named `name` exists, asked of `sqlite_master`, which
+/// both engines serve.
+fn table_exists(tag: &str, db: &Database, name: &str) -> bool {
+    let rows = must_query(
+        tag,
+        db,
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?1",
+        [Value::Text(name.to_owned())],
+    );
+    !rows.is_empty()
+}
+
+/// The row count of `table`.
+fn count_rows(tag: &str, db: &Database, table: &str) -> usize {
+    must_query(tag, db, &format!("SELECT * FROM {table}"), ()).len()
+}
+
+/// A list whose step 2 is broken fails with `Sql` at version 1; the
+/// corrected list then resumes, applying steps 2 and 3 and leaving step 1's
+/// effect single.
+fn migrate_resumes_after_failed_step(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    let seed = "INSERT INTO notes (id, body) VALUES (1, 'seed')";
+    let broken = [
+        crate::Migration {
+            to_version: 1,
+            statements: &[
+                "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)",
+                seed,
+            ],
+        },
+        crate::Migration {
+            to_version: 2,
+            statements: &[
+                "CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)",
+                "NOT VALID SQL",
+            ],
+        },
+    ];
+    let result = db.migrate(&broken);
+    assert!(
+        matches!(result, Err(DatabaseError::Sql { .. })),
+        "{tag}: a broken step must surface Sql, got {result:?}"
+    );
+    assert_eq!(db.schema_version().unwrap(), 1, "{tag}: version after fail");
+    assert!(
+        !table_exists(tag, &db, "tags"),
+        "{tag}: broken step rolled back"
+    );
+
+    let fixed = [
+        crate::Migration {
+            to_version: 1,
+            statements: &[
+                "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)",
+                seed,
+            ],
+        },
+        crate::Migration {
+            to_version: 2,
+            statements: &["CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)"],
+        },
+        crate::Migration {
+            to_version: 3,
+            statements: &["ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"],
+        },
+    ];
+    assert_eq!(db.migrate(&fixed).unwrap(), 3, "{tag}: resumed run");
+    assert_eq!(db.schema_version().unwrap(), 3, "{tag}: stored version");
+    assert!(
+        table_exists(tag, &db, "tags"),
+        "{tag}: step 2 effect present"
+    );
+    must_query(tag, &db, "SELECT pinned FROM notes", ());
+    assert_eq!(
+        count_rows(tag, &db, "notes"),
+        1,
+        "{tag}: step 1 applied once"
+    );
+}
+
+/// `to_version` above `i32::MAX` is refused before any statement runs;
+/// `i32::MAX` itself round-trips; an empty list is `Ok(0)` on a fresh
+/// database and an error on a database already at a version.
+fn migrate_version_range_and_empty_list(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    let too_big = [crate::Migration {
+        to_version: i32::MAX as u32 + 1,
+        statements: &["CREATE TABLE too_big (id INTEGER)"],
+    }];
+    let result = db.migrate(&too_big);
+    assert!(
+        matches!(result, Err(DatabaseError::Migration { .. })),
+        "{tag}: to_version above i32::MAX must be Migration, got {result:?}"
+    );
+    assert!(
+        !table_exists(tag, &db, "too_big"),
+        "{tag}: no statement ran"
+    );
+    assert_eq!(db.schema_version().unwrap(), 0, "{tag}: version untouched");
+
+    let max = [crate::Migration {
+        to_version: i32::MAX as u32,
+        statements: &["CREATE TABLE at_max (id INTEGER)"],
+    }];
+    assert_eq!(
+        db.migrate(&max).unwrap(),
+        i32::MAX as u32,
+        "{tag}: max apply"
+    );
+    assert_eq!(
+        db.schema_version().unwrap(),
+        i32::MAX as u32,
+        "{tag}: i32::MAX round trip"
+    );
+
+    let fresh = must_open(tag, open, Target::Memory);
+    assert_eq!(
+        fresh.migrate(&[]).unwrap(),
+        0,
+        "{tag}: empty list, fresh db"
+    );
+    must_exec(tag, &fresh, "PRAGMA user_version = 2", ());
+    let result = fresh.migrate(&[]);
+    assert!(
+        matches!(result, Err(DatabaseError::Migration { .. })),
+        "{tag}: empty list on a versioned db must be Migration, got {result:?}"
+    );
+    assert_eq!(fresh.schema_version().unwrap(), 2, "{tag}: untouched");
+}
+
+/// Handle A applies step 1 only; handle B on the same file then migrates the
+/// full list and must skip step 1 (the version is re-read inside each step's
+/// transaction) rather than apply it twice.
+fn migrate_second_handle_skips_applied_step(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let dir = scratch_dir(tag, "migrate-two-handles");
+    fs::create_dir_all(&dir).expect("create scratch dir");
+    let path = dir.join("shared.db");
+
+    let step1 = crate::Migration {
+        to_version: 1,
+        statements: &[
+            "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)",
+            "INSERT INTO notes (id, body) VALUES (1, 'seed')",
+        ],
+    };
+    let a = must_open(tag, open, Target::Path(path.clone()));
+    assert_eq!(a.migrate(&[step1]).unwrap(), 1, "{tag}: handle A");
+
+    let b = must_open(tag, open, Target::Path(path));
+    let list = [
+        step1,
+        crate::Migration {
+            to_version: 2,
+            statements: &["CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)"],
+        },
+        crate::Migration {
+            to_version: 3,
+            statements: &["ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"],
+        },
+    ];
+    // Either skipped cleanly, or refused by the engine's lock as `Sql` —
+    // never a double apply.
+    match b.migrate(&list) {
+        Ok(v) => assert_eq!(v, 3, "{tag}: handle B final version"),
+        Err(DatabaseError::Sql { .. }) => {
+            assert_eq!(b.migrate(&list).unwrap(), 3, "{tag}: handle B retry");
+        }
+        Err(e) => panic!("{tag}: handle B migrate failed unexpectedly: {e}"),
+    }
+    assert_eq!(a.schema_version().unwrap(), 3, "{tag}: A sees version 3");
+    assert!(table_exists(tag, &b, "tags"), "{tag}: step 2 present");
+    assert_eq!(
+        count_rows(tag, &b, "notes"),
+        1,
+        "{tag}: step 1 applied once"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 /// Bad lists and a newer-schema database return `Migration` without
@@ -767,7 +960,7 @@ fn migrate_rejects_bad_lists_and_newer_schema(
     }
     assert_eq!(db.schema_version().unwrap(), 0, "{tag}: version untouched");
     assert!(
-        db.query("SELECT * FROM should_not_exist", ()).is_err(),
+        !table_exists(tag, &db, "should_not_exist"),
         "{tag}: no statement may run on a bad list"
     );
 
