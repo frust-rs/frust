@@ -119,10 +119,12 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   - **shell_route (nested navigators):** `shell_route(inner, builder, children)` is a pathless route binding
     a subtree to a second app-owned `NavigatorController` — the shell page stays retained on the enclosing
     stack while its children resolve onto `inner` (go_router's `ShellRoute`). A chain crossing the boundary
-    splits there, one structural op per controller; the **keep rule** issues zero ops on the enclosing
-    controller once the shell page is placed. A deep link resolved before the shell page exists pre-queues
-    its inner segment, drained on `inner`'s first `build`. Chrome inside the shell reads the **inner**
-    navigator's `route_stack()` (or the facade's `RouteObserver`).
+    splits there, one structural op per controller. `go` makes the stack exactly the matched chain, keeping
+    pages by key (a concrete matched path, or a shell's inner controller), so a shell survives any `go`
+    crossing it, and only the top page animates; `push`/`replace` issue zero enclosing ops once it is placed.
+    To keep a page below a shell, nest it: `Route::new("/", ..).child(shell_route(..))`. A deep link resolved
+    before the shell page exists pre-queues its inner segment, drained on `inner`'s first `build`. Chrome
+    inside the shell reads the **inner** navigator's `route_stack()` (or the facade's `RouteObserver`).
   - **Gesture policy (interactive edge-swipe):** `NavigatorWidget::swipe_armable` gates arming on
     `BackPolicy` — a `DismissAnimated` or `Veto` top page refuses to arm outright (arm-refusal, not a
     dismiss-signal bump) — and resolves the navigator-wide default by rank: page override
@@ -458,8 +460,7 @@ deferring when the inner can consume the direction. A claim registers only with 
 snapshot and the defer decision is sticky for the gesture. All surfaces also run a live **multi-contact veto**, a per-gesture cell replaced on
 every primary `Down` and consulted on every `Move` takeover check, so a nested
 `pinch_detector`/`pan_zoom` reporting a second contact still suppresses the takeover. Claims are
-axis-aware: a viewport registers only into a same-axis host and drops a claim from a surface on the
-other axis.
+axis-aware: a viewport registers only into a same-axis host and drops other-axis surfaces' claims.
 
 **Programmatic scroll (`scroll_controller.rs`).** `ScrollController` is a cloneable, reactive-free
 handle that `ScrollView`/`ListView`/`CustomScrollView::controller` attaches. One surface holds a

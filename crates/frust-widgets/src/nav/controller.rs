@@ -11,7 +11,7 @@ use frust_core::{AnyView, View};
 
 use super::ambient::host_reachable;
 use super::options::{
-    BackPolicy, NavOp, NavigatorId, PageBuilder, PopResult, PushOptions, ReplaceOptions,
+    BackPolicy, NavOp, NavigatorId, PageBuilder, PageSpec, PopResult, PushOptions, ReplaceOptions,
     ResultCallback,
 };
 use super::route_state::RouteStack;
@@ -449,6 +449,7 @@ impl<State: 'static> NavigatorController<State> {
             pop_swipe: options.pop_swipe,
             barrier: options.barrier,
             barrier_dismissible: options.barrier_dismissible,
+            key: options.key,
         });
     }
 
@@ -476,6 +477,7 @@ impl<State: 'static> NavigatorController<State> {
             pop_swipe: None,
             barrier: None,
             barrier_dismissible: false,
+            key: None,
         });
     }
 
@@ -519,6 +521,7 @@ impl<State: 'static> NavigatorController<State> {
             opaque: true,
             transition: None,
             route: None,
+            key: None,
         });
     }
 
@@ -534,13 +537,14 @@ impl<State: 'static> NavigatorController<State> {
             opaque: true,
             transition: Some(transition),
             route: None,
+            key: None,
         });
     }
 
     /// Replace the top page with an explicit [`ReplaceOptions`] — the
     /// full-control variant carrying a route identity alongside opacity
-    /// and transition. [`Router::go`](super::router::Router::go)/
-    /// [`Router::replace`](super::router::Router::replace) push through this.
+    /// and transition. [`Router::replace`](super::router::Router::replace) goes
+    /// through this.
     pub fn replace_with_options<V: View<State>>(
         &self,
         builder: impl Fn() -> V + 'static,
@@ -551,7 +555,68 @@ impl<State: 'static> NavigatorController<State> {
             opaque: options.opaque,
             transition: options.transition,
             route: options.route,
+            key: options.key,
         });
+    }
+
+    /// Make the stack exactly `pages`, bottom to top, retaining every page whose
+    /// [`PageKey`](super::options::PageKey) the list names. An empty `pages` is
+    /// ignored: a navigator always keeps one page, and the queue stays as it was.
+    ///
+    /// Supersedes every op still queued that would only add a page and owes no
+    /// callback: the list decides what the stack holds, so such a page would be
+    /// built just to leave unpainted, and an earlier list would drop pages this one
+    /// retains. A page pushed with a result callback still lands, so that its
+    /// callback fires. A pop queued is resolved against the push it would pop: it is
+    /// dropped with a dropped push or list, so it cannot reach the keyed page beneath;
+    /// any other pop stays, so its result is still delivered.
+    pub(super) fn set_pages(&self, pages: Vec<PageSpec<State>>) {
+        if pages.is_empty() {
+            return;
+        }
+        // Through `drain`, so a dropped op's closures run with the queue unborrowed.
+        let mut superseded = Vec::new();
+        let mut kept = Vec::new();
+        // What each queued op put on top that no later pop has taken off yet:
+        // `true` for one this list drops.
+        let mut queued_tops = Vec::new();
+        for op in self.drain() {
+            match op {
+                NavOp::SetPages { .. }
+                | NavOp::Push {
+                    on_result: None, ..
+                } => {
+                    queued_tops.push(true);
+                    superseded.push(op);
+                }
+                NavOp::Replace { .. } => superseded.push(op),
+                NavOp::Push { .. } => {
+                    queued_tops.push(false);
+                    kept.push(op);
+                }
+                NavOp::Pop { .. } | NavOp::RequestBack => {
+                    if queued_tops.pop() == Some(true) {
+                        superseded.push(op);
+                    } else {
+                        kept.push(op);
+                    }
+                }
+            }
+        }
+        *self.ops.borrow_mut() = kept;
+        drop(superseded);
+        self.enqueue(NavOp::SetPages { pages });
+    }
+
+    /// Drop every op queued and not yet applied.
+    pub(super) fn discard_queued(&self) {
+        // Through `drain`, so an op's closures drop with the queue unborrowed.
+        drop(self.drain());
+    }
+
+    /// Whether any op is queued and not yet applied.
+    pub(super) fn has_queued(&self) -> bool {
+        !self.ops.borrow().is_empty()
     }
 
     /// Record `op`, then raise [`frust_core::mark_pending_result_flush`] so the

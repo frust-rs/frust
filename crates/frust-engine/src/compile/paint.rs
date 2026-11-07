@@ -281,7 +281,7 @@ fn alpha_tint(alpha: f32) -> Option<Tint> {
 /// subpixel is happening, so the downgrade is exact rather than a quality
 /// trade, and it is what keeps this tier's output bit-identical to the CPU
 /// reference for an unscaled image.
-fn resolved_quality(quality: ImageQuality, paint_transform: Affine) -> ImageQuality {
+pub(crate) fn resolved_quality(quality: ImageQuality, paint_transform: Affine) -> ImageQuality {
     if quality != ImageQuality::Medium {
         return quality;
     }

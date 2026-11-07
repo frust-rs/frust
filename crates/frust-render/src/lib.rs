@@ -104,6 +104,9 @@ pub use frust_gpu::missing_requested_features;
 pub use external_pass::{
     ExternalFrame, ExternalPass, register_external_pass, unregister_external_pass,
 };
+// The registration hints `ExternalFrame::bind_texture_with` takes, re-exported
+// so a pass names them without a direct engine dependency.
+pub use frust_engine::{SceneTextureFilter, SceneTextureHints};
 // The drain half, for a renderer of this crate's own (and its tests) driving
 // the identical path against an engine it holds; hidden for the same reason
 // `external_pass::run_external_passes` is.

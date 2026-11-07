@@ -38,11 +38,11 @@ use frust::authoring::{
     BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, Size, View, Widget,
 };
 use frust::{
-    AnyView, BackPolicy, NavigatorController, NavigatorView, PushOptions, Route, RouteObserver,
-    RouteParams, Router, any, column, handles_back, navigator, overlay_host, push_back_press,
-    shell_route, text,
+    AnyView, BackPolicy, NavigatorController, NavigatorView, PageTransition, PushOptions, Route,
+    RouteObserver, RouteParams, Router, TransitionSpec, any, column, handles_back, navigator,
+    overlay_host, push_back_press, shell_route, text,
 };
-use frust_core::RenderRoot;
+use frust_core::{FrameTime, RenderRoot};
 use frust_reactive::{ReactiveRuntime, clear_can_pop_provider};
 
 /// Serializes every test in this file — see the module doc.
@@ -577,12 +577,20 @@ fn the_shell_keep_rule_retains_the_inner_navigator_across_a_sibling_navigation()
     let outer_generation = h.outer.route_generation();
     assert_eq!(h.shell_builds.get(), 1, "the shell page built once");
 
+    // `go` replaces the whole stack with the chain, so the first go drops the
+    // `/` page below the shell. The shell page itself is kept: same widget,
+    // same inner navigator.
     h.router.go("/terminal");
     h.rebuild();
-    assert_eq!(
+    assert_ne!(
         h.outer.route_generation(),
         outer_generation,
-        "re-navigating inside the shell issued ZERO outer ops"
+        "the first go removed the `/` page, so the outer stack changed"
+    );
+    assert_eq!(
+        paths(&h.outer),
+        vec!["/sessions".to_string()],
+        "the outer stack is the shell alone"
     );
     assert_eq!(
         h.shell_builds.get(),
@@ -592,14 +600,26 @@ fn the_shell_keep_rule_retains_the_inner_navigator_across_a_sibling_navigation()
     );
     assert_eq!(paths(&h.inner), vec!["/terminal".to_string()]);
 
+    // A further sibling go issues zero outer ops.
+    let outer_generation = h.outer.route_generation();
+    h.router.go("/sessions");
+    h.rebuild();
+    assert_eq!(
+        h.outer.route_generation(),
+        outer_generation,
+        "re-navigating inside the shell issued ZERO outer ops"
+    );
+    assert_eq!(h.shell_builds.get(), 1);
+    assert_eq!(paths(&h.inner), vec!["/sessions".to_string()]);
+
     // And again, this time stacking rather than replacing inside the shell.
-    h.router.push("/sessions");
+    h.router.push("/terminal");
     h.rebuild();
     assert_eq!(h.outer.route_generation(), outer_generation);
     assert_eq!(h.shell_builds.get(), 1);
     assert_eq!(
         paths(&h.inner),
-        vec!["/terminal".to_string(), "/sessions".to_string()]
+        vec!["/sessions".to_string(), "/terminal".to_string()]
     );
 }
 
@@ -827,11 +847,445 @@ fn a_non_shell_chain_still_flattens_onto_one_controller() {
     root.rebuild(&mut app, &mut ());
     assert_eq!(
         paths(&controller),
-        vec!["/users/42".to_string(), "/users/42".to_string()],
+        vec!["/users".to_string(), "/users/42".to_string()],
         "both chain pages on the one controller"
     );
 
     router.push("/home");
     root.rebuild(&mut app, &mut ());
     assert_eq!(controller.depth(), 3, "push stacked the leaf alone");
+}
+
+// ---------------------------------------------------------------------------
+// `go` replaces the stack: acceptance through the facade, over flat routes, a
+// shell, and a route-tree page below a shell. These pages are text-free
+// ([`BuildCounter`] leaves) so frames can be laid out and painted without a
+// text context, which is what lets a page flight actually settle.
+// ---------------------------------------------------------------------------
+
+/// A scene that records nothing: the flights below are observed through the
+/// controllers, not through pixels.
+struct NullScene;
+impl PaintScene for NullScene {
+    fn fill_rect(&mut self, _origin: kurbo::Point, _size: kurbo::Size, _color: peniko::Color) {}
+    fn draw_text(&mut self, _origin: kurbo::Point, _text: &str) {}
+}
+
+/// A text-free page.
+fn leaf() -> AnyView<()> {
+    any(BuildCounter {
+        builds: Rc::new(Cell::new(0)),
+    })
+}
+
+fn slide() -> TransitionSpec {
+    TransitionSpec::duration(PageTransition::SlideUp)
+}
+
+/// How many frames a flight gets to settle: ~4.8 s of paint clock.
+const SETTLE_FRAMES: usize = 300;
+
+/// An onboarding-shaped table: flat `/welcome`, `/ready` and `/home`, plus a
+/// pathless shell whose children are `/inbox` and `/settings`. With
+/// `animated`, `/ready`, `/home` and the shell route carry a page transition.
+/// `under_root` instead declares the shell as a child of a `/` page
+/// (`Route::new("/").child(shell_route(..))`), the route-tree shape.
+struct FlowHarness {
+    router: Router<()>,
+    outer: NavigatorController<()>,
+    inner: NavigatorController<()>,
+    root: RenderRoot<(), NavigatorView<()>>,
+    app: AppLogic,
+    shell_builds: Rc<Cell<u32>>,
+    /// Builds of the `/` page in the `under_root` shape.
+    root_page_builds: Rc<Cell<u32>>,
+    clock_ms: u64,
+}
+
+impl FlowHarness {
+    fn build(animated: bool, under_root: bool, mount: bool) -> Self {
+        let outer: NavigatorController<()> = NavigatorController::new();
+        let inner: NavigatorController<()> = NavigatorController::new();
+        let shell_builds = Rc::new(Cell::new(0u32));
+        let root_page_builds = Rc::new(Cell::new(0u32));
+
+        let shell_page = {
+            let inner = inner.clone();
+            let builds = shell_builds.clone();
+            move |_: &RouteParams| {
+                let inner = inner.clone();
+                let builds = builds.clone();
+                any(column()
+                    .child(BuildCounter { builds })
+                    .child(navigator(&inner, leaf)))
+            }
+        };
+        let with_spec = |route: Route<()>| {
+            if animated {
+                route.transition(slide())
+            } else {
+                route
+            }
+        };
+        let children = if under_root {
+            vec![
+                Route::new("inbox", |_| leaf()),
+                Route::new("settings", |_| leaf()),
+            ]
+        } else {
+            vec![
+                Route::new("/inbox", |_| leaf()),
+                Route::new("/settings", |_| leaf()),
+            ]
+        };
+        let shell = with_spec(shell_route(&inner, shell_page, children));
+        let mut routes = Vec::new();
+        if under_root {
+            let builds = root_page_builds.clone();
+            routes.push(
+                Route::new("/", move |_| BuildCounter {
+                    builds: builds.clone(),
+                })
+                .child(shell),
+            );
+        } else {
+            routes.push(Route::new("/welcome", |_| leaf()));
+            routes.push(shell);
+        }
+        routes.push(with_spec(Route::new("/ready", |_| leaf())));
+        routes.push(with_spec(Route::new("/home", |_| leaf())));
+
+        let router = Router::with_controller(&outer, routes);
+        let app: AppLogic = {
+            let c = outer.clone();
+            Box::new(move |_: &mut ()| navigator(&c, leaf))
+        };
+        let mut h = FlowHarness {
+            router,
+            outer,
+            inner,
+            root: RenderRoot::new(),
+            app,
+            shell_builds,
+            root_page_builds,
+            clock_ms: 0,
+        };
+        if mount {
+            h.frame();
+        }
+        h
+    }
+
+    fn flat(animated: bool) -> Self {
+        Self::build(animated, false, true)
+    }
+
+    /// Rebuild, lay out and paint one frame on an advancing clock; returns
+    /// whether the paint asked for another frame.
+    fn frame(&mut self) -> bool {
+        self.root.rebuild(&mut self.app, &mut ());
+        self.root.layout(kurbo::Size::new(100.0, 100.0));
+        let outcome = self.root.paint(
+            &mut NullScene,
+            FrameTime::from_nanos(self.clock_ms * 1_000_000),
+        );
+        self.clock_ms += 16;
+        outcome.needs_frame
+    }
+
+    /// Frames until no animation asks for another.
+    fn settle(&mut self) {
+        for _ in 0..SETTLE_FRAMES {
+            if !self.frame() {
+                return;
+            }
+        }
+        panic!("still animating after {SETTLE_FRAMES} frames");
+    }
+
+    /// The facade-visible back state: nothing claims a back press.
+    fn assert_no_back(&self) {
+        assert!(!handles_back(), "no registrant claims back");
+        assert!(!self.outer.back_interest(), "outer claims no back interest");
+        assert!(!self.inner.back_interest(), "inner claims no back interest");
+    }
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn an_onboarding_flow_that_goes_to_ready_then_home_leaves_a_one_page_stack() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+    reset();
+
+    let mut h = FlowHarness::flat(false);
+    h.router.go("/welcome");
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/welcome"]));
+
+    h.router.push("/inbox");
+    h.settle();
+    assert_eq!(h.outer.depth(), 2, "the shell page sits over /welcome");
+    assert!(h.inner.is_mounted());
+
+    h.router.go("/settings");
+    h.settle();
+    assert_eq!(paths(&h.inner), strings(&["/settings"]));
+
+    h.router.go("/ready");
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/ready"]));
+
+    h.router.go("/home");
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/home"]));
+    assert_eq!(h.outer.depth(), 1);
+    assert!(!h.inner.is_mounted(), "the shell went with the stack");
+    h.assert_no_back();
+
+    // A back press has nothing to pop and changes nothing.
+    push_back_press();
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/home"]));
+    assert_eq!(h.outer.depth(), 1);
+    h.assert_no_back();
+}
+
+#[test]
+fn a_go_out_of_a_shell_flies_in_with_the_shell_as_the_leaving_page() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+    reset();
+
+    let mut h = FlowHarness::flat(true);
+    h.router.go("/welcome");
+    h.settle();
+    h.router.push("/inbox");
+    h.settle();
+    assert!(h.inner.is_mounted());
+
+    // Shell -> /ready: an animated flight, not an instant cut.
+    h.router.go("/ready");
+    h.frame();
+    let flight = h.outer.transition();
+    assert!(flight.active, "the go starts an animated flight");
+    assert!(!flight.is_pop, "a go is not a pop");
+    assert_eq!(h.outer.depth(), 1, "the stack is already the destination");
+    assert!(!handles_back(), "and back is already correct mid-flight");
+    assert!(
+        h.inner.is_mounted(),
+        "the shell is the leaving page, so it is still alive mid-flight"
+    );
+    h.settle();
+    assert!(!h.outer.transition().active);
+    assert!(
+        !h.inner.is_mounted(),
+        "the settled flight released the shell"
+    );
+    assert_eq!(paths(&h.outer), strings(&["/ready"]));
+
+    // /ready -> /home: the same, with the flat page leaving.
+    h.router.go("/home");
+    h.frame();
+    let flight = h.outer.transition();
+    assert!(flight.active, "go(/home) from /ready is an animated flight");
+    assert!(!flight.is_pop);
+    assert_eq!(h.outer.depth(), 1);
+    assert!(!handles_back());
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/home"]));
+    h.assert_no_back();
+}
+
+#[test]
+fn a_go_from_a_deep_start_gives_exactly_the_chain_and_claims_no_back() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+    reset();
+
+    // A page pushed over a mounted shell, then a go.
+    let mut h = FlowHarness::flat(false);
+    h.router.go("/welcome");
+    h.settle();
+    h.router.push("/inbox");
+    h.settle();
+    h.router.push("/settings");
+    h.settle();
+    h.router.push("/ready");
+    h.settle();
+    assert_eq!(
+        h.outer.depth(),
+        3,
+        "welcome, shell, and a page over the shell"
+    );
+    assert!(handles_back());
+
+    h.router.go("/home");
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/home"]));
+    assert_eq!(h.outer.depth(), 1);
+    assert!(!h.inner.is_mounted());
+    h.assert_no_back();
+    push_back_press();
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/home"]));
+
+    // The same go while the shell was never mounted: its controller holds only
+    // queued intent, which the go must discard rather than leave claiming back.
+    reset();
+    let mut h = FlowHarness::build(false, false, false);
+    h.router.handle_location("/inbox");
+    assert!(!h.inner.is_mounted());
+    h.router.go("/home");
+    h.frame();
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/home"]));
+    assert!(!h.inner.is_mounted());
+    h.assert_no_back();
+}
+
+#[test]
+fn a_page_below_a_shell_in_the_route_tree_survives_navigation_between_its_children() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+    reset();
+
+    let mut h = FlowHarness::build(false, true, true);
+    h.router.go("/ready");
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/ready"]));
+
+    // From anywhere: the chain is the `/` page then the shell.
+    h.router.go("/inbox");
+    h.settle();
+    assert_eq!(
+        paths(&h.outer),
+        strings(&["/", "/inbox"]),
+        "the `/` page reads as itself, then the shell page"
+    );
+    assert_eq!(paths(&h.inner), strings(&["/inbox"]));
+    assert_eq!(h.shell_builds.get(), 1);
+    let root_page_builds = h.root_page_builds.get();
+    assert_eq!(root_page_builds, 1, "the `/` page built once");
+
+    // Between children the shell and the `/` page are kept, and nothing on the
+    // outer stack changed, so it publishes nothing.
+    let outer_generation = h.outer.route_generation();
+    h.router.go("/settings");
+    h.settle();
+    assert_eq!(h.outer.route_generation(), outer_generation);
+    assert_eq!(paths(&h.outer), strings(&["/", "/inbox"]));
+    assert_eq!(paths(&h.inner), strings(&["/settings"]));
+    assert_eq!(h.inner.depth(), 1);
+    assert_eq!(h.shell_builds.get(), 1, "the shell was kept, not rebuilt");
+    assert_eq!(
+        h.root_page_builds.get(),
+        root_page_builds,
+        "the `/` page kept its state"
+    );
+
+    // Back at inner depth 1 leaves the shell for the `/` page.
+    assert!(handles_back(), "the outer navigator answers the press");
+    push_back_press();
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/"]));
+    assert!(!h.inner.is_mounted());
+    assert_eq!(h.root_page_builds.get(), root_page_builds);
+}
+
+#[test]
+fn a_push_after_a_back_press_out_of_a_shell_below_a_page_places_the_shell_again() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+    reset();
+
+    let mut h = FlowHarness::build(false, true, true);
+    h.router.go("/settings");
+    h.settle();
+    assert_eq!(h.shell_builds.get(), 1);
+
+    assert!(handles_back(), "the outer navigator answers the press");
+    push_back_press();
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/"]));
+    assert_eq!(
+        h.outer
+            .route_stack()
+            .current_route()
+            .map(|route| route.path.as_str()),
+        Some("/"),
+        "the page left behind reads as itself, not as the child it was kept for"
+    );
+    assert!(!h.inner.is_mounted());
+    h.assert_no_back();
+
+    h.router.push("/inbox");
+    h.settle();
+    assert_eq!(h.shell_builds.get(), 2, "the shell page was placed again");
+    assert!(
+        h.inner.is_mounted(),
+        "so the push landed on a live navigator"
+    );
+    assert_eq!(paths(&h.inner), strings(&["/inbox"]));
+    assert_eq!(
+        h.inner.depth(),
+        1,
+        "the leaf replaced the fresh inner's root"
+    );
+    assert_eq!(
+        paths(&h.outer),
+        strings(&["/", "/inbox"]),
+        "the shell page is on top of its parent, which is not stacked twice"
+    );
+    assert!(handles_back(), "and a press can leave the shell again");
+    assert!(!h.inner.back_interest(), "the inner is at its root");
+
+    push_back_press();
+    h.settle();
+    assert!(!h.inner.is_mounted(), "the press popped the shell page");
+    assert_eq!(
+        paths(&h.outer),
+        strings(&["/"]),
+        "one press, back at the parent"
+    );
+    h.assert_no_back();
+}
+
+#[test]
+fn a_go_during_an_animated_flight_leaves_back_correct() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+    reset();
+
+    let mut h = FlowHarness::flat(true);
+    h.router.go("/welcome");
+    h.settle();
+
+    // A push starts a flight; a go lands in the middle of it.
+    h.router.push("/ready");
+    h.frame();
+    h.frame();
+    assert!(h.outer.transition().active, "the push is mid-flight");
+    h.router.go("/home");
+    h.frame();
+    assert_eq!(h.outer.depth(), 1, "the go made the stack the one page");
+    assert!(
+        !handles_back(),
+        "back is correct while the old flight unwinds"
+    );
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/home"]));
+    h.assert_no_back();
+
+    // Back is still live afterwards: a fresh push is poppable.
+    h.router.push("/ready");
+    h.settle();
+    assert!(handles_back());
+    push_back_press();
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/home"]));
+    h.assert_no_back();
 }
