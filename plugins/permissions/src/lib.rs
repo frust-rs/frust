@@ -117,6 +117,8 @@ mod tests {
         }
     }
 
+    // The Apple arm answers for real; its own tests cover it.
+    #[cfg(not(target_vendor = "apple"))]
     #[test]
     fn enabled_permissions_reach_the_platform_arm() {
         for p in ALL.into_iter().filter(|p| codes::feature_enabled(*p)) {
