@@ -3999,13 +3999,16 @@ mod glass_reexport {
 /// round-trip of the atomic write.
 #[cfg(test)]
 mod paths_reexport {
-    // A build-time proof the items name-resolve through the facade.
-    #[allow(dead_code)]
-    fn _uses_all(
-        _data: fn() -> Option<std::path::PathBuf>,
-        _cache: fn() -> Option<std::path::PathBuf>,
-        _write: fn(&std::path::Path, &[u8]) -> std::io::Result<()>,
-    ) {
+    /// Removes the scratch directory on drop, so a failed assert does not leak it.
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn the_items_name_resolve_through_the_facade() {
         let _ = (
             crate::paths::data_dir as fn() -> Option<std::path::PathBuf>,
             crate::paths::cache_dir as fn() -> Option<std::path::PathBuf>,
@@ -4014,14 +4017,18 @@ mod paths_reexport {
     }
 
     #[test]
-    fn atomic_write_round_trips_and_leaves_no_temp_sibling() {
+    fn atomic_write_round_trips_and_leaves_only_the_target() {
         let dir = std::env::temp_dir().join(format!("frust-paths-reexport-{}", std::process::id()));
-        let file = dir.join("nested").join("blob.bin");
+        let _cleanup = Cleanup(dir.clone());
+        let nested = dir.join("nested");
+        let file = nested.join("blob.bin");
         crate::paths::atomic_write(&file, b"hello paths").unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b"hello paths");
-        let tmp = file.with_extension(format!("tmp.{}", std::process::id()));
-        assert!(!tmp.exists(), "temp sibling left behind: {tmp:?}");
-        let _ = std::fs::remove_dir_all(&dir);
+        let names: Vec<_> = std::fs::read_dir(&nested)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("blob.bin")]);
     }
 }
 

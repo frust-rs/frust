@@ -468,6 +468,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   each surface's drain reconciles against the registry and unbinds in its own engine.
 - `frust-i18n` negotiation is script-aware, so `zh-TW`/`HK`/`MO` no longer resolve to a `zh-Hans`
   bundle and a language-only switch keeps its script.
+- `frust_paths::atomic_write` (also `frust::paths::atomic_write`) uses a per-call temp file opened with
+  `create_new`, so concurrent writers and same-stem files no longer collide and a pre-placed symlink is
+  never followed; it returns `Unsupported` on the web instead of panicking; `data_dir`/`cache_dir`
+  return `None` for an empty or relative `HOME`/`APPDATA`/`LOCALAPPDATA`.
 
 ## 0.6.5 — 2026-11-02
 
