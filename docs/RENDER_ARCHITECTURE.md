@@ -290,6 +290,14 @@ same GPU-substrate layer boundary [ARCHITECTURE.md](ARCHITECTURE.md) records at 
   the face's run metrics, and the widget paints them as plain fills. `TextContext::layout_bounded`
   additionally measures against a max line count and applies `TextOverflow` natively in `layout/`
   (the ellipsis is a grapheme-granular cut of the last visible line, not a re-measured string).
+  `layout_rich(&[TextSpan], max_width)` and `layout_rich_bounded(.., max_lines, overflow)` lay out
+  borrowed `TextSpan { text, style }` pieces as one paragraph: the pieces are concatenated in order
+  and breaking, shaping and bidi see the joined text, so a word split across spans wraps as one
+  word. Paragraph knobs (`align`, `overflow_wrap`) come from the first span; everything else is per
+  span. No spans give the empty layout of `TextStyle::default()`; one span, or all-empty text,
+  delegates to `layout`. The shape cache key carries each span's byte length and style while
+  single-style keys are unchanged, so a one-span rich call shares the plain entry and a span list is
+  one cache entry. The truncation ellipsis takes the style of the span it cuts.
 - `frust-engine`'s compiler (`compile/mod.rs`) lowers two scene-layer geometry primitives to
   GPU-specific shapes: a dashed stroke (`Command::Path`'s `DashPattern`) is lowered to a plain
   path before stroking, expanded near the viewport and solid past the `cull` thresholds; a
