@@ -152,6 +152,12 @@ pub(crate) fn run_conformance_suite(
     syntax_error_is_sql(tag, open);
     open_at_non_writable_dir_is_storage(tag, open);
     multi_handle_same_file_reads_committed_writes(tag, open);
+    schema_version_fresh_is_zero(tag, open);
+    migrate_applies_all_and_is_idempotent(tag, open);
+    migrate_failing_step_rolls_back_that_step(tag, open);
+    migrate_rejects_bad_lists_and_newer_schema(tag, open);
+    schema_calls_inside_transaction_are_reentrant(tag, open);
+    execute_batch_commits_and_rolls_back(tag, open);
 }
 
 /// CREATE TABLE / INSERT / SELECT round-trip for all five [`Value`]
@@ -650,6 +656,192 @@ fn transaction_reentrant_call_is_reported(
         rows.len(),
         4,
         "{tag}: every queued cross-thread transaction must have committed"
+    );
+}
+
+/// A fresh database reports schema version 0.
+fn schema_version_fresh_is_zero(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    assert_eq!(db.schema_version().unwrap(), 0, "{tag}: fresh version");
+}
+
+/// A three-step list used by the migration cases; step 3 is an
+/// `ALTER TABLE .. ADD COLUMN`, which both engines run inside the
+/// migration's transaction (no carve-out needed).
+const THREE_STEPS: &[crate::Migration<'static>] = &[
+    crate::Migration {
+        to_version: 1,
+        statements: &["CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"],
+    },
+    crate::Migration {
+        to_version: 2,
+        statements: &["CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)"],
+    },
+    crate::Migration {
+        to_version: 3,
+        statements: &["ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"],
+    },
+];
+
+/// `migrate` applies every step, returns the final version, creates the
+/// schema, and a re-run of the same list applies nothing.
+fn migrate_applies_all_and_is_idempotent(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    assert_eq!(db.migrate(THREE_STEPS).unwrap(), 3, "{tag}: first run");
+    assert_eq!(db.schema_version().unwrap(), 3, "{tag}: stored version");
+    must_exec(
+        tag,
+        &db,
+        "INSERT INTO notes (id, body, pinned) VALUES (1, 'a', 1)",
+        (),
+    );
+    must_exec(tag, &db, "INSERT INTO tags (id, name) VALUES (1, 'x')", ());
+    let rows = must_query(tag, &db, "SELECT pinned FROM notes", ());
+    assert_eq!(rows.len(), 1, "{tag}: row count");
+    assert_eq!(rows[0].get(0), Some(&Value::Integer(1)), "{tag}: pinned");
+    assert_eq!(db.migrate(THREE_STEPS).unwrap(), 3, "{tag}: re-run");
+    assert_eq!(
+        must_query(tag, &db, "SELECT id FROM notes", ()).len(),
+        1,
+        "{tag}: re-run must not touch data"
+    );
+}
+
+/// A failing second step returns `Sql`, leaves the version at 1 and the
+/// first step's table present, with the failed step's own statements undone.
+fn migrate_failing_step_rolls_back_that_step(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    let list = [
+        crate::Migration {
+            to_version: 1,
+            statements: &["CREATE TABLE a (id INTEGER PRIMARY KEY)"],
+        },
+        crate::Migration {
+            to_version: 2,
+            statements: &["CREATE TABLE b (id INTEGER PRIMARY KEY)", "NOT VALID SQL"],
+        },
+    ];
+    let result = db.migrate(&list);
+    assert!(
+        matches!(result, Err(DatabaseError::Sql { .. })),
+        "{tag}: a failing step must surface Sql, got {result:?}"
+    );
+    assert_eq!(db.schema_version().unwrap(), 1, "{tag}: version after fail");
+    must_exec(tag, &db, "INSERT INTO a (id) VALUES (1)", ());
+    assert!(
+        db.execute("INSERT INTO b (id) VALUES (1)", ()).is_err(),
+        "{tag}: the failed step's table must have been rolled back"
+    );
+}
+
+/// Bad lists and a newer-schema database return `Migration` without
+/// touching the database.
+fn migrate_rejects_bad_lists_and_newer_schema(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    let step = |to_version| crate::Migration {
+        to_version,
+        statements: &["CREATE TABLE should_not_exist (id INTEGER)"],
+    };
+    for (name, list) in [
+        ("non-increasing", vec![step(1), step(1)]),
+        ("decreasing", vec![step(2), step(1)]),
+        ("zero", vec![step(0)]),
+    ] {
+        let result = db.migrate(&list);
+        assert!(
+            matches!(result, Err(DatabaseError::Migration { .. })),
+            "{tag}: {name} list must be a Migration error, got {result:?}"
+        );
+    }
+    assert_eq!(db.schema_version().unwrap(), 0, "{tag}: version untouched");
+    assert!(
+        db.query("SELECT * FROM should_not_exist", ()).is_err(),
+        "{tag}: no statement may run on a bad list"
+    );
+
+    must_exec(tag, &db, "PRAGMA user_version = 5", ());
+    let result = db.migrate(THREE_STEPS);
+    assert!(
+        matches!(result, Err(DatabaseError::Migration { .. })),
+        "{tag}: a newer schema must be a Migration error, got {result:?}"
+    );
+    assert_eq!(db.schema_version().unwrap(), 5, "{tag}: newer untouched");
+}
+
+/// `schema_version`, `migrate` and `execute_batch` on the parent handle
+/// inside a `transaction` closure report `Reentrant`; the closure's own
+/// `Transaction::schema_version` works.
+fn schema_calls_inside_transaction_are_reentrant(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    let db = &db;
+    db.transaction(|txn| {
+        let version = db.schema_version();
+        assert!(
+            matches!(version, Err(DatabaseError::Reentrant)),
+            "{tag}: schema_version must be Reentrant, got {version:?}"
+        );
+        let migrated = db.migrate(THREE_STEPS);
+        assert!(
+            matches!(migrated, Err(DatabaseError::Reentrant)),
+            "{tag}: migrate must be Reentrant, got {migrated:?}"
+        );
+        let batch = db.execute_batch(&[("SELECT 1", &[])]);
+        assert!(
+            matches!(batch, Err(DatabaseError::Reentrant)),
+            "{tag}: execute_batch must be Reentrant, got {batch:?}"
+        );
+        assert_eq!(txn.schema_version().unwrap(), 0, "{tag}: txn version");
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// `execute_batch` commits all statements and sums rows affected; a failing
+/// third statement leaves zero rows.
+fn execute_batch_commits_and_rolls_back(
+    tag: &str,
+    open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
+) {
+    let db = must_open(tag, open, Target::Memory);
+    must_exec(tag, &db, "CREATE TABLE t (id INTEGER PRIMARY KEY)", ());
+    let sql = "INSERT INTO t (id) VALUES (?1)";
+    let (one, two, three) = (
+        [Value::Integer(1)],
+        [Value::Integer(2)],
+        [Value::Integer(3)],
+    );
+    let affected = db
+        .execute_batch(&[(sql, &one), (sql, &two), (sql, &three)])
+        .unwrap_or_else(|e| panic!("{tag}: batch failed: {e}"));
+    assert_eq!(affected, 3, "{tag}: batch rows affected");
+    assert_eq!(must_query(tag, &db, "SELECT id FROM t", ()).len(), 3);
+
+    let (four, five) = ([Value::Integer(4)], [Value::Integer(5)]);
+    // The third statement repeats a primary key and fails.
+    let result = db.execute_batch(&[(sql, &four), (sql, &five), (sql, &one)]);
+    assert!(
+        matches!(result, Err(DatabaseError::Sql { .. })),
+        "{tag}: failing batch must be Sql, got {result:?}"
+    );
+    assert_eq!(
+        must_query(tag, &db, "SELECT id FROM t", ()).len(),
+        3,
+        "{tag}: a failed batch must roll back entirely"
     );
 }
 

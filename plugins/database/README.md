@@ -268,6 +268,56 @@ of failure, drop the handle on any `transaction` error and open a fresh one.
 
 ---
 
+## 4b. Schema versions and migrations
+
+An app keeps its schema version and ordered migrations in one call.
+`Database::migrate` takes a list of `Migration { to_version, statements }`
+(one SQL statement per entry; both engines prepare exactly one statement per
+call), strictly increasing from 1:
+
+```rust,ignore
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        to_version: 1,
+        statements: &["CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"],
+    },
+    Migration {
+        to_version: 2,
+        statements: &["ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"],
+    },
+];
+
+let version = db.migrate(MIGRATIONS)?; // 2
+```
+
+- **One transaction per step.** Each migration's statements and its
+  `PRAGMA user_version` bump commit together. A failing statement rolls that
+  step back and returns its `DatabaseError::Sql`, leaving the version at the
+  last completed step, so a crash mid-list resumes at the next unapplied step.
+- **Idempotent.** Re-running the same list applies nothing and returns the
+  current version. `Database::schema_version` (and `Transaction::schema_version`
+  inside a closure) reads it; a fresh database is 0.
+- **Error cases.** `DatabaseError::Migration` is returned, before any
+  statement runs, for a list that is not strictly increasing, has a
+  `to_version` of 0, or targets a database whose version is above the last
+  migration's `to_version`. A newer schema is an error rather than a silent
+  skip, so a downgraded binary cannot read a schema it does not know.
+- **Reentrant rule.** `migrate` and `schema_version` lock the connection:
+  calling them on the same handle from inside a `transaction` closure returns
+  `DatabaseError::Reentrant`.
+- **Blocking.** Every call is blocking; pair with `frust::spawn_blocking`
+  (see §3).
+
+## 4c. Batch writes
+
+`Database::execute_batch(&[(sql, &[Value])])` runs many statements in one
+transaction and returns the summed rows affected; any error rolls the whole
+batch back. It suits many-row inserts. It is not a prepared-statement cache:
+each statement is still prepared per call. Like `migrate`, it returns
+`DatabaseError::Reentrant` inside a `transaction` closure.
+
+---
+
 ## 5. Engine selection
 
 This crate supports multiple SQL engine backends, selected at compile time
@@ -470,10 +520,9 @@ The probe app was never committed.
 
 ## 7. Caveats
 
-- **v1 is basic SQL only.** No prepared-statement caching, no streaming
-  cursors, no migrations, no named parameters (positional only, matching this
-  crate's v1 scope). Future enhancements (not v1) include named parameters,
-  statement cache, streaming query results, and a migration runner.
+- **v1 is basic SQL only.** Migrations (§4b) and batch writes (§4c) exist;
+  there is still no prepared-statement cache, no streaming cursors and no
+  named parameters (positional only). Those remain future enhancements.
 - **Param-count strictness differs by engine.** Supplying fewer positional
   parameters than the statement declares placeholders is an error
   (`DatabaseError::Sql`) on the SQLite engine — a client-side guard rusqlite

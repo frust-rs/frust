@@ -331,6 +331,18 @@ pub enum DatabaseError {
     /// *Threading model* section promises.
     #[error("a database call re-entered a handle already locked by the calling thread")]
     Reentrant,
+
+    /// A [`Database::migrate`] call was refused: the migration list is not
+    /// strictly increasing in [`Migration::to_version`], names a
+    /// `to_version` of 0, or the database is already at a version above the
+    /// list's last `to_version` (a newer schema than this binary knows).
+    ///
+    /// Raised before any migration statement runs.
+    #[error("migration error: {message}")]
+    Migration {
+        /// What was wrong with the list or the database's version.
+        message: String,
+    },
 }
 
 /// The compiled SQL engine backend a [`Database`] routes through.
@@ -604,6 +616,156 @@ impl Database {
         guard.disarm();
         Ok(value)
     }
+
+    /// The database's schema version: the `PRAGMA user_version` value, 0 for
+    /// a fresh database. [`Self::migrate`] keeps it current.
+    ///
+    /// Blocking, like every call on this handle — pair with
+    /// `frust::spawn_blocking`. Inside a [`Self::transaction`] closure use
+    /// [`Transaction::schema_version`] instead.
+    ///
+    /// # Errors
+    /// [`DatabaseError::Sql`] if the engine rejects the pragma or reports a
+    /// value outside `0..=u32::MAX`; [`DatabaseError::Reentrant`] if the
+    /// calling thread is already inside a [`Self::transaction`] closure on
+    /// this same handle.
+    pub fn schema_version(&self) -> Result<u32, DatabaseError> {
+        let rows = self.query("PRAGMA user_version", ())?;
+        parse_user_version(&rows)
+    }
+
+    /// Bring the schema up to date: apply every [`Migration`] whose
+    /// `to_version` is above the database's current [`Self::schema_version`],
+    /// in order, and return the resulting version (the current one when
+    /// nothing applied).
+    ///
+    /// Each migration runs as its own [`Self::transaction`]: its statements
+    /// and the `PRAGMA user_version` bump commit together or not at all. A
+    /// failing statement rolls that migration back and returns its error,
+    /// leaving the version at the last completed migration, so a crash or
+    /// failure mid-list resumes at the next unapplied step on the next call.
+    /// The call is idempotent: re-running the same list applies nothing.
+    ///
+    /// The list is validated first; no statement runs on a bad list.
+    ///
+    /// Blocking, like every call on this handle — pair with
+    /// `frust::spawn_blocking`. Do not call it while holding a transaction.
+    ///
+    /// # Errors
+    /// [`DatabaseError::Migration`] if `to_version` values are not strictly
+    /// increasing, any is 0, or the database's version is above the last
+    /// migration's `to_version` (a newer schema is an error, never a silent
+    /// skip, so a downgraded binary cannot read a schema it does not know);
+    /// [`DatabaseError::Sql`] from a failing statement;
+    /// [`DatabaseError::Reentrant`] if the calling thread is already inside
+    /// a [`Self::transaction`] closure on this same handle.
+    pub fn migrate(&self, migrations: &[Migration<'_>]) -> Result<u32, DatabaseError> {
+        let mut previous = 0u32;
+        for m in migrations {
+            if m.to_version == 0 {
+                return Err(DatabaseError::Migration {
+                    message: "a migration's to_version must be at least 1".to_owned(),
+                });
+            }
+            if m.to_version <= previous {
+                return Err(DatabaseError::Migration {
+                    message: format!(
+                        "migrations must be strictly increasing in to_version, \
+                         but {} follows {previous}",
+                        m.to_version
+                    ),
+                });
+            }
+            previous = m.to_version;
+        }
+        let start = self.schema_version()?;
+        let mut current = start;
+        if current > previous {
+            return Err(DatabaseError::Migration {
+                message: format!(
+                    "the database is at schema version {current}, newer than the last \
+                     known migration ({previous})"
+                ),
+            });
+        }
+        for m in migrations.iter().filter(|m| m.to_version > start) {
+            self.transaction(|txn| {
+                for statement in m.statements {
+                    txn.execute(statement, ())?;
+                }
+                // A `u32`, so the formatted literal cannot inject SQL.
+                txn.execute(&format!("PRAGMA user_version = {}", m.to_version), ())?;
+                Ok(())
+            })?;
+            current = m.to_version;
+        }
+        Ok(current)
+    }
+
+    /// Run every `(sql, params)` statement in order inside one
+    /// [`Self::transaction`], returning the summed rows-affected. Any error
+    /// rolls the whole batch back.
+    ///
+    /// For many-row writes. This is not a prepared-statement cache: each
+    /// statement is still prepared on every call.
+    ///
+    /// Blocking, like every call on this handle — pair with
+    /// `frust::spawn_blocking`.
+    ///
+    /// # Errors
+    /// [`DatabaseError::Sql`] from the first failing statement (after
+    /// rolling back); [`DatabaseError::Reentrant`] if the calling thread is
+    /// already inside a [`Self::transaction`] closure on this same handle.
+    pub fn execute_batch(&self, statements: &[(&str, &[Value])]) -> Result<u64, DatabaseError> {
+        self.transaction(|txn| {
+            let mut total = 0u64;
+            for (sql, params) in statements {
+                total += txn.execute(sql, *params)?;
+            }
+            Ok(total)
+        })
+    }
+}
+
+/// An ordered schema step for [`Database::migrate`]: the statements that
+/// bring the schema to `to_version`.
+///
+/// One statement per entry — both engines prepare exactly one statement per
+/// call. A list is strictly increasing in `to_version`, starting at 1:
+///
+/// ```ignore
+/// const MIGRATIONS: &[Migration] = &[
+///     Migration {
+///         to_version: 1,
+///         statements: &["CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"],
+///     },
+///     Migration {
+///         to_version: 2,
+///         statements: &["ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"],
+///     },
+/// ];
+/// db.migrate(MIGRATIONS)?;
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Migration<'a> {
+    /// The schema version this migration leaves the database at. Must be at
+    /// least 1 and above the previous migration's.
+    pub to_version: u32,
+    /// The statements to run, in order, one statement per entry.
+    pub statements: &'a [&'a str],
+}
+
+/// Read a `PRAGMA user_version` result: first row, first column, an integer
+/// in `0..=u32::MAX`.
+fn parse_user_version(rows: &[Row]) -> Result<u32, DatabaseError> {
+    match rows.first().and_then(|row| row.get(0)) {
+        Some(Value::Integer(n)) => u32::try_from(*n).map_err(|_| DatabaseError::Sql {
+            message: format!("user_version {n} is outside the u32 range"),
+        }),
+        other => Err(DatabaseError::Sql {
+            message: format!("PRAGMA user_version returned {other:?}, expected an integer"),
+        }),
+    }
 }
 
 /// The RAII lock on a [`Database`]'s connection: holds the `MutexGuard` and
@@ -735,6 +897,17 @@ impl Transaction<'_> {
     /// [`DatabaseError::Sql`] if the engine rejects the statement.
     pub fn query(&self, sql: &str, params: impl IntoParams) -> Result<Vec<Row>, DatabaseError> {
         self.conn.borrow_mut().query(sql, &params.into_params())
+    }
+
+    /// The schema version (`PRAGMA user_version`) as seen inside this
+    /// transaction. See [`Database::schema_version`].
+    ///
+    /// # Errors
+    /// [`DatabaseError::Sql`] if the engine rejects the pragma or reports a
+    /// value outside `0..=u32::MAX`.
+    pub fn schema_version(&self) -> Result<u32, DatabaseError> {
+        let rows = self.query("PRAGMA user_version", ())?;
+        parse_user_version(&rows)
     }
 }
 
