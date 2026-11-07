@@ -1,7 +1,7 @@
 //! The twenty-two playground sections, one module per section: `platform_views`,
 //! `camera`, `responsive`, `terminal`, `keys`, `i18n`, `video_player`,
 //! `url_launcher`, `auth_session`, `database`, `graph_canvas`,
-//! `scroll_control`, `drag_drop`, `tabs`, `images`, `slivers`, `desktop_services`, `device_memory`, `shortcuts`, `network`, `glass`, and `gpu_pass` — each one an
+//! `scroll_control`, `drag_drop`, `tabs`, `images`, `slivers`, `desktop_services`, `shortcuts`, `network`, `glass`, `gpu_pass`, and `device_memory` — each one an
 //! OS-facing capability (or, for `graph_canvas`/`scroll_control`/`drag_drop`/
 //! `slivers`, a widget demo: `CanvasView`/`PanZoomView` for the first, a keyed
 //! `ListView` bound to a `ScrollController` for the second,

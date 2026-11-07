@@ -10,22 +10,18 @@
 //!
 //! # Threading
 //!
-//! [`DeviceMemory::query`] may run on any thread, so the pressure listener
-//! queries on its own thread and sends the result over an mpsc channel. A
-//! UI-thread [`spawn_local`] loop awaits the channel through [`spawn_blocking`]
-//! and is the only writer of the readout from that path, the same shape as the
-//! Network page. A button press runs in its event handler, so it writes the
-//! signals directly.
+//! Memory-pressure hooks run synchronously on the UI thread, the same as the
+//! Network page's lifecycle hooks (see
+//! [`AppLifecycleListener::on_memory_pressure`]). The listener is an event
+//! handler, so it queries and writes the readout and the log signals directly;
+//! `build` only reads them.
 
 use std::fmt::Display;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use frust::{
     AppLifecycleListener, Component, EdgeInsets, Get, MemoryPressure, Padding, RwSignal, Set,
-    SizedBox, Theme, Update, View, button, column, component, spawn_blocking, spawn_local, text,
-    use_context,
+    SizedBox, Theme, Update, View, button, column, component, text, use_context,
 };
 use frust_device_info::DeviceMemory;
 
@@ -43,12 +39,6 @@ pub fn page(_state: &crate::PlaygroundState) -> impl View<crate::PlaygroundState
     component(DeviceMemoryPage)
 }
 
-/// One query's result, carried from the listener thread to the UI thread.
-struct Sample {
-    reading: Option<DeviceMemory>,
-    row: String,
-}
-
 #[derive(Default)]
 struct DeviceMemoryPage;
 
@@ -64,12 +54,10 @@ impl Component for DeviceMemoryPage {
 
     fn init(&self) -> DeviceMemoryPageState {
         let start = Instant::now();
-        let (tx, rx) = channel();
-        let pressure = Self::pressure_listener(tx, start);
         let first = query_and_log("open", start);
         let reading = RwSignal::new(first.reading);
         let log = RwSignal::new(vec![first.row]);
-        Self::drain(rx, reading, log);
+        let pressure = Self::pressure_listener(reading, log, start);
 
         DeviceMemoryPageState {
             reading,
@@ -123,32 +111,20 @@ impl Component for DeviceMemoryPage {
 }
 
 impl DeviceMemoryPage {
-    /// Registers the pressure callback. It runs on the platform's thread, so it
-    /// only queries, logs and sends.
-    fn pressure_listener(tx: Sender<Sample>, start: Instant) -> AppLifecycleListener {
+    /// Registers the pressure hook. The hook runs synchronously on the UI
+    /// thread, so it is an event handler: it logs the level, queries, and
+    /// writes the readout and the log signals directly.
+    fn pressure_listener(
+        reading: RwSignal<Option<DeviceMemory>>,
+        log: RwSignal<Vec<String>>,
+        start: Instant,
+    ) -> AppLifecycleListener {
         AppLifecycleListener::new().on_memory_pressure(move |level: MemoryPressure| {
             log::info!("{GATE_PREFIX} pressure={level:?}");
             let sample = query_and_log(&format!("pressure={level:?}"), start);
-            let _ = tx.send(sample);
+            reading.set(sample.reading);
+            log.update(|rows| push_row(rows, sample.row));
         })
-    }
-
-    /// The UI-thread loop that moves pressure samples into the signals.
-    fn drain(
-        rx: Receiver<Sample>,
-        reading: RwSignal<Option<DeviceMemory>>,
-        log: RwSignal<Vec<String>>,
-    ) {
-        let rx = Arc::new(Mutex::new(rx));
-        spawn_local(async move {
-            loop {
-                let rx = Arc::clone(&rx);
-                let received = spawn_blocking(move || rx.lock().ok()?.recv().ok()).await;
-                let Ok(Some(sample)) = received else { break };
-                reading.set(sample.reading);
-                log.update(|rows| push_row(rows, sample.row));
-            }
-        });
     }
 
     fn query_button() -> impl View<DeviceMemoryPageState> {
@@ -159,6 +135,12 @@ impl DeviceMemoryPage {
             state.log.update(|rows| push_row(rows, row));
         })
     }
+}
+
+/// One query's result: the reading and its page row.
+struct Sample {
+    reading: Option<DeviceMemory>,
+    row: String,
 }
 
 /// Re-reads the device memory, writes the gate line and returns the sample
