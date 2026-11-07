@@ -560,28 +560,41 @@ impl<State: 'static> NavigatorController<State> {
     }
 
     /// Make the stack exactly `pages`, bottom to top, retaining every page whose
-    /// [`PageKey`](super::options::PageKey) the list names. `pages` must not be
-    /// empty: a navigator always keeps one page.
+    /// [`PageKey`](super::options::PageKey) the list names. An empty `pages` is
+    /// ignored: a navigator always keeps one page, and the queue stays as it was.
     ///
     /// Supersedes every op still queued that would only add a page and owes no
     /// callback: the list decides what the stack holds, so such a page would be
     /// built just to leave unpainted, and an earlier list would drop pages this one
     /// retains. A page pushed with a result callback still lands, so that its
-    /// callback fires.
+    /// callback fires. A pop queued after a dropped push is dropped with it, one
+    /// pop per push, so it cannot reach the keyed page beneath; any other pop
+    /// stays, so its result is still delivered.
     pub(super) fn set_pages(&self, pages: Vec<PageSpec<State>>) {
-        debug_assert!(!pages.is_empty(), "a navigator always keeps one page");
+        if pages.is_empty() {
+            return;
+        }
         // Through `drain`, so a dropped op's closures run with the queue unborrowed.
-        let (superseded, kept): (Vec<_>, Vec<_>) = self.drain().into_iter().partition(|op| {
-            matches!(
-                op,
-                NavOp::SetPages { .. }
-                    | NavOp::Replace { .. }
-                    | NavOp::Push {
-                        on_result: None,
-                        ..
-                    }
-            )
-        });
+        let mut superseded = Vec::new();
+        let mut kept = Vec::new();
+        // Dropped pushes not yet cancelled by a later pop, in queue order.
+        let mut dropped_pushes = 0usize;
+        for op in self.drain() {
+            match op {
+                NavOp::SetPages { .. } | NavOp::Replace { .. } => superseded.push(op),
+                NavOp::Push {
+                    on_result: None, ..
+                } => {
+                    dropped_pushes += 1;
+                    superseded.push(op);
+                }
+                NavOp::Pop { .. } | NavOp::RequestBack if dropped_pushes > 0 => {
+                    dropped_pushes -= 1;
+                    superseded.push(op);
+                }
+                op => kept.push(op),
+            }
+        }
         *self.ops.borrow_mut() = kept;
         drop(superseded);
         self.enqueue(NavOp::SetPages { pages });
