@@ -262,6 +262,9 @@ impl DetentController {
     }
 
     /// Rest at `progress` (clamped to `0.0..=1.0`, non-finite ignored) at once.
+    ///
+    /// [`progress`](Self::progress) reflects the call immediately; no
+    /// [`advance`](Self::advance) is needed for it to change.
     pub fn jump_to(&mut self, progress: f64) {
         if progress.is_finite() {
             self.anim.stop();
@@ -288,6 +291,9 @@ impl DetentController {
 
     /// Scrub by `delta_px` of total travel since [`begin_drag`](Self::begin_drag)
     /// ([`Detents::drag_to`]).
+    ///
+    /// Like [`jump_to`](Self::jump_to), the new [`progress`](Self::progress) is
+    /// visible at once: the drag does not wait for [`advance`](Self::advance).
     pub fn drag_by(&mut self, delta_px: f64, close_sign: f64) {
         let next = self
             .detents
@@ -331,6 +337,11 @@ impl DetentController {
     }
 
     /// Advance a settle to `now`; `true` while it still owes a frame.
+    ///
+    /// Only the post-release spring (from [`release`](Self::release) with
+    /// [`DetentRelease::SnapTo`]) is driven here. [`jump_to`](Self::jump_to)
+    /// and [`drag_by`](Self::drag_by) already update
+    /// [`progress`](Self::progress), so a drag never needs `advance` to show.
     pub fn advance(&mut self, now: FrameTime) -> bool {
         self.anim.advance(now)
     }
@@ -676,6 +687,23 @@ mod tests {
         assert_eq!(c.progress(), mid);
         c.drag_by(0.0, 1.0);
         assert_eq!(c.progress(), mid);
+    }
+
+    #[test]
+    fn jump_to_and_drag_by_move_progress_without_advance() {
+        let mut c = sheet();
+        c.jump_to(0.5);
+        assert_eq!(c.progress(), 0.5);
+        assert!(!c.is_settling());
+
+        c.begin_drag();
+        let expected = c
+            .detents()
+            .drag_to(0.5, -150.0, 1.0, c.extent())
+            .expect("a finite drag resolves to a progress");
+        c.drag_by(-150.0, 1.0);
+        assert_eq!(c.progress(), expected);
+        assert!(!c.is_settling());
     }
 
     #[test]
