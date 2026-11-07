@@ -37,6 +37,9 @@ frust-camera = { path = "../../plugins/camera" }
 # The Network page: default-network availability and change events next to the lifecycle log.
 frust-connectivity = { path = "../../plugins/connectivity" }
 
+# The Memory page: the device memory figures, re-read on a press and on every memory-pressure event.
+frust-device-info = { path = "../../plugins/device-info" }
+
 # Default features required: the `frust-api` hooks and the ICU4X `formatting` that `locales/*/main.ftl` uses.
 frust-i18n = { path = "../../plugins/i18n" }
 
