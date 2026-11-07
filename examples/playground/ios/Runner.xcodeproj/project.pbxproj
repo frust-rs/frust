@@ -274,6 +274,10 @@
 					AuthenticationServices,
 					"-framework",
 					Network,
+					"-framework",
+					Photos,
+					"-framework",
+					AVFoundation,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -316,6 +320,10 @@
 					AuthenticationServices,
 					"-framework",
 					Network,
+					"-framework",
+					Photos,
+					"-framework",
+					AVFoundation,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -359,6 +367,10 @@
 					AuthenticationServices,
 					"-framework",
 					Network,
+					"-framework",
+					Photos,
+					"-framework",
+					AVFoundation,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
