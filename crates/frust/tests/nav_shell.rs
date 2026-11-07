@@ -1236,9 +1236,9 @@ fn a_push_after_a_back_press_out_of_a_shell_below_a_page_places_the_shell_again(
         "the leaf replaced the fresh inner's root"
     );
     assert_eq!(
-        paths(&h.outer).last().map(String::as_str),
-        Some("/inbox"),
-        "the shell page is on top of the outer stack"
+        paths(&h.outer),
+        strings(&["/", "/inbox"]),
+        "the shell page is on top of its parent, which is not stacked twice"
     );
     assert!(handles_back(), "and a press can leave the shell again");
     assert!(!h.inner.back_interest(), "the inner is at its root");
@@ -1246,6 +1246,12 @@ fn a_push_after_a_back_press_out_of_a_shell_below_a_page_places_the_shell_again(
     push_back_press();
     h.settle();
     assert!(!h.inner.is_mounted(), "the press popped the shell page");
+    assert_eq!(
+        paths(&h.outer),
+        strings(&["/"]),
+        "one press, back at the parent"
+    );
+    h.assert_no_back();
 }
 
 #[test]
