@@ -128,7 +128,7 @@ The repository already contains substantial non-pixel coverage:
   magnification, the opaque pass, a same-extent rebind dropping the held plan), and
   `crates/frust-render/tests/texture_bus.rs` covers `SourceFormat::Bgra8` read-back order and
   `UpdateRegion` (a partial write, a refused region before any full frame, a format change).
-  Verified on Vulkan (NVIDIA T400); the Metal leg is pending.
+  Verified on Vulkan (NVIDIA T400) and Metal (Apple M4).
 - `crates/frust-testing`: the versioned golden corpus and comparator — a
   renderer-agnostic `SceneRenderer` pair (`CpuOracle` over the dev-only
   `vello_cpu` 0.2.0 pin, `EngineOracle` over `frust-gpu`'s `HeadlessTarget`), a 4-channel
