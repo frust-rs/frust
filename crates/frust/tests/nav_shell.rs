@@ -847,7 +847,7 @@ fn a_non_shell_chain_still_flattens_onto_one_controller() {
     root.rebuild(&mut app, &mut ());
     assert_eq!(
         paths(&controller),
-        vec!["/users/42".to_string(), "/users/42".to_string()],
+        vec!["/users".to_string(), "/users/42".to_string()],
         "both chain pages on the one controller"
     );
 
@@ -1161,18 +1161,23 @@ fn a_page_below_a_shell_in_the_route_tree_survives_navigation_between_its_childr
     // From anywhere: the chain is the `/` page then the shell.
     h.router.go("/inbox");
     h.settle();
-    assert_eq!(h.outer.depth(), 2, "the `/` page, then the shell page");
+    assert_eq!(
+        paths(&h.outer),
+        strings(&["/", "/inbox"]),
+        "the `/` page reads as itself, then the shell page"
+    );
     assert_eq!(paths(&h.inner), strings(&["/inbox"]));
     assert_eq!(h.shell_builds.get(), 1);
     let root_page_builds = h.root_page_builds.get();
     assert_eq!(root_page_builds, 1, "the `/` page built once");
 
-    // Between children the shell and the `/` page are kept. The outer stack
-    // may republish (the `/` page is restamped), so state is asserted, not the
-    // outer generation.
+    // Between children the shell and the `/` page are kept, and nothing on the
+    // outer stack changed, so it publishes nothing.
+    let outer_generation = h.outer.route_generation();
     h.router.go("/settings");
     h.settle();
-    assert_eq!(h.outer.depth(), 2);
+    assert_eq!(h.outer.route_generation(), outer_generation);
+    assert_eq!(paths(&h.outer), strings(&["/", "/inbox"]));
     assert_eq!(paths(&h.inner), strings(&["/settings"]));
     assert_eq!(h.inner.depth(), 1);
     assert_eq!(h.shell_builds.get(), 1, "the shell was kept, not rebuilt");
@@ -1186,12 +1191,61 @@ fn a_page_below_a_shell_in_the_route_tree_survives_navigation_between_its_childr
     assert!(handles_back(), "the outer navigator answers the press");
     push_back_press();
     h.settle();
-    assert_eq!(h.outer.depth(), 1);
-    // The surviving page is the same `/` page (built once). Its published
-    // location reads the restamped `/settings`, the known limit of a go
-    // between children, so the page's state is asserted rather than its path.
+    assert_eq!(paths(&h.outer), strings(&["/"]));
     assert!(!h.inner.is_mounted());
     assert_eq!(h.root_page_builds.get(), root_page_builds);
+}
+
+#[test]
+fn a_push_after_a_back_press_out_of_a_shell_below_a_page_places_the_shell_again() {
+    let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _rt = ReactiveRuntime::init(Arc::new(|| {}));
+    reset();
+
+    let mut h = FlowHarness::build(false, true, true);
+    h.router.go("/settings");
+    h.settle();
+    assert_eq!(h.shell_builds.get(), 1);
+
+    assert!(handles_back(), "the outer navigator answers the press");
+    push_back_press();
+    h.settle();
+    assert_eq!(paths(&h.outer), strings(&["/"]));
+    assert_eq!(
+        h.outer
+            .route_stack()
+            .current_route()
+            .map(|route| route.path.as_str()),
+        Some("/"),
+        "the page left behind reads as itself, not as the child it was kept for"
+    );
+    assert!(!h.inner.is_mounted());
+    h.assert_no_back();
+
+    h.router.push("/inbox");
+    h.settle();
+    assert_eq!(h.shell_builds.get(), 2, "the shell page was placed again");
+    assert!(
+        h.inner.is_mounted(),
+        "so the push landed on a live navigator"
+    );
+    assert_eq!(paths(&h.inner), strings(&["/inbox"]));
+    assert_eq!(
+        h.inner.depth(),
+        1,
+        "the leaf replaced the fresh inner's root"
+    );
+    assert_eq!(
+        paths(&h.outer).last().map(String::as_str),
+        Some("/inbox"),
+        "the shell page is on top of the outer stack"
+    );
+    assert!(handles_back(), "and a press can leave the shell again");
+    assert!(!h.inner.back_interest(), "the inner is at its root");
+
+    push_back_press();
+    h.settle();
+    assert!(!h.inner.is_mounted(), "the press popped the shell page");
 }
 
 #[test]

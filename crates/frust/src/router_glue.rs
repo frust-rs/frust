@@ -34,6 +34,11 @@
 //! mid-way onboarding flow, say) handles the link itself instead of relying on
 //! `track()`.
 //!
+//! An unmatched link is the exception, and a deliberate difference from
+//! go_router: it **pushes** the error page, so a stray or unrelated link cannot
+//! wipe the stack and back returns from it (see [`Router::handle_location`]). A
+//! [`Router::go`] to an unmatched location from app code still replaces the stack.
+//!
 //! # Dedupe
 //!
 //! [`RouterDeepLinks::track`] is meant to be called from every
@@ -542,9 +547,21 @@ mod tests {
         );
 
         // Criterion 3: a malformed/unmatched link hits the router's error
-        // page — no panic.
+        // page — no panic — and keeps the stack, so back returns from it.
+        warm.links.router().push("/settings");
+        warm.rebuild();
+        assert_eq!(warm.links.router().controller().depth(), 2);
         push_deep_link("/does/not/exist");
         assert_eq!(warm.track_and_paint(), ERROR);
+        assert_eq!(
+            warm.links.router().controller().depth(),
+            3,
+            "an unmatched link stacks over the stack rather than replacing it"
+        );
+        warm.links.router().pop();
+        warm.rebuild();
+        assert_eq!(warm.paint(), SETTINGS);
+        assert_eq!(warm.links.router().controller().depth(), 2);
 
         // Criterion 4 (the `RouteNavigator` pump): a request queued the way a
         // screen's event handler would — through the context-safe handle, with
