@@ -67,7 +67,7 @@ pub(crate) mod parallel;
 pub use clear::ClearPunch;
 pub use clip::ClipStack;
 pub use draw::{DepthCounter, EngineDraw};
-pub use external::{ExternalExtents, ExternalSkip};
+pub use external::{ExternalExtents, ExternalSkip, SceneTextureFilter, SceneTextureHints};
 pub use layers::{
     GroupStack, LayerLowering, RetainedBracket, RetainedKind, RetainedPlacement, RetainedStack,
 };
@@ -1119,6 +1119,16 @@ impl SceneCompiler {
     /// own `bind_texture` writes both.
     pub fn bind_external_texture(&mut self, id: u64, size: (u32, u32)) -> bool {
         self.externals.bind(id, size)
+    }
+
+    /// [`Self::bind_external_texture`] with registration-side `hints`.
+    pub fn bind_external_texture_with(
+        &mut self,
+        id: u64,
+        size: (u32, u32),
+        hints: SceneTextureHints,
+    ) -> bool {
+        self.externals.bind_with(id, size, hints)
     }
 
     /// Forgets the extent recorded for `id`, so a `SceneTexture` naming it
