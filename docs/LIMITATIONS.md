@@ -6554,10 +6554,12 @@ iPhone 13 mini reports `memory_mib=3674`), from 4 GiB elsewhere. Measured on tha
 iPhone 13 mini (S6, one session), `phys_footprint` p50 is 229.9 MiB on the plain tier
 (max 233.4) and 252.0 MiB on `mobile_large` (max 256.5): +22 MiB resident on this
 workload, the +80 MiB being a lazy ceiling (gates rf01-13mini-footprint-ab,
-p2-round1-integration-root). A memory warning (`RenderCommand::TrimMemory` ->
+p2-round1-integration-root). A Critical memory event (the iOS memory warning; on Android RUNNING_CRITICAL in the
+foreground, COMPLETE or `onLowMemory`; `RenderCommand::TrimMemory` ->
 `EngineRenderer::trim_memory`) drops the retained pages to the plain 32 MiB budget
 and clamps atlas growth to the plain tier's bytes, one-way until the renderer is
-rebuilt. The atlas has no layer-release primitive (`vello_common` 0.2.0's packer
+rebuilt, so a transient foreground RUNNING_CRITICAL lowers the budgets until then (accepted); macOS
+reports the event without trimming. The atlas has no layer-release primitive (`vello_common` 0.2.0's packer
 only appends), so a trim cannot give a layer back: it only stops the array growing,
 and resident glyphs keep serving. The trim is host-tested; on-device delivery was
 not exercised (gate rf01-13mini-memory-warning, skipped). That budget is one running total —
@@ -8967,3 +8969,17 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Why accepted**: a torn-down detector has no `&mut State` to call back into, and the teardown path never carries one.
 
 **Evidence**: `crates/frust-widgets/src/gesture.rs` (module docs, *Drag recognition* / Cancel).
+
+### `memory-pressure-not-reported-on-windows-linux-web` — no memory-pressure event on Windows, Linux or web
+
+**Observed**: `on_memory_pressure` never fires on Windows, Linux or web, since those shells have no source. iOS, Android and macOS report it. The render caches are trimmed only on iOS and Android Critical, and the app is never told about a low-memory condition on the other hosts.
+
+**Applies to**: `frust-shell-windows`, `frust-shell-linux`, `frust-shell-web`, and the shared desktop core.
+
+**Workaround**: an app that must shed memory there trims on its own signal. `push_memory_pressure` is public, so an embedding host with its own platform hook can deliver the event itself (on the UI thread).
+
+**Why accepted**: each needs its own platform signal (Windows `CreateMemoryResourceNotification`, Linux PSI) that no shell wires yet; the event and `push_memory_pressure` seam are ready for it.
+
+**Evidence**: `push_memory_pressure` (`crates/frust-reactive/src/app_lifecycle.rs`) is called only from `crates/frust-shell-ios/src/ffi_glue.rs` (`memory_warning`), `crates/frust-shell-android/src/jni_glue.rs` (`native_on_trim_memory`) and `crates/frust-shell-macos/src/lib.rs` (`pump`); `frust-shell-desktop`, `frust-shell-windows`, `frust-shell-linux` and `frust-shell-web` have no caller.
+
+---

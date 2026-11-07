@@ -447,14 +447,14 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   `FileDropAccumulator` batches one drop's files into a single `Drop`. `position` is the last known
   cursor position (a `FileHoverLatch` re-dispatches `Hover` on each `CursorMoved`);
   `HoveredFileCancelled`, `CursorLeft` and any real mouse button each unlatch and dispatch one `Cancel`.
-- **App lifecycle:** each shell pushes `AppLifecycleState` via `frust_reactive::push_app_lifecycle`
-  (state machine: [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) § App Lifecycle):
+- **App lifecycle:** shells push `AppLifecycleState` (`push_app_lifecycle`) and `MemoryPressure`
+  (`push_memory_pressure`, never moves the state; [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) § App Lifecycle):
 
   | Shell | Push site | Mapping |
   |---|---|---|
-  | Android | `lifecycle.rs` `LifecycleFlags::target`, driven by `jni_glue` `native_on_start/stop/resume/pause/window_focus_changed` | `native_on_destroy`→Detached; !started→Paused; started+resumed+focused→Resumed; else Inactive |
-  | iOS | `ffi_glue` pause/resume plus `frust_did_enter_background`/`frust_will_enter_foreground` | willResignActive→Inactive; didEnterBackground→Paused; willEnterForeground→Inactive; didBecomeActive→Resumed; never Detached; `didReceiveMemoryWarning`→`frust_memory_warning`→`RenderCommand::TrimMemory` (any phase; Android/desktop arms no-op) |
-  | Desktop | `app_handler.rs` `sync_app_lifecycle` | any window focused→Resumed; all occluded/minimized or `suspended`→Hidden; else Inactive; never Paused/Detached |
+  | Android | `lifecycle.rs` `LifecycleFlags::target`, driven by `jni_glue` `native_on_start/stop/resume/pause/window_focus_changed` | `native_on_destroy`→Detached; !started→Paused; started+resumed+focused→Resumed; else Inactive. Memory: `FrustActivity.onTrimMemory`/`onLowMemory`→`native_on_trim_memory`→`trim_level_to_pressure`: RUNNING_MODERATE, RUNNING_LOW, BACKGROUND, MODERATE→Moderate; RUNNING_CRITICAL, COMPLETE+→Critical (also trims the render caches); UI_HIDDEN/unknown→none. The OS refuses COMPLETE for a foreground process |
+  | iOS | `ffi_glue` pause/resume plus `frust_did_enter_background`/`frust_will_enter_foreground` | willResignActive→Inactive; didEnterBackground→Paused; willEnterForeground→Inactive; didBecomeActive→Resumed; never Detached; `didReceiveMemoryWarning`→`frust_memory_warning`→`TrimMemory` (render caches, any phase), then pushes Critical (iOS has one warning level) |
+  | Desktop | `app_handler.rs` `sync_app_lifecycle` | any window focused→Resumed; all occluded/minimized or `suspended`→Hidden; else Inactive; never Paused/Detached. Memory (macOS only): a libdispatch memory-pressure source installed in `on_window_created` (WARN→Moderate, CRITICAL→Critical) merges into an atomic slot drained in `pump`; reports only, trims no render caches. Windows, Linux and web report none |
   | Web | `frust-shell-web` `app_handler.rs` | document hidden→Hidden; window focused→Resumed; else Inactive |
 
   **Cancelable exit** (`request_app_exit`): desktop `handle_close_requested` asks only when
