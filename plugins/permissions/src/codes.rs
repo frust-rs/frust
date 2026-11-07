@@ -60,8 +60,9 @@ pub fn status_from_android_code(code: i32) -> Option<PermissionStatus> {
 }
 
 /// Maps a `PHAuthorizationStatus` raw value (0 notDetermined, 1 restricted,
-/// 2 denied, 3 authorized, 4 limited). UNVERIFIED-platform: the Apple arm
-/// confirms these against the SDK. Unknown values map to `Denied`.
+/// 2 denied, 3 authorized, 4 limited). Confirmed against the iPhoneOS 27.0 SDK
+/// `Photos.framework` headers (`PHAuthorizationStatus` 0..=4; `PHAccessLevel`
+/// AddOnly=1, ReadWrite=2). Unknown values map to `Denied`.
 pub fn status_from_ph_authorization(raw: isize) -> PermissionStatus {
     match raw {
         0 => PermissionStatus::NotDetermined,
@@ -98,8 +99,8 @@ pub fn usage_key(p: Permission) -> Option<&'static str> {
 }
 
 /// The Android manifest permissions behind `p` on a device at `sdk_int`.
-/// Photos add-only needs none on API 29+ (UNVERIFIED-platform: the Android
-/// arm confirms).
+/// Photos add-only needs none on API 29+. The sets were checked against
+/// developer.android.com and the Pixel 5 / Android 14 device gate.
 pub fn android_permissions(p: Permission, sdk_int: i32) -> &'static [&'static str] {
     match p {
         Permission::Photos(PhotoAccess::ReadWrite) => {

@@ -31,9 +31,11 @@
 //!
 //! iOS has no separate permission for the location stored in a photo:
 //! `PHAsset.location` is governed by photo-library authorization alone (see
-//! `PHAsset.h`). `MediaLocation` therefore reports `Granted` without a prompt
-//! and without a usage-key check; reading photos is still governed by the
-//! `Photos` permission. macOS reports `Unsupported`, like photos.
+//! `PHAsset.h`). The location in a photo is readable exactly when Photos read
+//! access is usable, so `MediaLocation` returns the `Photos(ReadWrite)`
+//! authorization status (the same read as `status(Photos(ReadWrite))`). It
+//! never prompts and never checks a usage key: ask for `Photos` first. macOS
+//! reports `Unsupported`, like photos.
 
 use std::sync::mpsc::sync_channel;
 use std::time::Duration;
@@ -77,9 +79,12 @@ pub(crate) fn request(p: Permission) -> Result<PermissionStatus, PermissionError
     }
 }
 
+/// The `Photos(ReadWrite)` authorization status, never prompting: the location
+/// stored in a photo is readable exactly when Photos read access is usable.
+/// macOS has no such permission.
 fn media_location() -> Result<PermissionStatus, PermissionError> {
     if cfg!(target_os = "ios") {
-        Ok(PermissionStatus::Granted)
+        photos_status(PhotoAccess::ReadWrite)
     } else {
         Err(PermissionError::Unsupported)
     }
@@ -180,7 +185,7 @@ fn photo_library() -> Result<&'static AnyClass, PermissionError> {
 fn access_level(access: PhotoAccess) -> isize {
     match access {
         PhotoAccess::AddOnly => PH_ACCESS_LEVEL_ADD_ONLY,
-        _ => PH_ACCESS_LEVEL_READ_WRITE,
+        PhotoAccess::ReadWrite => PH_ACCESS_LEVEL_READ_WRITE,
     }
 }
 
@@ -236,6 +241,9 @@ fn photos_request(_access: PhotoAccess) -> Result<PermissionStatus, PermissionEr
 
 // ---- settings --------------------------------------------------------------
 
+// `Ok(())` means the open was dispatched to the main queue, not that Settings
+// opened; a failed open is logged as a warning (URL kind only).
+
 #[cfg(target_os = "ios")]
 pub(crate) fn open_settings() -> Result<(), PermissionError> {
     use dispatch2::DispatchQueue;
@@ -251,14 +259,21 @@ pub(crate) fn open_settings() -> Result<(), PermissionError> {
         // and non-null wherever UIKit is linked.
         let key: &NSString = unsafe { UIApplicationOpenSettingsURLString };
         let Some(url) = NSURL::URLWithString(key) else {
+            log::warn!("open_settings: the app-settings URL could not be built");
             return;
         };
         let app = UIApplication::sharedApplication(mtm);
         let options: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::new();
         // SAFETY: `options` is the empty, correctly typed options dictionary
         // the binding's doc requires; `url` is a live `NSURL`; the completion
-        // handler is `None`.
-        unsafe { app.openURL_options_completionHandler(&url, &options, None) };
+        // handler is a block of the `void (^)(BOOL)` shape, called once on the
+        // main queue; it only logs.
+        let done = RcBlock::new(|opened: Bool| {
+            if !opened.as_bool() {
+                log::warn!("open_settings: the app-settings URL did not open");
+            }
+        });
+        unsafe { app.openURL_options_completionHandler(&url, &options, Some(&done)) };
     });
     Ok(())
 }
@@ -286,6 +301,7 @@ pub(crate) fn open_settings() -> Result<(), PermissionError> {
                 return;
             }
         }
+        log::warn!("open_settings: no Privacy & Security pane URL opened");
     });
     Ok(())
 }
