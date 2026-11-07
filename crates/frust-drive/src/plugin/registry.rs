@@ -768,9 +768,11 @@ const DEVICE_INFO: PluginSpec = PluginSpec {
 /// The macOS entitlement keys are the hardened-runtime resource-access keys
 /// `com.apple.security.device.camera` and
 /// `com.apple.security.device.audio-input`; signed macOS builds run with the
-/// hardened runtime on, so they are needed there. UNVERIFIED against Apple's
-/// live documentation from this checkout (no network lookup was possible);
-/// confirm before release.
+/// hardened runtime on, so they are needed there. See
+/// <https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.device.audio-input>
+/// and, for the camera key, Apple's archived App Sandbox entitlement key
+/// reference:
+/// <https://developer.apple.com/library/archive/documentation/Miscellaneous/Reference/EntitlementKeyReference/Chapters/EnablingAppSandbox.html>.
 ///
 /// `READ_EXTERNAL_STORAGE` is written without a `maxSdkVersion` attribute
 /// because [`Contribution::ManifestPermission`] carries only the permission

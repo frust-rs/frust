@@ -22,6 +22,11 @@ pub enum Permission {
     Microphone,
     /// Reading the location already stored inside a photo (cargo feature
     /// `media-location`). It never reads the device position.
+    ///
+    /// - Android: `Denied` unless Photos access is full; the system refuses it
+    ///   without a dialog otherwise.
+    /// - iOS: mirrors Photos read access.
+    /// - macOS: `Unsupported`.
     MediaLocation,
 }
 
@@ -35,6 +40,9 @@ pub enum Permission {
 /// | `Denied` | (not produced) | denied, the system will still show a rationale |
 /// | `Blocked` | `denied` (the OS never re-prompts) | denied after an ask, no rationale: only Settings can change it |
 /// | `Restricted` | `restricted` | (not produced) |
+///
+/// On Android the `Denied` / `Blocked` distinction is authoritative only while
+/// an Activity is resumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PermissionStatus {
