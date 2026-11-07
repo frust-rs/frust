@@ -6,7 +6,8 @@
 //!   iPhone this reads below 4 GiB, because the kernel reserves part of the RAM for itself
 //!   (`crates/frust-engine/src/cache/images.rs` notes the same).
 //! - `os_proc_available_memory()` on iOS only: the bytes this app may still allocate before it
-//!   hits its memory limit. It needs iOS 13, which is below frust's iOS floor.
+//!   hits its memory limit. It needs iOS 13, which is below frust's iOS floor. A frust binary on
+//!   iOS is always an app, so `0` is a real reading: the headroom is exhausted.
 //!
 //! macOS reports no headroom and no system-available figure in v1: `os_proc_available_memory`
 //! is `API_UNAVAILABLE` there, macOS has no per-process memory limit API, and the Mach
@@ -43,13 +44,14 @@ unsafe extern "C" {
     fn os_proc_available_memory() -> usize;
 }
 
-/// Remaining allocation headroom of this app; `None` when the OS reports 0.
+/// Remaining allocation headroom of this app. `Some(0)` is a reading, not an absence: on iOS
+/// the calling process is always an app, so 0 means the app is at or over its memory limit.
 #[cfg(target_os = "ios")]
 fn headroom() -> Option<u64> {
     // SAFETY: `os_proc_available_memory` takes no arguments, reads only process accounting
     // state and has no preconditions.
     let n = unsafe { os_proc_available_memory() };
-    (n > 0).then_some(n as u64)
+    Some(n as u64)
 }
 
 /// macOS has no headroom: `os_proc_available_memory` is `API_UNAVAILABLE` there and the OS

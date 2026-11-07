@@ -55,7 +55,12 @@ No permission, Gradle module or plist key is needed.
   the app is on screen. Poll this query instead; `system_low` is the one live low-memory state a
   foreground app still gets.
 - **`availMem` is not absolute.** It is a system-wide estimate, not this process's budget.
-- **iOS headroom is advisory.** It moves constantly; never cache it.
+- **iOS headroom is advisory.** It moves constantly; never cache it. On iOS `Some(0)` is a
+  reading, not an absence: a frust binary there is always an app, so zero means the app is at or
+  over its memory limit.
+- **Linux reports the host, not the container.** Inside a container or under a cgroup limit,
+  `total_bytes` and `system_available_bytes` come from `/proc/meminfo`, which shows the host's
+  memory and not the limit, so they can overstate the room the app has.
 - **macOS reports total only** in v1.
 - **Web reports nothing.** `navigator.deviceMemory` is Chromium-only, coarse and
   secure-context-gated.
@@ -70,6 +75,12 @@ may still allocate. Elsewhere, use a class table of your own choosing keyed on `
 
 The call is synchronous, cheap and thread-agnostic, but it is a reading, not a signal. Re-query
 from `AppLifecycleListener::on_memory_pressure` and when a page opens rather than once at start-up.
+
+On iOS, `process_headroom_bytes == Some(0)` is the headroom-exhausted state: shed memory now. Never
+treat it as unknown and fall back to sizing from `total_bytes`; only `None` means the figure is
+absent. Callers own the polling cadence. Poll at a modest rate, size conservatively, and apply
+hysteresis: shrink when a reading falls below a lower threshold, and grow back only after it stays
+above a higher one, so a noisy figure does not thrash the cache. The figures are hints, not limits.
 
 ---
 
