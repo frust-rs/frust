@@ -514,15 +514,29 @@ mod tests {
 
     #[test]
     fn semantics_value_is_the_concatenated_text() {
-        let view = rich_text([span("Hello, "), span("rich "), span("world")]);
-        let widget = View::<()>::build(&view, &mut BuildCtx::new(&mut 0u64));
-        let value: String = widget
-            .view
-            .spans
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        let mut root: frust_core::RenderRoot<(), RichTextView> = frust_core::RenderRoot::new();
+        let mut logic = |_: &mut ()| rich_text([span("Hello, "), span("rich "), span("world")]);
+        root.rebuild(&mut logic, &mut ());
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(400.0, 200.0), &mut tcx as &mut dyn std::any::Any);
+        let update = root.semantics();
+        let window = update
+            .nodes
             .iter()
-            .map(|s| s.content.as_str())
-            .collect();
-        assert_eq!(value, "Hello, rich world");
+            .find(|(id, _)| *id == update.root)
+            .expect("window node")
+            .1
+            .clone();
+        let label = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == window.children()[0])
+            .expect("rich text node")
+            .1
+            .clone();
+        assert_eq!(label.role(), frust_core::accesskit::Role::Label);
+        assert_eq!(label.value(), Some("Hello, rich world"));
     }
 
     #[test]
@@ -554,6 +568,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_span_list_reuses_the_layout() {
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
         let view = rich_text([span("alpha ").color(red()), span("beta").underline()]);
         let mut tcx = TextContext::new();
         let (mut widget, _) = lay_out(&view, None, 300.0, &mut tcx);
