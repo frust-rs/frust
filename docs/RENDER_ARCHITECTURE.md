@@ -297,7 +297,10 @@ same GPU-substrate layer boundary [ARCHITECTURE.md](ARCHITECTURE.md) records at 
   span. No spans give the empty layout of `TextStyle::default()`; one span, or all-empty text,
   delegates to `layout`. The shape cache key carries each span's byte length and style while
   single-style keys are unchanged, so a one-span rich call shares the plain entry and a span list is
-  one cache entry. The truncation ellipsis takes the style of the span it cuts.
+  one cache entry. A truncated line never exceeds `max_width` and always paints its ellipsis, in the
+  style of the span the cut settles in after at most two passes (guess the uncut last line's span,
+  re-cut once if the cut lands elsewhere); when adjacent spans differ in size, family, weight, width
+  or letter spacing, the ellipsis can follow another span's glyph.
 - `frust-engine`'s compiler (`compile/mod.rs`) lowers two scene-layer geometry primitives to
   GPU-specific shapes: a dashed stroke (`Command::Path`'s `DashPattern`) is lowered to a plain
   path before stroking, expanded near the viewport and solid past the `cull` thresholds; a
