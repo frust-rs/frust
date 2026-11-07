@@ -34,6 +34,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `frust-database`: `Database::schema_version`, `Database::migrate(&[Migration])` (one transaction per step,
+  `PRAGMA user_version` bumped inside it, identical on both engines) and `Database::execute_batch` (many
+  statements in one transaction); a new `DatabaseError::Migration` variant.
 - A memory-pressure event: `MemoryPressure` (`Moderate`, `Critical`),
   `AppLifecycleListener::on_memory_pressure`, shell-facing `push_memory_pressure` and the diagnostic
   `last_memory_pressure()`, independent of `AppLifecycleState`. iOS reports its memory warning as
