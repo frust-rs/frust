@@ -71,8 +71,9 @@
 //! - The temporary name is unique per call, so no caller-side locking is needed; concurrent
 //!   writers of one path are last-writer-wins, never interleaved. On Windows a concurrent replace
 //!   of the same path can fail with `PermissionDenied`.
-//! - A process crash mid-write leaves the previous contents intact, plus an orphaned
-//!   `<name>.tmp.<pid>.<n>` sibling that nothing removes.
+//! - A process crash mid-write leaves the previous contents intact; a crash between creating
+//!   and renaming the temp file can leave an orphaned `<name>.tmp.<pid>.<n>` sibling that
+//!   nothing removes.
 //! - It is NOT power-loss durable: no fsync is done, so after an OS crash or power loss the file
 //!   may be empty or truncated on some filesystems.
 //! - On the web (`wasm32-unknown-unknown`) there is no filesystem and it returns an

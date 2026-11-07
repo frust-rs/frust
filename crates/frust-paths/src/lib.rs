@@ -334,7 +334,7 @@ pub fn app_stem() -> OsString {
 ///   Concurrent writers of the same `path` are last-rename-wins, with no
 ///   interleaving and no `NotFound`. On Windows, a rename over a file another
 ///   writer is replacing at that moment can still fail with
-///   `PermissionDenied`; the concurrency tests run on Unix only.
+///   `PermissionDenied`; CI runs the concurrency tests on Linux only.
 /// - A reader never observes a partially-written file.
 /// - A *process* crash mid-write leaves any previous contents at `path`
 ///   intact. No fsync is done, so after an OS crash or power loss the file
