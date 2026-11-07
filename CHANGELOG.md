@@ -34,6 +34,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- A memory-pressure event: `MemoryPressure` (`Moderate`, `Critical`),
+  `AppLifecycleListener::on_memory_pressure`, shell-facing `push_memory_pressure` and the diagnostic
+  `last_memory_pressure()`, independent of `AppLifecycleState`. iOS reports its memory warning as
+  `Critical`; Android maps `onTrimMemory` levels (RUNNING_MODERATE, RUNNING_LOW, BACKGROUND, MODERATE
+  to `Moderate`; RUNNING_CRITICAL, COMPLETE to `Critical`) and trims the render caches on `Critical`,
+  which was a no-op before; macOS reports a libdispatch memory-pressure source (warn to `Moderate`,
+  critical to `Critical`) without trimming. Windows, Linux and web report none.
 - `SceneTextureHints` (`filter`: `SceneTextureFilter::{Linear, Nearest, NearestWhenMagnified}`, and
   a caller-asserted `opaque`) for externally bound textures: `EngineRenderer::bind_texture_with` and
   `ExternalFrame::bind_texture_with`, re-exported from `frust-engine`, `frust-render` and `frust::gpu`.

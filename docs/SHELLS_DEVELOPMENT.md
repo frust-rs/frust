@@ -395,6 +395,19 @@ rather than as passing-by-analogy with a browser that was checked. Check:
       carry through the `input` path); then press its Backspace — expect no deletion, which is
       the recorded gap; a deletion that does land is evidence to note against that gap.
 
+## Memory-pressure gates
+
+The playground GPU pass page shows `memory pressure: N (last: L)` and logs `memory pressure: <Level>`.
+
+- iOS Simulator: Debug > Simulate Memory Warning; expect `Critical`.
+- Android (foreground): `adb shell am send-trim-memory <package> RUNNING_MODERATE|RUNNING_LOW|RUNNING_CRITICAL`
+  expects Moderate, Moderate, Critical. Background the app first for `BACKGROUND` (Moderate) and
+  `COMPLETE` (Critical); the OS refuses `COMPLETE` for a foreground process. Rendering recovers on reopen.
+  Observed on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15): the `RUNNING_*` levels are still
+  delivered through `am` on API 36; `onLowMemory` (forwarded as `COMPLETE`) was not exercised.
+- macOS: `sudo memory_pressure -S -l warn`, then `-l critical` (`-S` simulates without real pressure);
+  expect Moderate, then Critical.
+
 ## Version Pins
 
 The pins this unit owns, under [DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy (pins are
@@ -409,6 +422,7 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `web-time 1.1.0` | `std::time::Instant::now()` panics on `wasm32-unknown-unknown` (no clock syscall on that target); `web-time` is the drop-in replacement winit 0.30.13 itself already resolves internally, so this pin introduces no new identity. Scope is every crate `frust-shell-web` compiles — `frust-shell-web`, `frust-shell-common`, `frust-text`, `frust-render`, `frust-engine`, `frust-gpu` declare it directly — and each reads time through `web_time::Instant` (`SystemTime` stays the std type); winit types `ControlFlow::WaitUntil` over it on this target, so anything else also mistypes that contract | `scripts/ci/wasm-time-check.sh` (clippy `disallowed-*` over the web graph; registry crates and feature-gated paths are `scripts/ci/web-smoke.sh`'s job); `cargo check --target wasm32-unknown-unknown -p frust-shell-web -p frust-gallery`; `cargo tree -i web-time` — expect those direct dependents plus winit's own entry |
 | `console_log 1.0.0` / `console_error_panic_hook 0.1.7` caret | (this lockfile currently resolves `console_log 1.1.0` from the `1.0.0` caret; `console_error_panic_hook 0.1.7` exact-matches) stderr is a silent no-op in a browser. The facade's `web_app!` bootstrap (`frust::__web_bootstrap`, the start shim's first call) installs both unconditionally — `console_error_panic_hook::set_once()` and `console_log::init_with_level(log::Level::Warn)` — before `frust_shell_web::logging::install` runs. A second `install` call is treated as "someone got here first" and swallowed rather than erroring (`log` allows exactly one sink per process), so an app or the gallery's own `?log=` query param re-levelling the sink afterward is safe and idempotent | `cargo check --target wasm32-unknown-unknown -p frust-ui --tests`; `cargo test -p frust-shell-web` (the `logging` module's own unit tests) — watch for `frust-shell-web`'s `DEFAULT_LEVEL` (`Warn`) drifting from the facade bootstrap's own default |
 | `wasm-bindgen-test =0.3.78` exact | `crates/frust-testing`'s `tests/wasm_goldens.rs`/`tests/wasm_binary_invariants.rs` browser harness (`wasm_bindgen_test_configure!(run_in_browser)`, `#[wasm_bindgen_test]`), declared under that crate's `[target.'cfg(target_arch = "wasm32")'.dev-dependencies]` behind its non-default `webgl` feature — crate-local, with no root `[workspace.dependencies]` row. Pinned exactly because it is one half of a two-part schema contract, not an ordinary semver dependency: `0.3.78` is the release paired with the `wasm-bindgen =0.2.128` exact pin above, and the host `wasm-bindgen-test-runner` (shipped by that same `wasm-bindgen-cli 0.2.128`) refuses a binary whose schema hash does not match. Bump it only together with the `wasm-bindgen` pin and the installed CLI, never on its own | `CHROMEDRIVER_REMOTE=http://localhost:9517 CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test -p frust-testing --target wasm32-unknown-unknown --features webgl --release --test wasm_goldens`; `cargo tree -i wasm-bindgen-test` — watch for a second identity or a drift from the `wasm-bindgen` pin's own version |
+| `dispatch2 0.3` + `block2 0.6` | `frust-shell-macos`'s memory-pressure source (`appkit_glue`), in its macOS target table with `default-features = false`; `dispatch2` features `std`, `block2`, `objc2`, `block2` feature `std`. Both join the existing objc2 lineage, moving no lockfile version | `cargo check --target aarch64-apple-darwin -p frust-shell-macos`, plus `cargo tree -d` |
 
 `arboard =3.6.1` is the other pin this unit consumes without owning: `frust-shell-desktop`'s
 clipboard route and `frust-clipboard`'s desktop backend resolve one shared row, kept with the plugin

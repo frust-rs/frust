@@ -41,10 +41,10 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-shell-macos`'s `platform_view` (macOS only) — the `FrustOverlaySurfaceView` `define_class!`,
     the `msg_send!` calls building/rescaling the overlay `CAMetalLayer` and view, and the view-handle
     `from_raw`/`Retained` conversions; each `SAFETY`-noted.
-  - `frust-shell-macos`'s `appkit_glue` module — five `SAFETY`-noted sites: the reopen-observer
+  - `frust-shell-macos`'s `appkit_glue` module — seven `SAFETY`-noted sites: the reopen-observer
     `define_class!`, `msg_send![super(this), init]`, `addObserver_selector_name_object` (plus its
-    `extern` static), `removeObserver` in `Drop` and `Retained::retain` on the window handle's
-    `NSView` in `window_is_zoomed`; plus its `cfg(macos)` `title_buttons` AppKit section.
+    `extern` static), `removeObserver` in `Drop`, `Retained::retain` in `window_is_zoomed`, and the
+    memory-pressure source's `DispatchSource::new` and `set_event_handler_with_block`; plus `title_buttons`.
   - `frust-shell-windows`'s `win32_glue` module — three `SAFETY`-noted sites: `SetCurrentProcessExplicitAppUserModelID`,
     `TranslateAcceleratorW` in the accelerator hook, and muda's `Menu::init_for_hwnd`.
   - `frust-plugin`'s `android` module — rebuilds the raw `JavaVM`/`jobject` handles from

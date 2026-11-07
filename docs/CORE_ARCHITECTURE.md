@@ -278,6 +278,12 @@ on the UI thread. `request_app_exit` asks every `on_exit_requested` listener wit
 short-circuiting; any `AppExitResponse::Cancel` cancels the exit. Which shells push which states,
 and which exits are asked, is in [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md).
 
+`MemoryPressure` (`Moderate`: trim cheaply rebuilt caches; `Critical`: release everything off screen;
+`#[non_exhaustive]`) is a separate event, independent of the state machine. Shells call
+`push_memory_pressure` (UI-thread-only); `AppLifecycleListener::on_memory_pressure` listeners run in
+registration order, each under `catch_unwind`. It changes no state and fires no lifecycle hook;
+`last_memory_pressure()` is a diagnostic mirror of the event, not state.
+
 ## Window Metrics and Context Delivery
 
 `WindowMetrics` (logical size, device-pixel scale, derived orientation, and window insets) is
