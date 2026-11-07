@@ -1751,6 +1751,7 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "frust-core",
+ "frust-paths",
  "frust-reactive",
  "frust-render",
  "frust-scene",

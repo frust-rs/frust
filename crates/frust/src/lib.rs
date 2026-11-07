@@ -42,6 +42,9 @@
 //! with [`component`], which gives it a private state boundary. [`run`] (or
 //! the [`app!`] macro, which also covers the mobile and web shells) starts it.
 //!
+//! Smaller modules: [`paths`] resolves the platform data and cache directories and writes a file
+//! atomically; [`texture`] and [`input`] cover external textures and gesture helpers.
+//!
 //! ## Low-level escape hatch: `App::new`
 //!
 //! [`App`] is the low-level primitive [`run`] and [`app!`] expand into
@@ -2211,6 +2214,8 @@ pub use frust_core::{Orientation, WindowMetrics};
 /// setting a cursor unconditionally is safe on every platform.
 pub use frust_core::CursorIcon;
 
+pub mod paths;
+
 /// Pure input/gesture helpers (slop constants, [`input::VelocityTracker`], the
 /// fling-decay math) re-exported for app authors and advanced widgets.
 pub mod input {
@@ -3986,6 +3991,36 @@ mod glass_reexport {
             .build();
         assert!(!theme.glass.control.is_opaque());
         assert_ne!(theme.glass, GlassScale::opaque_material());
+    }
+}
+
+/// Build-time proof that `frust::paths` re-exports the three `frust-paths` items, plus a
+/// round-trip of the atomic write.
+#[cfg(test)]
+mod paths_reexport {
+    // A build-time proof the items name-resolve through the facade.
+    #[allow(dead_code)]
+    fn _uses_all(
+        _data: fn() -> Option<std::path::PathBuf>,
+        _cache: fn() -> Option<std::path::PathBuf>,
+        _write: fn(&std::path::Path, &[u8]) -> std::io::Result<()>,
+    ) {
+        let _ = (
+            crate::paths::data_dir as fn() -> Option<std::path::PathBuf>,
+            crate::paths::cache_dir as fn() -> Option<std::path::PathBuf>,
+            crate::paths::atomic_write as fn(&std::path::Path, &[u8]) -> std::io::Result<()>,
+        );
+    }
+
+    #[test]
+    fn atomic_write_round_trips_and_leaves_no_temp_sibling() {
+        let dir = std::env::temp_dir().join(format!("frust-paths-reexport-{}", std::process::id()));
+        let file = dir.join("nested").join("blob.bin");
+        crate::paths::atomic_write(&file, b"hello paths").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"hello paths");
+        let tmp = file.with_extension(format!("tmp.{}", std::process::id()));
+        assert!(!tmp.exists(), "temp sibling left behind: {tmp:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
