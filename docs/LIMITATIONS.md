@@ -9061,3 +9061,83 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Evidence**: (2026-11-07) `crates/frust-widgets/src/rich_text.rs`.
 
 ---
+
+### `permissions-android-asked-flag-local` — Android's "never asked" state is a flag the plugin keeps, not one the system reports
+
+**Observed**: Android has no never-asked state: an unasked permission and one refused for good both read as not granted with no rationale. `frust-permissions` tells `NotDetermined` from `Blocked` with its own flag, a boolean per Android permission in the `frust.permissions` `SharedPreferences` file (key `frust.permissions.asked.<permission>`). Granted and Limited always come from `checkSelfPermission`; the flag is only a never-asked hint. It lives in app data, so clearing the data or reinstalling resets it while the system's own record may differ (a permission refused earlier then reads `NotDetermined` until the next ask). A prompt dismissed without an answer, which Android 11+ does not count, is recognised only by inference: a first denial with no rationale before or after the request leaves the flag unset. A permission requested by other code (another plugin, the app) is invisible to the flag unless that code sets the same key.
+
+**Applies to**: Android.
+
+**Workaround**: treat `NotDetermined` after a data clear as "ask again"; the prompt then either appears or the system answers at once. An app or plugin that requests a runtime permission itself writes the documented key.
+
+**Why accepted**: the platform exposes no query for "has this app ever asked", and the flag is the standard way to tell the two cases apart; a lost flag only makes a refused permission read `NotDetermined` until the next ask; it never grants anything.
+
+**Trigger for removal**: Android reports a never-asked state.
+
+**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*The asked flag*); gate k2-pm-07 (Pixel 5, Android 14: Denied, then Blocked with no dialog; `pm clear` returns every row to `NotDetermined`).
+
+---
+
+### `permissions-request-lost-on-process-death` — a permission prompt answered after the process died is lost
+
+**Observed**: `request` launches the system dialog through the resumed Activity's `activityResultRegistry`, keyed by request id. If the process is killed while the dialog is up, the callback dies with it. A call still waiting in a surviving process gives up after 120 s and re-reads the status; a restarted process has no waiting call, so the answer is applied by the system but never delivered, and the next `status` call reports it. Rotation does not trigger this (the embedding handles `configChanges`, and the answer still arrived in the gate).
+
+**Applies to**: Android.
+
+**Workaround**: re-read `status` on resume, as for any permission that can change while the app is away.
+
+**Why accepted**: a plugin cannot subclass the app's Activity to receive `onRequestPermissionsResult` after recreation, and a status re-read after the fact is complete.
+
+**Trigger for removal**: a persisted request registry that survives process death.
+
+**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Delivering the answer*); `plugins/permissions/src/android.rs` (`REQUEST_TIMEOUT`); gate k2-pm-07 (rotation with a dialog up delivered the answer). Process death with a dialog up is derived from the code and has not been run on a device.
+
+---
+
+### `permissions-photos-macos-unsupported` — Photos permissions answer `Unsupported` on macOS
+
+**Observed**: on macOS `Permission::Photos` (both access levels) returns `PermissionError::Unsupported` from `status` and `request`; camera and microphone work. `open_settings` works. The plugin's Apple arm reaches `PHPhotoLibrary` only on iOS.
+
+**Applies to**: macOS (Linux, Windows and web answer `Unsupported` for every permission).
+
+**Workaround**: none in the crate. A macOS app that reads photos goes through the system open panel instead.
+
+**Why accepted**: the plugin's Photos support targets mobile; a macOS Photos library needs its own entitlement and sandbox review that no app has asked for.
+
+**Trigger for removal**: a macOS Photos arm with its entitlement and a device gate.
+
+**Evidence**: (2026-11-08) `plugins/permissions/src/apple.rs` (Photos and `MediaLocation` arms on macOS); the macOS host test `photos_and_media_location_are_unsupported_on_macos`; gate k2-pm-08 (Mac: Photos and Media location rows read `Unsupported`).
+
+---
+
+### `permissions-read-external-storage-no-maxsdk` — the registry declares `READ_EXTERNAL_STORAGE` without `maxSdkVersion`
+
+**Observed**: the `photos` registry feature writes `android.permission.READ_EXTERNAL_STORAGE` into the app manifest with no `maxSdkVersion` attribute, because `Contribution::ManifestPermission` carries only the permission name. Android 13+ ignores it for media (the `READ_MEDIA_*` permissions apply), and the plugin requests it only on API 29-32. A store scan of the manifest may still list the broad storage permission. The API 30 path (`READ_EXTERNAL_STORAGE` as the only photo permission) has not been run on a device.
+
+**Applies to**: Android apps that add the `photos` registry feature (`frust-drive`'s `permissions` plugin entry).
+
+**Workaround**: edit the added manifest line to `android:maxSdkVersion="32"`.
+
+**Why accepted**: the contribution model has no attribute slot, and the permission is inert on API 33+.
+
+**Trigger for removal**: `ManifestPermission` gains a `maxSdkVersion` field and the registry sets it, and the API 30 emulator leg passes.
+
+**Evidence**: (2026-11-08) `crates/frust-drive/src/plugin/registry.rs` (`PERMISSIONS_PHOTOS`); `plugins/permissions/src/codes.rs` (the photos permission lists); gate k2-pm-07 (step 7, the API 30 emulator leg, OWED).
+
+---
+
+### `permissions-media-location-android-only` — `MediaLocation` needs full photo access on Android and is not a permission elsewhere
+
+**Observed**: `Permission::MediaLocation` is the right to read the location already stored inside photos (`ACCESS_MEDIA_LOCATION`), never the device position. Android grants it only alongside full photo access: with "Allow all" it was granted with no dialog of its own; under partial access ("Select photos") the system refuses it silently (the permission screen opens and closes in about 90 ms, nothing is granted), and the plugin reports `Denied` rather than `NotDetermined`. It cannot be requested usefully until the user grants full access through the Photos request or system settings. On iOS there is no separate permission: it reads `Granted` with no prompt, and reading the metadata still needs Photos access. On macOS it answers `Unsupported`.
+
+**Applies to**: all platforms; the refusal under partial access is Android 14+.
+
+**Workaround**: ask for Photos first, offer `open_settings()` when `MediaLocation` reads `Denied` while Photos is `Limited`, and treat the location as absent otherwise.
+
+**Why accepted**: the platform ties the grant to full photo access, and the plugin reports the system's answer rather than hiding it.
+
+**Trigger for removal**: Android grants `ACCESS_MEDIA_LOCATION` under partial access, or the API adds a way to read photo location without it.
+
+**Evidence**: (2026-11-08) `plugins/permissions/src/codes.rs` (`MEDIA_LOCATION`); `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Media location*); gate k2-pm-07 (Pixel 5: full access Granted with no dialog; Limited access refused silently, recorded and fixed to report `Denied`); gate k2-pm-06 (iPhone 13 mini: Granted, no prompt); gate k2-pm-08 (Mac: `Unsupported`).
+
+---

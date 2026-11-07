@@ -7,7 +7,7 @@ substrate, in two halves with opposite directions: the Android platform-handle s
 (JavaVM/Context) a shell writes and a JNI-reaching plugin reads, and the desktop view-factory
 registry a plugin writes and a desktop shell reads. On top of it sit the independent
 OS-capability plugins — `shared-preferences`, `secure-storage`, `camera`, `clipboard`, `haptics`,
-`iap`, `video-player`, `url-launcher`, `auth-session`, `share`, `file-dialogs`, `connectivity`, and `device-info` — each exposing one platform-independent
+`iap`, `video-player`, `url-launcher`, `auth-session`, `share`, `file-dialogs`, `connectivity`, `device-info`, and `permissions` — each exposing one platform-independent
 public API behind a per-platform backend. `url-launcher` opens an absolute `http`/`https` URL in the
 platform's default external browser, fire-and-forget, over Android `ACTION_VIEW`, iOS
 `openURL:options:completionHandler:`, or a desktop opener — the launch half of an RFC 8252 OAuth
@@ -73,6 +73,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how PLUGINS relates to the other unit
 | `plugins/haptics` | Fire-and-forget haptic effects over Android `Vibrator`/`VibrationEffect` or iOS `UI*FeedbackGenerator`; desktop is unavailable by design (no first-class API to route to) |
 | `plugins/connectivity` | Network reachability events (`Available`/`Lost`, a current-path query) over a process-wide monitor: Android `ConnectivityManager.registerDefaultNetworkCallback` (a network counts only with `INTERNET`+`VALIDATED`; Kotlin `FrustConnectivityHost` plus JNI) or Network.framework `nw_path_monitor` called from Rust (`src/apple.rs`); Linux, Windows and web are no-ops |
 | `plugins/device-info` | Device-memory query (`DeviceMemory::query()`: total RAM, Android low-RAM flag, system-available memory on Android/Linux/Windows, iOS per-process headroom) over `ActivityManager.getMemoryInfo`/`isLowRamDevice` (plain JNI, no Gradle module), `sysctl hw.memsize` + `os_proc_available_memory` (Apple), `/proc/meminfo`, `GlobalMemoryStatusEx`; web reports nothing |
+| `plugins/permissions` | Runtime-permission API (`status` / `request` / `open_settings` over `Permission::{Photos(ReadWrite\|AddOnly), Camera, Microphone, MediaLocation}` and `PermissionStatus::{NotDetermined, Granted, Limited, Denied, Blocked, Restricted}`; each permission an opt-in cargo feature, `FeatureDisabled` when off). Android: a Kotlin `FrustPermissionsHost` in the plugin's own Gradle module (no `uses-permission` in the module manifest) launches the prompt through the resumed `ComponentActivity`'s `activityResultRegistry` and answers a request-id keyed relay (120 s timeout, then re-reads status); Apple: `AVCaptureDevice` for camera/microphone and `PHPhotoLibrary` through `msg_send!` for Photos (no extra crate). `MediaLocation` is the location already stored in photos, never device position: Android only, granted alongside full photo access |
 | `plugins/iap` | In-app purchases and subscriptions (products, purchases, restore, deep-link to subscription management) over Play Billing (`openiap-google`) or StoreKit 2 (`FrustIap` Swift glue), both speaking OpenIAP 3.0.1; desktop is a v1 deferral, not a capability gap |
 | `plugins/video-player` | Video playback (file, bundled-asset, `http(s)` and HLS sources; play/pause/seek/rate/volume/loop; lifecycle state and events) over Media3 ExoPlayer on Android or AVPlayer on iOS and macOS; the picture is a native platform-view slot (`VideoOutput::NativeView`, the default) or opt-in `VideoOutput::Texture` frames the scene paints: on Android a GLES copy on its own GL thread writes each decoded frame into an RGBA_8888 `ImageReader`, handed on as a zero-copy `AHardwareBuffer` when the importer is installed and API ≥ 29, else a CPU copy; on iOS and macOS an `AVPlayerItemVideoOutput` (32BGRA, IOSurface-backed) polled by a dispatch timer on the session's queue, handed on as a zero-copy `CVPixelBuffer` when the importer is installed, else a CPU swizzle copy (the Info log names the path); web has no texture producer |
 | `plugins/url-launcher` | Fire-and-forget launch of an absolute http/https URL in the platform's default external browser over Android `ACTION_VIEW` (application-`Context` + `NEW_TASK`), iOS `openURL:options:completionHandler:` (async main-queue bounce), or desktop `xdg-open` / `open` / `ShellExecuteW`; the launch half of an RFC 8252 OAuth round trip — completion returns through `frust::deep_links()`; `Maps` builds Apple/Google Maps https URLs and `open_maps_native` opens an allowlisted `geo:`/`maps:`/`comgooglemaps:`/`google.navigation:` URL |
@@ -108,6 +109,7 @@ preview or a `frust build macos|windows|linux`. See
 | `clipboard` | generic-desktop | `arboard` on macOS, Linux, and Windows alike — macOS shares this arm rather than its own Apple `UIPasteboard` one (UIKit-only) |
 | `haptics` | unavailable-by-design | no first-class OS API to route to, on macOS, Linux, or Windows |
 | `connectivity` | no-op | Linux/Windows (and web) never report; iOS and macOS share the `nw_path_monitor` arm |
+| `permissions` | macOS-native for camera/microphone | `AVCaptureDevice` (macOS, sharing the Apple arm with iOS); Photos and `MediaLocation` answer `Unsupported` on macOS, and everything answers `Unsupported` on Linux, Windows and web (`permissions-photos-macos-unsupported` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `iap` | deferred (v1) | dependency-free, always-erroring stub on macOS, Linux, and Windows — mobile-first scope, not a capability gap (`iap-desktop-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)) |
 | `video-player` | macOS-native (Mode A) via the desktop platform-view host | AVPlayer (macOS, sharing the Apple arm with iOS), its `NSView` hosted above the window's content view by the desktop shell; Windows and Linux have no backend at all (`video-web-windows-linux-unavailable-v1` in [LIMITATIONS.md](LIMITATIONS.md)); opt-in texture mode on macOS uses the shared Apple `AVPlayerItemVideoOutput` producer (32BGRA, IOSurface-backed, zero-copy `CVPixelBuffer` when the importer is installed), and Linux/Windows have none |
 | `url-launcher` | generic-desktop | `xdg-open` (Linux), `open` (macOS), `ShellExecuteW` (Windows); desktop receives no deep links, so an OAuth round trip needs a typed-code fallback; native map schemes: `NoHandler` on desktop, `Maps::directions` is the https path |
@@ -231,6 +233,13 @@ process-wide monitor starts once via `OnceLock`. A dedup state machine (`src/sta
 `RawReport` into `Available`/`Lost`; an initial unusable report emits nothing. Delivery runs on a
 single plugin-owned `frust-connectivity-events` thread behind a `sync_channel(64)` that drops the
 newest event when a listener falls behind.
+
+`permissions` takes `frust-plugin` plus FFI crates only (`jni` on Android, `objc2` on Apple; `PHPhotoLibrary`
+is reached by `msg_send!`, so no new crate). The Android relay is keyed by request id: `request` registers
+a waiter and the Kotlin host answers through one JNI export, so a late answer after the timeout is dropped.
+The privacy-sensitive framework references compile only behind the per-permission cargo features, which the
+registry features enable together with the app-side manifest permissions, Info.plist usage strings and
+framework links.
 
 ## Design-System Plugins
 

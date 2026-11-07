@@ -80,8 +80,27 @@ is exempt. `open_settings` is fire-and-forget.
 - `MediaLocation` covers reading the location already stored inside a photo.
   It never reads the device position.
 - On Linux, Windows and web every call returns `Unsupported`.
-- Platform arms are filled in incrementally; until then they return
-  `Unsupported`.
+- `MediaLocation` is granted by Android only alongside full photo access: under
+  "Select photos" the status is `Denied`. iOS reports it `Granted` with no
+  prompt, macOS `Unsupported`.
+- macOS answers `Unsupported` for photos.
+- The app manifest may omit `READ_MEDIA_VISUAL_USER_SELECTED`; without it
+  Android runs the app in compatibility mode and a partial selection reads
+  `Granted` for that session.
+
+## Tested platforms
+
+| Platform | Result |
+|---|---|
+| iPhone 13 mini, iOS 27 | passed (photos limited and add-only, camera, microphone, media location) |
+| Pixel 5, Android 14 | passed; the API 30 (`READ_EXTERNAL_STORAGE`) path is not yet run |
+| macOS 27, Apple M4 | passed unbundled: camera and microphone status, missing usage string reported, photos `Unsupported` |
+| Linux, Windows, web | every call returns `Unsupported` (host tests) |
+
+Accepted limitations are recorded in the repository's `docs/LIMITATIONS.md`
+(`permissions-android-asked-flag-local`, `permissions-request-lost-on-process-death`,
+`permissions-photos-macos-unsupported`, `permissions-read-external-storage-no-maxsdk`,
+`permissions-media-location-android-only`).
 
 ## License
 

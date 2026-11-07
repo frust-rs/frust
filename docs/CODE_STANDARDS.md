@@ -51,8 +51,7 @@ off this index — read this plus the one that covers what you are touching:
     `ndk-context`, scoped `AttachGuard` per call.
   - `frust-shared-preferences`'s `apple` backend — two `setObject:forKey:` calls; `frust-secure-storage`'s
     — a confined `as_cf` objc→`CFType` Keychain bridge.
-  - `frust-clipboard`'s `apple` backend — `UIPasteboard` calls plus one `extern` static read
-    (`UIPasteboardOptionLocalOnly`), each `# Safety`-noted.
+  - `frust-clipboard`'s `apple` backend — `UIPasteboard` calls plus one `extern` static read, `# Safety`-noted.
   - `frust-share`'s `apple` backend — three `SAFETY`-noted sites: `MainThreadMarker::new_unchecked()`,
     `UIActivityViewController` init, and the subject `setValue_forKey` (`respondsToSelector`-guarded).
   - `frust-url-launcher`'s `apple` backend — `MainThreadMarker::new_unchecked()` plus the one
@@ -77,13 +76,11 @@ off this index — read this plus the one that covers what you are touching:
     (paths, bounds, variation copy and read-back, cmap lookup), CF casts each followed by a checked
     downcast, `CGPath::apply`'s `extern "C-unwind"` callback, and `unsafe impl Send + Sync for CtFace`
     (read-only; SAFETY names every call, cites Apple's Core Text thread-safety statement; `Sync` stays).
-  - `frust-gpu`'s `RenderContext::create_pipeline_cache` — one call building a `wgpu::PipelineCache`
-    from a shell-persisted, fingerprint-validated blob.
+  - `frust-gpu`'s `create_pipeline_cache` — one call building a `wgpu::PipelineCache` from a validated blob.
   - `frust-reactive`'s private `thread_policy::sys` — `gettid`/`getpriority`/`setpriority` (Linux)
     and `pthread_set_qos_class_self_np` (Apple), calling thread only, over the unpinned `libc` 0.2.
-  - `frust-drive`'s `process` module — a `kill(2)` shim (std has no `killpg`) group-killing a child.
-  - `frust-devtools`'s `token::os_random_bytes` (Windows only) — one `BCryptGenRandom` call; a
-    non-zero status yields `TokenSource::Fallback`, which the hot-patch gate refuses.
+  - `frust-drive`'s `process` `kill(2)` shim (group-kill a child); `frust-devtools`'s Windows-only
+    `token::os_random_bytes` — one `BCryptGenRandom` call (non-zero yields `TokenSource::Fallback`, refused).
   - `frust-camera`'s `apple` backend — AVFoundation message sends behind one `QueueBound<T>`
     `unsafe impl Send/Sync` (serial-queue confinement, one `# Safety` note), and
     `frust_camera_session_handle`'s raw-pointer C export (retain contract **+1**); its Android
@@ -106,6 +103,9 @@ off this index — read this plus the one that covers what you are touching:
     presentation-anchor class, one `MainThreadMarker::new_unchecked()`; each is `SAFETY`-noted, the
     completion body under `catch_unwind`. Its `android` backend, like `frust-iap`'s, holds only a
     JNI export's `#[unsafe(no_mangle)]`.
+  - `frust-permissions`'s `apple` backend — AVFoundation request calls, `msg_send!` on `PHPhotoLibrary`,
+    `NSBundle` usage-string reads and `UIApplication` open-settings, each `SAFETY`-noted; its `android`
+    backend holds only its JNI export's `#[unsafe(no_mangle)]`.
   - `frust-hotpatch` — `patch.rs` (`load_patch_library` via `libloading`, so only a library built
     for this process; `apply_patch`; the leaked, Release-published `get_jump_table`), `hot_fn.rs`
     (table address to hot-fn signature), `anchor.rs`, `android.rs` (memfd + `android_dlopen_ext`).

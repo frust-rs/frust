@@ -90,6 +90,15 @@ is additional or different for a plugin.
   (`CameraError::UiThread`) on the platform's UI thread instead of parking there. A call
   that answers without waiting (e.g. an already-decided permission status) is exempt and
   stays callable from anywhere.
+- **Privacy-sensitive API references compile only behind opt-in cargo features** (`frust-permissions`:
+  `photos`/`camera`/`microphone`/`media-location`, none default), and the registry feature that enables
+  one also adds the app's usage string, so an app never links or declares a capability it does not use
+  (Apple's static analysis of the binary is reported to flag unexplained privacy-API references, ITMS-90683:
+  <https://developer.apple.com/forums/thread/744965>, a forum report, not Apple documentation).
+- **Play-policy-sensitive permissions are app-side `ManifestPermission` contributions inside a
+  `FeatureSpec`, never declared in a plugin's module manifest** (`frust-permissions`' module manifest
+  declares no `uses-permission`). A plugin host launches Activity Result contracts through the resumed
+  `ComponentActivity`'s `activityResultRegistry`, under a plugin-prefixed key.
 - **`frust-material`'s ported/vendored modules carry a 2–4 line attribution header**: upstream
   file or package, version/revision, license, and any porting decisions, e.g.
   `// Ported from material_3_expressive v1.0.8 (MIT, © 2026 Paa Developments)`. Binding for every
