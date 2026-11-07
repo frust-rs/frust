@@ -398,6 +398,32 @@ fn limited_derivation_ignores_what_the_manifest_declares() {
 }
 
 #[test]
+fn media_location_is_denied_while_photos_access_is_partial() {
+    let kotlin = read(KOTLIN_HOST);
+    let current = kotlin_fn(&kotlin, "currentCode");
+    assert!(
+        current.contains("kind == MEDIA_LOCATION"),
+        "currentCode must special-case MediaLocation"
+    );
+    assert!(
+        current.contains("mediaLocationCode(photosCode(ctx, sdk))"),
+        "the MediaLocation path must consult the Photos derivation"
+    );
+    let photos = kotlin_fn(&kotlin, "photosCode");
+    assert!(photos.contains("photosGrantCode(sdk,"));
+
+    let mapping = kotlin_fn(&kotlin, "mediaLocationCode");
+    assert!(
+        mapping.contains("if (photos == LIMITED) DENIED else null"),
+        "partial photo access must map to DENIED"
+    );
+    assert!(
+        !mapping.contains("wasAsked") && !mapping.contains("markAsked"),
+        "the partial-access decision must not use the asked flag"
+    );
+}
+
+#[test]
 fn scanners_read_the_shapes_they_claim() {
     let sample = "    const val A = 1\n    const val B = -1\n    const val S = \"x\"\n    \
                   private val L = listOf(\"p.a\", \"p.b\")\n    \
