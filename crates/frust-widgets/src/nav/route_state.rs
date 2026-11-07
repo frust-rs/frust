@@ -36,6 +36,12 @@
 //! anything else                          -> Reset
 //! ```
 //!
+//! The label describes the published identities, not the call that caused them.
+//! A router `go` to a chain that drops exactly the top entry reads as `Pop`, one
+//! that swaps only the top as `Replace`, and one that leaves every identity
+//! unchanged (a go to the current location, or a go within a shell) publishes
+//! nothing at all: no new generation, no observer call.
+//!
 //! # Staleness contract
 //!
 //! - **Authoritative-at-publish.** After `apply_ops` the published
@@ -85,8 +91,9 @@ pub enum NavChange {
     Pop,
     /// Same depth as the previous stack; only the top entry differs.
     Replace,
-    /// Anything else — e.g. a router `go()` that swaps the whole chain in one
-    /// batch, or a multi-page pop that isn't a strict-prefix shrink.
+    /// Anything else — e.g. a router `go()` that replaces more than the top of
+    /// the stack, or a multi-page pop that isn't a one-entry prefix shrink. A `go`
+    /// does not always read as this: see the [module docs](self).
     Reset,
 }
 
@@ -227,8 +234,8 @@ mod tests {
 
     #[test]
     fn a_whole_chain_swap_is_reset() {
-        // A router `go()` that replaces the root AND pushes more in one
-        // batch: neither a strict extension, shrink, nor top-only swap.
+        // A router `go()` whose chain swaps the root AND adds a page: neither
+        // a strict extension, shrink, nor top-only swap.
         let prev = [loc("/a")];
         let next = [loc("/b"), loc("/c")];
         assert_eq!(derive_nav_change(&prev, &next), NavChange::Reset);

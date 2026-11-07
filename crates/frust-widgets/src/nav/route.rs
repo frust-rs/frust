@@ -59,7 +59,8 @@ pub type NavWaker = Arc<dyn Fn() + Send + Sync>;
 /// on opposite sides of the `Send + Sync` boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NavRequest {
-    /// Reset the stack to the matched chain — [`Router::go`](super::router::Router::go).
+    /// Make the stack exactly the matched chain —
+    /// [`Router::go`](super::router::Router::go).
     Go(String),
     /// Stack the matched leaf — [`Router::push`](super::router::Router::push).
     Push(String),
@@ -137,7 +138,7 @@ impl RouteNavigator {
         self.wake();
     }
 
-    /// Queue a [`NavRequest::Go`] — reset the stack to `location`'s chain.
+    /// Queue a [`NavRequest::Go`] — make the stack exactly `location`'s chain.
     pub fn go(&self, location: impl Into<String>) {
         self.request(NavRequest::Go(location.into()));
     }

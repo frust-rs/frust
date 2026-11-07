@@ -5433,6 +5433,40 @@ order only orders fallbacks among themselves).
 
 ---
 
+### `nav-go-undelivered-results` — a `go` does not deliver every result callback it makes unreachable
+
+**Observed**: `Router::go` fires `on_result` once with an empty result for each page it removes from a
+navigator. Two cases get nothing: a page inside a nested navigator torn down with its host page, and a
+push still queued on a shell controller the new chain does not cross, whose queue the `go` discards.
+
+**Applies to**: code that clears state only in `on_result` for a page inside a `shell_route`, when a
+`go` can leave that shell.
+
+**Why accepted, not fixed**: `NavigatorView::teardown` has no `&mut State` pass to flush results in, and
+Flutter loses a nested navigator's route results the same way. The queued push never became a page.
+
+**Evidence**: `NavigatorView::teardown` in `crates/frust-widgets/src/nav/navigator.rs`; `forget_queued_outside`
+and `a_go_out_of_a_shell_discards_a_stale_push_before_a_push_back_in` in `crates/frust-widgets/src/nav/router.rs`.
+
+---
+
+### `nav-go-closes-routeless-overlays` — a `go` closes a dialog even over a page it keeps
+
+**Observed**: a route-less page (a dialog or sheet pushed through the controller) has no key, so a `go`
+removes it even when the page beneath it is retained, including a `go` to the current location.
+
+**Applies to**: an app that navigates while an overlay is open and expects the overlay to stay,
+including a `BackPolicy::Veto` overlay and a `go` from a deep link. A security gate (app lock, consent)
+must be a route redirect, not an overlay. Flutter keeps pageless routes attached to a retained page;
+frust has no such attachment.
+
+**Why accepted, not fixed**: the stack after a `go` is exactly the matched chain, which is the contract
+apps rely on to leave nothing below a finished flow.
+
+**Evidence**: `a_go_within_the_shell_closes_a_page_pushed_over_it` in `crates/frust-widgets/src/nav/router.rs`.
+
+---
+
 ### `back-single-window` — back arbitration is per UI thread, so multi-window apps cannot route back per window
 
 **Observed**: back presses arrive only from the Android shell (`push_back_press`), and the arbitration
