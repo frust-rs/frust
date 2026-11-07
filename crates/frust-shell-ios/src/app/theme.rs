@@ -1,8 +1,9 @@
 //! Theme + appearance: the default-theme precedence ladder (app override >
 //! design-system-seeded default > the built-in `Theme::neutral()` fallback),
 //! the reduced-motion floor, and the three arms that drive them — the
-//! construction seed, `frust_set_appearance`/`frust_set_reduce_motion`/`frust_set_text_scale`, and the
-//! per-frame `set_app_theme`/`clear_app_theme` poll.
+//! construction seed, `frust_set_appearance`/`frust_set_reduce_motion`/
+//! `frust_set_text_scale`, and the per-frame `set_app_theme`/`clear_app_theme`
+//! poll.
 //!
 //! This module owns the whole ladder on purpose: the source-scan conformance
 //! test `crates/frust/tests/theme_ladder_conformance.rs` pins every helper here
@@ -218,19 +219,19 @@ impl IosAppHandle {
     /// OS factor by `Theme::with_text_scale`, so repeated pushes never
     /// compound and `1.0` restores the authored scale. Swift re-pushes on every
     /// foreground, so an unchanged value returns early: the body-clamped new
-    /// factor is compared with `Theme::text_scale` (a `Theme` `==` cannot tell
-    /// two factors apart).
+    /// factor is compared with the last applied one in `os_text_scale`.
     pub(crate) fn set_text_scale(&mut self, scale: f32) {
-        self.os_text_scale = scale;
-        if TextScale::clamped(scale) == self.theme.text_scale() {
+        let clamped = TextScale::clamped(scale);
+        if self.os_text_scale == clamped {
             return;
         }
+        self.os_text_scale = clamped;
         self.theme = self
             .theme
             .clone()
-            .with_text_scale(&self.authored_type_scale, scale);
-        self.push_theme();
+            .with_text_scale(&self.authored_type_scale, clamped);
         self.appearance_dirty = true;
+        self.push_theme();
     }
 
     /// The per-frame app-facing theme-override poll
@@ -265,7 +266,7 @@ impl IosAppHandle {
                 effective_reduce_motion(self.authored_reduce_motion, self.os_reduce_motion);
             // Likewise the type scale: record the incoming theme's own, then
             // re-apply the OS text scale over it.
-            self.authored_type_scale = theme.type_scale.clone();
+            self.authored_type_scale = theme.authored_type_scale();
             let theme = theme.with_text_scale(&self.authored_type_scale, self.os_text_scale);
             self.theme = theme;
             self.theme_override_active = override_active;

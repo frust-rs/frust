@@ -287,8 +287,8 @@ pub struct IosAppHandle {
     authored_reduce_motion: bool,
     /// The platform's last-reported text scale (Dynamic Type content size,
     /// delivered by `frust_set_text_scale` → [`Self::set_text_scale`]),
-    /// unclamped as reported. Tracked independently of the theme so a theme
-    /// swap can re-apply it. Starts `1.0` (no report yet).
+    /// already clamped by `TextScale::clamped`. Tracked independently of the
+    /// theme so a theme swap can re-apply it. Starts `1.0` (no report yet).
     os_text_scale: f32,
     /// The **active theme's own** unscaled `type_scale`, captured every time a
     /// whole `Theme` is installed ([`Self::new`]'s seed and the override-poll
@@ -580,7 +580,7 @@ impl IosAppHandle {
         let authored_reduce_motion = theme.motion.reduce_motion;
         // The base's own type scale, kept for the same reason: the OS text
         // scale is applied over it, never accumulated into it.
-        let authored_type_scale = theme.type_scale.clone();
+        let authored_type_scale = theme.authored_type_scale();
 
         app.set_theme(Box::new(theme.clone()));
         // Thread the surface's RESOLVED translucency into the render root and
