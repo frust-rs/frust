@@ -57,6 +57,7 @@ pub mod pinch;
 mod platform_view;
 mod radio;
 mod repaint_boundary;
+mod rich_text;
 mod safe_area;
 mod scaffold;
 mod scroll;
@@ -161,6 +162,7 @@ pub use platform_view::{
 };
 pub use radio::{Radio, RadioView, RadioWidget, radio};
 pub use repaint_boundary::{RepaintBoundaryView, RepaintBoundaryWidget, repaint_boundary};
+pub use rich_text::{RichTextView, RichTextWidget, SpanView, rich_text, span};
 pub use safe_area::{SafeAreaView, SafeAreaWidget, safe_area};
 pub use scaffold::{ScaffoldView, ScaffoldWidget, scaffold};
 pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};

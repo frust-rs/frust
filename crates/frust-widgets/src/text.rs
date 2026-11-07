@@ -578,36 +578,57 @@ impl TextWidget {
     /// path pixel-identical to a text that never opted in. Resolving here,
     /// during layout, is what lets both follow a live theme swap.
     fn effective_style(&self, theme: Option<&Theme>) -> TextStyle {
-        let mut style = self.style.clone();
-        let Some(theme) = theme else {
-            return style;
-        };
-        if !self.color_explicit {
-            let scheme = theme.scheme();
-            style.color = match self.role {
-                ThemeTextColor::OnSurface => scheme.on_surface,
-                ThemeTextColor::OnPrimary => scheme.on_primary,
-                ThemeTextColor::OnSurfaceVariant => scheme.on_surface_variant,
-                ThemeTextColor::OnPrimaryContainer => scheme.on_primary_container,
-                ThemeTextColor::Error => scheme.error,
-            };
-        }
-        if !self.family_explicit
-            && let Some(source) = self.family_source
-        {
-            style.family = match source {
-                FamilySource::Role(role) => role.style_in(&theme.type_scale).family.clone(),
-                FamilySource::Monospace => theme.monospace_family(),
-            };
-        }
-        // Applied last, after color and family resolution. The scaled size
-        // lands in the effective style, so the `laid_out_style ==` compare in
-        // `layout` re-shapes on a scale change without a view change.
-        if !self.size_explicit {
-            scale_default_size(&mut style, theme.text_scale());
-        }
-        style
+        resolve_style(
+            &self.style,
+            self.color_explicit,
+            self.role,
+            self.family_explicit,
+            self.family_source,
+            self.size_explicit,
+            theme,
+        )
     }
+}
+
+/// Resolve the style to shape with from an app style and its explicit-choice
+/// flags, shared by [`TextWidget`] and the rich-text spans so both follow one
+/// precedence (explicit > theme > fallback). With no theme the style is
+/// returned unchanged. The scaled size lands in the returned style, so a
+/// cache comparing it re-shapes on a scale change without a view change.
+pub(crate) fn resolve_style(
+    base: &TextStyle,
+    color_explicit: bool,
+    role: ThemeTextColor,
+    family_explicit: bool,
+    family_source: Option<FamilySource>,
+    size_explicit: bool,
+    theme: Option<&Theme>,
+) -> TextStyle {
+    let mut style = base.clone();
+    let Some(theme) = theme else {
+        return style;
+    };
+    if !color_explicit {
+        let scheme = theme.scheme();
+        style.color = match role {
+            ThemeTextColor::OnSurface => scheme.on_surface,
+            ThemeTextColor::OnPrimary => scheme.on_primary,
+            ThemeTextColor::OnSurfaceVariant => scheme.on_surface_variant,
+            ThemeTextColor::OnPrimaryContainer => scheme.on_primary_container,
+            ThemeTextColor::Error => scheme.error,
+        };
+    }
+    if !family_explicit && let Some(source) = family_source {
+        style.family = match source {
+            FamilySource::Role(role) => role.style_in(&theme.type_scale).family.clone(),
+            FamilySource::Monospace => theme.monospace_family(),
+        };
+    }
+    // Applied last, after color and family resolution.
+    if !size_explicit {
+        scale_default_size(&mut style, theme.text_scale());
+    }
+    style
 }
 
 /// Scale a default-sized style by the theme's text `factor` through the
@@ -620,6 +641,25 @@ pub(crate) fn scale_default_size(style: &mut TextStyle, factor: f32) {
         return;
     }
     *style = frust_theme::scale_style(style, factor);
+}
+
+/// Paint a shaped layout: underline rects, glyph runs, then line-through rects.
+pub(crate) fn paint_layout(layout: &TextLayout, origin: Point, scene: &mut dyn PaintScene) {
+    let rects = layout.decoration_rects(origin);
+    let fill = |scene: &mut dyn PaintScene, kind: DecorationKind| {
+        for d in rects.iter().filter(|d| d.kind == kind) {
+            scene.fill_rect(
+                Point::new(d.rect.x0, d.rect.y0),
+                Size::new(d.rect.width(), d.rect.height()),
+                d.color,
+            );
+        }
+    };
+    fill(scene, DecorationKind::Underline);
+    for run in layout.to_scene_runs(origin) {
+        scene.draw_glyph_run(run);
+    }
+    fill(scene, DecorationKind::LineThrough);
 }
 
 impl Widget for TextWidget {
@@ -676,22 +716,7 @@ impl Widget for TextWidget {
         let Some(layout) = &self.layout else {
             return;
         };
-        let origin = ctx.origin();
-        let rects = layout.decoration_rects(origin);
-        let fill = |scene: &mut dyn PaintScene, kind: DecorationKind| {
-            for d in rects.iter().filter(|d| d.kind == kind) {
-                scene.fill_rect(
-                    Point::new(d.rect.x0, d.rect.y0),
-                    Size::new(d.rect.width(), d.rect.height()),
-                    d.color,
-                );
-            }
-        };
-        fill(scene, DecorationKind::Underline);
-        for run in layout.to_scene_runs(origin) {
-            scene.draw_glyph_run(run);
-        }
-        fill(scene, DecorationKind::LineThrough);
+        paint_layout(layout, ctx.origin(), scene);
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
