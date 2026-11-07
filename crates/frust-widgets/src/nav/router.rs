@@ -35,6 +35,45 @@
 //! The router is plain data + logic an app keeps in its `Component::State`
 //! alongside the controller — no global registry.
 //!
+//! # What a go does
+//!
+//! * **Keys.** A page is keyed by the concrete path matched up to its route, query
+//!   excluded, and a shell page by its inner controller. A chain page whose key is
+//!   on the stack retains that page: its widget state, result callback and back
+//!   policy stay, and it takes the new params and stamp. Pages placed by
+//!   [`push`](Router::push), [`replace`](Router::replace) or a bare
+//!   [`NavigatorController`] op have no key and never match, except shell pages.
+//! * **Identity belongs in the path.** A go to the current path keeps the page's
+//!   state and hands it the new query, and a same-path link does the same. So a
+//!   value that identifies what a page shows goes in the path: as a query param it
+//!   would change under state retained from the old value.
+//! * **Removed pages.** Every other page leaves, route-less overlays included. Each
+//!   one's result callback fires once with an empty
+//!   [`PopResult`](super::options::PopResult), on the go rather than when any
+//!   animation settles. Routes inside a nested navigator that is disposed with its
+//!   host do not fire.
+//! * **Gates belong in a redirect.** Any go, one from a link included, closes an
+//!   overlay whose [`BackPolicy::Veto`](super::options::BackPolicy::Veto) refuses
+//!   a back press. A security gate must be a route redirect, not an overlay.
+//! * **Transition.** A fresh top page pushes in with its route's
+//!   [`Route::transition`] or the navigator's default, over the leaving top. If the
+//!   top was removed and the new top was retained, the old top pops with its own
+//!   transition reversed. If the top is unchanged nothing animates, and pages
+//!   removed below it leave silently. A first-build navigator never animates, so a
+//!   freshly placed shell or a cold-start link appears at once.
+//! * **Timing.** Depth, back interest and the route stack report the new stack on
+//!   the rebuild that applies the go, even while the flight runs. Within one frame
+//!   the last go wins outright: a page an earlier navigation queued is never built,
+//!   unless it was pushed with a result callback, and a page on the stack that the
+//!   last go names keeps its state.
+//! * **Stamps.** Each page publishes a location on
+//!   [`NavigatorController::route_stack`] (`R-B1`), so no consumer re-derives the
+//!   page-to-route mapping. The chain's leaf publishes the whole location, an
+//!   ordinary parent its own matched path with no query, so `/users/42?tab=a` reads
+//!   `[/users, /users/42?tab=a]`. A shell page publishes the whole location that
+//!   placed it and keeps that across a go, because the keep rule re-matches it
+//!   through the shell (see [`shell_route`]).
+//!
 //! # Reaching the router from a screen
 //!
 //! Neither a `Router` (`Rc` page builders) nor a [`NavigatorController`]
@@ -362,6 +401,10 @@ pub struct ResolvedPage<State: 'static> {
     builder: RouteBuilder<State>,
     params: RouteParams,
     location: Location,
+    /// What this page publishes on the route stack (see the [module docs](self)'
+    /// *Stamps*): [`location`](Self::location) for a chain's leaf or a shell page,
+    /// otherwise this page's own matched path, so a parent never reads as its child.
+    stamp: Location,
     /// The route's own [`Route::transition`], if it set one.
     transition: Option<TransitionSpec>,
     /// The [`shell_route`] binding of the route this page came from: the
@@ -393,12 +436,12 @@ impl<State: 'static> ResolvedPage<State> {
         &self.location
     }
 
-    /// The push options for this page: opaque, stamped with its location, and
-    /// carrying the route's own transition when it set one. A shell page also
-    /// carries its key, so a later [`go`](Router::go) keeps it; every other page
-    /// placed by a push is unkeyed, and a go never matches it.
+    /// The push options for this page: opaque, carrying its stamp and the route's
+    /// own transition when it set one. A shell page also carries its key, so a
+    /// later [`go`](Router::go) keeps it; every other page placed by a push is
+    /// unkeyed, and a go never matches it.
     fn push_options(&self) -> PushOptions<State> {
-        let mut options = PushOptions::opaque().route(self.location.clone());
+        let mut options = PushOptions::opaque().route(self.stamp.clone());
         if let Some(spec) = self.transition {
             options = options.transition(spec);
         }
@@ -410,7 +453,7 @@ impl<State: 'static> ResolvedPage<State> {
 
     /// The replace options for this page (see [`push_options`](Self::push_options)).
     fn replace_options(&self) -> ReplaceOptions {
-        let mut options = ReplaceOptions::opaque().route(self.location.clone());
+        let mut options = ReplaceOptions::opaque().route(self.stamp.clone());
         if let Some(spec) = self.transition {
             options = options.transition(spec);
         }
@@ -420,13 +463,12 @@ impl<State: 'static> ResolvedPage<State> {
         options
     }
 
-    /// This page as one entry of a [`go`](Router::go)'s list: opaque, keyed,
-    /// stamped with its location, and carrying the route's own transition when it
-    /// set one.
+    /// This page as one entry of a [`go`](Router::go)'s list: opaque, keyed, and
+    /// carrying its stamp and the route's own transition when it set one.
     fn into_page_spec(self) -> PageSpec<State> {
         let key = self.key.clone();
         let transition = self.transition;
-        let route = self.location.clone();
+        let route = self.stamp.clone();
         PageSpec {
             key: Some(key),
             builder: erase_page(self.into_page_builder()),
@@ -656,12 +698,19 @@ impl<State: 'static> Router<State> {
             //    through `resolve` (see the module docs).
             let mut merged = loc.query.clone();
             merged.extend(params);
+            let leaf = chain.len() - 1;
             let pages = chain
                 .iter()
-                .map(|(route, matched)| ResolvedPage {
+                .enumerate()
+                .map(|(index, (route, matched))| ResolvedPage {
                     builder: route.builder.clone(),
                     params: merged.clone(),
                     location: loc.clone(),
+                    stamp: if index == leaf || route.shell.is_some() {
+                        loc.clone()
+                    } else {
+                        matched_location(&loc.segments[..*matched])
+                    },
                     transition: route.transition,
                     shell: route.shell.clone(),
                     key: match &route.shell {
@@ -734,42 +783,18 @@ impl<State: 'static> Router<State> {
         }
     }
 
-    /// Make the stack exactly the matched chain, as go_router's `go` does.
+    /// Make the stack exactly the matched chain, as go_router's `go` does: a page
+    /// whose key is in the chain stays with its state and takes the new params, and
+    /// every other page leaves, route-less overlays included. An unmatched location
+    /// makes the stack one error page.
     ///
-    /// - **Keys.** A page is keyed by the concrete path matched up to its route,
-    ///   query excluded, and a shell page by its inner controller. A chain page
-    ///   whose key is on the stack retains that page: its widget state, result
-    ///   callback and back policy stay, and it takes the new params and stamped
-    ///   location. So a go to the current path keeps the page's state and hands
-    ///   it the new query. Pages placed by [`push`](Self::push),
-    ///   [`replace`](Self::replace) or a bare [`NavigatorController`] op have no
-    ///   key and never match, except shell pages.
-    /// - **Removed pages.** Every other page leaves, route-less overlays included.
-    ///   Each one's result callback fires once with an empty [`PopResult`](super::options::PopResult),
-    ///   on the go rather than when any animation settles. Routes inside a nested
-    ///   navigator that is disposed with its host do not fire.
-    /// - **Transition.** A fresh top page pushes in with its route's
-    ///   [`Route::transition`] or the navigator's default, over the leaving top. If
-    ///   the top was removed and the new top was retained, the old top pops with
-    ///   its own transition reversed. If the top is unchanged nothing animates, and
-    ///   pages removed below it leave silently. A first-build navigator never
-    ///   animates, so a freshly placed shell or a cold-start link appears at once.
-    /// - **Timing.** Depth, back interest and the route stack report the new stack
-    ///   on the rebuild that applies the go, even while the flight runs. Within one
-    ///   frame the last go wins outright: a page an earlier navigation queued is
-    ///   never built, unless it was pushed with a result callback, and a page on
-    ///   the stack that the last go names keeps its state.
+    /// Across a [`shell_route`] each controller's stack becomes its own segment, and
+    /// anything queued on a shell the chain sets no pages on is discarded. Depth,
+    /// back interest and the route stack report the result on the rebuild that
+    /// applies the go, and within one frame the last go wins.
     ///
-    /// Each resolved page is stamped with its own [`ResolvedPage::location`]
-    /// (`R-B1`) — [`NavigatorController::route_stack`] tracks the
-    /// resulting page-to-route mapping, so no consumer needs to re-derive it. A
-    /// retained shell page keeps its stamp: see [`shell_route`].
-    ///
-    /// A chain crossing a [`shell_route`] boundary sets each controller's stack to
-    /// its own segment. Ops still queued on a shell the chain does not cross are
-    /// discarded, since they would otherwise land on that shell's next mount. See
-    /// [`shell_route`]'s table for the keep rule and for how to keep a page below
-    /// a shell. An unmatched location makes the stack one error page.
+    /// See the [module docs](self)' *What a go does*, which also says why identifying
+    /// values belong in the path and a security gate in a route redirect.
     pub fn go(&self, location: &str) {
         match self.resolved(location) {
             Resolution::Matched { pages, .. } => self.go_chain(self.split_chain(pages)),
@@ -866,10 +891,15 @@ impl<State: 'static> Router<State> {
 
     /// Queue a [`go`](Self::go)'s pages: each segment's controller gets exactly its
     /// segment. A trailing empty segment (a shell matched as the leaf) issues no
-    /// inner op, so the shell keeps what it shows.
+    /// inner op and its queue is forgotten with the rest, so the shell keeps what it
+    /// shows: an earlier go still queued there cannot decide the inner stack.
     fn go_chain(&self, segments: Vec<Segment<State>>) {
-        let crossed = segments.iter().map(|s| s.controller.id()).collect();
-        self.forget_queued_outside(&crossed);
+        let targets = segments
+            .iter()
+            .filter(|s| !s.pages.is_empty())
+            .map(|s| s.controller.id())
+            .collect();
+        self.forget_queued_outside(&targets);
         for segment in segments {
             if segment.pages.is_empty() {
                 continue;
@@ -919,14 +949,14 @@ impl<State: 'static> Router<State> {
         controller.set_pages(pages);
     }
 
-    /// Forget everything queued that a go to a chain over the `crossed` controllers
+    /// Forget everything queued that a go setting the `targets` controllers' stacks
     /// makes stale: every shell placement noted, because the go decides afresh what
-    /// each stack holds, and the queue of every shell the chain does not cross, whose
-    /// ops would otherwise land on that shell's next mount.
-    fn forget_queued_outside(&self, crossed: &HashSet<NavigatorId>) {
+    /// each stack holds, and the queue of every shell it sets no pages on, whose ops
+    /// would otherwise land on that shell's next mount or undo what it keeps showing.
+    fn forget_queued_outside(&self, targets: &HashSet<NavigatorId>) {
         self.pending_shells.borrow_mut().clear();
         visit_shells(&self.routes, &mut |shell| {
-            if !crossed.contains(&shell.id()) {
+            if !targets.contains(&shell.id()) {
                 shell.discard_queued();
                 self.queued_gos.borrow_mut().remove(&shell.id());
             }
@@ -1074,7 +1104,8 @@ impl<State: 'static> Router<State> {
     /// the same shell at the same boundary. Re-matching (rather than comparing
     /// locations) is what keeps a pathless shell honest: the shell page is
     /// stamped with the location that placed it, and every one of its children
-    /// resolves through the same shell.
+    /// resolves through the same shell. A parent above the shell publishes its own
+    /// path, whose chain stops short of the shell, so it never reads as placing it.
     ///
     /// "On the stack", not "on top": a page the app pushed *over* the shell
     /// leaves the shell page retained beneath it, and placing a second one
@@ -1203,7 +1234,7 @@ impl<State: 'static> Router<State> {
         match caller {
             None => page.push_options(),
             Some(mut options) => {
-                options = options.route(page.location().clone());
+                options = options.route(page.stamp.clone());
                 if options.transition.is_none() {
                     options.transition = page.transition;
                 }
@@ -1215,13 +1246,23 @@ impl<State: 'static> Router<State> {
         }
     }
 
-    /// The single entry point a deep link resolves through: exactly a
-    /// [`go`](Self::go), so a link arriving while the app runs replaces the stack
+    /// The single entry point a deep link resolves through: a [`go`](Self::go) for a
+    /// matched location, so a link arriving while the app runs replaces the stack
     /// with the link's chain, as go_router does for a platform link. A flow that
-    /// must not lose its stack handles the link itself. The facade tracks the
-    /// deep-link signal and calls this; this crate stays reactive-free.
+    /// must not lose its stack handles the link itself.
+    ///
+    /// An unmatched location pushes the error page instead, and back returns from
+    /// it. This differs from go_router on purpose: a stray or unrelated link cannot
+    /// wipe the stack, while a [`go`](Self::go) from app code still replaces it. The
+    /// facade tracks the deep-link signal and calls this; this crate stays
+    /// reactive-free.
     pub fn handle_location(&self, location: &str) {
-        self.go(location);
+        match self.resolved(location) {
+            Resolution::Matched { pages, .. } => self.go_chain(self.split_chain(pages)),
+            Resolution::Error { location } => {
+                self.controller.push(self.error_page_builder(location));
+            }
+        }
     }
 
     /// Resolve `name` + `params` into a path, then [`go`](Self::go) to it. An
@@ -1329,6 +1370,16 @@ fn match_routes<'a, State: 'static>(
 fn matched_path(segments: &[String]) -> String {
     let encoded: Vec<String> = segments.iter().map(|s| encode_segment(s)).collect();
     format!("/{}", encoded.join("/"))
+}
+
+/// The location an ordinary parent page publishes: the path `segments` spell, the
+/// same matched path its key names, with no query.
+fn matched_location(segments: &[String]) -> Location {
+    Location {
+        path: format!("/{}", segments.join("/")),
+        segments: segments.to_vec(),
+        query: RouteParams::new(),
+    }
 }
 
 /// Call `visit` with the inner controller of every [`shell_route`] in the tree.
@@ -1968,6 +2019,59 @@ mod tests {
         assert_eq!(controller.route_stack().change(), NavChange::Replace);
     }
 
+    #[test]
+    fn a_parent_page_publishes_its_own_matched_path_and_the_leaf_the_whole_location() {
+        let controller: NavigatorController<()> = NavigatorController::new();
+        let router: Router<()> = Router::with_controller(
+            &controller,
+            vec![
+                Route::new("/users", |_| sized(10.0, 10.0)).child(
+                    Route::new(":id", |_| sized(20.0, 20.0))
+                        .child(Route::new("posts", |_| sized(30.0, 30.0))),
+                ),
+            ],
+        );
+        let mut root: RenderRoot<(), NavigatorView<()>> = RenderRoot::new();
+        let mut app: Build = {
+            let c = controller.clone();
+            Box::new(move |_: &mut ()| navigator(&c, || sized(10.0, 10.0)))
+        };
+        root.rebuild(&mut app, &mut ());
+
+        router.go("/users/42?tab=a");
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[
+                Some(Location::parse("/users")),
+                Some(Location::parse("/users/42?tab=a"))
+            ],
+            "a parent has no query, and the leaf keeps its own"
+        );
+
+        router.go("/users/a%2Fb/posts?tab=a");
+        root.rebuild(&mut app, &mut ());
+        assert_eq!(
+            controller.route_stack().entries(),
+            &[
+                Some(Location::parse("/users")),
+                Some(Location::parse("/users/a%2Fb")),
+                Some(Location::parse("/users/a%2Fb/posts?tab=a"))
+            ],
+            "the leaf of the last go is a parent now, and an encoded slash stays one segment"
+        );
+
+        // The public accessor still reports the location the chain resolved from.
+        let Resolution::Matched { pages, .. } = router.resolve("/users/42?tab=a") else {
+            panic!("expected a match");
+        };
+        assert_eq!(
+            pages[0].location(),
+            &Location::parse("/users/42?tab=a"),
+            "location() is the raw resolved location for every page of the chain"
+        );
+    }
+
     // ================= RouteNavigator seam (pump) =================
 
     /// The build closure [`RenderRoot::rebuild`] drives, boxed so
@@ -2195,37 +2299,65 @@ mod tests {
         shell_builds: Rc<Cell<u32>>,
     }
 
+    /// The shell page a [`ShellHarness`] table hands to [`shell_route`].
+    type ShellPage = Box<dyn Fn(&RouteParams) -> AnyView<()>>;
+
     impl ShellHarness {
         fn new() -> Self {
+            Self::with_routes(|inner, shell_page| {
+                vec![
+                    Route::new("/", |_| sized(10.0, 10.0)),
+                    Route::new("/flat", |_| sized(40.0, 40.0)).transition(slide()),
+                    shell_route(
+                        inner,
+                        shell_page,
+                        vec![
+                            Route::new("/sessions", |_| sized(20.0, 20.0)),
+                            Route::new("/terminal", |_| sized(30.0, 30.0)),
+                        ],
+                    ),
+                ]
+            })
+        }
+
+        /// The route-tree shape: the shell nested under a `/` page, so every chain
+        /// through the shell names that page too.
+        fn under_root() -> Self {
+            Self::with_routes(|inner, shell_page| {
+                vec![
+                    Route::new("/", |_| sized(10.0, 10.0)).child(shell_route(
+                        inner,
+                        shell_page,
+                        vec![
+                            Route::new("inbox", |_| sized(20.0, 20.0)),
+                            Route::new("settings", |_| sized(30.0, 30.0)),
+                        ],
+                    )),
+                    Route::new("/flat", |_| sized(40.0, 40.0)),
+                ]
+            })
+        }
+
+        fn with_routes(
+            routes: impl FnOnce(&NavigatorController<()>, ShellPage) -> Vec<Route<()>>,
+        ) -> Self {
             let outer: NavigatorController<()> = NavigatorController::new();
             let inner: NavigatorController<()> = NavigatorController::new();
             let shell_builds = Rc::new(Cell::new(0u32));
 
-            let shell_page = {
+            let shell_page: ShellPage = {
                 let inner = inner.clone();
                 let builds = shell_builds.clone();
-                move |_: &RouteParams| {
+                Box::new(move |_: &RouteParams| {
                     let inner = inner.clone();
                     let builds = builds.clone();
                     any(crate::column()
                         .child(BuildCounter { builds })
                         .child(navigator(&inner, || sized(11.0, 11.0))))
-                }
+                })
             };
-            let routes = vec![
-                Route::new("/", |_| sized(10.0, 10.0)),
-                Route::new("/flat", |_| sized(40.0, 40.0)).transition(slide()),
-                shell_route(
-                    &inner,
-                    shell_page,
-                    vec![
-                        Route::new("/sessions", |_| sized(20.0, 20.0)),
-                        Route::new("/terminal", |_| sized(30.0, 30.0)),
-                    ],
-                ),
-            ];
-            let router =
-                Router::with_controller(&outer, routes).error_builder(|_| sized(99.0, 99.0));
+            let router = Router::with_controller(&outer, routes(&inner, shell_page))
+                .error_builder(|_| sized(99.0, 99.0));
             let app: Build = {
                 let c = outer.clone();
                 Box::new(move |_: &mut ()| navigator(&c, || sized(10.0, 10.0)))
@@ -2694,7 +2826,7 @@ mod tests {
         root.rebuild(&mut app, &mut ());
         assert_eq!(
             paths(&controller),
-            vec!["/users/42".to_string(), "/users/42".to_string()],
+            vec!["/users".to_string(), "/users/42".to_string()],
             "go made the stack the whole chain, both pages on the one controller"
         );
 
@@ -2851,7 +2983,7 @@ mod tests {
 
         router.go("/users/42");
         root.rebuild(&mut app, &mut ());
-        assert_eq!(paths(&controller), strings(&["/users/42", "/users/42"]));
+        assert_eq!(paths(&controller), strings(&["/users", "/users/42"]));
         let flight = controller.transition();
         assert!(flight.active && !flight.is_pop);
         assert_eq!(
@@ -3040,6 +3172,121 @@ mod tests {
         assert_eq!(paths(&inner), strings(&["/sessions"]));
         assert_eq!(outer.depth(), 1);
         assert_eq!(builds.get(), 1);
+    }
+
+    #[test]
+    fn a_go_to_a_shell_matched_as_the_leaf_beats_an_earlier_go_in_one_frame() {
+        let mut h = ShellHarness::with_routes(|inner, shell_page| {
+            vec![shell_route(
+                inner,
+                shell_page,
+                vec![
+                    Route::new("/sessions", |_| sized(20.0, 20.0)),
+                    Route::new("/terminal", |_| sized(30.0, 30.0)),
+                ],
+            )]
+        });
+        h.router.go("/sessions");
+        h.rebuild();
+
+        h.router.go("/terminal");
+        h.router.go("/");
+        h.rebuild();
+        assert_eq!(
+            paths(&h.inner),
+            strings(&["/sessions"]),
+            "the last go names no inner page, so the inner stays as it was"
+        );
+        assert_eq!(h.outer.depth(), 1);
+        assert_eq!(h.shell_builds.get(), 1);
+
+        // The earlier go's note went with its op: a push reads the inner afresh.
+        h.router.go("/terminal");
+        h.router.go("/");
+        h.router.push("/terminal");
+        h.rebuild();
+        assert_eq!(paths(&h.inner), strings(&["/sessions", "/terminal"]));
+        assert_eq!(h.outer.depth(), 1);
+    }
+
+    #[test]
+    fn a_go_between_children_below_a_parent_page_publishes_nothing_on_the_outer_stack() {
+        let mut h = ShellHarness::under_root();
+        h.router.go("/settings");
+        h.rebuild();
+        assert_eq!(h.stacks().0, strings(&["/", "/settings"]));
+        let generation = h.outer.route_generation();
+
+        h.router.go("/inbox?tab=a");
+        h.rebuild();
+        assert_eq!(
+            h.outer.route_generation(),
+            generation,
+            "the parent's stamp did not move and the shell keeps its own"
+        );
+        assert_eq!(h.stacks().0, strings(&["/", "/settings"]));
+        assert_eq!(h.stacks().1, strings(&["/inbox"]));
+        assert_eq!(h.shell_builds.get(), 1);
+    }
+
+    #[test]
+    fn a_shell_popped_out_of_a_go_chain_is_placed_again_by_a_push() {
+        let mut h = ShellHarness::under_root();
+        h.router.go("/settings");
+        h.rebuild();
+
+        h.router.pop();
+        h.rebuild();
+        assert_eq!(h.stacks().0, strings(&["/"]));
+        assert_eq!(
+            h.outer
+                .route_stack()
+                .current_route()
+                .map(|route| route.path.as_str()),
+            Some("/"),
+            "the page left behind reads as itself, not as the child it was kept for"
+        );
+        assert!(!h.inner.is_mounted());
+
+        h.router.push("/inbox");
+        h.rebuild();
+        assert_eq!(h.shell_builds.get(), 2, "the shell page was placed again");
+        assert!(
+            h.inner.is_mounted(),
+            "so the push did not strand on the inner"
+        );
+        assert_eq!(h.stacks().1, strings(&["/inbox"]));
+        assert_eq!(h.inner.depth(), 1);
+        assert_eq!(
+            h.stacks().0.last().map(String::as_str),
+            Some("/inbox"),
+            "the shell page is on top of the outer stack"
+        );
+    }
+
+    #[test]
+    fn a_push_and_a_replace_that_place_a_shell_stamp_the_parent_with_its_own_path() {
+        let mut h = ShellHarness::under_root();
+        h.router.go("/flat");
+        h.rebuild();
+        h.router.push("/inbox");
+        h.rebuild();
+        assert_eq!(h.stacks().0, strings(&["/flat", "/", "/inbox"]));
+        assert_eq!(h.shell_builds.get(), 1);
+
+        let mut h = ShellHarness::under_root();
+        h.router.go("/flat");
+        h.rebuild();
+        h.router.replace("/inbox");
+        h.rebuild();
+        assert_eq!(h.stacks().0, strings(&["/", "/inbox"]));
+
+        // The stamps still read as placed: this push stays inside the shell.
+        h.router.push("/settings");
+        h.rebuild();
+        assert_eq!(h.stacks().0, strings(&["/", "/inbox"]));
+        assert_eq!(h.stacks().1, strings(&["/inbox", "/settings"]));
+        assert_eq!(h.shell_builds.get(), 1);
     }
 
     /// Leave a placed shell in the frame that also queued a push inside it, then
@@ -3439,6 +3686,54 @@ mod tests {
         h.router.push("/sessions");
         h.rebuild();
         assert_eq!(h.stacks().1, strings(&["/sessions"]));
+    }
+
+    #[test]
+    fn an_unmatched_location_handled_as_a_link_pushes_and_back_returns() {
+        let mut h = PumpHarness::new(pump_routes());
+        let controller = h.router.controller().clone();
+        h.router.go("/home");
+        let _ = h.frame();
+        h.router.push("/detail");
+        let _ = h.frame();
+
+        h.router.handle_location("/nope");
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(99.0, 99.0))]);
+        assert_eq!(paths(&controller), strings(&["/home", "/detail", "-"]));
+
+        h.router.pop();
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(20.0, 20.0))]);
+        assert_eq!(paths(&controller), strings(&["/home", "/detail"]));
+
+        // A go from app code still replaces the stack with the one error page.
+        h.router.go("/nope");
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(99.0, 99.0))]);
+        assert_eq!(paths(&controller), strings(&["-"]));
+        assert_eq!(controller.depth(), 1);
+
+        // And a matched link is still a go.
+        h.router.handle_location("/other");
+        assert_eq!(h.frame(), vec![(Point::ZERO, Size::new(30.0, 30.0))]);
+        assert_eq!(paths(&controller), strings(&["/other"]));
+    }
+
+    #[test]
+    fn an_unmatched_location_handled_as_a_link_leaves_a_placed_shell_alone() {
+        let mut h = ShellHarness::new();
+        h.router.go("/sessions");
+        h.rebuild();
+
+        h.router.push("/terminal");
+        h.router.handle_location("/nope");
+        h.rebuild();
+        assert_eq!(h.stacks().0, strings(&["/sessions", "-"]));
+        assert_eq!(
+            h.stacks().1,
+            strings(&["/sessions", "/terminal"]),
+            "the push queued in the same frame was not discarded"
+        );
+        assert!(h.inner.is_mounted());
+        assert_eq!(h.shell_builds.get(), 1);
     }
 
     #[test]
