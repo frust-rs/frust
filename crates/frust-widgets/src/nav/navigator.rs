@@ -1421,43 +1421,24 @@ impl<State: 'static> NavigatorWidget<State> {
     }
 
     /// Make the stack exactly `specs` (the [`NavOp::SetPages`] arm), returning the
-    /// dirtiness. The caller's closing `publish_state` commits depth, route stack
-    /// and visibility on this frame, even when a flight starts.
+    /// dirtiness; the caller's `publish_state` commits depth, routes and visibility.
     ///
-    /// A page whose key matches an old page retains it: pod, widget state,
-    /// `on_result`, back policy, barrier, opacity, visibility and reach all stay,
-    /// and the page takes the new builder, route and stored transition. A shell
-    /// page keeps its route, which goes on naming the location that placed it: what
-    /// happens inside a shell is the inner navigator's to publish, so a navigation
-    /// within one changes nothing on this stack. Every other
-    /// old page is removed, top to bottom, with its `on_result` firing empty now
-    /// rather than at settle. New pages build before anything is torn down, so a
-    /// controller shared between an old and a new page never reads as unmounted.
-    ///
-    /// When the old top is retained as the new top, its focus, pointer capture
-    /// and IME session are untouched, whatever happens to the pages below it.
-    /// When the old top stops being the top, removed or retained and now covered,
-    /// its focus and capture are cancelled and, if it held focus under the full
-    /// gate, the IME surface is cleared. The edge-swipe arm is dropped either way.
-    ///
-    /// The flight follows Flutter's `DefaultTransitionDelegate`:
-    ///
-    /// - **Push:** the new top is fresh and its spec animates. The old top leaves
-    ///   under it. Every other removed page is [held](HeldFlight::held) until settle,
-    ///   and whatever was visible below a non-opaque old top stays painted.
-    /// - **Pop:** the new top was retained, the old top was removed and its stored
-    ///   spec animates. The old top animates out reversed; other removed pages tear
-    ///   down now.
-    /// - **None:** otherwise, or on [`OpsPass::FirstBuild`] whatever the spec. Every
-    ///   removed page tears down now.
+    /// A page whose key matches an old page is retained: pod, widget state,
+    /// `on_result`, back policy, barrier, opacity, visibility and reach stay, and
+    /// it takes the new builder, route and transition (a shell keeps its route).
+    /// Every other old page is removed, top to bottom, its `on_result` firing empty
+    /// now. New pages build before anything is torn down. A fresh animated top
+    /// pushes, a retained top over a removed animated old top pops, and anything
+    /// else (or [`OpsPass::FirstBuild`]) flies nothing, per Flutter's
+    /// `DefaultTransitionDelegate`.
     fn apply_set_pages(
         &mut self,
         specs: Vec<PageSpec<State>>,
         pass: OpsPass,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        // `NavigatorController::set_pages` asserts this; an empty list must not
-        // drain the stack in a release build either.
+        // Defensive backstop: `NavigatorController::set_pages` drops an empty list,
+        // and one reaching here must not drain the stack.
         if specs.is_empty() {
             return ChangeFlags::NONE;
         }
@@ -1472,6 +1453,9 @@ impl<State: 'static> NavigatorWidget<State> {
         let matches = match_retained(&specs, &self.pages);
         let old_top_stays_top = from_depth > 0
             && matches[specs.len() - 1].is_some_and(|old_index| old_index + 1 == from_depth);
+        // A retained top keeps its focus, pointer capture and IME session whatever
+        // happens below it; a top that stops being the top (removed, or retained
+        // and covered) loses them, and the IME surface clears if it held focus.
         if !old_top_stays_top {
             self.cancel_top();
         }
@@ -1566,6 +1550,9 @@ impl<State: 'static> NavigatorWidget<State> {
         let may_fly = pass == OpsPass::Rebuild;
         let new_top_spec = self.pages[new_top].transition;
         if may_fly && new_top_fresh && new_top_spec.is_animated() {
+            // Push: the old top leaves under the fresh top. Every other removed
+            // page is held until settle, and whatever was visible below a
+            // non-opaque old top stays painted (the backdrop).
             let stashed = old_top_removed.then(|| removed.remove(0).1);
             let backdrop = (old_visible_from..from_depth.saturating_sub(1))
                 .map(|old_index| match retained_at[old_index] {
@@ -1585,6 +1572,8 @@ impl<State: 'static> NavigatorWidget<State> {
             });
             self.stage_transition(new_top_spec, false, stashed, from_depth);
         } else {
+            // Pop: the retained top is the new top and the removed old top animates
+            // out reversed by its stored spec; other removed pages tear down now.
             if may_fly && !new_top_fresh && old_top_removed {
                 let spec = removed[0].1.transition;
                 if spec.is_animated() {
@@ -1609,6 +1598,11 @@ impl<State: 'static> NavigatorWidget<State> {
     ) -> ChangeFlags {
         let mut flags = ChangeFlags::NONE;
         for op in ops {
+            // A held flight records stack indices, which any op but `SetPages`
+            // (which finalizes itself) would leave stale: end the flight first.
+            if self.held_flight.is_some() && !matches!(op, NavOp::SetPages { .. }) {
+                self.finalize_transition(ctx);
+            }
             match op {
                 NavOp::Push {
                     builder,

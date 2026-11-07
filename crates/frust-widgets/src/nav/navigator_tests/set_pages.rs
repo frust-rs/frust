@@ -1457,3 +1457,160 @@ fn a_stale_page_focus_flag_under_a_blurred_navigator_raises_no_ime_clear() {
     );
     assert_eq!(root.focus_ime_generation(), generation);
 }
+
+// --- Instant ops end a live held flight; a superseded push cancels its pop. ---
+
+/// Start a push flight whose old top is retained as the leaving page, over a
+/// plain page or, with `dialog`, over a dialog backdrop. Returns the harness
+/// mid-flight.
+fn held_flight_over(dialog: bool, log: &Log) -> Harness {
+    let mut h = Harness::new();
+    let list = |top: bool| {
+        let mut pages = vec![page("/a", probe("a", 10.0, log))];
+        let b = page("/b", probe("b", 20.0, log));
+        pages.push(if dialog { transparent(b) } else { b });
+        if top {
+            pages.push(flying(page("/c", probe("c", 30.0, log))));
+        }
+        pages
+    };
+    h.set(list(false), 0);
+    h.set(list(true), 1000);
+    h.frame(1050);
+    let flight = h.nav().held_flight.as_ref().expect("a held flight");
+    assert_eq!(flight.leaving_index, Some(1), "the old top is retained");
+    h
+}
+
+fn assert_flight_ended(h: &mut Harness, depth: usize) {
+    // A pop runs its own flight by the popped page's stored spec, so only the
+    // held flight is asserted ended before the settle.
+    assert!(h.nav().held_flight.is_none());
+    h.settle(1100);
+    assert!(h.nav().held_flight.is_none());
+    assert!(h.nav().transition.is_none());
+    assert_eq!(h.nav().pages.len(), depth);
+    assert_eq!(h.controller.depth(), depth);
+}
+
+#[test]
+fn instant_replace_then_two_pops_during_a_held_flight_reach_depth_one() {
+    let log = Log::default();
+    let mut h = held_flight_over(false, &log);
+    h.controller
+        .replace_with(|| sized_page(100.0, 40.0), TransitionSpec::NONE);
+    h.controller.pop();
+    h.controller.pop();
+    h.frame(1060);
+    assert_flight_ended(&mut h, 1);
+}
+
+#[test]
+fn each_instant_op_during_a_held_flight_ends_it_before_the_stack_changes() {
+    type Op = fn(&NavigatorController<()>);
+    let ops: [(Op, usize); 3] = [
+        (|c| c.push(|| sized_page(100.0, 40.0)), 4),
+        (|c| c.pop(), 2),
+        (
+            |c| c.replace_with(|| sized_page(100.0, 40.0), TransitionSpec::NONE),
+            3,
+        ),
+    ];
+    for dialog in [false, true] {
+        for (op, depth) in ops {
+            let log = Log::default();
+            let mut h = held_flight_over(dialog, &log);
+            op(&h.controller);
+            h.frame(1060);
+            assert_flight_ended(&mut h, depth);
+        }
+    }
+}
+
+#[test]
+fn push_then_pop_then_set_pages_in_one_frame_keeps_the_keyed_page() {
+    let log = Log::default();
+    let mut h = Harness::new();
+    let list = || {
+        vec![
+            page("/a", probe("a", 10.0, &log)),
+            page("/b", probe("b", 20.0, &log)),
+        ]
+    };
+    h.set(list(), 0);
+
+    h.controller.push(|| sized_page(100.0, 40.0));
+    h.controller.pop();
+    h.set(list(), 16);
+
+    assert_eq!(h.routes(), ["/a", "/b"]);
+    assert_eq!(count(&log, "build b"), 1);
+    assert_eq!(count(&log, "teardown b"), 0);
+}
+
+#[test]
+fn two_pushes_and_one_pop_then_set_pages_leave_no_pop() {
+    let log = Log::default();
+    let mut h = Harness::new();
+    let list = || {
+        vec![
+            page("/a", probe("a", 10.0, &log)),
+            page("/b", probe("b", 20.0, &log)),
+        ]
+    };
+    h.set(list(), 0);
+
+    h.controller.push(|| sized_page(100.0, 40.0));
+    h.controller.push(|| sized_page(100.0, 50.0));
+    h.controller.pop();
+    h.set(list(), 16);
+
+    assert_eq!(h.routes(), ["/a", "/b"]);
+    assert_eq!(count(&log, "teardown b"), 0);
+    assert!(!h.controller.has_queued());
+}
+
+#[test]
+fn pop_with_result_then_set_pages_in_one_frame_delivers_the_payload_once() {
+    let log = Log::default();
+    let received = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let mut h = Harness::new();
+    let sink = Rc::clone(&received);
+    let builder = probe("b", 20.0, &log);
+    h.controller.push_with_options(
+        move || builder(),
+        PushOptions::opaque()
+            .key(path_key("/b"))
+            .on_result(move |_, result| {
+                sink.borrow_mut().extend(result.take::<i32>());
+            }),
+    );
+    h.frame(0);
+
+    h.controller.pop_with_result(PopResult::of(7i32));
+    h.set(vec![page("/x", probe("x", 30.0, &log))], 16);
+    h.frame(32);
+
+    assert_eq!(*received.borrow(), [7]);
+    assert_eq!(h.routes(), ["/x"]);
+}
+
+#[test]
+fn an_empty_set_pages_leaves_the_queue_and_the_stack_alone() {
+    let log = Log::default();
+    let mut h = Harness::new();
+    h.set(vec![page("/a", probe("a", 10.0, &log))], 0);
+
+    h.controller.push(|| sized_page(100.0, 40.0));
+    h.controller.set_pages(Vec::new());
+    assert!(h.controller.has_queued(), "the queued push survives");
+    h.frame(16);
+
+    assert_eq!(h.controller.depth(), 2);
+    assert_eq!(count(&log, "teardown a"), 0);
+
+    h.controller.set_pages(Vec::new());
+    assert!(!h.controller.has_queued(), "nothing was enqueued");
+    h.frame(32);
+    assert_eq!(h.controller.depth(), 2);
+}
