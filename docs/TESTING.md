@@ -119,6 +119,16 @@ The repository already contains substantial non-pixel coverage:
   `device_generation`) and `headless_external_pass.rs` (explicit and registry-draining renders,
   per-renderer frame numbering, reserved-id refusal); `crates/frust-testing/tests/engine_external_pass.rs`
   covers `EngineOracle`'s pass methods. Run with `-- --ignored --test-threads=1`.
+  `crates/frust-testing/tests/scene_texture_hints.rs` holds three ignored parity cases through
+  `EngineOracle::render_with_passes`, compared exactly with `CpuOracle`: an unhinted texture at 1:1
+  on a whole-pixel offset equals `Command::Image` of the same pixels; a `Nearest` hint at 4x equals
+  a CPU-side 4x nearest-replicated copy drawn as an image at 1:1 (the oracle has no sampling
+  choice); an `opaque` hint on an opaque texture changes routing, not colour.
+  `crates/frust-engine/tests/scene_texture.rs` pins the hints at the engine (nearest
+  magnification, the opaque pass, a same-extent rebind dropping the held plan), and
+  `crates/frust-render/tests/texture_bus.rs` covers `SourceFormat::Bgra8` read-back order and
+  `UpdateRegion` (a partial write, a refused region before any full frame, a format change).
+  Verified on Vulkan (NVIDIA T400) and Metal (Apple M4).
 - `crates/frust-testing`: the versioned golden corpus and comparator — a
   renderer-agnostic `SceneRenderer` pair (`CpuOracle` over the dev-only
   `vello_cpu` 0.2.0 pin, `EngineOracle` over `frust-gpu`'s `HeadlessTarget`), a 4-channel

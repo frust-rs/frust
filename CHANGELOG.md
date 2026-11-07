@@ -34,6 +34,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `SceneTextureHints` (`filter`: `SceneTextureFilter::{Linear, Nearest, NearestWhenMagnified}`, and
+  a caller-asserted `opaque`) for externally bound textures: `EngineRenderer::bind_texture_with` and
+  `ExternalFrame::bind_texture_with`, re-exported from `frust-engine`, `frust-render` and `frust::gpu`.
+  `Linear` shares the image sampling resolver, and an `opaque` texture joins the depth-writing opaque
+  pass like an opaque image. Unhinted textures behave as before.
+- Texture bus: `SourceFormat::Bgra8` (premultiplied; swizzled on the CPU on GL only) and sub-rect
+  updates through `SourceFrame::with_update_region` / `UpdateRegion` (re-exported as
+  `frust::texture::UpdateRegion`), refused with a one-time warning when no same-size, same-format
+  texture is shown.
 - `DeviceHandle::generation()` (process-wide, monotonic, non-zero, shared by clones) and
   `DeviceHandle::is_lost()` (latched by the device-lost callback, never cleared); `frust::gpu::device_generation()`.
 - `frust::gpu::request_optional_features`/`requested_optional_features` (and

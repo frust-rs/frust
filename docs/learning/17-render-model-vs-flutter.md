@@ -51,7 +51,7 @@ docs.flutter.dev page. Frust paths are in this repository.
 | Android hardware-buffer import is opt-in and RGBA8-only | `android-hwbuffer-import-opt-in` |
 | Android video textures copy through GLES; camera preview textures are CPU-copied | `video-texture-android-gles-copy`, `camera-texture-cpu-copy-only` |
 | A native frame's release can lag by a submit; a full backlog drops the newest frame | `texture-bus-native-release-delay` |
-| An external texture never joins the opaque depth-writing pass | `engine-scene-texture-always-blended` |
+| An external texture joins the opaque depth-writing pass only when its binder asserts opacity | `engine-scene-texture-always-blended` |
 
 The Apple side of those rows is shipped: the iOS and macOS overlay hosts sit behind the same
 `FRUST_OVERLAYS` knob (default off, `apple-overlay-limits`), and Metal import and the Apple texture

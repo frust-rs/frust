@@ -6890,28 +6890,27 @@ sizing, premultiplied compositing, reaping, run batching) are pinned by
 device-backed golden class for shader quads), at which point the deferral and
 the skip-list row come out together.
 
-### `engine-scene-texture-always-blended` — an external texture never joins the opaque depth-writing pass
+### `engine-scene-texture-always-blended` — an unhinted external texture is blended, and opacity is caller-asserted
 
-**Observed** (evidence: `crates/frust-engine/src/compile/external.rs` sets
-`may_have_transparency` unconditionally; `Command::SceneTexture` and the
-`bind_texture` registration carry no opacity statement): the engine never
-reads a caller's texels, so every `SceneTexture` and `ShaderQuad` draw takes
-the blended painter-order path even when the texture is fully opaque (a video
-frame, an opaque 3D render), paying the blend and forgoing depth occlusion of
-what lies beneath it. Sampling is also unconditionally bilinear
-(`ImageQuality::Medium`): the whole-pixel-translation nearest downgrade
-`Command::Image` gets from `compile::paint` is not shared with the external
-path; at a 1:1 pixel-aligned mapping the difference rounds away in `u8`.
-The texture bus's `texture_view` frames (`frust_render::texture_bus`, a video or camera
-frame drawn in-scene) take this same path, so they are always blended.
+**Observed** (evidence: `crates/frust-engine/src/compile/external.rs`,
+`crates/frust-engine/tests/scene_texture.rs`): the engine never reads a
+caller's texels. A `SceneTexture` bound with `SceneTextureHints::opaque` set
+(`EngineRenderer::bind_texture_with`, `ExternalFrame::bind_texture_with`)
+routes like an opaque image, but the claim is the caller's: an "opaque" texture
+with alpha below one occludes instead of blending. Every `ShaderQuad` draw and
+every `SceneTexture` bound without the hint (plain `bind_texture`, every
+texture-bus frame, `beui`'s 3D faces) still takes the blended painter-order
+path, paying the blend and forgoing depth occlusion of what lies beneath it.
+Inside an isolated layer (alpha below one) even an opaque-hinted texture
+blends offscreen, as an opaque image does.
 
 **Accepted because**: claiming opacity the engine cannot verify would let a
-translucent texture occlude what it should have blended over; drawing
-correctly and slowly beats drawing wrong.
+translucent texture occlude what it should have blended over; the hint puts
+that claim with the one party that knows, and the default draws correctly.
 
-**Trigger for removal**: an opacity hint on the scene command or on
-registration, and a shared sampling-quality resolver for image and external
-paints.
+**Trigger for removal**: `ShaderQuad` and the texture bus gaining an opacity
+statement of their own, or the engine verifying a texture's alpha. Colour-space
+handling stays deferred: texture bytes pass through unconverted, as before.
 
 ### `engine-frame-clears-colour-unconditionally` — content painted into the target ahead of the frame keeps its depth and loses its pixels
 
