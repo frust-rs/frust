@@ -884,6 +884,9 @@ pub mod authoring {
         PointerPhase, ScrollDelta, SemanticsCtx, SemanticsUpdate, TickClass, View, ViewSeq, Widget,
         WidgetId, any, views,
     };
+    /// The retained widget a [`text`](crate::text) view builds, lifted so a widget-tree query
+    /// (`frust::testing::find::by_type::<TextWidget>()`) or an inspector can name it.
+    pub use frust_widgets::TextWidget;
     pub use frust_widgets::{
         Either, EitherOf3, EitherOf3Widget, EitherOf4, EitherOf4Widget, EitherOf5, EitherOf5Widget,
         EitherOf6, EitherOf6Widget, EitherOf7, EitherOf7Widget, EitherOf8, EitherOf8Widget,

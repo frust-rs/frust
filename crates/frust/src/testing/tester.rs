@@ -17,7 +17,7 @@ use kurbo::Size;
 use crate::Theme;
 
 /// The virtual frame [`Tester::pump_and_settle`] and [`Tester::pump_until`] advance per pump.
-const FRAME: Duration = Duration::from_millis(16);
+pub(super) const FRAME: Duration = Duration::from_millis(16);
 /// Pumps [`Tester::pump_and_settle`] runs before declaring the tree unsettled (9.6 s virtual).
 const SETTLE_FRAME_CAP: usize = 600;
 /// Real time [`Tester::pump_until`] sleeps between pumps, so background threads make progress.
@@ -305,8 +305,24 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
         owner.with(|| root.event(state, event))
     }
 
-    /// Perform an accessibility `action` on semantics node `node` under the Tester's owner.
-    pub fn perform_action(&mut self, node: NodeId, action: Action) -> EventOutcome {
+    /// Perform an accessibility `action` on a semantics node under the Tester's owner, as a
+    /// platform screen reader would.
+    ///
+    /// `target` is a [`NodeId`] or a [`Finder`](super::Finder) (by value or by reference), which
+    /// resolves to the first node it matches. The root honours two actions, each synthesised as
+    /// pointer input at the centre of the node's bounds: [`Action::Click`] (a `Down` then an
+    /// `Up`, a real tap) and [`Action::Focus`] (a `Down` then a `Cancel`, which claims focus
+    /// without pressing). Any other action, or a node not in the tree, is a no-op.
+    ///
+    /// # Panics
+    ///
+    /// When a finder matches nothing or is a type finder, which matches widgets, not nodes.
+    pub fn perform_action(
+        &mut self,
+        target: impl Into<super::find::ActionTarget>,
+        action: Action,
+    ) -> EventOutcome {
+        let node: NodeId = self.resolve_node(target.into());
         let Self {
             root, state, owner, ..
         } = self;
