@@ -72,7 +72,10 @@ use anyhow::{Context, Result, bail};
 use frust_core::event::{EditCommand, EditingState, ImeContentType, ImeState};
 use frust_core::selection_toolbar::{SelectionToolbarPolicy, lock_selection_toolbar_policy};
 use frust_reactive::thread_policy::{ThreadClass, ThreadClassOutcome, set_current_thread_class};
-use frust_reactive::{AppLifecycleState, ReactiveRuntime, push_app_lifecycle, push_deep_link};
+use frust_reactive::{
+    AppLifecycleState, MemoryPressure, ReactiveRuntime, push_app_lifecycle, push_deep_link,
+    push_memory_pressure,
+};
 use frust_render::{RenderContext, SurfaceAlphaRequest, SurfacePhase, SurfaceRenderer};
 use frust_scene::Scene;
 use frust_shell_common::perf::{self, FrameStats, StartupSpans};
@@ -2025,13 +2028,18 @@ pub fn did_enter_background(handle: *mut c_void) {
 /// `frust_memory_warning`: `didReceiveMemoryWarningNotification` — trim the
 /// renderer's caches to the plain mobile tier's ceilings (see
 /// [`IosAppHandle::trim_memory`]). One-way for the renderer's life; delivered
-/// in the background as well as the foreground, and safe in both. A missing
-/// handle is a no-op.
+/// in the background as well as the foreground, and safe in both. After the
+/// trim it also pushes the app-facing [`MemoryPressure`] event on the UI
+/// thread (UIKit delivers the notification on the main thread, the reactive
+/// UI thread) and pumps. iOS reports a single warning level, so it always maps
+/// to [`MemoryPressure::Critical`]. A missing handle is a no-op.
 pub fn memory_warning(handle: *mut c_void) {
     guard("frust_memory_warning", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
             app.trim_memory();
+            push_memory_pressure(MemoryPressure::Critical);
+            pump_reactive();
         }
     });
 }

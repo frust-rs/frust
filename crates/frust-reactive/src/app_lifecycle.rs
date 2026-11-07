@@ -131,6 +131,7 @@ pub fn app_lifecycle() -> AppLifecycle {
 type Hook = Arc<dyn Fn() + Send + Sync>;
 type StateHook = Arc<dyn Fn(AppLifecycleState) + Send + Sync>;
 type ExitHook = Arc<dyn Fn() -> AppExitResponse + Send + Sync>;
+type PressureHook = Arc<dyn Fn(MemoryPressure) + Send + Sync>;
 
 #[derive(Default)]
 struct Callbacks {
@@ -143,6 +144,7 @@ struct Callbacks {
     detach: Option<Hook>,
     state_change: Option<StateHook>,
     exit_requested: Option<ExitHook>,
+    memory_pressure: Option<PressureHook>,
     disposed: bool,
 }
 
@@ -243,6 +245,12 @@ impl AppLifecycleListener {
         f: impl Fn() -> AppExitResponse + Send + Sync + 'static,
     ) -> Self {
         self.install(|c| c.exit_requested = Some(Arc::new(f)))
+    }
+
+    /// The host reported memory pressure via [`push_memory_pressure`]. Independent of the
+    /// lifecycle state machine: it fires in any [`AppLifecycleState`] and never changes it.
+    pub fn on_memory_pressure(self, f: impl Fn(MemoryPressure) + Send + Sync + 'static) -> Self {
+        self.install(|c| c.memory_pressure = Some(Arc::new(f)))
     }
 
     /// Unregister now — the explicit form of dropping the listener.
@@ -388,6 +396,53 @@ fn push(rt: Option<&ReactiveRuntime>, target: AppLifecycleState) {
     }
 }
 
+/// How urgently the host asks the app to give memory back. A one-shot event, not state.
+/// Each shell documents how it maps the platform's signal onto these levels.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MemoryPressure {
+    /// Trim caches you can cheaply rebuild.
+    Moderate,
+    /// Release everything that is not on screen.
+    Critical,
+}
+
+impl MemoryPressure {
+    fn code(self) -> u8 {
+        match self {
+            Self::Moderate => 1,
+            Self::Critical => 2,
+        }
+    }
+}
+
+static LAST_PRESSURE: AtomicU8 = AtomicU8::new(0);
+
+/// The level of the most recent [`push_memory_pressure`] in this process, or `None` before
+/// any. A diagnostic mirror only — memory pressure is an event, not a signal.
+pub fn last_memory_pressure() -> Option<MemoryPressure> {
+    match LAST_PRESSURE.load(Ordering::SeqCst) {
+        1 => Some(MemoryPressure::Moderate),
+        2 => Some(MemoryPressure::Critical),
+        _ => None,
+    }
+}
+
+/// Deliver a memory-pressure event. Shell-facing; panics off the UI thread once the
+/// runtime exists (the [`push_app_lifecycle`] contract). Every live listener's
+/// [`on_memory_pressure`](AppLifecycleListener::on_memory_pressure) hook runs synchronously
+/// in registration order, each under `catch_unwind`. It does not touch [`AppLifecycleState`]
+/// and fires no lifecycle hook. A hook must not itself push.
+pub fn push_memory_pressure(level: MemoryPressure) {
+    assert_ui_thread("push_memory_pressure");
+    LAST_PRESSURE.store(level.code(), Ordering::SeqCst);
+    for slot in snapshot() {
+        if let Some(hook) = live(&slot, |c| c.memory_pressure.clone()) {
+            guarded("on_memory_pressure", || hook(level));
+        }
+    }
+}
+
 /// Ask every listener whether the app may exit — Flutter's `handleRequestAppExit`.
 /// Shell-facing: a desktop shell calls it only for a cancelable exit (a window close, the
 /// Quit menu item), never on mobile or web. Panics off the UI thread once the runtime exists.
@@ -415,6 +470,7 @@ pub fn request_app_exit() -> AppExitResponse {
 #[cfg(test)]
 fn reset_for_test() {
     MIRROR.store(NO_PUSH, Ordering::SeqCst);
+    LAST_PRESSURE.store(0, Ordering::SeqCst);
     if let Some(signal) = SIGNAL.get() {
         signal.set(AppLifecycleState::Detached);
     }
@@ -756,5 +812,73 @@ mod tests {
         exit_handler("gone", &log, AppExitResponse::Cancel).dispose();
         assert_eq!(request_app_exit(), AppExitResponse::Exit);
         expect(&log, &[]);
+    }
+
+    #[test]
+    fn memory_pressure_reaches_listeners_in_registration_order() {
+        let (_guard, log) = setup();
+        let hook = |tag: &'static str| {
+            let log = Arc::clone(&log);
+            move |level| note(&log, format!("{tag}:{level:?}"))
+        };
+        let _a = AppLifecycleListener::new().on_memory_pressure(hook("a"));
+        let _b = AppLifecycleListener::new().on_memory_pressure(hook("b"));
+        push_memory_pressure(MemoryPressure::Moderate);
+        push_memory_pressure(MemoryPressure::Critical);
+        expect(
+            &log,
+            &["a:Moderate", "b:Moderate", "a:Critical", "b:Critical"],
+        );
+    }
+
+    #[test]
+    fn a_disposed_listener_gets_no_memory_pressure() {
+        let (_guard, log) = setup();
+        let l = Arc::clone(&log);
+        AppLifecycleListener::new()
+            .on_memory_pressure(move |_| note(&l, "gone"))
+            .dispose();
+        push_memory_pressure(MemoryPressure::Critical);
+        expect(&log, &[]);
+    }
+
+    #[test]
+    fn a_panicking_pressure_hook_does_not_stop_the_others() {
+        let (_guard, log) = setup();
+        let _a = AppLifecycleListener::new().on_memory_pressure(|_| panic!("pressure failed"));
+        let l = Arc::clone(&log);
+        let _b = AppLifecycleListener::new().on_memory_pressure(move |_| note(&l, "b"));
+        push_memory_pressure(MemoryPressure::Critical);
+        expect(&log, &["b"]);
+    }
+
+    #[test]
+    fn memory_pressure_leaves_the_lifecycle_alone() {
+        let (_guard, log) = setup();
+        let _a = recorder("a", &log);
+        push_app_lifecycle(Resumed);
+        take(&log);
+        push_memory_pressure(MemoryPressure::Critical);
+        expect(&log, &[]);
+        assert_eq!(app_lifecycle().state_untracked(), Resumed);
+    }
+
+    #[test]
+    fn last_memory_pressure_mirrors_the_latest_push() {
+        let (_guard, _log) = setup();
+        assert_eq!(last_memory_pressure(), None);
+        push_memory_pressure(MemoryPressure::Critical);
+        assert_eq!(last_memory_pressure(), Some(MemoryPressure::Critical));
+        push_memory_pressure(MemoryPressure::Moderate);
+        assert_eq!(last_memory_pressure(), Some(MemoryPressure::Moderate));
+    }
+
+    #[test]
+    #[should_panic(expected = "wiring bug")]
+    fn memory_pressure_off_the_ui_thread_panics() {
+        let (_guard, _log) = setup();
+        std::thread::spawn(|| push_memory_pressure(MemoryPressure::Moderate))
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e));
     }
 }

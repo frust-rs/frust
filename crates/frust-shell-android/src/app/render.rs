@@ -107,7 +107,7 @@ pub(crate) fn gpu_passes(renderer: &SurfaceRenderer) -> Option<GpuPasses> {
 ///
 /// The slot is process-global (one renderer per process); see
 /// [`publish_resident_pages`].
-pub(super) fn publish_ledger(renderer: &mut SurfaceRenderer) {
+pub(crate) fn publish_ledger(renderer: &mut SurfaceRenderer) {
     if let Some(resident) = renderer.take_retained_ledger() {
         publish_resident_pages(
             resident.frame,

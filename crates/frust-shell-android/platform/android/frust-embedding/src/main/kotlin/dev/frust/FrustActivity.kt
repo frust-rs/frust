@@ -1,5 +1,6 @@
 package dev.frust
 
+import android.content.ComponentCallbacks2
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -313,6 +314,18 @@ open class FrustActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         surfaceView.onStart()
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        surfaceView.onTrimMemory(level)
+    }
+
+    @Suppress("DEPRECATION")
+    override fun onLowMemory() {
+        super.onLowMemory()
+        // TRIM_MEMORY_COMPLETE: the most severe level.
+        surfaceView.onTrimMemory(ComponentCallbacks2.TRIM_MEMORY_COMPLETE)
     }
 
     override fun onStop() {
