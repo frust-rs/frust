@@ -3,9 +3,9 @@
 //! These are the CORE `frust-paths` leaf, re-exported so an app that depends on `frust` alone can
 //! place caches, sidecars and export staging.
 //!
-//! - [`data_dir`] is the user's per-app-agnostic data root; [`cache_dir`] is the cache root. Both
-//!   return the *base*: join your own subdirectory onto it. Neither creates the directory
-//!   ([`atomic_write`] creates the parents of the file it writes).
+//! - [`data_dir`] is the platform's data root and [`cache_dir`] its cache root, shared by every
+//!   app on desktop: join your own subdirectory onto the returned base. Neither creates the
+//!   directory ([`atomic_write`] creates the parents of the file it writes).
 //! - Both return `None` when the platform cannot resolve one (`HOME` or `APPDATA` unset), never a
 //!   guess that could write into the current directory.
 //!
