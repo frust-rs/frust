@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between twenty-one sections
+`pattern_switcher`-hosted section body, selecting between twenty-two sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twenty-one
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twenty-two
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -207,6 +207,18 @@ The sections, in order:
     continuous frames. The ignored `tests/gpu_pass_headless.rs` renders the same
     pass offscreen on a GPU host (`cargo test --test gpu_pass_headless --
     --ignored`).
+22. **Memory** — the `frust-device-info` device-gate vehicle. It shows the five
+    figures of `DeviceMemory::query()`: total RAM (GiB and bytes), the low-RAM
+    flag, system available, process headroom and the system low flag. A figure the
+    platform does not report reads "not reported on this platform". A **Query**
+    button re-reads them, and so does every `on_memory_pressure` event; the
+    newest-first log (20 rows) keeps each read. Each read writes one line to the
+    platform log with the prefix `frust-gate device-memory:` (`total=`,
+    `low_ram=`, `system_available=`, `headroom=`, `system_low=`; `none` for an
+    unreported figure), and a pressure event first writes
+    `frust-gate device-memory: pressure=<level>`. Android 14 and later deliver no
+    foreground trim level, so poll this section instead. Deep link:
+    `frustplay://section/memory`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
