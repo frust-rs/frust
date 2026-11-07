@@ -93,6 +93,33 @@ impl Locale {
             &variants,
         ))
     }
+
+    /// `reactive::I18n::set_locale`'s retention rule: `base` (region-less)
+    /// plus the region of `retained`, with the script `base` is meant to have
+    /// when it has none of its own.
+    ///
+    /// - `retained` is the same language: its explicit script carries over,
+    ///   so `zh-Hans-US` then `zh` stays `zh-Hans-US` and a repeated call is
+    ///   a no-op. `zh-TW` has none, so `zh-TW` then `zh` stays `zh-TW`.
+    /// - `retained` is another language and the region settles the script
+    ///   (`en-HK` then `zh`): nothing is pinned, so the region decides.
+    /// - `retained` is another language otherwise: the script `base` implies
+    ///   without a region is pinned, so an inherited region cannot change it
+    ///   (`en-US` then `zh` is `zh-Hans-US`, not likely-`Hant` `zh-US`).
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn compose_retained(base: &Locale, retained: &Locale, region: Region) -> Self {
+        let mut id = base.as_lang_id().clone();
+        if id.script.is_none() {
+            id.script = if retained.language() == base.language() {
+                retained.script()
+            } else if crate::engine::region_settles_script(id.language, region) {
+                None
+            } else {
+                crate::engine::likely_script(id.language, None)
+            };
+        }
+        Self::compose_region(&Locale(id), region)
+    }
 }
 
 impl FromStr for Locale {

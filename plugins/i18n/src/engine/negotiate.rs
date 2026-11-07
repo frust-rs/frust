@@ -19,7 +19,10 @@
 //! is dropped. Without this, `fluent-langneg`'s built-in table does not
 //! maximize `zh-TW`/`zh-HK`/`zh-MO`, and the language-only match hands a
 //! Traditional-Chinese request a `zh-Hans` bundle. The declared fallback is
-//! exempt, so a script mismatch ends at the app's fallback.
+//! exempt, so a script mismatch ends at the app's fallback. A region-tagged
+//! bundle takes part in the filtering too: it counts as the script its own
+//! likely-script row gives it (`zh-CN` is `Hans`, `zh-TW` is `Hant`), so a
+//! `zh-TW` request never lands on a `zh-CN` bundle.
 //!
 //! A script-less available bundle (e.g. `zh`) stays a language-wide match for
 //! every request of that language; name bundles with a script (`zh-Hans`,
@@ -55,6 +58,19 @@ pub(crate) fn likely_script(language: Language, region: Option<Region>) -> Optio
         _ => return None,
     };
     script.parse().ok()
+}
+
+/// Whether `region` itself settles `language`'s script, so a region inherited
+/// from a tag of another language may decide it (`en-HK` then `zh` is
+/// Traditional). `zh-US` and `zh-GB` are not on this list: a Chinese device
+/// locale there is `Hant`, but an English device there says nothing about
+/// which Chinese the user picked.
+#[cfg(feature = "frust-api")]
+pub(crate) fn region_settles_script(language: Language, region: Region) -> bool {
+    matches!(
+        (language.as_str(), region.as_str()),
+        ("zh", "TW" | "HK" | "MO") | ("sr", "RS" | "BA")
+    )
 }
 
 /// Resolves `requested` against `available`, returning the fallback chain.
