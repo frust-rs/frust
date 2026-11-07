@@ -72,7 +72,7 @@ static TABLES: Mutex<Option<HashMap<String, MaterialStrings>>> = Mutex::new(None
 /// by script into `zh-Hans` and `zh-Hant`. The script comes from
 /// [`Locale::likely_script`], the same table locale negotiation uses, so a
 /// bundle and its Material strings always agree. A Chinese locale whose
-/// script cannot be inferred (`zh-US`) takes `zh-Hans`.
+/// script cannot be inferred (`zh-AU`) takes `zh-Hans`.
 fn table_key(locale: &Locale) -> String {
     let language = locale.language();
     if language.as_str() != "zh" {

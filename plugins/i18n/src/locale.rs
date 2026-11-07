@@ -136,6 +136,8 @@ mod tests {
         assert_eq!(script("zh-TW").as_deref(), Some("Hant"));
         assert_eq!(script("zh-CN").as_deref(), Some("Hans"));
         assert_eq!(script("zh-Hant-CN").as_deref(), Some("Hant"));
+        assert_eq!(script("zh-US").as_deref(), Some("Hant"));
+        assert_eq!(script("sr-ME"), None);
         assert_eq!(script("de-AT"), None);
     }
 }
