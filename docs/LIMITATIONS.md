@@ -5455,31 +5455,15 @@ and `a_go_out_of_a_shell_discards_a_stale_push_before_a_push_back_in` in `crates
 **Observed**: a route-less page (a dialog or sheet pushed through the controller) has no key, so a `go`
 removes it even when the page beneath it is retained, including a `go` to the current location.
 
-**Applies to**: an app that navigates while an overlay is open and expects the overlay to stay. Flutter
-keeps pageless routes attached to a retained page; frust has no such attachment.
+**Applies to**: an app that navigates while an overlay is open and expects the overlay to stay,
+including a `BackPolicy::Veto` overlay and a `go` from a deep link. A security gate (app lock, consent)
+must be a route redirect, not an overlay. Flutter keeps pageless routes attached to a retained page;
+frust has no such attachment.
 
 **Why accepted, not fixed**: the stack after a `go` is exactly the matched chain, which is the contract
 apps rely on to leave nothing below a finished flow.
 
 **Evidence**: `a_go_within_the_shell_closes_a_page_pushed_over_it` in `crates/frust-widgets/src/nav/router.rs`.
-
----
-
-### `nav-go-parent-page-location` — a page kept as a chain parent publishes its child's location
-
-**Observed**: every page of a matched chain is stamped with the full resolved location. After a `go`
-between the children of `Route::new("/", ..).child(shell_route(..))`, the retained `/` page's published
-route entry reads the child's path, and the outer `RouteStack` publishes a new generation although no
-page changed. A page retained by a shell's key is the exception: it keeps the location that placed it.
-
-**Applies to**: code reading lower entries of `NavigatorController::route_stack`. `RouteStack::current_route`
-reads the top and is unaffected.
-
-**Why accepted, not fixed**: this stamping predates the keyed `go`. Per-page matched locations are a
-wider change to route identity than a stack reset needs.
-
-**Evidence**: `a_page_below_a_shell_in_the_route_tree_survives_navigation_between_its_children` in
-`crates/frust/tests/nav_shell.rs`.
 
 ---
 

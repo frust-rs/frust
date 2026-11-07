@@ -15,8 +15,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   What follows from it:
   - A page whose matched path is unchanged keeps its state and takes the new params, rather than
     rebuilding. A shell page survives any `go` whose chain crosses it.
-  - A warm deep link replaces the stack, since `handle_location` is a `go`.
-  - `go` closes route-less overlays, including one over a page it keeps.
+  - A warm deep link replaces the stack, since `handle_location` is a `go`. A link matching no route
+    pushes the error page instead, unlike go_router, so a stray link cannot wipe the stack.
+  - `go` closes route-less overlays, including a non-dismissable one over a page it keeps, whether
+    the `go` came from app code or a link. A security gate must be a route redirect.
+  - A parent page in a matched chain publishes its own path in `route_stack`, not the leaf's location.
   - A removed page's `on_result` fires once with an empty result, on the `go`'s own frame.
   - Only the top page animates, with its route's transition or the navigator's default. Removed pages
     stay alive until the transition settles, though depth and back already report the new stack.
