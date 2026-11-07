@@ -8,12 +8,41 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Breaking
 
+- `Router::go` and `RouteNavigator::go` now make the stack exactly the matched chain, as their docs
+  said and as go_router defines `go`. They used to replace only the top page, so pages below it
+  survived. To keep a page below a shell or another page, make it a parent in the route table:
+  `Route::new("/", ..).child(shell_route(..))`. A hand-written pop to the root before `go` can go.
+  What follows from it:
+  - A page whose matched path is unchanged keeps its state and takes the new params, rather than
+    rebuilding. A shell page survives any `go` whose chain crosses it.
+  - A warm deep link replaces the stack, since `handle_location` is a `go`, and one matching no route
+    makes it one error page. An app receiving links no route is for, such as an OAuth callback delivered
+    as a deep link, declares a route for them or handles them before `track()`.
+  - `go` closes route-less overlays, including a non-dismissable one over a page it keeps, whether
+    the `go` came from app code or a link. A security gate must be a route redirect.
+  - A parent page in a matched chain publishes its own path in `route_stack`, not the leaf's location.
+    A `push` placing a shell from its parent page stacks only the shell.
+  - A removed page's `on_result` fires once with an empty result, on the `go`'s own frame.
+  - Only the top page animates, with its route's transition or the navigator's default. Removed pages
+    stay alive until the transition settles, though depth and back already report the new stack.
+  - A `go` applied in a navigator's first build starts no transition, so a cold start shows its page
+    at once instead of animating from the root page.
+  - When several `go` calls land in one frame, the last one wins and the earlier pages are not built.
 - `frust-shell-common`'s non-default `gpu` feature: `install_gpu_handle` and `gpu_handle` are
   removed. A shell now publishes through an RAII `GpuPublisher` into a replaceable, generation-tagged
   slot, read with `with_gpu_handle` and `gpu_handle_generation`. Only in-repo consumers were affected.
 
 ### Added
 
+- `SceneTextureHints` (`filter`: `SceneTextureFilter::{Linear, Nearest, NearestWhenMagnified}`, and
+  a caller-asserted `opaque`) for externally bound textures: `EngineRenderer::bind_texture_with` and
+  `ExternalFrame::bind_texture_with`, re-exported from `frust-engine`, `frust-render` and `frust::gpu`.
+  `Linear` shares the image sampling resolver, and an `opaque` texture joins the depth-writing opaque
+  pass like an opaque image. Unhinted textures behave as before.
+- Texture bus: `SourceFormat::Bgra8` (premultiplied; swizzled on the CPU on GL only) and sub-rect
+  updates through `SourceFrame::with_update_region` / `UpdateRegion` (re-exported as
+  `frust::texture::UpdateRegion`), refused with a one-time warning when no same-size, same-format
+  texture is shown.
 - `DeviceHandle::generation()` (process-wide, monotonic, non-zero, shared by clones) and
   `DeviceHandle::is_lost()` (latched by the device-lost callback, never cleared); `frust::gpu::device_generation()`.
 - `frust::gpu::request_optional_features`/`requested_optional_features` (and

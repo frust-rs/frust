@@ -24,6 +24,20 @@
 //! `build` returns — an app already calling `track()` every build gets path
 //! navigation with **no new app code**.
 //!
+//! # Links replace the stack
+//!
+//! A warm link is handled exactly like [`Router::go`]: it **replaces** the
+//! navigation stack with the link's chain, it does not stack a page over the
+//! current one. The same holds for a request queued through the
+//! [`RouteNavigator`] with `go`, which `track()` applies through
+//! [`Router::go`] too. An app that must keep its stack when a link arrives (a
+//! mid-way onboarding flow, say) handles the link itself instead of relying on
+//! `track()`.
+//!
+//! A link matching no route makes the stack one error page, as go_router does. So
+//! an app receiving links no route is for (an OAuth callback delivered as a deep
+//! link, say) declares a route for them or handles them before `track()`.
+//!
 //! # Dedupe
 //!
 //! [`RouterDeepLinks::track`] is meant to be called from every
@@ -504,6 +518,21 @@ mod tests {
         push_deep_link("/settings");
         assert_eq!(warm.track_and_paint(), SETTINGS);
 
+        // A warm link REPLACES the stack: stack pages over the current one,
+        // then deliver a link, and the stack is exactly the link's chain.
+        warm.links.router().push("/profile/7");
+        warm.rebuild();
+        warm.links.router().push("/settings");
+        warm.rebuild();
+        assert!(warm.links.router().controller().depth() >= 3);
+        push_deep_link("/profile/9");
+        assert_eq!(warm.track_and_paint(), PROFILE);
+        assert_eq!(
+            warm.links.router().controller().depth(),
+            1,
+            "a warm link replaces the stack rather than stacking over it"
+        );
+
         // Criterion 2 (dedupe): manually navigate elsewhere, then call
         // `track()` again with no new push — the same link must not be
         // re-handled (it would jump back to SETTINGS if it were).
@@ -517,9 +546,13 @@ mod tests {
         );
 
         // Criterion 3: a malformed/unmatched link hits the router's error
-        // page — no panic.
+        // page, with no panic, and replaces the stack like any other go.
+        warm.links.router().push("/settings");
+        warm.rebuild();
+        assert_eq!(warm.links.router().controller().depth(), 2);
         push_deep_link("/does/not/exist");
         assert_eq!(warm.track_and_paint(), ERROR);
+        assert_eq!(warm.links.router().controller().depth(), 1);
 
         // Criterion 4 (the `RouteNavigator` pump): a request queued the way a
         // screen's event handler would — through the context-safe handle, with
@@ -532,6 +565,19 @@ mod tests {
             warm.track_and_paint(),
             SETTINGS,
             "track() must pump the RouteNavigator queue"
+        );
+
+        // `RouteNavigator::go` goes through `Router::go` too: it replaces the
+        // stack rather than stacking over it.
+        warm.links.router().push("/profile/3");
+        warm.rebuild();
+        assert!(warm.links.router().controller().depth() >= 2);
+        warm.links.route_navigator().go("/profile/5");
+        assert_eq!(warm.track_and_paint(), PROFILE);
+        assert_eq!(
+            warm.links.router().controller().depth(),
+            1,
+            "a queued go replaces the stack"
         );
 
         // ...and pumping an empty queue on every subsequent build is inert.

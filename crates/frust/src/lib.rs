@@ -1230,11 +1230,21 @@ pub mod authoring {
 ///   [`CommandBuffer`] comes from — are for a *host* sharing one depth buffer
 ///   across renderers of its own; they have nothing to do with a pass
 ///   registered here.
-/// - **The result is always composited blended**, never treated as opaque:
-///   the engine does not read the caller's texels, so it cannot know they are
-///   (`docs/LIMITATIONS.md`'s `engine-scene-texture-always-blended`). Return
-///   premultiplied colour, the convention every paint in an engine frame
-///   travels in.
+/// - **The result is composited blended unless you say otherwise.** The
+///   engine does not read the caller's texels, so it cannot know they are
+///   opaque and blends by default (`docs/LIMITATIONS.md`'s
+///   `engine-scene-texture-always-blended`). A pass that guarantees alpha is
+///   one everywhere in the view it binds opts in through
+///   [`ExternalFrame::bind_texture_with`] and
+///   [`gpu::SceneTextureHints::assume_opaque`]; the engine takes that on trust, and
+///   a view holding any alpha below one drawn as opaque occludes instead of
+///   blending. The same hints pick the filter used when the texture is drawn
+///   scaled: [`gpu::SceneTextureFilter::Linear`] (the default),
+///   [`gpu::SceneTextureFilter::Nearest`], or
+///   [`gpu::SceneTextureFilter::NearestWhenMagnified`] — hard-edged texels while
+///   magnified, smooth when minified, for pixel-peeping a photo. An unscaled
+///   whole-pixel placement is always sampled exactly. Return premultiplied
+///   colour, the convention every paint in an engine frame travels in.
 /// - **A pass's recorded work is submitted only if the frame is** — a
 ///   refused engine frame drops the encoder unsubmitted, and every command a
 ///   pass recorded into it goes with it — **but [`ExternalFrame::bind_texture`]
@@ -1293,7 +1303,8 @@ pub mod gpu {
     /// passes are recorded into rather than from `frust-gpu`: the registry is
     /// process-wide, but only an engine-tier frame drains it.
     pub use frust_render::{
-        ExternalFrame, ExternalPass, register_external_pass, unregister_external_pass,
+        ExternalFrame, ExternalPass, SceneTextureFilter, SceneTextureHints, register_external_pass,
+        unregister_external_pass,
     };
     /// Offscreen rendering of a scene through the engine, with no window: the
     /// harness an app golden-tests a viewport drawn by its own
@@ -1411,8 +1422,8 @@ pub mod texture {
     pub use frust_render::texture_bus::take_frame_owed;
     pub use frust_render::texture_bus::{
         MAX_RETIRING, NativeHandle, NativeHandleKind, NativeImporter, SourceFormat, SourceFrame,
-        SourcePayload, TextureRegistration, native_importer_installed, register_texture_source,
-        request_frame,
+        SourcePayload, TextureRegistration, UpdateRegion, native_importer_installed,
+        register_texture_source, request_frame,
     };
 }
 

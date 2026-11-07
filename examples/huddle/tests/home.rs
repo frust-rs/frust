@@ -27,22 +27,19 @@ type Root = RenderRoot<HuddleState, AnyView<HuddleState>>;
 const FRAME_MS: u64 = 16;
 
 /// How many frames an animation gets to settle before a test gives up: ~4.8 s
-/// of paint clock, an order of magnitude past the boot entrance transition.
+/// of paint clock, an order of magnitude past any page transition.
 const SETTLE_FRAMES: usize = 300;
 
 /// A monotonic paint clock: [`frame`](Self::frame) paints at the current time
 /// and then advances it by [`FRAME_MS`], the way a real shell's clock moves.
 ///
-/// The app boots mid-transition: the router's start location replaces the
-/// navigator's seeded Home page under an `M3FadeThrough` cross-fade. Until that
-/// cross-fade settles, the replaced page is the one on screen — and the
-/// navigator does not rebuild a replaced page, so it keeps its loading
-/// skeleton. The live Home page the roster loads into sits at alpha 0 on the
-/// cross-fade's first stretch, and the navigator paints an alpha-0 page into a
-/// discard sink, so none of its text reaches the recorded scene. A clock pinned
-/// at [`FrameTime::ZERO`] — the time [`support::frame`] paints at — holds the
-/// cross-fade at progress 0 forever, so no frame could ever show the loaded
-/// roster.
+/// The app boots straight onto its start page: ops drained in a navigator's
+/// first build start no flight, so there is no entrance cross-fade. Page
+/// transitions only run for navigation after boot, and the navigator paints an
+/// alpha-0 page into a discard sink while one runs, so a clock pinned at
+/// [`FrameTime::ZERO`] (the time [`support::frame`] paints at) holds any such
+/// flight at progress 0 forever. This clock advances like a real shell's so
+/// every later transition can settle.
 struct PaintClock {
     t_ms: u64,
 }
@@ -97,7 +94,7 @@ fn render_until_loaded(
         let transition = state.nav.router().controller().transition();
         assert!(
             Instant::now() < deadline,
-            "the roster did not load within the deadline (entrance transition \
+            "the roster did not load within the deadline (page transition \
              active: {}, progress {:.3})",
             transition.active,
             transition.progress
@@ -143,13 +140,11 @@ fn first_row_center(scene: &support::RecScene) -> Point {
     Point::new(origin.x + size.width / 2.0, origin.y + size.height / 2.0)
 }
 
-/// The paint clock carries the app out of its boot entrance cross-fade within a
-/// bounded number of frames, independently of the roster loader's timer. Until
-/// the cross-fade settles, the page the roster loads into is painted into a
-/// discard sink (see [`PaintClock`]), so a clock that cannot settle it makes
-/// every roster assertion in this file unreachable.
+/// The app boots onto its start page with no transition in flight: a go drained
+/// in the navigator's first build starts no flight, so the very first frame
+/// paints the page itself rather than a cross-fade out of a placeholder root.
 #[test]
-fn boot_entrance_transition_settles_on_the_paint_clock() {
+fn boot_starts_no_transition_and_paints_the_start_page() {
     let _g = serial();
     let _ambient = setup();
 
@@ -160,24 +155,16 @@ fn boot_entrance_transition_settles_on_the_paint_clock() {
     let mut clock = PaintClock::new();
     let nav = state.nav.router().controller().clone();
 
-    clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
-    assert!(
-        nav.transition().active,
-        "the app boots mid-way through its entrance cross-fade"
-    );
-
-    for _ in 0..SETTLE_FRAMES {
-        if !nav.transition().active {
-            break;
-        }
-        clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
-    }
+    let (scene, _) = clock.frame(&mut root, &mut logic, &mut state, &mut tcx);
     let transition = nav.transition();
     assert!(
         !transition.active,
-        "the entrance cross-fade never settled on the paint clock (still at \
-         progress {:.3} after {SETTLE_FRAMES} frames)",
+        "a cold-start go starts no flight (progress {:.3})",
         transition.progress
+    );
+    assert!(
+        scene.glyph_runs > 0,
+        "the first frame paints the start page's text, not an empty cross-fade"
     );
 }
 

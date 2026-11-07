@@ -18,17 +18,17 @@
 //! `Component::init`), so an integration test
 //! exercises exactly that real, non-empty feed.
 //!
-//! # Settling the boot/push cross-fade before driving input
+//! # Settling the push cross-fade before driving input
 //!
-//! The shell's navigator runs an `M3FadeThrough` cross-fade at boot and again
-//! when `/activity` is pushed. The shared [`support::frame`] helper paints at
+//! The shell's navigator runs an `M3FadeThrough` cross-fade when `/activity` is
+//! pushed. The shared [`support::frame`] helper paints at
 //! [`frust_core::FrameTime::ZERO`], which freezes that transition forever —
 //! and while a transition is in flight the navigator suppresses ALL page
 //! input, so an app-bar or row tap dispatched mid-transition never reaches the
 //! Activity screen. [`mount_loaded_activity_tab`] therefore advances the paint
 //! clock (via the local [`frame_at`]) as it pumps the loader, exactly like
 //! `tests/home.rs`/`tests/search.rs`'s `settle_transitions`: by the time the
-//! feed resolves past its mocked latency the entrance cross-fade has long
+//! feed resolves past its mocked latency the cross-fade has long
 //! settled, the leaving Home page is torn down, and page input flows again.
 //! [`settle_transitions`] is the same wait, reused after a later row-tap push
 //! (into `/channel/:id`, a `Component`-hosted page with its own real async
@@ -127,8 +127,8 @@ fn first_row_center(scene: &RecScene) -> Point {
 /// Rebuild + layout + paint like [`support::frame`], but painting at `t_ms` on a
 /// caller-advanced clock instead of the shared harness's pinned
 /// [`FrameTime::ZERO`]. Returns the recorded scene together with whether the
-/// paint asked for another frame (an animation — such as the boot/push
-/// cross-fade — is still running). Mirrors `tests/home.rs`'s helper of the same
+/// paint asked for another frame (an animation — such as the push cross-fade —
+/// is still running). Mirrors `tests/home.rs`'s helper of the same
 /// name (see the module docs).
 fn frame_at(
     root: &mut Root,
@@ -146,7 +146,7 @@ fn frame_at(
 }
 
 /// Navigate a fresh app straight to `/activity` and pump past the mocked load
-/// latency — advancing the paint clock so the boot/push cross-fade settles and
+/// latency — advancing the paint clock so the push cross-fade settles and
 /// page input flows (see the module docs). Returns the root/state/logic/tcx,
 /// the current paint-clock reading (so callers keep advancing it), and the
 /// loaded scene.
@@ -185,7 +185,7 @@ fn mount_loaded_activity_tab() -> (
     );
 
     // Pump the spawned loader (`spawn_local`) while advancing the paint clock,
-    // which settles the boot/push cross-fade so subsequent taps reach the page.
+    // which settles the push cross-fade so subsequent taps reach the page.
     // The feed resolves past its mocked ~400ms latency and starts painting one
     // "Unread" chip per (freshly unread) row.
     let runtime = ReactiveRuntime::get().expect("setup() installed the reactive runtime");

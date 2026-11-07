@@ -5433,6 +5433,40 @@ order only orders fallbacks among themselves).
 
 ---
 
+### `nav-go-undelivered-results` — a `go` does not deliver every result callback it makes unreachable
+
+**Observed**: `Router::go` fires `on_result` once with an empty result for each page it removes from a
+navigator. Two cases get nothing: a page inside a nested navigator torn down with its host page, and a
+push still queued on a shell controller the new chain does not cross, whose queue the `go` discards.
+
+**Applies to**: code that clears state only in `on_result` for a page inside a `shell_route`, when a
+`go` can leave that shell.
+
+**Why accepted, not fixed**: `NavigatorView::teardown` has no `&mut State` pass to flush results in, and
+Flutter loses a nested navigator's route results the same way. The queued push never became a page.
+
+**Evidence**: `NavigatorView::teardown` in `crates/frust-widgets/src/nav/navigator.rs`; `forget_queued_outside`
+and `a_go_out_of_a_shell_discards_a_stale_push_before_a_push_back_in` in `crates/frust-widgets/src/nav/router.rs`.
+
+---
+
+### `nav-go-closes-routeless-overlays` — a `go` closes a dialog even over a page it keeps
+
+**Observed**: a route-less page (a dialog or sheet pushed through the controller) has no key, so a `go`
+removes it even when the page beneath it is retained, including a `go` to the current location.
+
+**Applies to**: an app that navigates while an overlay is open and expects the overlay to stay,
+including a `BackPolicy::Veto` overlay and a `go` from a deep link. A security gate (app lock, consent)
+must be a route redirect, not an overlay. Flutter keeps pageless routes attached to a retained page;
+frust has no such attachment.
+
+**Why accepted, not fixed**: the stack after a `go` is exactly the matched chain, which is the contract
+apps rely on to leave nothing below a finished flow.
+
+**Evidence**: `a_go_within_the_shell_closes_a_page_pushed_over_it` in `crates/frust-widgets/src/nav/router.rs`.
+
+---
+
 ### `back-single-window` — back arbitration is per UI thread, so multi-window apps cannot route back per window
 
 **Observed**: back presses arrive only from the Android shell (`push_back_press`), and the arbitration
@@ -6856,28 +6890,27 @@ sizing, premultiplied compositing, reaping, run batching) are pinned by
 device-backed golden class for shader quads), at which point the deferral and
 the skip-list row come out together.
 
-### `engine-scene-texture-always-blended` — an external texture never joins the opaque depth-writing pass
+### `engine-scene-texture-always-blended` — an unhinted external texture is blended, and opacity is caller-asserted
 
-**Observed** (evidence: `crates/frust-engine/src/compile/external.rs` sets
-`may_have_transparency` unconditionally; `Command::SceneTexture` and the
-`bind_texture` registration carry no opacity statement): the engine never
-reads a caller's texels, so every `SceneTexture` and `ShaderQuad` draw takes
-the blended painter-order path even when the texture is fully opaque (a video
-frame, an opaque 3D render), paying the blend and forgoing depth occlusion of
-what lies beneath it. Sampling is also unconditionally bilinear
-(`ImageQuality::Medium`): the whole-pixel-translation nearest downgrade
-`Command::Image` gets from `compile::paint` is not shared with the external
-path; at a 1:1 pixel-aligned mapping the difference rounds away in `u8`.
-The texture bus's `texture_view` frames (`frust_render::texture_bus`, a video or camera
-frame drawn in-scene) take this same path, so they are always blended.
+**Observed** (evidence: `crates/frust-engine/src/compile/external.rs`,
+`crates/frust-engine/tests/scene_texture.rs`): the engine never reads a
+caller's texels. A `SceneTexture` bound with `SceneTextureHints::opaque` set
+(`EngineRenderer::bind_texture_with`, `ExternalFrame::bind_texture_with`)
+routes like an opaque image, but the claim is the caller's: an "opaque" texture
+with alpha below one occludes instead of blending. Every `ShaderQuad` draw and
+every `SceneTexture` bound without the hint (plain `bind_texture`, every
+texture-bus frame, `beui`'s 3D faces) still takes the blended painter-order
+path, paying the blend and forgoing depth occlusion of what lies beneath it.
+Inside an isolated layer (alpha below one) even an opaque-hinted texture
+blends offscreen, as an opaque image does.
 
 **Accepted because**: claiming opacity the engine cannot verify would let a
-translucent texture occlude what it should have blended over; drawing
-correctly and slowly beats drawing wrong.
+translucent texture occlude what it should have blended over; the hint puts
+that claim with the one party that knows, and the default draws correctly.
 
-**Trigger for removal**: an opacity hint on the scene command or on
-registration, and a shared sampling-quality resolver for image and external
-paints.
+**Trigger for removal**: `ShaderQuad` and the texture bus gaining an opacity
+statement of their own, or the engine verifying a texture's alpha. Colour-space
+handling stays deferred: texture bytes pass through unconverted, as before.
 
 ### `engine-frame-clears-colour-unconditionally` — content painted into the target ahead of the frame keeps its depth and loses its pixels
 

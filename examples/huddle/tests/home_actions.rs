@@ -86,8 +86,8 @@ fn settle(
 }
 
 /// Boot the app and pump frames until the roster's loaded (many more text
-/// glyphs than the loading skeleton's), then settle the boot-time entrance
-/// cross-fade — mirrors `tests/home.rs`'s two-step loaded+settled setup, folded
+/// glyphs than the loading skeleton's), then settle any running animation —
+/// mirrors `tests/home.rs`'s two-step loaded+settled setup, folded
 /// into one helper here since every test below starts from it.
 fn mount_loaded_home() -> (
     Root,
