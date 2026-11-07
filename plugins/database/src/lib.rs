@@ -636,8 +636,9 @@ impl Database {
 
     /// Bring the schema up to date: apply every [`Migration`] whose
     /// `to_version` is above the database's current [`Self::schema_version`],
-    /// in order, and return the resulting version (the current one when
-    /// nothing applied).
+    /// in order, and return the resulting version: `Ok(v)` means the stored
+    /// `user_version` is `v` (it equals the version read first when nothing
+    /// ran).
     ///
     /// Each migration runs as its own [`Self::transaction`]: its statements
     /// and the `PRAGMA user_version` bump commit together or not at all. A
@@ -649,10 +650,10 @@ impl Database {
     /// Inside each step's transaction the stored version is read again
     /// before any statement runs: if another migrator already brought the
     /// database to that step's `to_version`, the step is skipped, never
-    /// applied twice. If the stored version is neither the version this step
-    /// builds on nor already past it, the call fails with
-    /// [`DatabaseError::Migration`] (the file moved in a way the list does
-    /// not explain). The recommended pattern is still to run `migrate` once
+    /// applied twice. If the stored version is above the last migration in the
+    /// list (a newer schema), or is neither the version this step builds on
+    /// nor already past it, the call fails with [`DatabaseError::Migration`]
+    /// (the file moved in a way the list does not explain). The recommended pattern is still to run `migrate` once
     /// at startup, before any other handle opens the file. A concurrent
     /// migrator on another connection may instead receive
     /// [`DatabaseError::Sql`] from the engine's write lock (no busy timeout
@@ -672,7 +673,8 @@ impl Database {
     /// `1..=i32::MAX`), the database's version is above the last migration's
     /// `to_version` (a newer schema is an error, never a silent skip, so a
     /// downgraded binary cannot read a schema it does not know), or the
-    /// stored version changed underneath a step as described above. An empty
+    /// stored version changed underneath a step as described above (a newer
+    /// schema is an error whether it is seen before or during a step). An empty
     /// list means the app knows no schema: a fresh database (version 0)
     /// returns `Ok(0)`, while a database at any version above 0 is newer than
     /// the last known migration (0) and errors;
@@ -681,6 +683,27 @@ impl Database {
     /// [`DatabaseError::Reentrant`] if the calling thread is already inside
     /// a [`Self::transaction`] closure on this same handle.
     pub fn migrate(&self, migrations: &[Migration<'_>]) -> Result<u32, DatabaseError> {
+        self.migrate_inner(migrations, &mut |_| {})
+    }
+
+    /// Conformance seam: [`Self::migrate`] with `before_step(to_version)`
+    /// called immediately before each step's transaction opens (never inside
+    /// it), so a test can move the stored version between a step's read and
+    /// its `BEGIN` without threads. Not part of the public API.
+    #[cfg(any(test, feature = "conformance"))]
+    pub(crate) fn migrate_with_hook(
+        &self,
+        migrations: &[Migration<'_>],
+        before_step: &mut dyn FnMut(u32),
+    ) -> Result<u32, DatabaseError> {
+        self.migrate_inner(migrations, before_step)
+    }
+
+    fn migrate_inner(
+        &self,
+        migrations: &[Migration<'_>],
+        before_step: &mut dyn FnMut(u32),
+    ) -> Result<u32, DatabaseError> {
         let mut previous = 0u32;
         for m in migrations {
             if m.to_version == 0 {
@@ -721,10 +744,19 @@ impl Database {
         // first applicable step, then each step's own `to_version`.
         let mut expected = start;
         for m in migrations.iter().filter(|m| m.to_version > start) {
+            before_step(m.to_version);
             self.transaction(|txn| {
                 // Re-read inside the transaction: another migrator may have
                 // advanced the version since the read above.
                 let stored = txn.schema_version()?;
+                if stored > previous {
+                    return Err(DatabaseError::Migration {
+                        message: format!(
+                            "the database is at schema version {stored}, newer than the \
+                             last known migration ({previous})"
+                        ),
+                    });
+                }
                 if stored >= m.to_version {
                     return Ok(());
                 }
@@ -746,7 +778,7 @@ impl Database {
             })?;
             expected = m.to_version;
         }
-        Ok(expected)
+        self.schema_version()
     }
 
     /// Run every `(sql, params)` statement in order inside one
