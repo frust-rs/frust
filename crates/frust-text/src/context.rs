@@ -486,14 +486,14 @@ impl TextContext {
             max_width,
             max_lines,
             overflow,
-            &mut |cx, full| full.truncated(max_lines, Some(cx.ellipsis_in(style, 0))),
+            &mut |cx, _| cx.ellipsis_in(style, 0),
         )
     }
 
     /// Caps `full` (a layout of `text_len` bytes of text, already laid out
     /// at `max_width`) to `max_lines` (at least 1) as [`Self::layout_bounded`]
-    /// documents; `ellipsize` makes the [`TextOverflow::Ellipsis`] cut of the
-    /// full layout, ellipsis included.
+    /// documents; `ellipsis` builds the ellipsis an
+    /// [`TextOverflow::Ellipsis`] cut is marked with, given the full layout.
     fn cap_lines(
         &mut self,
         full: TextLayout,
@@ -501,7 +501,7 @@ impl TextContext {
         max_width: Option<f32>,
         max_lines: usize,
         overflow: TextOverflow,
-        ellipsize: &mut dyn FnMut(&mut Self, &TextLayout) -> TextLayout,
+        ellipsis: &mut dyn FnMut(&mut Self, &TextLayout) -> Ellipsis,
     ) -> TextLayout {
         let visible_lines = visible_line_count(&full, text_len);
         let has_extra_lines = visible_lines > max_lines;
@@ -524,7 +524,10 @@ impl TextContext {
         match overflow {
             TextOverflow::Clip if !has_extra_lines => full,
             TextOverflow::Clip => full.truncated(max_lines, None),
-            TextOverflow::Ellipsis => ellipsize(self, &full),
+            TextOverflow::Ellipsis => {
+                let ellipsis = ellipsis(self, &full);
+                full.truncated(max_lines, Some(ellipsis))
+            }
         }
     }
 
@@ -597,19 +600,15 @@ impl TextContext {
     /// Lays out `spans` exactly like [`Self::layout_rich`], then caps it to
     /// `max_lines` (when `Some`) as [`Self::layout_bounded`] does.
     ///
-    /// An [`TextOverflow::Ellipsis`] cut is drawn in the style of the span the
-    /// kept text ends in, at the same size and colour as the text it follows.
-    ///
-    /// The kept text depends on the ellipsis's width, so the span is settled
-    /// in at most two passes: the span the uncut last line ends in, then the
-    /// span the cut that gave actually ends in. The guarantee: unless nothing
-    /// fits and the bare ellipsis is drawn, the ellipsis is in the style of
-    /// the span holding the last kept byte, and the line never exceeds
-    /// `max_width`. When no pairing of ellipsis and cut agrees (a wider
-    /// ellipsis cuts into an earlier span, a narrower one back into a later
-    /// one), the text is capped at the shorter of the two cuts and
-    /// ellipsized in the span that cap ends in, re-capped at each shorter cut
-    /// that gives until the cut ends in the ellipsis's own span.
+    /// The guarantee: the line never exceeds `max_width`, and an overflowing
+    /// paragraph always paints the ellipsis. The ellipsis takes the style of
+    /// the span where the cut settles after at most two passes: the span the
+    /// uncut last line ends in is the guess, the text is cut with that
+    /// span's ellipsis, and when the cut ends in another span the ellipsis is
+    /// re-made in that span's style and the text re-cut once. The kept text
+    /// depends on the ellipsis's width, so when adjacent spans differ in
+    /// size, family, weight, width or letter spacing, the ellipsis can follow
+    /// a glyph of another span.
     pub fn layout_rich_bounded(
         &mut self,
         spans: &[TextSpan<'_>],
@@ -647,81 +646,20 @@ impl TextContext {
             max_lines,
             overflow,
             &mut |cx, full| {
-                // The exclusive end byte of the text a layout's last line kept.
-                let cut_of = |layout: &TextLayout| {
-                    layout
-                        .line_info(max_lines - 1)
-                        .map_or(0, |line| line.range.end)
+                let index_of = |layout: &TextLayout| {
+                    let range = layout.line_info(max_lines - 1).map(|l| l.range);
+                    span_at(range.map_or(0, |r| r.end.saturating_sub(1)))
                 };
-                let span_of_cut = |cut: usize| span_at(cut.saturating_sub(1));
-                let cut_with = |cx: &mut Self, index: usize| {
-                    let ellipsis = cx.ellipsis_in(spans[index].style, span_style_index(index));
-                    full.truncated(max_lines, Some(ellipsis))
-                };
-                let guess = span_of_cut(cut_of(full));
-                let first = cut_with(cx, guess);
-                let settled = span_of_cut(cut_of(&first));
+                let guess = index_of(full);
+                let ellipsis = cx.ellipsis_in(spans[guess].style, span_style_index(guess));
+                let settled = index_of(&full.truncated(max_lines, Some(ellipsis.clone())));
                 if settled == guess {
-                    return first;
+                    ellipsis
+                } else {
+                    cx.ellipsis_in(spans[settled].style, span_style_index(settled))
                 }
-                let second = cut_with(cx, settled);
-                let second_cut = cut_of(&second);
-                if span_of_cut(second_cut) == settled {
-                    return second;
-                }
-                cx.cut_in_own_span(spans, max_width, max_lines, cut_of(&first).min(second_cut))
             },
         )
-    }
-
-    /// The last-resort rich ellipsis cut: the text up to byte `cut` of
-    /// `spans`, laid out alone (so no cut can reach past it) and ellipsized
-    /// in the style of the span holding its last byte, repeated with the
-    /// shorter cut that gave while the cut ends in another span. Each repeat
-    /// is strictly shorter, so it ends, at worst in the bare ellipsis.
-    fn cut_in_own_span(
-        &mut self,
-        spans: &[TextSpan<'_>],
-        max_width: Option<f32>,
-        max_lines: usize,
-        mut cut: usize,
-    ) -> TextLayout {
-        loop {
-            // The spans of the first `cut` bytes, the last one clipped to it.
-            let mut left = cut;
-            let mut kept: Vec<TextSpan<'_>> = Vec::new();
-            for span in spans {
-                if left == 0 {
-                    break;
-                }
-                let take = left.min(span.text.len());
-                kept.push(TextSpan::new(&span.text[..take], span.style));
-                left -= take;
-            }
-            let index = kept.len().saturating_sub(1);
-            // With nothing kept, the bare ellipsis is in the first span's style.
-            let style = kept.get(index).map_or(spans[0].style, |s| s.style);
-            let ellipsis = self.ellipsis_in(style, span_style_index(index));
-            let layout = self
-                .layout_rich(&kept, max_width)
-                .truncated(max_lines, Some(ellipsis));
-            let next = layout
-                .line_info(max_lines - 1)
-                .map_or(0, |line| line.range.end);
-            // The span of the new cut's last byte within the kept prefix.
-            let mut end = 0;
-            let ends_in = kept
-                .iter()
-                .position(|s| {
-                    end += s.text.len();
-                    end >= next
-                })
-                .unwrap_or(index);
-            if next == 0 || next >= cut || ends_in == index {
-                return layout;
-            }
-            cut = next;
-        }
     }
 
     /// The shape cache's instrumentation counters (shapes performed,
@@ -3234,20 +3172,7 @@ mod tests {
         );
     }
 
-    /// The (colour, size) of the last two glyph runs of a one-line capped
-    /// rich layout: the text the cut kept, then the ellipsis.
-    fn kept_and_ellipsis_runs(layout: &TextLayout) -> ((Color, f32), (Color, f32)) {
-        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
-        assert!(runs.len() >= 2, "kept text and an ellipsis: {}", runs.len());
-        let key = |r: &frust_scene::GlyphRun| match &r.brush {
-            peniko::Brush::Solid(c) => (*c, r.font_size),
-            other => panic!("expected a solid brush, got {other:?}"),
-        };
-        (key(&runs[runs.len() - 2]), key(&runs[runs.len() - 1]))
-    }
-
-    /// A two-span fixture: `head` in a 12px black style, `tail` in a 36px red
-    /// one.
+    /// A two-span fixture: a 12px black head style and a 36px red tail style.
     fn mixed_size_cx() -> (TextContext, TextStyle, TextStyle) {
         let (cx, base) = noto_cx();
         let small = TextStyle {
@@ -3263,37 +3188,34 @@ mod tests {
     }
 
     #[test]
-    fn rich_ellipsis_settled_in_a_second_pass_follows_the_kept_text() {
+    fn rich_ellipsis_paints_when_only_a_narrow_ellipsis_fits_beside_one_big_glyph() {
         let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let (mut cx, small, big) = mixed_size_cx();
-        let head = "aaaaaaaa";
-        let tail = "bbbbbbbbbb";
-        let spans = [TextSpan::new(head, &small), TextSpan::new(tail, &big)];
-        // The uncut line ends in the big span, so the first guess is the big
-        // ellipsis; its wide cut falls back into the small span, which the
-        // second pass then settles in.
-        let six = cx.layout_rich(&[TextSpan::new("aaaaaa", &small)], None);
-        let big_ellipsis = cx.layout(&ELLIPSIS.to_string(), &big, None);
-        let width = six.size().width as f32 + big_ellipsis.size().width as f32;
+        let spans = [TextSpan::new("a", &small), TextSpan::new("iiii", &big)];
+        // Wide enough for "a", one big "i" and the small ellipsis, but not
+        // for "a" and the big ellipsis.
+        let kept = cx.layout_rich(
+            &[TextSpan::new("a", &small), TextSpan::new("i", &big)],
+            None,
+        );
+        let small_ellipsis = cx.layout(&ELLIPSIS.to_string(), &small, None);
+        let width = kept.size().width as f32 + small_ellipsis.size().width as f32;
         let layout = cx.layout_rich_bounded(&spans, Some(width), Some(1), TextOverflow::Ellipsis);
         assert!(layout.size().width <= f64::from(width) + 0.01);
-        let (kept, ellipsis) = kept_and_ellipsis_runs(&layout);
-        assert_eq!(kept, (Color::BLACK, 12.0));
-        assert_eq!(ellipsis, kept, "the ellipsis follows the small span");
+        assert!(
+            !layout.to_scene_runs(kurbo::Point::ORIGIN).is_empty(),
+            "the ellipsis is painted"
+        );
     }
 
     #[test]
-    fn rich_ellipsis_never_trails_a_glyph_of_another_span() {
+    fn rich_ellipsis_settled_in_a_second_pass_still_paints_within_the_width() {
         let _guard = crate::locale::test_support::DefaultLocale::set(None);
         let (mut cx, small, big) = mixed_size_cx();
         let spans = [
             TextSpan::new("aaaa", &small),
             TextSpan::new("bbbbbbbbbb", &big),
         ];
-        // Just wide enough for the small span, one big glyph and the small
-        // ellipsis: cut with the small ellipsis the text ends in the big
-        // span, cut with the big one it ends in the small span, and neither
-        // pairing is consistent. The cut must shorten until it is.
         let head = cx.layout_rich(
             &[TextSpan::new("aaaa", &small), TextSpan::new("b", &big)],
             None,
@@ -3307,8 +3229,41 @@ mod tests {
             "{} > {width}",
             layout.size().width
         );
-        let (kept, ellipsis) = kept_and_ellipsis_runs(&layout);
-        assert_eq!(kept, ellipsis, "the ellipsis takes the last kept span");
+        assert!(!layout.to_scene_runs(kurbo::Point::ORIGIN).is_empty());
+    }
+
+    #[test]
+    fn rich_ellipsis_with_mismatched_sizes_paints_within_the_width() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, small, big) = mixed_size_cx();
+        let spans = [
+            TextSpan::new("aaaaaaaa", &small),
+            TextSpan::new("bbbbbbbbbb", &big),
+        ];
+        let six = cx.layout_rich(&[TextSpan::new("aaaaaa", &small)], None);
+        let big_ellipsis = cx.layout(&ELLIPSIS.to_string(), &big, None);
+        let width = six.size().width as f32 + big_ellipsis.size().width as f32;
+        let layout = cx.layout_rich_bounded(&spans, Some(width), Some(1), TextOverflow::Ellipsis);
+        assert!(layout.size().width <= f64::from(width) + 0.01);
+        assert!(layout.to_scene_runs(kurbo::Point::ORIGIN).len() >= 2);
+    }
+
+    #[test]
+    fn rich_ellipsis_with_two_lines_keeps_two_lines_when_the_text_overflows() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, black) = noto_cx();
+        let red = TextStyle {
+            color: RED,
+            ..black.clone()
+        };
+        let spans = [
+            TextSpan::new("Hello ", &black),
+            TextSpan::new(RICH_TAIL, &red),
+            TextSpan::new(RICH_TAIL, &black),
+        ];
+        let layout = cx.layout_rich_bounded(&spans, Some(120.0), Some(2), TextOverflow::Ellipsis);
+        assert_eq!(layout.line_count(), 2);
+        assert!(layout.size().width <= 120.0 + 0.01);
     }
 
     #[test]
