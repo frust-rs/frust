@@ -73,7 +73,9 @@
 //! own docs.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
+use frust_reactive::MemoryPressure;
 use frust_shell_common::platform_view::ViewCommand;
 use frust_shell_desktop::config::{DEFAULT_APP_NAME, DesktopConfig, MenuSpec};
 use frust_shell_desktop::extensions::{CloseAction, DesktopExtensions};
@@ -105,6 +107,60 @@ mod title_buttons;
 
 use lifecycle::{CloseDecision, Lifecycle};
 
+/// `DISPATCH_MEMORYPRESSURE_WARN` / `_CRITICAL` (`NORMAL`, 0x1, is not a
+/// pressure report).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const FLAG_WARN: usize = 0x2;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const FLAG_CRITICAL: usize = 0x4;
+
+/// Map a libdispatch memory-pressure data word onto the app-facing level:
+/// `WARN` is [`MemoryPressure::Moderate`], `CRITICAL` is
+/// [`MemoryPressure::Critical`] (and wins when both bits are set); a word with
+/// neither (`NORMAL`, the all-clear) reports nothing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn level_from_flags(flags: usize) -> Option<MemoryPressure> {
+    if flags & FLAG_CRITICAL != 0 {
+        Some(MemoryPressure::Critical)
+    } else if flags & FLAG_WARN != 0 {
+        Some(MemoryPressure::Moderate)
+    } else {
+        None
+    }
+}
+
+/// The level recorded off the UI thread and not yet delivered. Max-merge:
+/// `Critical` is never downgraded by a later `Moderate` before the next
+/// [`take`](Self::take), so the single event `pump` delivers is the worst one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Default)]
+struct PendingPressure(AtomicU8);
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl PendingPressure {
+    const MODERATE: u8 = 1;
+    const CRITICAL: u8 = 2;
+
+    fn record(&self, level: MemoryPressure) {
+        let code = match level {
+            MemoryPressure::Critical => Self::CRITICAL,
+            // `MemoryPressure` is `#[non_exhaustive]`: any other level is
+            // treated as the mildest report.
+            _ => Self::MODERATE,
+        };
+        self.0.fetch_max(code, Ordering::AcqRel);
+    }
+
+    /// Take and clear the pending level, if any.
+    fn take(&self) -> Option<MemoryPressure> {
+        match self.0.swap(0, Ordering::AcqRel) {
+            Self::CRITICAL => Some(MemoryPressure::Critical),
+            Self::MODERATE => Some(MemoryPressure::Moderate),
+            _ => None,
+        }
+    }
+}
+
 /// The macOS [`DesktopExtensions`] implementation — construct it from the same
 /// [`DesktopConfig`] handed to
 /// [`run_desktop_with`](frust_shell_desktop::run_desktop_with) and install it
@@ -134,6 +190,11 @@ pub struct MacosExtensions {
     /// The live reopen registration; dropping it unregisters.
     #[cfg(target_os = "macos")]
     activation: Option<appkit_glue::AppActivationObserver>,
+    /// The level the memory-pressure source recorded, awaiting `pump`.
+    pending_pressure: Arc<PendingPressure>,
+    /// The live memory-pressure source; dropping it cancels.
+    #[cfg(target_os = "macos")]
+    memory_pressure: Option<appkit_glue::MemoryPressureSource>,
     /// The live resize/exit-fullscreen registration that re-places the window
     /// buttons; dropping it unregisters.
     #[cfg(target_os = "macos")]
@@ -161,6 +222,9 @@ impl MacosExtensions {
             decorations: config.decorations,
             title_buttons: config.title_buttons,
             lifecycle: Arc::new(Lifecycle::new(config.quit_on_last_window_closed)),
+            pending_pressure: Arc::new(PendingPressure::default()),
+            #[cfg(target_os = "macos")]
+            memory_pressure: None,
             #[cfg(target_os = "macos")]
             menu: None,
             #[cfg(target_os = "macos")]
@@ -191,6 +255,10 @@ impl DesktopExtensions for MacosExtensions {
             self.menu = menu::install_menu(&self.app_name, self.menu_spec.as_ref());
             self.activation =
                 appkit_glue::AppActivationObserver::install(Arc::clone(&self.lifecycle));
+            self.memory_pressure = Some(appkit_glue::MemoryPressureSource::install(
+                Arc::clone(&self.pending_pressure),
+                window.clone(),
+            ));
             // Before the window is shown; `Full`/`None` never reach AppKit here.
             if let Some(buttons) = title_buttons::wanted(self.decorations, self.title_buttons) {
                 let placed = title_buttons::apply(window, buttons);
@@ -213,6 +281,11 @@ impl DesktopExtensions for MacosExtensions {
         // the `menu` module docs).
         if let Some(id) = menu::bridge().take_next() {
             frust_reactive::push_menu_event(id);
+        }
+        // Memory pressure was recorded on the source's queue; deliver it here,
+        // on the UI thread `push_memory_pressure` requires.
+        if let Some(level) = self.pending_pressure.take() {
+            frust_reactive::push_memory_pressure(level);
         }
     }
 
@@ -276,10 +349,12 @@ impl std::fmt::Debug for MacosExtensions {
             .field("menu_spec", &self.menu_spec)
             .field("decorations", &self.decorations)
             .field("title_buttons", &self.title_buttons)
-            .field("lifecycle", &self.lifecycle);
+            .field("lifecycle", &self.lifecycle)
+            .field("pending_pressure", &self.pending_pressure);
         #[cfg(target_os = "macos")]
         debug
             .field("menu_installed", &self.menu.is_some())
+            .field("memory_pressure_source", &self.memory_pressure.is_some())
             .field("reopen_observer", &self.activation.is_some())
             .field("title_button_observer", &self.button_observer.is_some())
             .field("hosted_platform_views", &self.view_host.hosted_count());
@@ -328,6 +403,29 @@ mod tests {
     use frust_shell_desktop::config::{MenuItemSpec, MenuRole};
 
     use super::*;
+
+    #[test]
+    fn dispatch_flags_map_to_levels() {
+        assert_eq!(level_from_flags(0x1), None);
+        assert_eq!(level_from_flags(0), None);
+        assert_eq!(level_from_flags(0x2), Some(MemoryPressure::Moderate));
+        assert_eq!(level_from_flags(0x4), Some(MemoryPressure::Critical));
+        assert_eq!(level_from_flags(0x2 | 0x4), Some(MemoryPressure::Critical));
+        assert_eq!(level_from_flags(0x1 | 0x2), Some(MemoryPressure::Moderate));
+    }
+
+    #[test]
+    fn pending_pressure_merges_to_the_worst_and_clears_on_take() {
+        let pending = PendingPressure::default();
+        assert_eq!(pending.take(), None);
+        pending.record(MemoryPressure::Moderate);
+        pending.record(MemoryPressure::Critical);
+        pending.record(MemoryPressure::Moderate);
+        assert_eq!(pending.take(), Some(MemoryPressure::Critical));
+        assert_eq!(pending.take(), None);
+        pending.record(MemoryPressure::Moderate);
+        assert_eq!(pending.take(), Some(MemoryPressure::Moderate));
+    }
 
     #[test]
     fn implements_desktop_extensions() {
