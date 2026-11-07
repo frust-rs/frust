@@ -65,15 +65,20 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
 - Widget resolution precedence: explicit builder value > theme token > unthemed-fallback constant,
   generally re-resolved every paint; `Text`/`TextInput` instead bake the resolved color and a themed
   family (`.themed_family`/`.themed_mono_family`) at layout: `Text` yields to an explicit `.family()`/`.style()`, `TextInput` does not.
+- Text scale: a `TextScale` theme extension carries the OS factor a mobile shell applies through
+  `Theme::with_text_scale` (`TypeScale::scaled`; clamps `TEXT_SCALE_MIN` 0.8, body/label/title max 2.0,
+  display/headline max 1.5). Default-sized `Text`/`TextInput` scale at layout through
+  `frust_theme::scale_style` (body-role clamp); explicit sizes never scale, and catalogs pass explicit
+  sizes from the already-scaled `TypeScale`. A theme read from context may go back to `set_app_theme`
+  without compounding (`Theme::authored_type_scale`); edit the type scale on the app's own authored theme.
 - Introspection flow: a container implements `Widget::visit_children` (CORE unit) via the
   authoring toolkit's `VisitPods` trait and `visit_children!` macro (one line naming its
   `ChildPod` fields) so `RenderRoot::inspect()` can enumerate its children; a hand-rolled child
   list implements `VisitPods` by hand on the same seam. The baseline set and all five plugins use
   it; see WIDGETS_CODE_STANDARDS.md for the convention this obliges.
-- Design-system layering: the five design-system plugins (PLUGINS unit) assemble their own
-  `Theme` via `ThemeBuilder`'s editors over `frust-theme`'s neutral floor; `frust-cupertino`
-  owns its "Liquid Glass" `GlassScale` recipe, degrading to the neutral
-  `GlassScale::opaque_material()` where unsupported.
+- Design-system layering: the five design-system plugins (PLUGINS unit) assemble their own `Theme` via
+  `ThemeBuilder`'s editors over `frust-theme`'s neutral floor; `frust-cupertino` owns its "Liquid Glass"
+  `GlassScale` recipe, degrading to the neutral `GlassScale::opaque_material()` where unsupported.
 - Motion flow: implicit-animation and transition widgets resolve default timing from `Theme.motion`,
   collapsing to a short crossfade under `reduce_motion`; decorative loops request paced frames. `reduce_motion` is a floor, not an assignment: every
   baseline defaults it `false`, and a mobile shell OR's the OS accessibility preference over whatever
@@ -173,97 +178,88 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   `top_right`, `bottom_left`, `bottom_right`), each the window control's protrusion beyond the safe
   area in logical px; `safe_area` neither pads by nor removes them (`consuming` copies them) and `padding()` ignores them.
 - Scaffold flow: `scaffold(body)` assembles the four fixed chrome slots (`app_bar`/`body`/`bottom_bar`/`fab`)
-  most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the
-  slots from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and
-  `bottom_bar` self-size for the top/bottom inset the same way (reading `ctx.window_insets()` in their own
-  `layout` — Material's `app_bar`/`search_app_bar` self-inset the top and the left/right edges by default and
+  most screens compose around, theme-agnostic (a design system's own bar/nav-bar/FAB widgets plug into the slots
+  from app code). **R-B4-inset:** the Scaffold itself consumes no window inset — `app_bar` and `bottom_bar`
+  self-size for the top/bottom inset the same way (reading `ctx.window_insets()` in their own `layout` —
+  Material's `app_bar`/`search_app_bar` self-inset the top and the left/right edges by default and
   `navigation_bar` the bottom only, see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md); the sliver and
-  bottom app bars do not, wrap them in `safe_area`), and `body` is never pre-inset; `fab` is the one slot
-  the Scaffold insets on the caller's behalf, floating above `bottom_bar` when present and off the raw
-  window edge otherwise. **Bar contract:** the Glyph app bar and the Material top and sliver app bars
-  (listed in [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)) shift their leading slot right by
-  `top_left.width` and their trailing edge left by `top_right.width` whenever that corner's height > 0;
-  the Scaffold is unchanged. The shift assumes the bar spans the window's top edge: layout cannot see a
-  bar's window-space position and corners are never consumed, so there is no automatic detection — a bar
-  hosted in a pane, sheet or dialog opts out with `corner_shift(false)`. Other catalogs' top bars
-  (Cupertino's navigation bar, the shadcn/beUI headers) do not yet apply the rule; see
-  `corner-insets-ios-26-only` in [LIMITATIONS.md](LIMITATIONS.md).
-- Overlay flow: anchored placement is framework-owned — `place(anchor, content, area, placement)`
-  and `OverlaySlot`, which resolve a side, a cross-axis alignment, an offset, a collision flip and a
-  clamp-back-inside, pure and total — so a widget, a catalog and an app all place a floated surface
-  the same way. A widget hosting its own pod keeps an `OverlaySlot` (whose substituted-state route
-  forwards layout requests to the owner) and forwards four calls to it (rebuild; layout, loosely
-  against the window; paint-time placement and registration; event, before its own children);
-  `overlay_portal(child)` is the declarative case, anchoring a surface to that child's bounds. Three
-  coordinate spaces meet in a slot — window space (the registered rect and the broadcast payload),
-  owner-local space and pod space — and the slot owns both the translation and the pod's capture
-  lifetime. `frust-shadcn`'s tooltip (`Tooltip`/`Transparent`) and hover card (`Floating`/`Interactive`)
-  ride the slot directly; the catalogs' own `overlay::anchored` hosts still carry plugin-local copies.
-  See CORE_ARCHITECTURE.md's Overlay Portal for the mechanism itself.
-- Drag-and-drop flow: an ambient, Rc-shared `DragCoordinator` (one per scope, cloneable like
-  `ScrollController`) is the single source of truth for a session — idle/armed/dragging/dropping/
-  cancelled — and its typed `Box<dyn Any>` payload, so several targets type-gate against one
-  handle. `draggable()` arms on a primary press and begins once a `DragPolicy` is crossed (a mouse
-  travels past a distance threshold, a touch press holds through a long-press — `Auto` picks per
-  press from the pointer source), floating a ghost through the overlay portal anchored at
-  `OverlayAnchor::Window` (see CORE_ARCHITECTURE.md's Overlay Portal) and cancelling on Escape or a
-  release with nothing hovered. A begun drag vetoes the takeover of every enclosing scroll surface,
-  not only the nearest, for as long as the session runs. `drag_target()` resolves against bounds
-  the coordinator's registry collects at paint — never a hit test — so later registration wins an
-  overlap and a drop can land across containers (two kanban columns, a list and a trash bin).
-  Keyboard lift/cycle/drop (`move_to_next_target`/`move_to_previous_target`, Enter/Space/arrows,
-  Escape to cancel) is the assistive-technology path, driving the same coordinator from the source's
-  own focus; semantics advertise a `Role::Button` source and a `Role::Group` target, each supporting
-  `Action::Click`: the target's `Click` drops a live, accepting KEYBOARD session onto it (a pointer
-  session's `Up` belongs to its source), while the source's `Click` drops (or cancels) its own live
-  keyboard session and is a plain tap otherwise (see `drag-ghost-pod-no-semantics` in
-  [LIMITATIONS.md](LIMITATIONS.md)). `auto_scroll_zone()` drives
-  an attached `ScrollController` toward whichever edge the dragged pointer sits inside
-  (`AutoScroll::edge_px`/`max_px_per_s`). `reorderable_list()` composes both primitives over keyed
-  rows with `N + 1` gap targets, firing `on_reorder(state, from, to)` on an actual move. A desktop
-  `InputEvent::FileDrop` opens an `ExternalFiles` session so a `drag_target::<Vec<PathBuf>>`
-  accepts an OS file drop the same way a widget-originated session would (see
-  [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)).
+  bottom app bars do not, wrap them in `safe_area`), and `body` is never pre-inset; `fab` is the one slot the
+  Scaffold insets on the caller's behalf, floating above `bottom_bar` when present and off the raw window edge
+  otherwise. **Bar contract:** the Glyph app bar and the Material top and sliver app bars (listed in
+  [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)) shift their leading slot right by `top_left.width` and
+  their trailing edge left by `top_right.width` whenever that corner's height > 0; the Scaffold is unchanged.
+  The shift assumes the bar spans the window's top edge: layout cannot see a bar's window-space position and
+  corners are never consumed, so there is no automatic detection — a bar hosted in a pane, sheet or dialog opts
+  out with `corner_shift(false)`. Other catalogs' top bars (Cupertino's navigation bar, the shadcn/beUI headers)
+  do not yet apply the rule; see `corner-insets-ios-26-only` in [LIMITATIONS.md](LIMITATIONS.md).
+- Overlay flow: anchored placement is framework-owned — `place(anchor, content, area, placement)` and
+  `OverlaySlot`, which resolve a side, a cross-axis alignment, an offset, a collision flip and a
+  clamp-back-inside, pure and total — so a widget, a catalog and an app all place a floated surface the same
+  way. A widget hosting its own pod keeps an `OverlaySlot` (whose substituted-state route forwards layout
+  requests to the owner) and forwards four calls to it (rebuild; layout, loosely against the window; paint-time
+  placement and registration; event, before its own children); `overlay_portal(child)` is the declarative case,
+  anchoring a surface to that child's bounds. Three coordinate spaces meet in a slot — window space (the
+  registered rect and the broadcast payload), owner-local space and pod space — and the slot owns both the
+  translation and the pod's capture lifetime. `frust-shadcn`'s tooltip (`Tooltip`/`Transparent`) and hover card
+  (`Floating`/`Interactive`) ride the slot directly; the catalogs' own `overlay::anchored` hosts still carry
+  plugin-local copies. See CORE_ARCHITECTURE.md's Overlay Portal for the mechanism itself.
+- Drag-and-drop flow: an ambient, Rc-shared `DragCoordinator` (one per scope, cloneable like `ScrollController`)
+  is the single source of truth for a session — idle/armed/dragging/dropping/ cancelled — and its typed `Box<dyn
+  Any>` payload, so several targets type-gate against one handle. `draggable()` arms on a primary press and
+  begins once a `DragPolicy` is crossed (a mouse travels past a distance threshold, a touch press holds through
+  a long-press — `Auto` picks per press from the pointer source), floating a ghost through the overlay portal
+  anchored at `OverlayAnchor::Window` (see CORE_ARCHITECTURE.md's Overlay Portal) and cancelling on Escape or a
+  release with nothing hovered. A begun drag vetoes the takeover of every enclosing scroll surface, not only the
+  nearest, for as long as the session runs. `drag_target()` resolves against bounds the coordinator's registry
+  collects at paint — never a hit test — so later registration wins an overlap and a drop can land across
+  containers (two kanban columns, a list and a trash bin). Keyboard lift/cycle/drop
+  (`move_to_next_target`/`move_to_previous_target`, Enter/Space/arrows, Escape to cancel) is the
+  assistive-technology path, driving the same coordinator from the source's own focus; semantics advertise a
+  `Role::Button` source and a `Role::Group` target, each supporting `Action::Click`: the target's `Click` drops
+  a live, accepting KEYBOARD session onto it (a pointer session's `Up` belongs to its source), while the
+  source's `Click` drops (or cancels) its own live keyboard session and is a plain tap otherwise (see
+  `drag-ghost-pod-no-semantics` in [LIMITATIONS.md](LIMITATIONS.md)). `auto_scroll_zone()` drives an attached
+  `ScrollController` toward whichever edge the dragged pointer sits inside
+  (`AutoScroll::edge_px`/`max_px_per_s`). `reorderable_list()` composes both primitives over keyed rows with `N
+  + 1` gap targets, firing `on_reorder(state, from, to)` on an actual move. A desktop `InputEvent::FileDrop`
+  opens an `ExternalFiles` session so a `drag_target::<Vec<PathBuf>>` accepts an OS file drop the same way a
+  widget-originated session would (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)).
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
-- Canvas flow: `canvas(paint)` takes `Fn(&mut dyn PaintScene, Size, &PaintCtx)`; the widget
-  translates to its own origin and clips to its bounds before invoking the closure, so painting
-  happens entirely in local space. `.size(Size)`/`.expand()` (default) pick the sizing policy;
-  `.on_hit(Fn(Point, Size) -> bool)` narrows hit-testing and gates `.on_tap`/`.on_pointer`;
-  `.repaint_key(impl Hash)` requests a repaint when an external fingerprint changes, since the paint
-  closure itself is not comparable across a rebuild.
-- Pinch flow: `PinchRecognizer::handle(PointerId, &PointerEvent, time_ms) -> Option<ScaleEvent>`
-  reduces a gesture's tracked contacts (the first two, in `Down` order) to the same
-  `ScaleEvent`/`ScalePhase` stream a desktop source produces. `pinch_detector(child)` captures the
-  pointer and calls `EventCtx::capture_contacts()` on the first primary `Down`, forwards the first
-  contact to the child unchanged, and steals an in-progress child gesture with one synthesized
-  `Cancel` once a pinch begins (`on_scale` never fires from a `Cancel`); a desktop `InputEvent::Scale`
-  reaches `on_scale` only when the child ignores it first. Nesting two detectors is unsupported.
-  `pinch_detector` captures the ambient multi-contact veto cell (`scroll.rs`'s `ambient_scroll_veto`)
-  on its claiming `Down` and holds it raised while it tracks a second contact, so a pinch over a
-  single-finger press inside a `ScrollView`/`ListView` survives the claimant's travel past slop; it
-  never joins the Down-time nested-scroll claim itself (see below), unlike `pan_zoom`.
-- Pan-zoom flow: `pan_zoom(child)` places its child in a `ChildPod` transformed by
-  `Affine::translate(offset) * Affine::scale(scale)` (`PanZoomTransform`), so frust-core's
-  transformed-pod seam (see CORE_ARCHITECTURE.md) inverse-maps the child's hit-testing and events. A
-  primary `Down` is offered to the child first; an ignored press pans on the claimant's moves. An
-  `InputEvent::Scale` (desktop ctrl/⌘+wheel, trackpad pinch) is likewise offered to the child first
-  and applied here when ignored; a touch pinch is recognised in-widget by a `PinchRecognizer` fed
-  from every primary `Down`'s contacts, so a second finger routes here even when the child owns the
-  first. On a `Down` the child ignores, the view publishes the nested-scroll claim (the same ambient
-  cell `ScrollView`/`ListView` use, both drag directions registered unconditionally) so an enclosing
-  scrollable defers to it; when the child owns the press instead, the view captures the ambient
-  multi-contact veto cell and holds it raised while a second contact is tracked, so a pinch
-  beginning over that child-owned press is not taken over by the enclosing scroll surface once the
-  claimant crosses slop — the veto clears, and the surface's ordinary takeover resumes, once back
-  down to one contact. A `Scroll` arriving between `Scale`
-  events clears the stale `last_focal` left by an open bracket (a macOS trackpad pinch whose
-  modifier released mid-gesture finishes as wheel events) so a later unrelated wheel notch does not
-  anchor on it. `.min_scale`/`.max_scale` (default `0.25`/`8.0`) clamp zoom; `.inertia(bool)` (off by
-  default) glides a released pan on a per-axis `FrictionSimulation`; `.on_transform(Fn(&mut State,
-  PanZoomTransform))` notifies after every change; `.controller(PanZoomController)` attaches a
-  cloneable handle (`jump_to`/`fit_to_bounds`/`fit_rect`/`transform`/`viewport_size`/`content_size`)
-  whose commands apply at the next layout or paint. Panning is unbounded; only panning glides.
+- Canvas flow: `canvas(paint)` takes `Fn(&mut dyn PaintScene, Size, &PaintCtx)`; the widget translates to its
+  own origin and clips to its bounds before invoking the closure, so painting happens entirely in local space.
+  `.size(Size)`/`.expand()` (default) pick the sizing policy; `.on_hit(Fn(Point, Size) -> bool)` narrows
+  hit-testing and gates `.on_tap`/`.on_pointer`; `.repaint_key(impl Hash)` requests a repaint when an external
+  fingerprint changes, since the paint closure itself is not comparable across a rebuild.
+- Pinch flow: `PinchRecognizer::handle(PointerId, &PointerEvent, time_ms) -> Option<ScaleEvent>` reduces a
+  gesture's tracked contacts (the first two, in `Down` order) to the same `ScaleEvent`/`ScalePhase` stream a
+  desktop source produces. `pinch_detector(child)` captures the pointer and calls `EventCtx::capture_contacts()`
+  on the first primary `Down`, forwards the first contact to the child unchanged, and steals an in-progress
+  child gesture with one synthesized `Cancel` once a pinch begins (`on_scale` never fires from a `Cancel`); a
+  desktop `InputEvent::Scale` reaches `on_scale` only when the child ignores it first. Nesting two detectors is
+  unsupported. `pinch_detector` captures the ambient multi-contact veto cell (`scroll.rs`'s
+  `ambient_scroll_veto`) on its claiming `Down` and holds it raised while it tracks a second contact, so a pinch
+  over a single-finger press inside a `ScrollView`/`ListView` survives the claimant's travel past slop; it never
+  joins the Down-time nested-scroll claim itself (see below), unlike `pan_zoom`.
+- Pan-zoom flow: `pan_zoom(child)` places its child in a `ChildPod` transformed by `Affine::translate(offset) *
+  Affine::scale(scale)` (`PanZoomTransform`), so frust-core's transformed-pod seam (see CORE_ARCHITECTURE.md)
+  inverse-maps the child's hit-testing and events. A primary `Down` is offered to the child first; an ignored
+  press pans on the claimant's moves. An `InputEvent::Scale` (desktop ctrl/⌘+wheel, trackpad pinch) is likewise
+  offered to the child first and applied here when ignored; a touch pinch is recognised in-widget by a
+  `PinchRecognizer` fed from every primary `Down`'s contacts, so a second finger routes here even when the child
+  owns the first. On a `Down` the child ignores, the view publishes the nested-scroll claim (the same ambient
+  cell `ScrollView`/`ListView` use, both drag directions registered unconditionally) so an enclosing scrollable
+  defers to it; when the child owns the press instead, the view captures the ambient multi-contact veto cell and
+  holds it raised while a second contact is tracked, so a pinch beginning over that child-owned press is not
+  taken over by the enclosing scroll surface once the claimant crosses slop — the veto clears, and the surface's
+  ordinary takeover resumes, once back down to one contact. A `Scroll` arriving between `Scale` events clears
+  the stale `last_focal` left by an open bracket (a macOS trackpad pinch whose modifier released mid-gesture
+  finishes as wheel events) so a later unrelated wheel notch does not anchor on it. `.min_scale`/`.max_scale`
+  (default `0.25`/`8.0`) clamp zoom; `.inertia(bool)` (off by default) glides a released pan on a per-axis
+  `FrictionSimulation`; `.on_transform(Fn(&mut State, PanZoomTransform))` notifies after every change;
+  `.controller(PanZoomController)` attaches a cloneable handle
+  (`jump_to`/`fit_to_bounds`/`fit_rect`/`transform`/`viewport_size`/`content_size`) whose commands apply at the
+  next layout or paint. Panning is unbounded; only panning glides.
 
 ## Key Types
 
