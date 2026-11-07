@@ -37,6 +37,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - The new `frust-device-info` plugin crate: `DeviceMemory::query()` reports total RAM, the Android
   low-RAM flag, system-available memory (Android/Linux/Windows) and the iOS per-process headroom, so
   an app can size caches on Android 14+ where no foreground trim-memory level is delivered any more.
+- `frust-database`: `Database::schema_version`, `Database::migrate(&[Migration])` (one transaction per step,
+  `PRAGMA user_version` bumped inside it, identical on both engines) and `Database::execute_batch` (many
+  statements in one transaction); a new `DatabaseError::Migration` variant.
 - A memory-pressure event: `MemoryPressure` (`Moderate`, `Critical`),
   `AppLifecycleListener::on_memory_pressure`, shell-facing `push_memory_pressure` and the diagnostic
   `last_memory_pressure()`, independent of `AppLifecycleState`. iOS reports its memory warning as
