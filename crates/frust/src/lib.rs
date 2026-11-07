@@ -4019,6 +4019,7 @@ mod paths_reexport {
     #[test]
     fn atomic_write_round_trips_and_leaves_only_the_target() {
         let dir = std::env::temp_dir().join(format!("frust-paths-reexport-{}", std::process::id()));
+        std::fs::create_dir(&dir).expect("scratch dir must not already exist (planted path?)");
         let _cleanup = Cleanup(dir.clone());
         let nested = dir.join("nested");
         let file = nested.join("blob.bin");

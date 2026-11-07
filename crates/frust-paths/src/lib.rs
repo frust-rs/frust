@@ -82,8 +82,10 @@
 //!   and a process crash mid-write leaves any previous contents intact. No
 //!   fsync is done, so after an OS crash or power loss the file may be
 //!   empty or truncated on some filesystems. On a failed write or rename the
-//!   temp file is best-effort removed before the error is returned. Returns
-//!   `Unsupported` on the web (`wasm32-unknown-unknown`).
+//!   temp file is best-effort removed before the error is returned; a process
+//!   that dies mid-write leaves its temp sibling behind. On Windows a
+//!   concurrent replace of the same path can fail with `PermissionDenied`.
+//!   Returns `Unsupported` on the web (`wasm32-unknown-unknown`).
 //!
 //! # Compat contract
 //!
@@ -330,13 +332,17 @@ pub fn app_stem() -> OsString {
 ///
 /// - Concurrent calls never share a temp file, so callers need no locking.
 ///   Concurrent writers of the same `path` are last-rename-wins, with no
-///   interleaving and no `NotFound`.
+///   interleaving and no `NotFound`. On Windows, a rename over a file another
+///   writer is replacing at that moment can still fail with
+///   `PermissionDenied`; the concurrency tests run on Unix only.
 /// - A reader never observes a partially-written file.
 /// - A *process* crash mid-write leaves any previous contents at `path`
 ///   intact. No fsync is done, so after an OS crash or power loss the file
 ///   may be empty or truncated on some filesystems.
 /// - On a failed write or rename the temp file is best-effort removed (its
-///   own removal error is swallowed) and the original error is returned.
+///   own removal error is swallowed) and the original error is returned. A
+///   process that dies between creating and renaming the temp file leaves a
+///   `<file_name>.tmp.<pid>.<n>` sibling behind; nothing removes it.
 ///
 /// # Errors
 ///
@@ -383,6 +389,8 @@ fn write_via_temp(path: &Path, bytes: &[u8], next: &mut dyn FnMut() -> u64) -> i
 
     const MAX_ATTEMPTS: usize = 16;
 
+    // Reject a path with no file name before creating any directory for it.
+    temp_candidate(path, 0)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1558,6 +1566,17 @@ mod tests {
             let err = temp_candidate(Path::new(p), 0).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{p}");
         }
+    }
+
+    #[test]
+    fn atomic_write_without_file_name_creates_no_directory() {
+        let root = scratch_path("nameless");
+        let root = root.parent().unwrap().parent().unwrap().to_path_buf();
+        let made = root.join("made");
+        let err = atomic_write(&made.join(".."), b"x").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(!made.exists(), "parent created for a nameless path");
+        let _ = fs::remove_dir_all(&root);
     }
 
     // --- absolute HOME / APPDATA validation -------------------------------

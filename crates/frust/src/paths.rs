@@ -7,10 +7,11 @@
 //!   app on desktop: join your own subdirectory onto the returned base. Neither creates the
 //!   directory ([`atomic_write`] creates the parents of the file it writes).
 //! - Both return `None` when the platform cannot resolve one, never a guess that could write into
-//!   the current directory, and never a relative path. That is: `HOME` on iOS, macOS and Linux
-//!   (other Unix), `APPDATA` for `data_dir` and `LOCALAPPDATA` for `cache_dir` on Windows, each
-//!   when unset, empty or not absolute; Android before the shell installs the directories; and
-//!   every other target, always.
+//!   the current directory, and never a relative path. That is: on iOS and macOS, `HOME` unset,
+//!   empty or not absolute; on Linux and other Unix, the matching `XDG_DATA_HOME` /
+//!   `XDG_CACHE_HOME` unset or relative *and* `HOME` unset, empty or not absolute; on Windows,
+//!   `APPDATA` (for `data_dir`) or `LOCALAPPDATA` (for `cache_dir`) unset, empty or not absolute;
+//!   on Android, before the shell installs the directories; on every other target, always.
 //!
 //! ```
 //! let thumbs = frust::paths::cache_dir().map(|d| d.join("my-app").join("thumbs"));
@@ -28,9 +29,12 @@
 //! | Android | `Context.getFilesDir()` | `Context.getCacheDir()` |
 //! | any other target (the web included) | `None` | `None`; `atomic_write` returns `Unsupported` on the web |
 //!
-//! On macOS, `XDG_*` variables do not move the base; they only feed a read-through fallback for
-//! installs that predate the macOS-specific location. An `XDG_*` value that is not an absolute
-//! path is ignored, as the XDG Base Directory specification requires.
+//! On macOS the base can instead be the older XDG location (`$XDG_DATA_HOME` or `~/.local/share`,
+//! and `$XDG_CACHE_HOME` or `~/.cache`): `frust-paths` returns it when a directory named after the
+//! running executable's file stem exists there and not under `~/Library`, so installs that predate
+//! the macOS location keep their files. An app that joins its own subdirectory name gets the
+//! `~/Library` base unless such a directory exists. An `XDG_*` value that is not an absolute path
+//! is ignored, as the XDG Base Directory specification requires.
 //!
 //! The Android shell installs both directories when the first surface is created
 //! (`nativeInitPlatform`), so both functions return `None` before that. Code that runs earlier,
@@ -65,8 +69,10 @@
 //! reader never sees a partial file. Parent directories are created.
 //!
 //! - The temporary name is unique per call, so no caller-side locking is needed; concurrent
-//!   writers of one path are last-writer-wins, never interleaved.
-//! - A process crash mid-write leaves the previous contents intact.
+//!   writers of one path are last-writer-wins, never interleaved. On Windows a concurrent replace
+//!   of the same path can fail with `PermissionDenied`.
+//! - A process crash mid-write leaves the previous contents intact, plus an orphaned
+//!   `<name>.tmp.<pid>.<n>` sibling that nothing removes.
 //! - It is NOT power-loss durable: no fsync is done, so after an OS crash or power loss the file
 //!   may be empty or truncated on some filesystems.
 //! - On the web (`wasm32-unknown-unknown`) there is no filesystem and it returns an
