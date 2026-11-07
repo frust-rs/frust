@@ -237,6 +237,7 @@ impl<State: 'static> View<State> for RichTextView {
             layout: None,
             laid_out_max_width: None,
             laid_out_styles: Vec::new(),
+            laid_out_span_styles: Vec::new(),
             laid_out_locale_stamp: LocaleStamp::default(),
         }
     }
@@ -268,6 +269,10 @@ pub struct RichTextWidget {
     /// so a bare theme swap or text-scale change re-shapes without a view
     /// change.
     laid_out_styles: Vec<TextStyle>,
+    /// Every span's effective style before grouping: grouping depends on the
+    /// theme-resolved styles, so two layouts with equal group styles can
+    /// still split the spans differently.
+    laid_out_span_styles: Vec<TextStyle>,
     /// The locale stamp read just before shaping.
     laid_out_locale_stamp: LocaleStamp,
 }
@@ -352,7 +357,7 @@ impl Widget for RichTextWidget {
         let locale_stamp = LocaleStamp::for_style(None);
         if let Some(cached) = &self.layout
             && self.laid_out_max_width == max_width
-            && self.laid_out_styles == styles
+            && self.laid_out_span_styles == all_styles
             && self.laid_out_locale_stamp == locale_stamp
         {
             return bc.constrain(cached.size());
@@ -383,6 +388,7 @@ impl Widget for RichTextWidget {
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
         self.laid_out_styles = styles;
+        self.laid_out_span_styles = all_styles;
         self.laid_out_locale_stamp = locale_stamp;
         size
     }
@@ -624,6 +630,25 @@ mod tests {
         assert_eq!(big.len(), 2);
         assert!((big[0] / plain[0] - 1.5).abs() < 0.1, "{plain:?} {big:?}");
         assert!((big[1] - plain[1]).abs() < 0.01, "explicit size is pinned");
+    }
+
+    #[test]
+    fn a_text_scale_change_that_regroups_spans_relays_out() {
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        // At scale 1.0 the default size equals the pinned 16, so the groups
+        // are [ab:16, c:24]; at scale 1.5 it is 24 and they are [a:16, bc:24].
+        // Both group-style vectors are [S16, S24].
+        let view = rich_text([span("a").size(16.0), span("b"), span("c").size(24.0)]);
+        let base = Theme::neutral();
+        let authored = base.type_scale.clone();
+        let scaled = base.clone().with_text_scale(&authored, 1.5);
+
+        let mut tcx = TextContext::new();
+        let (mut reused, _) = lay_out(&view, Some(&base), 300.0, &mut tcx);
+        let reused_size = layout_widget(&mut reused, Some(&scaled), 300.0, &mut tcx);
+        let (fresh, fresh_size) = lay_out(&view, Some(&scaled), 300.0, &mut tcx);
+        assert_eq!(reused.laid_out_styles, fresh.laid_out_styles);
+        assert_eq!(reused_size, fresh_size, "\"b\" lays out at 24px");
     }
 
     #[test]
