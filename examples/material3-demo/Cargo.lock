@@ -1459,9 +1459,11 @@ version = "0.6.5"
 dependencies = [
  "frust-i18n",
  "frust-material",
+ "frust-reactive",
  "frust-ui",
  "icu_datetime",
  "icu_locale_core",
+ "log",
 ]
 
 [[package]]

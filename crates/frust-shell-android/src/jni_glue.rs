@@ -2861,6 +2861,23 @@ pub fn native_set_reduce_motion(handle: jlong, reduce: jboolean) {
     });
 }
 
+/// `nativeSetTextScale`: apply the platform's font-size preference to the
+/// active theme's type scale, re-publishing it through both delivery paths —
+/// the text-scale twin of [`native_set_reduce_motion`].
+///
+/// `scale` is Kotlin's effective scale at body size (see
+/// `FrustSurfaceView.textScale`). `Configuration.fontScale` reaches Kotlin
+/// through `onConfigurationChanged`, so the activity must declare `fontScale`
+/// in `android:configChanges`. A missing handle is a no-op.
+pub fn native_set_text_scale(handle: jlong, scale: jfloat) {
+    guard("nativeSetTextScale", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_text_scale(scale);
+        }
+    });
+}
+
 /// `nativeFocusGeneration`: return the focus/IME session generation — a
 /// counter over *changes to the published focus/IME surface*.
 ///

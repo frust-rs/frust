@@ -1987,8 +1987,8 @@ pub use frust_theme::{
     Brightness, ColorScheme, CosmeticLoopRate, DesignLanguage, EasingSet, Elevation,
     ElevationLevel, FontFace, GlassFill, GlassMaterial, GlassScale, GlassTier, MonospaceFamily,
     MotionDurations, MotionExtras, MotionScheme, MotionSpring, NativeTypefaces, ShadowSpec,
-    ShapeScale, StatusColors, StatusPalette, SurfaceRole, Theme, ThemeBuilder, ThemeExtensions,
-    TypeScale,
+    ShapeScale, StatusColors, StatusPalette, SurfaceRole, TextScale, Theme, ThemeBuilder,
+    ThemeExtensions, TypeScale,
 };
 
 /// The color type every [`ColorScheme`] role is expressed in
@@ -2013,6 +2013,10 @@ pub use peniko::Color;
 /// [`push_deep_link`]), and the override-wins-over-appearance rule (an app
 /// override, once set, is never overridden back by a live platform dark-mode
 /// flip until [`clear_app_theme`] runs).
+///
+/// A theme read from context carries the OS text scale and may be handed back
+/// here without compounding it; to change the type scale itself, edit it on the
+/// app's own authored theme.
 ///
 /// ```no_run
 /// use frust::{Brightness, Theme, set_app_theme};

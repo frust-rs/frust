@@ -238,9 +238,172 @@ impl Theme {
     }
 }
 
+/// Lower clamp of the OS text scale: type never shrinks below 80%.
+pub const TEXT_SCALE_MIN: f32 = 0.8;
+/// Upper clamp for body, label and title roles (and their emphasized twins).
+pub const TEXT_SCALE_MAX_BODY: f32 = 2.0;
+/// Upper clamp for display and headline roles (and their emphasized twins).
+pub const TEXT_SCALE_MAX_DISPLAY: f32 = 1.5;
+
+/// The authored scale behind a published scaled one, attached by
+/// [`Theme::with_text_scale`] and read by [`Theme::authored_type_scale`].
+///
+/// `scaled` is the exact scale that call produced, so a later edit to the
+/// theme's roles is detectable: the pair no longer matches `type_scale`.
+#[derive(Clone, Debug, PartialEq)]
+struct AuthoredTypeScale {
+    authored: TypeScale,
+    scaled: TypeScale,
+}
+
+/// The OS text-scale factor, attached to a [`Theme`] as an extension payload.
+///
+/// Absent means `1.0`. `factor` is stored already clamped to the body range
+/// by [`Theme::with_text_scale`]; read it through [`Theme::text_scale`].
+/// Shells dedupe on the OS text scale they stored themselves (compared after
+/// [`TextScale::clamped`]), not on [`Theme::text_scale`], so a theme the app
+/// derived or replaced does not change when a re-push happens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextScale {
+    /// The (body-clamped) scale factor.
+    pub factor: f32,
+}
+
+impl Default for TextScale {
+    fn default() -> Self {
+        Self { factor: 1.0 }
+    }
+}
+
+impl TextScale {
+    /// Clamps a raw OS factor to the body range `[TEXT_SCALE_MIN,
+    /// TEXT_SCALE_MAX_BODY]`; a non-finite or non-positive value is `1.0`.
+    pub fn clamped(factor: f32) -> f32 {
+        Self::clamped_to(factor, TEXT_SCALE_MAX_BODY)
+    }
+
+    fn clamped_to(factor: f32, max: f32) -> f32 {
+        if !factor.is_finite() || factor <= 0.0 {
+            1.0
+        } else {
+            factor.clamp(TEXT_SCALE_MIN, max)
+        }
+    }
+}
+
+/// `style` with its size, absolute line height and letter spacing multiplied
+/// by `factor`. Relative line heights, family and weight are untouched.
+///
+/// The single style-scaling routine: [`TypeScale::scaled`] applies it per role
+/// (after clamping) and default-sized text applies it to its own style. The
+/// factor is used as given, with no clamping; a factor of exactly `1.0`
+/// returns the style unchanged.
+pub fn scale_style(style: &TextStyle, factor: f32) -> TextStyle {
+    if factor == 1.0 {
+        return style.clone();
+    }
+    let mut out = style.clone().with_size(style.size * factor);
+    out.letter_spacing = style.letter_spacing * factor;
+    if let LineHeight::Absolute(px) = style.line_height {
+        out.line_height = LineHeight::Absolute(px * factor);
+    }
+    out
+}
+
+impl TypeScale {
+    /// This scale with every role's size, absolute line height and letter
+    /// spacing multiplied by `factor`, clamped per role: display and
+    /// headline roles (and their emphasized twins) to
+    /// `[TEXT_SCALE_MIN, TEXT_SCALE_MAX_DISPLAY]`, all other roles to
+    /// `[TEXT_SCALE_MIN, TEXT_SCALE_MAX_BODY]`. A non-finite or non-positive
+    /// factor is `1.0`. Relative line heights, family and weight are
+    /// untouched. Always scale from the authored scale, never from an
+    /// already-scaled one, so repeated calls do not compound.
+    pub fn scaled(&self, factor: f32) -> TypeScale {
+        let body = TextScale::clamped_to(factor, TEXT_SCALE_MAX_BODY);
+        let display = TextScale::clamped_to(factor, TEXT_SCALE_MAX_DISPLAY);
+        let b = |s: &TextStyle| scale_style(s, body);
+        let d = |s: &TextStyle| scale_style(s, display);
+        TypeScale {
+            display_large: d(&self.display_large),
+            display_medium: d(&self.display_medium),
+            display_small: d(&self.display_small),
+            headline_large: d(&self.headline_large),
+            headline_medium: d(&self.headline_medium),
+            headline_small: d(&self.headline_small),
+            title_large: b(&self.title_large),
+            title_medium: b(&self.title_medium),
+            title_small: b(&self.title_small),
+            body_large: b(&self.body_large),
+            body_medium: b(&self.body_medium),
+            body_small: b(&self.body_small),
+            label_large: b(&self.label_large),
+            label_medium: b(&self.label_medium),
+            label_small: b(&self.label_small),
+            display_large_emphasized: d(&self.display_large_emphasized),
+            display_medium_emphasized: d(&self.display_medium_emphasized),
+            display_small_emphasized: d(&self.display_small_emphasized),
+            headline_large_emphasized: d(&self.headline_large_emphasized),
+            headline_medium_emphasized: d(&self.headline_medium_emphasized),
+            headline_small_emphasized: d(&self.headline_small_emphasized),
+            title_large_emphasized: b(&self.title_large_emphasized),
+            title_medium_emphasized: b(&self.title_medium_emphasized),
+            title_small_emphasized: b(&self.title_small_emphasized),
+            body_large_emphasized: b(&self.body_large_emphasized),
+            body_medium_emphasized: b(&self.body_medium_emphasized),
+            body_small_emphasized: b(&self.body_small_emphasized),
+            label_large_emphasized: b(&self.label_large_emphasized),
+            label_medium_emphasized: b(&self.label_medium_emphasized),
+            label_small_emphasized: b(&self.label_small_emphasized),
+        }
+    }
+}
+
+impl Theme {
+    /// The attached [`TextScale`] factor, or `1.0` when none is attached.
+    pub fn text_scale(&self) -> f32 {
+        self.extension::<TextScale>().map_or(1.0, |t| t.factor)
+    }
+
+    /// This theme with `type_scale` set to `authored.scaled(factor)` and a
+    /// [`TextScale`] extension attached with the body-clamped factor.
+    ///
+    /// The single pure function the shells call when the OS text scale
+    /// changes or a theme is replaced: the shell keeps the `authored` scale
+    /// and the OS factor itself, so re-applying never compounds and a factor
+    /// of `1.0` restores the authored scale exactly.
+    pub fn with_text_scale(mut self, authored: &TypeScale, factor: f32) -> Theme {
+        self.type_scale = authored.scaled(factor);
+        self.extensions.insert(AuthoredTypeScale {
+            authored: authored.clone(),
+            scaled: self.type_scale.clone(),
+        });
+        self.extensions.insert(TextScale {
+            factor: TextScale::clamped(factor),
+        });
+        self
+    }
+
+    /// The type scale this theme was authored with, before any OS text scale.
+    ///
+    /// For a theme produced by [`Theme::with_text_scale`] and not edited since
+    /// (a theme read from context and handed back, or re-derived with
+    /// `with_brightness`), this is the authored scale it was derived from, so
+    /// feeding a published theme back never compounds the OS scale. A fresh
+    /// theme, or one whose roles were edited after scaling, returns its own
+    /// `type_scale`: the edit is the new authored scale.
+    pub fn authored_type_scale(&self) -> TypeScale {
+        match self.extension::<AuthoredTypeScale>() {
+            Some(a) if a.scaled == self.type_scale => a.authored.clone(),
+            _ => self.type_scale.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::Brightness;
     use peniko::Color;
 
     #[test]
@@ -403,6 +566,146 @@ mod tests {
         let scale = TypeScale::neutral(&base);
         assert_ne!(scale.body_large.family, base.family);
         assert_eq!(scale.body_large.color, base.color);
+    }
+
+    fn authored() -> TypeScale {
+        TypeScale::neutral(&TextStyle::new(16.0, Color::BLACK))
+    }
+
+    #[test]
+    fn scaled_identity_at_one() {
+        assert_eq!(authored().scaled(1.0), authored());
+    }
+
+    #[test]
+    fn scaled_multiplies_size_line_height_and_tracking() {
+        let s = authored().scaled(1.3);
+        assert!((s.body_large.size - 20.8).abs() < 1e-4);
+        match s.body_large.line_height {
+            LineHeight::Absolute(px) => assert!((px - 31.2).abs() < 1e-4),
+            other => panic!("unexpected line height {other:?}"),
+        }
+        assert!((s.body_large.letter_spacing - 0.65).abs() < 1e-4);
+        assert_eq!(s.body_large.weight, authored().body_large.weight);
+    }
+
+    #[test]
+    fn scaled_clamps_per_role() {
+        let a = authored();
+        let hi = a.scaled(3.0);
+        assert_eq!(hi.body_large.size, 32.0);
+        assert_eq!(hi.body_large_emphasized.size, 32.0);
+        assert_eq!(hi.display_large.size, 57.0 * 1.5);
+        assert_eq!(hi.headline_small_emphasized.size, 36.0);
+        let lo = a.scaled(0.5);
+        assert!((lo.body_large.size - 12.8).abs() < 1e-4);
+        assert!((lo.display_large.size - 57.0 * 0.8).abs() < 1e-3);
+    }
+
+    #[test]
+    fn scaled_non_finite_or_non_positive_is_identity() {
+        assert_eq!(authored().scaled(f32::NAN), authored());
+        assert_eq!(authored().scaled(f32::INFINITY), authored());
+        assert_eq!(authored().scaled(0.0), authored());
+        assert_eq!(authored().scaled(-2.0), authored());
+    }
+
+    #[test]
+    fn relative_line_heights_are_untouched() {
+        let mut a = authored();
+        a.body_large = a
+            .body_large
+            .with_line_height(LineHeight::FontSizeRelative(1.5));
+        let s = a.scaled(1.5);
+        assert_eq!(s.body_large.line_height, LineHeight::FontSizeRelative(1.5));
+    }
+
+    #[test]
+    fn theme_without_extension_reports_one() {
+        assert_eq!(Theme::neutral().text_scale(), 1.0);
+    }
+
+    #[test]
+    fn with_text_scale_scales_and_attaches() {
+        let a = authored();
+        let t = Theme::neutral().with_text_scale(&a, 1.5);
+        assert_eq!(t.text_scale(), 1.5);
+        assert_eq!(t.type_scale.body_large.size, 24.0);
+        assert_eq!(t.type_scale, a.scaled(1.5));
+    }
+
+    #[test]
+    fn with_text_scale_reports_clamped_factor() {
+        let a = authored();
+        assert_eq!(Theme::neutral().with_text_scale(&a, 3.0).text_scale(), 2.0);
+        assert_eq!(Theme::neutral().with_text_scale(&a, 0.1).text_scale(), 0.8);
+        assert_eq!(TextScale::clamped(f32::NAN), 1.0);
+    }
+
+    #[test]
+    fn with_text_scale_does_not_compound() {
+        let a = authored();
+        let once = Theme::neutral().with_text_scale(&a, 1.5);
+        let twice = once.clone().with_text_scale(&a, 1.5);
+        assert_eq!(once, twice);
+        assert_eq!(once.type_scale, twice.type_scale);
+    }
+
+    #[test]
+    fn theme_override_keeps_the_os_scale() {
+        let a = authored();
+        let mut other = TypeScale::neutral(&TextStyle::new(20.0, Color::BLACK));
+        other.body_large = other.body_large.with_size(10.0);
+        let t = Theme::neutral()
+            .with_text_scale(&a, 1.5)
+            .with_text_scale(&other, 1.5);
+        assert_eq!(t.type_scale.body_large.size, 15.0);
+        assert_eq!(t.text_scale(), 1.5);
+    }
+
+    #[test]
+    fn a_published_theme_fed_back_never_compounds() {
+        let a = authored();
+        let published = Theme::neutral().with_text_scale(&a, 1.5);
+        let mut t = published.clone();
+        for _ in 0..4 {
+            let authored_now = t.authored_type_scale();
+            assert_eq!(authored_now, a);
+            t = t
+                .with_brightness(Brightness::Dark)
+                .with_text_scale(&authored_now, 1.5);
+            assert_eq!(t.type_scale.body_large.size, 24.0);
+            assert_eq!(t.type_scale, a.scaled(1.5));
+        }
+        let authored_now = t.authored_type_scale();
+        let restored = t.with_text_scale(&authored_now, 1.0);
+        assert_eq!(restored.type_scale, a);
+        assert_eq!(restored.type_scale.body_large.size, 16.0);
+    }
+
+    #[test]
+    fn an_edited_role_on_a_derived_theme_is_the_new_authored_scale() {
+        let a = authored();
+        let mut t = Theme::neutral().with_text_scale(&a, 1.5);
+        t.type_scale.body_large = t.type_scale.body_large.with_size(30.0);
+        assert_eq!(t.authored_type_scale().body_large.size, 30.0);
+        assert_eq!(t.authored_type_scale(), t.type_scale);
+    }
+
+    #[test]
+    fn a_fresh_theme_returns_its_own_scale() {
+        let t = Theme::neutral();
+        assert_eq!(t.authored_type_scale(), t.type_scale);
+    }
+
+    #[test]
+    fn factor_one_restores_authored_exactly() {
+        let a = authored();
+        let t = Theme::neutral()
+            .with_text_scale(&a, 1.5)
+            .with_text_scale(&a, 1.0);
+        assert_eq!(t.type_scale, a);
+        assert_eq!(t.text_scale(), 1.0);
     }
 }
 

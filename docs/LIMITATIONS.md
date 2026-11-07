@@ -8668,7 +8668,7 @@ and iOS.
 
 ### `material-strings-machine-drafted-locales` — the non-English Material string tables are machine-drafted
 
-**Observed**: the th, vi, ja, es, de and fr `MaterialStrings` tables in
+**Observed**: the th, vi, ja, zh-Hans, es, de and fr `MaterialStrings` tables in
 `plugins/material-i18n/src/tables` are machine-drafted and pending native review; only English
 is reviewed. Month and weekday names come from CLDR; the other strings are hand-written.
 
@@ -8983,5 +8983,37 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Why accepted**: each needs its own platform signal (Windows `CreateMemoryResourceNotification`, Linux PSI) that no shell wires yet; the event and `push_memory_pressure` seam are ready for it.
 
 **Evidence**: `push_memory_pressure` (`crates/frust-reactive/src/app_lifecycle.rs`) is called only from `crates/frust-shell-ios/src/ffi_glue.rs` (`memory_warning`), `crates/frust-shell-android/src/jni_glue.rs` (`native_on_trim_memory`) and `crates/frust-shell-macos/src/lib.rs` (`pump`); `frust-shell-desktop`, `frust-shell-windows`, `frust-shell-linux` and `frust-shell-web` have no caller.
+
+---
+
+### `text-scale-partial-coverage` — the OS text scale reaches only theme-driven, default-sized text
+
+**Observed**: explicit pixel sizes and catalog constants outside `TypeScale` do not scale: the shadcn label and most shadcn text, Material `list_item` overline and supporting lines, and app bar titles. Material time-picker input labels overlap their digits at 2.0. Desktop and web have no OS source (the scale stays 1.0). iOS native-widgets controls keep Dynamic Type off. Editing one role on a theme read from context makes that whole scaled scale the new authored scale. The 1.5x display-role cap is unit-tested only. A theme push alone does not rebuild the component that calls `provide_localized_strings`; build-time readers below it update on the next rebuild (shells rebuild from the root on Run frames).
+
+**Applies to**: apps on Android and iOS that set a large system font size; apps that edit a theme read from context.
+
+**Workaround**: size text from the theme's `TypeScale` roles instead of pixel constants; edit the type scale on the app's own authored theme (`Theme::authored_type_scale`), not on one read from context.
+
+**Why accepted**: scaling explicit sizes would break layouts that chose them on purpose, and each catalog's constants are its own design decision; the roles that matter most (body, label, title, display, headline) scale and clamp.
+
+**Trigger for removal**: a catalog moving its remaining constants onto `TypeScale` roles, or a desktop OS text-scale source.
+
+**Evidence**: (2026-11-07) `frust-theme` text-scale tests (`crates/frust-theme/src/typography.rs`); gate `p4-text-scale` on a Xiaomi 12 and an iPhone 13 mini.
+
+---
+
+### `i18n-likely-script-subset` — script-aware negotiation covers only zh and sr
+
+**Observed**: `Locale::likely_script` is a frust-owned subset covering `zh` and `sr` only; other script-split languages negotiate on language and region alone. A `zh-US` tag saved by an earlier version stays English against Simplified-only bundles until the app sets an explicit script.
+
+**Applies to**: apps shipping bundles split by script for a language other than zh or sr.
+
+**Workaround**: name the bundles with a script and set the locale with an explicit script tag.
+
+**Why accepted**: no shipped bundle pair is split by script for another language, and the full CLDR likely-subtags table would be unused data.
+
+**Trigger for removal**: a shipped bundle pair split by script for another language.
+
+**Evidence**: (2026-11-07) `plugins/i18n/src/locale.rs` (`Locale::likely_script`) and `plugins/i18n/src/engine/negotiate.rs`.
 
 ---

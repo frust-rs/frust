@@ -296,6 +296,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `frust::gpu::headless` re-exports `HeadlessRenderer`, `HeadlessOptions`, `HeadlessSpec`,
   `HeadlessImage`, `HeadlessMeta` and the golden env-var names, so an app can golden-test its own pass.
 - The playground gains a "GPU pass" section that drives an `ExternalPass` through the facade only.
+- OS text scale on Android and iOS: `frust-theme` gains `TextScale`, `TypeScale::scaled`,
+  `Theme::with_text_scale`, `Theme::text_scale`, `Theme::authored_type_scale`, `TextScale::clamped`
+  and `scale_style`; default-sized `Text` and `TextInput` follow it, explicit sizes do not.
+- Material `zh-Hans` strings, and `frust_i18n::Locale::likely_script`.
 
 ### Changed
 
@@ -404,6 +408,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - An `ExternalPass` registration's `record` is never run concurrently, even with two live surfaces.
 - `ExternalFrame::frame_index` on an explicit headless render (`render_with_passes`) counts that
   renderer's own renders from 0; surfaces and registry drains keep the process-wide count.
+- Scaffolded Android manifests gain `fontScale` in `android:configChanges`; existing apps should add
+  it to keep state across a font-size change.
+- `frust-material-i18n` depends on `frust-reactive`.
+- Docs: `clean-signals-frust` shows localized failure text through the helpers' closures.
 
 ### Fixed
 
@@ -441,6 +449,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   T400 host, and the golden is unchanged (2f2832c1c).
 - A second surface no longer keeps a stale external-pass binding after `unregister_external_pass`:
   each surface's drain reconciles against the registry and unbinds in its own engine.
+- `frust-i18n` negotiation is script-aware, so `zh-TW`/`HK`/`MO` no longer resolve to a `zh-Hans`
+  bundle and a language-only switch keeps its script.
 
 ## 0.6.5 — 2026-11-02
 

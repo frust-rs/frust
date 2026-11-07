@@ -1,8 +1,9 @@
 //! Theme + appearance: the default-theme precedence ladder (app override >
 //! design-system-seeded default > the built-in `Theme::neutral()` fallback),
 //! the reduced-motion floor, and the three arms that drive them — the
-//! construction seed, `frust_set_appearance`/`frust_set_reduce_motion`, and the
-//! per-frame `set_app_theme`/`clear_app_theme` poll.
+//! construction seed, `frust_set_appearance`/`frust_set_reduce_motion`/
+//! `frust_set_text_scale`, and the per-frame `set_app_theme`/`clear_app_theme`
+//! poll.
 //!
 //! This module owns the whole ladder on purpose: the source-scan conformance
 //! test `crates/frust/tests/theme_ladder_conformance.rs` pins every helper here
@@ -12,7 +13,7 @@
 
 use frust_reactive::{ReactiveRuntime, provide_context};
 use frust_shell_common::{default_theme, effective_brightness_for_platform_change};
-use frust_theme::{Brightness, Theme};
+use frust_theme::{Brightness, TextScale, Theme};
 
 use super::IosAppHandle;
 
@@ -210,6 +211,29 @@ impl IosAppHandle {
         self.appearance_dirty = true;
     }
 
+    /// `frust_set_text_scale`: apply the platform's Dynamic Type content size
+    /// to the active theme's type scale and re-push it to both delivery paths —
+    /// the text-size twin of [`Self::set_reduce_motion`].
+    ///
+    /// The theme's scale is derived from [`Self::authored_type_scale`] and the
+    /// OS factor by `Theme::with_text_scale`, so repeated pushes never
+    /// compound and `1.0` restores the authored scale. Swift re-pushes on every
+    /// foreground, so an unchanged value returns early: the body-clamped new
+    /// factor is compared with the last applied one in `os_text_scale`.
+    pub(crate) fn set_text_scale(&mut self, scale: f32) {
+        let clamped = TextScale::clamped(scale);
+        if self.os_text_scale == clamped {
+            return;
+        }
+        self.os_text_scale = clamped;
+        self.theme = self
+            .theme
+            .clone()
+            .with_text_scale(&self.authored_type_scale, clamped);
+        self.appearance_dirty = true;
+        self.push_theme();
+    }
+
     /// The per-frame app-facing theme-override poll
     /// (`frust::set_app_theme`/`clear_app_theme`), run from [`Self::frame`]
     /// before the pause/ready gate — theme delivery needs no renderer, so it
@@ -240,6 +264,10 @@ impl IosAppHandle {
             self.authored_reduce_motion = theme.motion.reduce_motion;
             theme.motion.reduce_motion =
                 effective_reduce_motion(self.authored_reduce_motion, self.os_reduce_motion);
+            // Likewise the type scale: record the incoming theme's own, then
+            // re-apply the OS text scale over it.
+            self.authored_type_scale = theme.authored_type_scale();
+            let theme = theme.with_text_scale(&self.authored_type_scale, self.os_text_scale);
             self.theme = theme;
             self.theme_override_active = override_active;
             self.push_theme();
@@ -255,6 +283,7 @@ impl IosAppHandle {
     ///
     /// This IS the shared theme-delivery body: [`Self::set_appearance`]
     /// (after it resolves the new brightness), [`Self::set_reduce_motion`],
+    /// [`Self::set_text_scale`],
     /// [`Self::poll_theme_override`] and [`Self::frame`]'s late-font drain all
     /// call it, so a forced override and a live appearance change go through
     /// one code path.
@@ -461,5 +490,26 @@ mod tests {
         let mut active = forced;
         active.motion.reduce_motion = effective_reduce_motion(authored, true);
         assert!(active.motion.reduce_motion);
+    }
+
+    // --- the text-scale composition (`frust_set_text_scale`) ----------------
+
+    #[test]
+    fn text_scale_applies_is_idempotent_and_restores() {
+        use frust_theme::TextScale;
+        let base = Theme::neutral();
+        let authored = base.type_scale.clone();
+        let scaled = base.with_text_scale(&authored, 1.3);
+        assert_eq!(scaled.text_scale(), TextScale::clamped(1.3));
+        // Re-applying derives from the authored scale: no compounding.
+        let again = scaled.clone().with_text_scale(&authored, 1.3);
+        assert_eq!(again.type_scale, scaled.type_scale);
+        // A swapped-in theme keeps the OS factor over its own authored scale.
+        let swapped = Theme::neutral().with_text_scale(&authored, 1.3);
+        assert_eq!(swapped.text_scale(), scaled.text_scale());
+        // 1.0 restores the authored scale exactly.
+        let restored = scaled.with_text_scale(&authored, 1.0);
+        assert_eq!(restored.type_scale, authored);
+        assert_eq!(restored.text_scale(), 1.0);
     }
 }

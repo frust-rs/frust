@@ -2525,6 +2525,7 @@ dependencies = [
  "frust-widgets",
  "icu_datetime",
  "icu_locale_core",
+ "log",
 ]
 
 [[package]]

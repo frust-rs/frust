@@ -420,27 +420,24 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
 
 ### Cross-cutting host signals
 
-- **Event pass under root owner:** every shell routes input through `AppTree::event` inside a
-  reactive `Owner.with` wrap, so handlers see root-level contexts (`Theme`, `WindowMetrics`,
-  root-component `init`-installed values). `frust-reactive` is a leaf crate and cannot wrap
-  itself. The pass is deliberately **not tracked** — entering a tracked scope resets dependencies
-  and clears the dirty flag, which would unsubscribe the frame loop from pending wakes. Desktop
-  forwards the secondary mouse button as `PointerButton::Secondary` through a delivery-latched
-  gate — an Up dispatches iff its Down did — guaranteeing every Down/Up pair reaches `AppTree`
-  paired even under pointer capture.
-- **Touch contacts and resampling:** each mobile shell maps its platform's per-finger id onto a
-  gesture-local `PointerId` slot (a gesture's first contact is always slot `0`) and delivers every
-  contact as `InputEvent::PointerContact`, direct or `PointerResampler`-buffered (a
-  `RawPointerSample` carries the same `pointer_id`; one resampler lane per contact). Every shell
-  uses the same **lowest-currently-free-slot** rule — taken on `Down`, freed on `Up`/`Cancel`,
-  never renumbering a live slot — implemented independently by Android's `TouchSlotMap`
-  (`frust-shell-android::ffi_support`), iOS `FrustView`'s `freeSlots` and the web `TouchTracker`'s
+- **Event pass under root owner:** every shell routes input through `AppTree::event` inside a reactive
+  `Owner.with` wrap, so handlers see root-level contexts (`Theme`, `WindowMetrics`, root-component
+  `init`-installed values). `frust-reactive` is a leaf crate and cannot wrap itself. The pass is
+  deliberately **not tracked** — entering a tracked scope resets dependencies and clears the dirty flag,
+  which would unsubscribe the frame loop from pending wakes. Desktop forwards the secondary mouse button
+  as `PointerButton::Secondary` through a delivery-latched gate — an Up dispatches iff its Down did —
+  guaranteeing every Down/Up pair reaches `AppTree` paired even under pointer capture.
+- **Touch contacts and resampling:** each mobile shell maps its platform's per-finger id onto a gesture-local
+  `PointerId` slot (a gesture's first contact is always slot `0`) and delivers every contact as
+  `InputEvent::PointerContact`, direct or `PointerResampler`-buffered (a `RawPointerSample` carries the same
+  `pointer_id`; one resampler lane per contact). Every shell uses the same **lowest-currently-free-slot** rule — taken
+  on `Down`, freed on `Up`/`Cancel`, never renumbering a live slot — implemented independently by Android's
+  `TouchSlotMap` (`frust-shell-android::ffi_support`), iOS `FrustView`'s `freeSlots` and the web `TouchTracker`'s
   `free_slots`. Entries: `nativeOnTouch` (Android), `frust_dispatch_touch` (iOS); web has no resampler.
-- **Desktop scale gestures:** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) maps to
-  `InputEvent::Scale` at the cursor, `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE × lines)` (0.1,
-  ~10% per notch); a plain wheel stays `Scroll`. Winit's `PinchGesture` (macOS only at this pin)
-  maps to the same stream with `scale_delta = 1.0 + delta`; see `desktop-pinch-linux-windows-unavailable`
-  in [LIMITATIONS.md](LIMITATIONS.md).
+- **Desktop scale gestures:** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) maps to `InputEvent::Scale` at the cursor,
+  `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE × lines)` (0.1, ~10% per notch); a plain wheel stays `Scroll`. Winit's
+  `PinchGesture` (macOS only at this pin) maps to the same stream with `scale_delta = 1.0 + delta`; see
+  `desktop-pinch-linux-windows-unavailable` in [LIMITATIONS.md](LIMITATIONS.md).
 - **Desktop file drop:** winit's `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` events map onto
   `InputEvent::FileDrop`'s three `FileDropPhase`s. Files arrive one event each with no "that's
   everything" signal, so only a hover's first arrival dispatches (`Hover`, empty `paths`) and a
@@ -470,44 +467,44 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   `WindowInsets` (zero elsewhere and below iOS 26). An app's `FrustSceneDelegate` subclass owns
   `preferredWindowingControlStyle(for:)` and `windowScene.sizeRestrictions`; it stores the surface as `frustViewController` and roots the
   window at `makeWindowRootViewController(hosting:)` (default: that controller; a plugin may re-root).
-- **Android edge-to-edge:** `FrustActivity`, not the manifest theme, owns edge-to-edge — `onCreate`
-  calls androidx `enableEdgeToEdge` with transparent `SystemBarStyle`s, then on API < 35 adds
-  `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and (API 29+) clears the bar contrast scrim, so transparent
-  bars and real insets arrive regardless of the manifest theme; API 35+ enforces it platform-side.
-  A legacy theme (missing `windowDrawsSystemBarBackgrounds`) keeps working but logs one warning
-  naming the migration recipe ([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)).
+- **Android edge-to-edge:** `FrustActivity`, not the manifest theme, owns edge-to-edge — `onCreate` calls androidx
+  `enableEdgeToEdge` with transparent `SystemBarStyle`s, then on API < 35 adds `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` and
+  (API 29+) clears the bar contrast scrim, so transparent bars and real insets arrive regardless of the manifest
+  theme; API 35+ enforces it platform-side. A legacy theme (missing `windowDrawsSystemBarBackgrounds`) keeps working
+  but logs one warning naming the migration recipe ([SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)).
 - **Theme and brightness** reach widgets through `RenderRoot::set_theme` and app code through a
-  re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated
-  on the resolved brightness actually moving so an override swapping one dark theme for another
-  fires nothing. Android also reads the resolved brightness back over JNI after every appearance
-  change and on any frame whose `nativeFrameSync` word reports a flip, so a Rust-forced theme reaches
-  the status bar.
-- **Accessibility:** `frust-core` reports semantics `bounds` in logical pixels, accesskit wants physical:
-  all three shells push one assembly, `frust-shell-common`'s `build_tree_update` / `tree_update_from_parts`,
-  whose root carries `Affine::scale(sanitize_scale(scale))` (none at 1.0) — window scale factor on desktop,
-  display scale on iOS, the frame's density on Android (`accesskit_android`, `accesskit_ios` do the delivery).
-- **Reduced motion** is the one host signal whose sensor is not the appearance sensor: Android
-  watches the animator duration scale (`ContentObserver` plus an `onResume` re-read), iOS the UIKit
-  notification plus an activation re-read, desktop has no source (winit exposes nothing). Delivery
-  bypasses the theme-override path, which would latch an override and pin brightness; each shell
-  edits the motion field directly and marks appearance dirty so the gate cannot skip the tick.
-- **IME content type:** each focused widget publishes a content type (Normal/Password/
-  NoSuggestions/Terminal) and each shell destructures the editing state into its platform's
-  payload — Android into `EditorInfo` input-type and IME flags (restarting the connection when the
-  type changes on a steady-focused field), iOS into the `UITextInputTraits` matrix over its shared
-  responder (every managed trait assigned in every arm), desktop into winit's `ImePurpose`, a
-  cosmetic hint on Wayland only and never a secure-text-entry boundary. Both mobile shells
-  reconcile the platform's IME mirror on a per-frame poll behind a divergence guard. The iOS Swift
-  half remains compile- and device-unverified on the Linux build host — see
-  [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
-- **Cursor:** desktop reads `RenderRoot::cursor()` after every event dispatch, beside
-  `sync_ime` (`ShellHandler::sync_cursor`), and applies it via winit's `Window::set_cursor` only
-  when it differs from the shape last pushed. `winit_cursor_for` (`frust-shell-desktop`) is the one
-  platform touch point mapping the framework's `CursorIcon` onto winit's own vocabulary; a mobile
-  shell never reads the resolved value. Web carries the identical request/resolve contract and a
-  real implementation (winit's web backend writes the canvas's CSS `cursor` property), unlike its
-  semantics/devtools seams below. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover
-  and Cursor section.
+  re-provide under the root owner; on desktop a third path fires the per-OS brightness hook, gated on
+  the resolved brightness actually moving so an override swapping one dark theme for another fires
+  nothing. Android also reads the resolved brightness back over JNI after every appearance change and on
+  any frame whose `nativeFrameSync` word reports a flip, so a Rust-forced theme reaches the status bar.
+- **Accessibility:** `frust-core` reports semantics `bounds` in logical pixels, accesskit wants physical: all three
+  shells push one assembly, `frust-shell-common`'s `build_tree_update` / `tree_update_from_parts`, whose root carries
+  `Affine::scale(sanitize_scale(scale))` (none at 1.0) — window scale factor on desktop, display scale on iOS, the
+  frame's density on Android (`accesskit_android`, `accesskit_ios` do the delivery).
+- **Reduced motion** is the one host signal whose sensor is not the appearance sensor: Android watches the animator
+  duration scale (`ContentObserver` plus an `onResume` re-read), iOS the UIKit notification plus an activation
+  re-read, desktop has no source. Delivery bypasses the theme-override path (it would latch an override and pin
+  brightness): each shell edits the motion field directly and marks appearance dirty so the gate cannot skip the tick.
+- **OS text scale** follows that shape. Android pushes the effective scale at body size (16sp through
+  `displayMetrics` / 16dp, so Android 14+ nonlinear curves count) after `nativeInit`, in `onResume` and
+  `onConfigurationChanged` (`fontScale` in `android:configChanges` keeps the activity). iOS pushes the
+  `UIFontMetrics` body ratio (`scaledValue(for: 17)/17`) at the surface seed, on `appDidBecomeActive`
+  and `UIContentSizeCategory.didChangeNotification`. Desktop and web report none (1.0). Both mobile
+  shells compose `Theme::with_text_scale` over `Theme::authored_type_scale`, dedupe on their stored,
+  clamped `os_text_scale`, and re-apply it on every whole-theme install beside the reduce-motion floor.
+- **IME content type:** each focused widget publishes a content type (Normal/Password/ NoSuggestions/Terminal) and
+  each shell destructures the editing state into its platform's payload — Android into `EditorInfo` input-type and IME
+  flags (restarting the connection when the type changes on a steady-focused field), iOS into the `UITextInputTraits`
+  matrix over its shared responder (every managed trait assigned in every arm), desktop into winit's `ImePurpose`, a
+  cosmetic hint on Wayland only and never a secure-text-entry boundary. Both mobile shells reconcile the platform's
+  IME mirror on a per-frame poll behind a divergence guard. The iOS Swift half remains compile- and device-unverified
+  on the Linux build host — see [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
+- **Cursor:** desktop reads `RenderRoot::cursor()` after every event dispatch, beside `sync_ime`
+  (`ShellHandler::sync_cursor`), and applies it via winit's `Window::set_cursor` only when it differs from the shape
+  last pushed. `winit_cursor_for` (`frust-shell-desktop`) is the one platform touch point mapping the framework's
+  `CursorIcon` onto winit's own vocabulary; a mobile shell never reads the resolved value. Web carries the identical
+  request/resolve contract and a real implementation (winit's web backend writes the canvas's CSS `cursor` property), unlike its semantics/devtools seams below.
+  See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover and Cursor section.
 - **Clipboard:** the framework side is two one-shot slots plus one inbound verb —
   `AppTree::take_clipboard_write`/`take_paste_request`, drained after a dispatch, and
   `InputEvent::EditCommand`, dispatched back. [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) owns
@@ -535,34 +532,29 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   system-initiated read, which only UIKit's own edit menu provides; the framework's view is the
   app's single responder for that menu and for hardware `Cmd+C`/`X`/`V`/`A`, and its read runs
   synchronously inside `paste(_:)`. Both mobile clipboard paths are device-unverified.
-- **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (upstream issue 4424 is
-  open), so `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">`
-  under `document.body`, opened when the focused widget publishes an active `ImeState` and removed
-  when it stops. Its attributes come from the field's `ImeContentType` (a secret field gets
-  `type="password"`); a hint that moves rebuilds the element, since a browser reads `type` only
-  when it first classifies one. Composition is an explicit three-state session, because an *empty*
-  `compositionend` is not reliably a cancel: the preedit is held one signal longer and resolved as
-  a commit when an `input` follows, as a clear otherwise. winit's key listeners stay on the canvas,
-  so the overlay re-dispatches each plain keystroke there — except an `Unidentified` `keydown` (a
-  mobile soft keyboard), whose edit is taken from the `input` behind it. A soft keyboard's
-  Backspace is the known gap. The same element is the page's clipboard surface. Device-unverified —
-  see [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
-- **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web
-  adapter) and the in-app devtools UI-thread hop (a `wasm32` build has no sockets, so
-  `frust-shell-web` forwards no `devtools` feature) are each a documented no-op
-  (`push_semantics`/`pump_devtools` in `crates/frust-shell-web/src/app_handler.rs`). See
+- **Web IME bridge:** winit's web backend never emits `WindowEvent::Ime` (upstream issue 4424 is open), so
+  `frust-shell-web::ime` bypasses it with one hidden `<input id="frust-ime-overlay">` under `document.body`, opened
+  when the focused widget publishes an active `ImeState` and removed when it stops. Its attributes come from the
+  field's `ImeContentType` (a secret field gets `type="password"`); a hint that moves rebuilds the element, since a
+  browser reads `type` only when it first classifies one. Composition is an explicit three-state session, because an
+  *empty* `compositionend` is not reliably a cancel: the preedit is held one signal longer and resolved as a commit
+  when an `input` follows, as a clear otherwise. winit's key listeners stay on the canvas, so the overlay
+  re-dispatches each plain keystroke there — except an `Unidentified` `keydown` (a mobile soft keyboard), whose edit
+  is taken from the `input` behind it. A soft keyboard's Backspace is the known gap. The same element is the page's
+  clipboard surface. Device-unverified — see [LIMITATIONS.md](LIMITATIONS.md) `web-ime-residual-gaps`.
+- **Web host signals with no browser counterpart:** accessibility (AccessKit ships no web adapter) and the in-app
+  devtools UI-thread hop (a `wasm32` build has no sockets, so `frust-shell-web` forwards no `devtools` feature) are
+  each a documented no-op (`push_semantics`/`pump_devtools` in `crates/frust-shell-web/src/app_handler.rs`). See
   [LIMITATIONS.md](LIMITATIONS.md) `web-a11y-devtools`.
 - **Surface-mode resolution:** each mobile shell resolves the host's declared translucency mode
   against actual surface capabilities at configure time and republishes the verdict every frame.
-- **Devtools UI-thread hop** (feature-gated): a backend call needing live app state queues onto a
-  process-wide request each shell drains once per frame — desktop wakes via its winit proxy, the
-  mobile shells pump at the top of every tick (their display loop runs continuously while resumed).
-  An injected event dispatches through the shell's real input path. `FRUST_DEVTOOLS=0` is the one
-  security-relevant kill switch — it skips starting the service even in a `devtools` build. Detail
-  in [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
-- **Kill switches:** a set of additive, off-by-default env vars (`FRUST_NO_RENDER_THREAD`,
-  `FRUST_NO_FRAME_GATE`, `FRUST_NO_ANIM_PACING`, `FRUST_NO_RESAMPLE`) each revert one
-  frame-pipeline seam independently.
+- **Devtools UI-thread hop** (feature-gated): a backend call needing live app state queues onto a process-wide request
+  each shell drains once per frame — desktop wakes via its winit proxy, the mobile shells pump at the top of every
+  tick (their display loop runs continuously while resumed). An injected event dispatches through the shell's real
+  input path. `FRUST_DEVTOOLS=0` is the one security-relevant kill switch — it skips starting the service even in a
+  `devtools` build. Detail in [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md).
+- **Kill switches:** a set of additive, off-by-default env vars (`FRUST_NO_RENDER_THREAD`, `FRUST_NO_FRAME_GATE`,
+  `FRUST_NO_ANIM_PACING`, `FRUST_NO_RESAMPLE`) each revert one frame-pipeline seam independently.
 
 ## Key Types
 

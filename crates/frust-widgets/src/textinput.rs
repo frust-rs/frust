@@ -1331,6 +1331,14 @@ impl TextInputWidget {
                 FamilySource::Monospace => theme.monospace_family(),
             };
         }
+        // A default-sized field follows the theme's text scale; an explicit
+        // `.text_style(..)` size does not. The scaled size lands in
+        // `applied_style`, so the field height, caret and placeholder follow it.
+        if !self.text_style_explicit
+            && let Some(theme) = theme
+        {
+            crate::text::scale_default_size(&mut style, theme.text_scale());
+        }
         if !self.enabled {
             style.color = style.color.multiply_alpha(DISABLED_CONTENT_ALPHA);
         }
@@ -1413,7 +1421,7 @@ impl TextInputWidget {
         self.display()
             .layout_size()
             .height
-            .max(self.style.size as f64 * 1.25)
+            .max(self.applied_style.size as f64 * 1.25)
     }
 
     /// The top-left of the text content within a `height`-tall field (vertically
@@ -1430,7 +1438,7 @@ impl TextInputWidget {
         if h > 0.0 && n > 0 {
             h / n as f64
         } else {
-            self.style.size as f64 * 1.25
+            self.applied_style.size as f64 * 1.25
         }
     }
 
@@ -2665,6 +2673,10 @@ impl Widget for TextInputWidget {
                 ph_style.color = chrome.placeholder;
                 // The themed family resolved at layout, not the declared one.
                 ph_style.family = self.applied_style.family.clone();
+                // Likewise the (possibly text-scaled) metrics.
+                ph_style.size = self.applied_style.size;
+                ph_style.line_height = self.applied_style.line_height;
+                ph_style.letter_spacing = self.applied_style.letter_spacing;
                 let layout = self.text_ctx.layout(&self.placeholder, &ph_style, None);
                 for run in layout.to_scene_runs(text_origin) {
                     scene.draw_glyph_run(run);
@@ -8543,6 +8555,52 @@ mod tests {
         }
         root.layout(Size::new(600.0, 200.0));
         root
+    }
+
+    fn scaled_theme(factor: f32) -> Theme {
+        let base = Theme::neutral();
+        let authored = base.type_scale.clone();
+        base.with_text_scale(&authored, factor)
+    }
+
+    fn field_height(root: &mut RenderRoot<AppState, TextInputView<AppState>>) -> f64 {
+        root.layout(Size::new(600.0, 200.0)).height
+    }
+
+    #[test]
+    fn a_default_styled_field_follows_the_theme_text_scale() {
+        let mut one = themed_field("hi", Some(scaled_theme(1.0)), |v| v);
+        let mut big = themed_field("hi", Some(scaled_theme(1.5)), |v| v);
+        assert_eq!(widget(&one).applied_style.size, 16.0);
+        assert_eq!(widget(&big).applied_style.size, 24.0);
+        assert!(field_height(&mut big) > field_height(&mut one));
+        assert!(
+            widget(&big).content_height() > widget(&one).content_height(),
+            "the measured content height (and with it the caret line) follows the scale"
+        );
+    }
+
+    #[test]
+    fn an_explicit_text_style_field_ignores_the_theme_text_scale() {
+        let style = TextStyle::new(16.0, Color::BLACK);
+        let mut one = themed_field("hi", Some(scaled_theme(1.0)), |v| {
+            v.text_style(style.clone())
+        });
+        let mut big = themed_field("hi", Some(scaled_theme(1.5)), |v| {
+            v.text_style(style.clone())
+        });
+        assert_eq!(widget(&big).applied_style.size, 16.0);
+        assert_eq!(field_height(&mut big), field_height(&mut one));
+    }
+
+    #[test]
+    fn a_bare_scale_push_rescales_a_default_field_without_a_rebuild() {
+        let mut root = themed_field("hi", Some(scaled_theme(1.0)), |v| v);
+        let before = field_height(&mut root);
+        root.set_theme(Box::new(scaled_theme(1.5)));
+        let after = field_height(&mut root);
+        assert!(after > before, "{before} -> {after}");
+        assert_eq!(widget(&root).applied_style.size, 24.0);
     }
 
     #[test]

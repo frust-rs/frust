@@ -93,8 +93,9 @@
 //!   range selection against the single-month calendar.
 //! - **No text-scale clamping.** The reference caps its own layout against
 //!   `MediaQuery.textScalerOf` (`maxTextScaleFactor`, `maxHeaderTextScaleFactor`,
-//!   …); the framework exposes no text-scale factor to a widget, so those
-//!   constants have nothing to clamp here.
+//!   …). A factor now exists (`Theme::text_scale`, and the type scale the
+//!   picker reads is already scaled by it), but those clamping constants are
+//!   still not implemented here.
 //! - **No keyboard month paging.** `_M3EMonthPickerState._handleKey` pages on
 //!   arrow-left/right while the grid holds focus; this widget claims no focus
 //!   of its own (it has no editable and no focusable child), so there is no

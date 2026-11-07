@@ -35,6 +35,19 @@ impl Locale {
         self.0.region
     }
 
+    /// The script this locale is written in: its explicit script subtag, or
+    /// the likely one for the few languages where script decides readability
+    /// (`zh-TW` is `Hant`; `zh`, `zh-CN`, `zh-SG` are `Hans`; `sr` is `Cyrl`).
+    ///
+    /// `None` for every other locale. This is the same table locale
+    /// negotiation uses, so callers keying their own data on it agree with
+    /// which bundle a request resolves to.
+    pub fn likely_script(&self) -> Option<Script> {
+        self.0
+            .script
+            .or_else(|| crate::engine::likely_script(self.0.language, self.0.region))
+    }
+
     /// The underlying `unic_langid` identifier — the lossless route back for
     /// negotiation and ICU bridging (carries locale variants the subtag
     /// accessors above do not expose).
@@ -80,6 +93,33 @@ impl Locale {
             &variants,
         ))
     }
+
+    /// `reactive::I18n::set_locale`'s retention rule: `base` (region-less)
+    /// plus the region of `retained`, with the script `base` is meant to have
+    /// when it has none of its own.
+    ///
+    /// - `retained` is the same language: its explicit script carries over,
+    ///   so `zh-Hans-US` then `zh` stays `zh-Hans-US` and a repeated call is
+    ///   a no-op. `zh-TW` has none, so `zh-TW` then `zh` stays `zh-TW`.
+    /// - `retained` is another language and the region settles the script
+    ///   (`en-HK` then `zh`): nothing is pinned, so the region decides.
+    /// - `retained` is another language otherwise: the script `base` implies
+    ///   without a region is pinned, so an inherited region cannot change it
+    ///   (`en-US` then `zh` is `zh-Hans-US`, not likely-`Hant` `zh-US`).
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn compose_retained(base: &Locale, retained: &Locale, region: Region) -> Self {
+        let mut id = base.as_lang_id().clone();
+        if id.script.is_none() {
+            id.script = if retained.language() == base.language() {
+                retained.script()
+            } else if crate::engine::region_settles_script(id.language, region) {
+                None
+            } else {
+                crate::engine::likely_script(id.language, None)
+            };
+        }
+        Self::compose_region(&Locale(id), region)
+    }
 }
 
 impl FromStr for Locale {
@@ -112,5 +152,19 @@ mod tests {
         assert_eq!(locale.language().as_str(), "de");
         assert_eq!(locale.region().expect("region present").as_str(), "CH");
         assert_eq!(locale.to_string(), "de-CH");
+    }
+
+    #[test]
+    fn likely_script_prefers_an_explicit_script_then_the_table() {
+        let script = |tag: &str| {
+            let locale: Locale = tag.parse().expect("valid locale");
+            locale.likely_script().map(|s| s.to_string())
+        };
+        assert_eq!(script("zh-TW").as_deref(), Some("Hant"));
+        assert_eq!(script("zh-CN").as_deref(), Some("Hans"));
+        assert_eq!(script("zh-Hant-CN").as_deref(), Some("Hant"));
+        assert_eq!(script("zh-US").as_deref(), Some("Hant"));
+        assert_eq!(script("sr-ME"), None);
+        assert_eq!(script("de-AT"), None);
     }
 }

@@ -175,6 +175,17 @@ void  frust_set_appearance(void *handle, uint8_t dark);
 // a replacement), so it also reaches a theme forced with frust::set_app_theme.
 void  frust_set_reduce_motion(void *handle, uint8_t reduce);
 
+// Text scale: apply the platform's Dynamic Type content size to the app's type
+// scale. `scale` is UIFontMetrics.default.scaledValue(for: 17, compatibleWith:
+// traitCollection) / 17 (1.0 = the default body size). Dynamic Type is not
+// reported through traitCollectionDidChange here, so FrustViewController
+// observes UIContentSizeCategory.didChangeNotification for live changes, seeds
+// the initial value right after frust_init returns a handle, and re-pushes it
+// on every foreground. The Rust side clamps the factor and derives the theme's
+// type scale from the authored one, so it also reaches a theme forced with
+// frust::set_app_theme.
+void  frust_set_text_scale(void *handle, float scale);
+
 // Deep links: deliver a platform URL — cold-start, from
 // SceneDelegate's connectionOptions.urlContexts, or running, from
 // scene(_:openURLContexts:) — into the process-wide deep-link source. `url`

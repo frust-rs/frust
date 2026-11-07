@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn every_supported_language_fills_cldr_names() {
-        for tag in ["en", "th", "vi", "ja", "es", "de", "fr"] {
+        for tag in ["en", "th", "vi", "ja", "es", "de", "fr", "zh-Hans"] {
             let s = material_strings_for(&locale(tag));
             let d = s.date_picker;
             assert!(d.months.iter().all(|m| !m.is_empty()), "{tag}");
@@ -319,6 +319,138 @@ mod tests {
             material_strings_for(&locale("xx")),
             MaterialStrings::ENGLISH
         );
+    }
+
+    #[test]
+    fn simplified_chinese_locales_share_the_zh_hans_table() {
+        let hans = material_strings_for(&locale("zh-Hans"));
+        assert_eq!(hans.dialog_cancel, "取消");
+        assert_ne!(hans, MaterialStrings::ENGLISH);
+        for tag in ["zh", "zh-CN", "zh-SG"] {
+            assert_eq!(material_strings_for(&locale(tag)), hans, "{tag}");
+        }
+    }
+
+    #[test]
+    fn traditional_chinese_locales_fall_back_to_english() {
+        for tag in ["zh-Hant", "zh-TW", "zh-HK", "zh-US", "zh-GB"] {
+            assert_eq!(
+                material_strings_for(&locale(tag)),
+                MaterialStrings::ENGLISH,
+                "{tag}"
+            );
+        }
+    }
+
+    /// Reads the ambient theme's brightness after providing the localized
+    /// theme, which is what a descendant of this component would read.
+    struct Probe {
+        i18n: I18n,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<frust::Brightness>>>,
+        /// A theme the component itself provides just before the call.
+        caller: Option<frust::Brightness>,
+    }
+
+    impl Component for Probe {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> impl View<()> {
+            if let Some(brightness) = self.caller {
+                frust::provide_context(frust::Theme::neutral().with_brightness(brightness));
+            }
+            provide_localized_strings(&self.i18n);
+            let theme = frust::use_context::<frust::Theme>().expect("theme provided");
+            self.seen.lock().unwrap().push(theme.brightness);
+            frust::text("probe")
+        }
+    }
+
+    #[test]
+    fn a_theme_pushed_on_the_parent_owner_reaches_a_rebuilt_provider() {
+        let root_owner = Owner::new();
+        root_owner.set();
+        root_owner.with(|| {
+            frust::provide_context(
+                frust::Theme::neutral().with_brightness(frust::Brightness::Light),
+            );
+        });
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let i18n = i18n("en");
+        let mut root: RenderRoot<(), ComponentView<Probe>> = RenderRoot::new();
+        let (host, probe_seen) = (i18n.clone(), seen.clone());
+        let mut logic = move |_: &mut ()| {
+            component(Probe {
+                i18n: host.clone(),
+                seen: probe_seen.clone(),
+                caller: None,
+            })
+        };
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        root_owner.with(|| {
+            frust::provide_context(
+                frust::Theme::neutral().with_brightness(frust::Brightness::Dark),
+            );
+        });
+        root.rebuild(&mut logic, &mut state);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [frust::Brightness::Light, frust::Brightness::Dark]
+        );
+    }
+
+    /// Rebuilds a `Probe` three times and returns the brightness each build saw.
+    fn probe_builds(caller: Option<frust::Brightness>) -> Vec<frust::Brightness> {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let i18n = i18n("en");
+        let mut root: RenderRoot<(), ComponentView<Probe>> = RenderRoot::new();
+        let (host, probe_seen) = (i18n.clone(), seen.clone());
+        let mut logic = move |_: &mut ()| {
+            component(Probe {
+                i18n: host.clone(),
+                seen: probe_seen.clone(),
+                caller,
+            })
+        };
+        let mut state = ();
+        for _ in 0..3 {
+            root.rebuild(&mut logic, &mut state);
+        }
+        seen.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_theme_the_caller_provided_on_the_same_owner_is_the_base_on_every_build() {
+        let root_owner = Owner::new();
+        root_owner.set();
+        root_owner.with(|| {
+            frust::provide_context(
+                frust::Theme::neutral().with_brightness(frust::Brightness::Light),
+            );
+        });
+        assert_eq!(
+            probe_builds(Some(frust::Brightness::Dark)),
+            [frust::Brightness::Dark; 3]
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_provider_with_no_ancestor_theme_is_stable() {
+        let root_owner = Owner::new();
+        root_owner.set();
+        let seen = probe_builds(None);
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(seen[1], seen[2]);
+    }
+
+    #[test]
+    fn a_provider_on_a_root_owner_reads_that_owners_theme() {
+        let owner = Owner::new();
+        owner.set();
+        frust::provide_context(frust::Theme::neutral().with_brightness(frust::Brightness::Dark));
+        crate::provide_localized_strings(&i18n("en"));
+        let theme = frust::use_context::<frust::Theme>().expect("provided");
+        assert_eq!(theme.brightness, frust::Brightness::Dark);
     }
 
     #[test]

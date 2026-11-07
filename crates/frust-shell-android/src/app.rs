@@ -139,7 +139,7 @@ use frust_shell_common::{
     sanitize_scale,
 };
 use frust_text::TextContext;
-use frust_theme::{Brightness, Theme};
+use frust_theme::{Brightness, TextScale, Theme, TypeScale};
 use ndk::native_window::NativeWindow;
 
 use crate::ffi_support::TouchSlotMap;
@@ -256,6 +256,17 @@ pub struct AndroidAppHandle {
     /// of it — without this, turning the OS setting back off would have to
     /// guess what the theme originally asked for.
     authored_reduce_motion: bool,
+    /// The platform's last-reported text scale (`nativeSetTextScale` →
+    /// [`Self::set_text_scale`]), already clamped by [`TextScale::clamped`].
+    /// Starts `1.0` (no OS report yet — Kotlin pushes the real value right
+    /// after `nativeInit`, beside the reduce-motion push).
+    os_text_scale: f32,
+    /// The **active theme's own** `type_scale`, captured every time a whole
+    /// `Theme` is installed ([`Self::new`]'s seed and the override-poll arm in
+    /// [`Self::frame`]). [`Theme::with_text_scale`] derives the published scale
+    /// from this plus [`Self::os_text_scale`], so re-applying never compounds
+    /// and `1.0` restores the authored scale exactly.
+    authored_type_scale: TypeScale,
     /// The accessibility adapter state, attached lazily by
     /// `nativeInitAccessibility` after `nativeInit` (see
     /// [`Self::attach_accessibility`]). `None` until then — a11y is best-effort
@@ -664,6 +675,9 @@ impl AndroidAppHandle {
         // later theme swap) can re-derive the effective value instead of
         // guessing what the theme asked for — see `authored_reduce_motion`.
         let authored_reduce_motion = theme.motion.reduce_motion;
+        // The base's own type scale, kept for the same reason: the OS text
+        // scale is applied over it, never assigned over it.
+        let authored_type_scale = theme.authored_type_scale();
 
         app.set_theme(Box::new(theme.clone()));
         // Seed both translucency consumers — the render root and the app-facing
@@ -726,6 +740,8 @@ impl AndroidAppHandle {
             // seed above needs no fix-up.
             os_reduce_motion: false,
             authored_reduce_motion,
+            os_text_scale: 1.0,
+            authored_type_scale,
             a11y: None,
             frame_gate,
             events_since_last_frame: false,
@@ -853,6 +869,29 @@ impl AndroidAppHandle {
         self.push_theme();
     }
 
+    /// `nativeSetTextScale`: apply the platform's font-size preference to the
+    /// active theme's `type_scale` and re-publish it through both delivery paths.
+    ///
+    /// `scale` is Kotlin's effective scale at body size (it includes the
+    /// nonlinear curve on newer Android versions). The value is clamped with
+    /// [`TextScale::clamped`] and compared with the last applied one; an
+    /// unchanged value returns early, since Kotlin re-pushes on every resume and
+    /// a `push_theme` forces a relayout. The composition itself is
+    /// [`Theme::with_text_scale`] over [`Self::authored_type_scale`].
+    pub(crate) fn set_text_scale(&mut self, scale: f32) {
+        let clamped = TextScale::clamped(scale);
+        if self.os_text_scale == clamped {
+            return;
+        }
+        self.os_text_scale = clamped;
+        self.theme = self
+            .theme
+            .clone()
+            .with_text_scale(&self.authored_type_scale, clamped);
+        self.appearance_dirty = true;
+        self.push_theme();
+    }
+
     /// `nativeTakeClipboardWrite`: drain the text a focused editable asked to
     /// put on the host clipboard
     /// ([`AppTree::take_clipboard_write`](frust_shell_common::AppTree::take_clipboard_write)).
@@ -957,6 +996,10 @@ impl AndroidAppHandle {
             self.authored_reduce_motion = theme.motion.reduce_motion;
             theme.motion.reduce_motion =
                 effective_reduce_motion(self.authored_reduce_motion, self.os_reduce_motion);
+            // Same for the type scale: re-capture the incoming theme's authored
+            // scale and re-apply the OS text scale over it.
+            self.authored_type_scale = theme.authored_type_scale();
+            theme = theme.with_text_scale(&self.authored_type_scale, self.os_text_scale);
             self.theme = theme;
             self.theme_override_active = override_active;
             self.push_theme();

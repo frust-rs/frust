@@ -2168,6 +2168,24 @@ pub fn set_reduce_motion(handle: *mut c_void, reduce: u8) {
     });
 }
 
+/// `frust_set_text_scale`: apply the platform's Dynamic Type content size to
+/// the active theme's type scale, re-publishing it through both delivery
+/// paths — the text-size twin of [`set_reduce_motion`].
+///
+/// `scale` is Swift's `UIFontMetrics.default.scaledValue(for: 17, ...) / 17`
+/// (1.0 = the default body size). Dynamic Type is not a `UITraitCollection`
+/// trait Swift observes here, so it is sourced from
+/// `UIContentSizeCategory.didChangeNotification`. Non-finite or non-positive
+/// values are treated as `1.0` by the theme side. A missing handle is a no-op.
+pub fn set_text_scale(handle: *mut c_void, scale: f32) {
+    guard("frust_set_text_scale", (), || {
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.set_text_scale(scale);
+        }
+    });
+}
+
 /// `frust_set_insets`: deliver the platform's window insets. The eight `f32`s
 /// are two per-edge
 /// sets in the order [`logical_insets`](frust_shell_common::logical_insets)

@@ -46,4 +46,7 @@ pub use shape::ShapeScale;
 pub use status::{StatusColors, StatusPalette};
 pub use theme::{DesignLanguage, Theme};
 pub use typefaces::{FontFace, NativeTypefaces};
-pub use typography::{MonospaceFamily, TypeScale};
+pub use typography::{
+    MonospaceFamily, TEXT_SCALE_MAX_BODY, TEXT_SCALE_MAX_DISPLAY, TEXT_SCALE_MIN, TextScale,
+    TypeScale, scale_style,
+};

@@ -217,6 +217,12 @@ pub struct TextView {
     /// Whether the app set the font family explicitly (via
     /// `.family()`/`.style()`). When `true`, `family_source` is never consulted.
     family_explicit: bool,
+    /// Whether the app set the font size explicitly (via `.size()`/`.style()`).
+    /// When `false` and a theme carries a text scale, the default size (and an
+    /// absolute line height and the letter spacing) is multiplied by
+    /// `Theme::text_scale` at layout. An explicit size is never scaled: catalogs
+    /// pass sizes already taken from the scaled type scale.
+    size_explicit: bool,
     /// Where the family resolves from at layout, set via
     /// [`Self::themed_family`] or [`Self::themed_mono_family`]. `None`
     /// (default) keeps the style's own family.
@@ -240,6 +246,7 @@ pub fn text(content: impl Into<String>) -> TextView {
         color_explicit: false,
         role: ThemeTextColor::OnSurface,
         family_explicit: false,
+        size_explicit: false,
         family_source: None,
         max_lines: None,
         overflow: TextOverflow::default(),
@@ -247,9 +254,11 @@ pub fn text(content: impl Into<String>) -> TextView {
 }
 
 impl TextView {
-    /// Set the font size, in logical pixels.
+    /// Set the font size, in logical pixels. Marks the size as explicitly set,
+    /// so the theme's text scale no longer applies to it.
     pub fn size(mut self, size: f32) -> Self {
         self.style.size = size;
+        self.size_explicit = true;
         self
     }
 
@@ -369,13 +378,15 @@ impl TextView {
         self.font_feature(*b"tnum", 1)
     }
 
-    /// Replace the whole style in one call. Treated as an explicit color and
-    /// family choice (the supplied style carries its own of both), so it wins
-    /// over the themed color default and any [`Self::themed_family`] role.
+    /// Replace the whole style in one call. Treated as an explicit color,
+    /// family and size choice (the supplied style carries its own of each), so
+    /// it wins over the themed color default and any [`Self::themed_family`]
+    /// role, and the theme's text scale does not apply to it.
     pub fn style(mut self, style: TextStyle) -> Self {
         self.style = style;
         self.color_explicit = true;
         self.family_explicit = true;
+        self.size_explicit = true;
         self
     }
 
@@ -450,6 +461,7 @@ impl<State: 'static> View<State> for TextView {
             color_explicit: self.color_explicit,
             role: self.role,
             family_explicit: self.family_explicit,
+            size_explicit: self.size_explicit,
             family_source: self.family_source,
             max_lines: self.max_lines,
             overflow: self.overflow,
@@ -494,6 +506,13 @@ impl<State: 'static> View<State> for TextView {
             element.layout = None;
             flags |= ChangeFlags::LAYOUT;
         }
+        // Whether the default size follows the theme's text scale is resolved
+        // at layout, so a flip must reshape.
+        if prev.size_explicit != self.size_explicit {
+            element.size_explicit = self.size_explicit;
+            element.layout = None;
+            flags |= ChangeFlags::LAYOUT;
+        }
         // Truncation inputs feed into shaping the same way content/style do
         // (`layout_bounded` reshapes on overflow) — a change here must
         // invalidate the cache exactly like those.
@@ -518,6 +537,8 @@ pub struct TextWidget {
     role: ThemeTextColor,
     /// Whether the app set the font family explicitly — see [`TextView`].
     family_explicit: bool,
+    /// Whether the app set the font size explicitly — see [`TextView`].
+    size_explicit: bool,
     /// Where the family resolves from when `family_explicit` is `false` —
     /// see [`TextView::themed_family`] and [`TextView::themed_mono_family`].
     family_source: Option<FamilySource>,
@@ -579,8 +600,26 @@ impl TextWidget {
                 FamilySource::Monospace => theme.monospace_family(),
             };
         }
+        // Applied last, after color and family resolution. The scaled size
+        // lands in the effective style, so the `laid_out_style ==` compare in
+        // `layout` re-shapes on a scale change without a view change.
+        if !self.size_explicit {
+            scale_default_size(&mut style, theme.text_scale());
+        }
         style
     }
+}
+
+/// Scale a default-sized style by the theme's text `factor` through the
+/// shared `frust_theme::scale_style` routine. A factor of `1.0` (no text scale
+/// attached) leaves the style untouched, which keeps unscaled output
+/// byte-identical. The factor is the body-clamped one, so default-sized text
+/// clamps as a body role.
+pub(crate) fn scale_default_size(style: &mut TextStyle, factor: f32) {
+    if factor == 1.0 {
+        return;
+    }
+    *style = frust_theme::scale_style(style, factor);
 }
 
 impl Widget for TextWidget {
@@ -802,6 +841,81 @@ mod tests {
         let mut pctx = PaintCtx::new(Point::ZERO, Size::new(200.0, 100.0));
         widget.paint(&mut pctx, &mut rec);
         *rec.colors.first().expect("one glyph run painted")
+    }
+
+    /// The laid-out size of `view` under `theme` (or none).
+    fn laid_out_size(view: TextView, theme: Option<&Theme>) -> Size {
+        let mut widget = View::<()>::build(&view, &mut frust_core::BuildCtx::new(&mut 0u64));
+        let mut tcx = TextContext::new();
+        let theme_any = theme.map(|t| t as &dyn Any);
+        let mut lctx = LayoutCtx::with_resources(Some(&mut tcx as &mut dyn Any), theme_any);
+        widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 400.0)))
+    }
+
+    fn scaled_theme(factor: f32) -> Theme {
+        let base = Theme::neutral();
+        let authored = base.type_scale.clone();
+        base.with_text_scale(&authored, factor)
+    }
+
+    #[test]
+    fn default_sized_text_scales_with_the_theme_text_scale() {
+        let plain = laid_out_size(text("x"), Some(&scaled_theme(1.0)));
+        let big = laid_out_size(text("x"), Some(&scaled_theme(1.5)));
+        let ratio = big.height / plain.height;
+        assert!(
+            (ratio - 1.5).abs() < 0.1,
+            "a 1.5 scale lays the line out 1.5x taller, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn explicit_size_text_ignores_the_theme_text_scale() {
+        let plain = laid_out_size(text("x").size(16.0), Some(&scaled_theme(1.0)));
+        let big = laid_out_size(text("x").size(16.0), Some(&scaled_theme(1.5)));
+        assert_eq!(plain, big);
+        let styled = laid_out_size(
+            text("x").style(TextStyle::new(16.0, Color::BLACK)),
+            Some(&scaled_theme(1.5)),
+        );
+        assert_eq!(styled, plain);
+    }
+
+    #[test]
+    fn size_builder_marks_size_explicit_but_family_and_color_builders_do_not() {
+        assert!(!text("x").size_explicit);
+        assert!(text("x").size(12.0).size_explicit);
+        assert!(text("x").style(TextStyle::default()).size_explicit);
+        let view = text("x")
+            .color(Color::BLACK)
+            .themed_family(ThemeTextType::BodyLarge)
+            .italic()
+            .weight(FontWeight::BOLD)
+            .locale("ja");
+        assert!(!view.size_explicit);
+    }
+
+    #[test]
+    fn themed_family_text_without_a_size_still_scales() {
+        let family = || text("x").themed_family(ThemeTextType::BodyLarge);
+        let plain = laid_out_size(family(), Some(&scaled_theme(1.0)));
+        let big = laid_out_size(family(), Some(&scaled_theme(1.5)));
+        assert!(big.height > plain.height * 1.3);
+    }
+
+    #[test]
+    fn absolute_line_height_and_tracking_scale_with_a_default_size() {
+        let mut style = TextStyle::new(16.0, Color::BLACK);
+        style.line_height = LineHeight::Absolute(20.0);
+        style.letter_spacing = 2.0;
+        scale_default_size(&mut style, 1.5);
+        assert_eq!(style.size, 24.0);
+        assert_eq!(style.line_height, LineHeight::Absolute(30.0));
+        assert_eq!(style.letter_spacing, 3.0);
+        let mut relative = TextStyle::new(16.0, Color::BLACK);
+        relative.line_height = LineHeight::FontSizeRelative(1.2);
+        scale_default_size(&mut relative, 1.5);
+        assert_eq!(relative.line_height, LineHeight::FontSizeRelative(1.2));
     }
 
     #[test]
