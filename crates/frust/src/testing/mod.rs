@@ -11,6 +11,17 @@
 //! | `pumpAndSettle` | [`Tester::pump_and_settle`] |
 //! | `runAsync` + polling | [`Tester::pump_until`] (the one real-time wait) |
 //! | `binding.setSurfaceSize` | [`Tester::resize`] / [`Tester::set_metrics`] |
+//! | `tap` / `press` / `longPress` | [`Tester::tap`] / [`Tester::press`] / [`Tester::long_press`] |
+//! | `drag` / `timedDrag` | [`Tester::drag`] / [`Tester::timed_drag`] |
+//! | `startGesture` / `createGesture` | [`Tester::start_gesture`] / [`Tester::start_touch`] |
+//! | `TestGesture.moveBy` / `moveTo` | [`Tester::move_by`] / [`Tester::move_to`] |
+//! | `TestGesture.up` / `cancel` | [`Tester::up`] / [`Tester::cancel`] |
+//! | `find.text` / `find.byType` | [`find::text`] / [`find::by_type`] |
+//! | `getSemantics` | [`Tester::get_semantics`] |
+//!
+//! Unlike Flutter's, [`Tester::tap`] does not pump: the change it makes shows from the next pump.
+//! A second touch contact reaches only a widget that opted into the gesture's other contacts;
+//! see [`gesture`].
 //!
 //! Time enters only through paint: there is no fake-async zone and no timer queue. A widget reads
 //! the clock from `PaintCtx::frame_time`, and a pump advances it by exactly the duration given.
@@ -21,8 +32,12 @@
 //! [`PaintCtx::for_test`](crate::authoring::PaintCtx::for_test) available for driving a widget's
 //! `paint` directly against a chosen clock.
 
+pub mod find;
+pub mod gesture;
 mod tester;
 
+pub use find::{ActionTarget, Finder, Match};
+pub use gesture::{Gesture, Target};
 pub use tester::{PumpOutcome, Tester, TesterOptions};
 
 /// What [`Tester::inspect`] returns: one retained-tree node with its absolute bounds.
