@@ -600,8 +600,9 @@ impl TextContext {
     /// Lays out `spans` exactly like [`Self::layout_rich`], then caps it to
     /// `max_lines` (when `Some`) as [`Self::layout_bounded`] does.
     ///
-    /// The guarantee: the line never exceeds `max_width`, and an overflowing
-    /// paragraph always paints the ellipsis. The ellipsis takes the style of
+    /// The guarantee: an overflowing paragraph always paints the ellipsis,
+    /// and the line never exceeds `max_width` unless the ellipsis alone is
+    /// wider, when it is drawn bare. The ellipsis takes the style of
     /// the span where the cut settles after at most two passes: the span the
     /// uncut last line ends in is the guess, the text is cut with that
     /// span's ellipsis, and when the cut ends in another span the ellipsis is
@@ -3187,6 +3188,21 @@ mod tests {
         (cx, small, big)
     }
 
+    /// The size the layout's last glyph is painted at when that glyph is
+    /// [`ELLIPSIS`] in `style`'s font, `None` when it is any other glyph.
+    fn trailing_ellipsis_size(
+        cx: &mut TextContext,
+        layout: &TextLayout,
+        style: &TextStyle,
+    ) -> Option<f32> {
+        let ellipsis = cx.layout(&ELLIPSIS.to_string(), style, None);
+        let ellipsis_runs = ellipsis.to_scene_runs(kurbo::Point::ORIGIN);
+        let id = ellipsis_runs.last()?.glyphs.last()?.id;
+        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+        let last = runs.last()?;
+        (last.glyphs.last()?.id == id).then_some(last.font_size)
+    }
+
     #[test]
     fn rich_ellipsis_paints_when_only_a_narrow_ellipsis_fits_beside_one_big_glyph() {
         let _guard = crate::locale::test_support::DefaultLocale::set(None);
@@ -3202,9 +3218,12 @@ mod tests {
         let width = kept.size().width as f32 + small_ellipsis.size().width as f32;
         let layout = cx.layout_rich_bounded(&spans, Some(width), Some(1), TextOverflow::Ellipsis);
         assert!(layout.size().width <= f64::from(width) + 0.01);
-        assert!(
-            !layout.to_scene_runs(kurbo::Point::ORIGIN).is_empty(),
-            "the ellipsis is painted"
+        // The uncut line ends in the big span, but the big ellipsis cut keeps
+        // only "a", so the second pass re-makes it in the small style.
+        assert_eq!(
+            trailing_ellipsis_size(&mut cx, &layout, &small),
+            Some(small.size),
+            "the small ellipsis is painted"
         );
     }
 
@@ -3229,7 +3248,11 @@ mod tests {
             "{} > {width}",
             layout.size().width
         );
-        assert!(!layout.to_scene_runs(kurbo::Point::ORIGIN).is_empty());
+        assert_eq!(
+            trailing_ellipsis_size(&mut cx, &layout, &small),
+            Some(small.size),
+            "settled on the small head after guessing the big tail"
+        );
     }
 
     #[test]
@@ -3245,7 +3268,10 @@ mod tests {
         let width = six.size().width as f32 + big_ellipsis.size().width as f32;
         let layout = cx.layout_rich_bounded(&spans, Some(width), Some(1), TextOverflow::Ellipsis);
         assert!(layout.size().width <= f64::from(width) + 0.01);
-        assert!(layout.to_scene_runs(kurbo::Point::ORIGIN).len() >= 2);
+        assert!(
+            trailing_ellipsis_size(&mut cx, &layout, &small).is_some(),
+            "the ellipsis is painted"
+        );
     }
 
     #[test]

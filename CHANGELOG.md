@@ -36,12 +36,12 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 - Rich text spans. `frust-text` gains `TextSpan` and `TextContext::layout_rich` /
   `layout_rich_bounded`, laying out differently styled pieces as one paragraph (paragraph knobs come
-  from the first span; a one-span call shares the plain cache entry; a truncated line never exceeds
-  the width and always paints its ellipsis, styled after the span the cut settles in within two
-  passes, so between spans of different sizes or fonts it can follow another span's glyph).
-  `frust-widgets` gains `rich_text(spans)` and `span(text)` with
-  per-span size, colour, weight, family, italic, letter spacing, locale, font features, decorations
-  and themed roles, resolving theme and the OS text scale like `TextView`.
+  from the first span; a one-span call shares the plain cache entry; a truncated line always paints
+  its ellipsis and stays within the width unless the ellipsis alone is wider, styled after the span
+  the cut settles in within two passes, so between spans of different sizes or fonts it can follow
+  another span's glyph). `frust-widgets` gains `rich_text(spans)` and `span(text)` with per-span
+  size, colour, weight, family, italic, letter spacing, locale, font features, decorations and
+  themed roles, resolving theme and the OS text scale like `TextView`.
 - A memory-pressure event: `MemoryPressure` (`Moderate`, `Critical`),
   `AppLifecycleListener::on_memory_pressure`, shell-facing `push_memory_pressure` and the diagnostic
   `last_memory_pressure()`, independent of `AppLifecycleState`. iOS reports its memory warning as

@@ -236,7 +236,6 @@ impl<State: 'static> View<State> for RichTextView {
             view: self.clone(),
             layout: None,
             laid_out_max_width: None,
-            laid_out_styles: Vec::new(),
             laid_out_span_styles: Vec::new(),
             laid_out_locale_stamp: LocaleStamp::default(),
         }
@@ -265,13 +264,10 @@ pub struct RichTextWidget {
     layout: Option<TextLayout>,
     /// The width the cached layout was broken at.
     laid_out_max_width: Option<f32>,
-    /// The effective style of each shaped span group (see [`group_spans`]),
-    /// so a bare theme swap or text-scale change re-shapes without a view
-    /// change.
-    laid_out_styles: Vec<TextStyle>,
-    /// Every span's effective style before grouping: grouping depends on the
-    /// theme-resolved styles, so two layouts with equal group styles can
-    /// still split the spans differently.
+    /// Every span's effective style, so a bare theme swap or text-scale
+    /// change re-shapes without a view change. Kept before grouping:
+    /// grouping depends on the theme-resolved styles, so two layouts with
+    /// equal group styles can still split the spans differently.
     laid_out_span_styles: Vec<TextStyle>,
     /// The locale stamp read just before shaping.
     laid_out_locale_stamp: LocaleStamp,
@@ -348,12 +344,6 @@ impl Widget for RichTextWidget {
             if w.is_finite() { Some(w as f32) } else { None }
         };
         let all_styles = self.effective_styles(Theme::from_layout_ctx(ctx));
-        let groups = group_spans(
-            self.view.spans.iter().map(|s| s.content.as_str()),
-            &all_styles,
-            usize::from(u16::MAX),
-        );
-        let styles: Vec<TextStyle> = groups.iter().map(|g| all_styles[g.style].clone()).collect();
         let locale_stamp = LocaleStamp::for_style(None);
         if let Some(cached) = &self.layout
             && self.laid_out_max_width == max_width
@@ -363,6 +353,12 @@ impl Widget for RichTextWidget {
             return bc.constrain(cached.size());
         }
 
+        let groups = group_spans(
+            self.view.spans.iter().map(|s| s.content.as_str()),
+            &all_styles,
+            usize::from(u16::MAX),
+        );
+        let styles: Vec<TextStyle> = groups.iter().map(|g| all_styles[g.style].clone()).collect();
         let texts: Vec<String> = groups
             .iter()
             .map(|g| {
@@ -387,7 +383,6 @@ impl Widget for RichTextWidget {
         let size = bc.constrain(layout.size());
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
-        self.laid_out_styles = styles;
         self.laid_out_span_styles = all_styles;
         self.laid_out_locale_stamp = locale_stamp;
         size
@@ -470,6 +465,20 @@ mod tests {
         paint(&mut widget)
     }
 
+    /// The style of each span group the widget last laid out, regrouped
+    /// from the per-span styles it keys reuse on.
+    fn group_styles(widget: &RichTextWidget) -> Vec<TextStyle> {
+        let styles = &widget.laid_out_span_styles;
+        group_spans(
+            widget.view.spans.iter().map(|s| s.content.as_str()),
+            styles,
+            usize::from(u16::MAX),
+        )
+        .iter()
+        .map(|g| styles[g.style].clone())
+        .collect()
+    }
+
     fn glyph_colors(ops: &[Op]) -> Vec<Color> {
         ops.iter()
             .filter_map(|op| match op {
@@ -517,9 +526,10 @@ mod tests {
         let (mut widget, _) = lay_out(&view, None, 300.0, &mut tcx);
         // The weight is part of the style each span is shaped with; the
         // neighbouring span keeps the default.
-        assert_eq!(widget.laid_out_styles.len(), 2);
-        assert_eq!(widget.laid_out_styles[0].weight, FontWeight::default());
-        assert_eq!(widget.laid_out_styles[1].weight, FontWeight::BOLD);
+        let groups = group_styles(&widget);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].weight, FontWeight::default());
+        assert_eq!(groups[1].weight, FontWeight::BOLD);
         assert_eq!(paint(&mut widget).len(), 2, "one run per span");
     }
 
@@ -646,8 +656,11 @@ mod tests {
         let mut tcx = TextContext::new();
         let (mut reused, _) = lay_out(&view, Some(&base), 300.0, &mut tcx);
         let reused_size = layout_widget(&mut reused, Some(&scaled), 300.0, &mut tcx);
-        let (fresh, fresh_size) = lay_out(&view, Some(&scaled), 300.0, &mut tcx);
-        assert_eq!(reused.laid_out_styles, fresh.laid_out_styles);
+        let (mut fresh, fresh_size) = lay_out(&view, Some(&scaled), 300.0, &mut tcx);
+        assert_eq!(
+            glyph_sizes(&paint(&mut reused)),
+            glyph_sizes(&paint(&mut fresh))
+        );
         assert_eq!(reused_size, fresh_size, "\"b\" lays out at 24px");
     }
 
@@ -698,7 +711,7 @@ mod tests {
             let _slot = crate::test_support::LocaleSlotGuard::hold();
             let mut tcx = TextContext::new();
             let (widget, _) = lay_out(&view, None, 300.0, &mut tcx);
-            assert_eq!(widget.laid_out_styles.len(), 3);
+            assert_eq!(group_styles(&widget).len(), 3);
         }
         let colors = glyph_colors(&painted(&view, None));
         assert_eq!(colors.len(), 3);
@@ -732,7 +745,7 @@ mod tests {
             rich_text((0..count).map(|i| span("a").size(if i % 2 == 0 { 12.0 } else { 13.0 })));
         let mut tcx = TextContext::new();
         let (widget, size) = lay_out(&view, None, 300.0, &mut tcx);
-        assert_eq!(widget.laid_out_styles.len(), usize::from(u16::MAX));
+        assert_eq!(group_styles(&widget).len(), usize::from(u16::MAX));
         assert!(size.width > 0.0);
     }
 }
