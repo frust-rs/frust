@@ -1012,7 +1012,7 @@ pub mod authoring {
         pub use frust_text::{
             DecorationKind, DecorationRect, FamilyName, FontFamily, FontStyle, FontWeight,
             GenericSlot, LineHeight, OverflowWrap, TextAlign, TextContext, TextDecoration,
-            TextLayout, TextOverflow, TextStyle,
+            TextLayout, TextOverflow, TextSpan, TextStyle,
         };
         pub use frust_text::{EditOp, EditingState, EditingStateBytes, TextEditor};
         /// Types named in [`TextContext`]'s own public signatures —
