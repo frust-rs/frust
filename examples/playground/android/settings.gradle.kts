@@ -141,3 +141,20 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("../build/android/frust-auth-session"))
     }
 }
+
+// frust-permissions: the same include/projectDir/build-dir-redirect trio as
+// `:frust-camera` above, and exactly what `frust-drive::plugin::apply_gradle_module`
+// writes for this plugin's `Contribution::GradleModule`. Carried in-tree
+// because playground is a committed example, not a generated project.
+//
+// The module supplies the runtime-permission host (`FrustPermissionsHost`)
+// + its process-start init provider, and declares no permission itself.
+include(":frust-permissions")
+project(":frust-permissions").projectDir =
+    file("../../../plugins/permissions/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-permissions") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-permissions"))
+    }
+}
