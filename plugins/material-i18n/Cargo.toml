@@ -16,6 +16,7 @@ readme = "README.md"
 frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.5", default-features = false }
 frust-material = { path = "../material", version = "0.6.5" }
 frust-i18n = { path = "../i18n", version = "0.6.5" }
+frust-reactive = { workspace = true }
 # Month and weekday names come straight from CLDR through the same ICU4X pins frust-i18n uses.
 icu_datetime = { workspace = true }
 icu_locale_core = { workspace = true }
@@ -24,4 +25,3 @@ log = { workspace = true }
 [dev-dependencies]
 frust-core = { path = "../../crates/frust-core", version = "0.6.5", features = ["test-support"] }
 frust-widgets = { path = "../../crates/frust-widgets", version = "0.6.5", features = ["test-support"] }
-frust-reactive = { workspace = true }

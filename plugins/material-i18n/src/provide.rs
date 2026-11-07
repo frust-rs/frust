@@ -7,6 +7,7 @@ use std::sync::{Mutex, PoisonError};
 use frust::{Theme, provide_context, use_context};
 use frust_i18n::{I18n, Locale};
 use frust_material::{DatePickerStrings, DatePickerStringsOwned, MaterialStrings};
+use frust_reactive::Owner;
 
 use crate::tables::{de, en, es, fr, ja, th, vi, zh_hans};
 use names::calendar_names;
@@ -159,6 +160,13 @@ pub fn localized_theme(mut theme: Theme, i18n: &I18n) -> Theme {
 /// from the provided theme when its view is created, so this call alone
 /// localizes the subtree; no shell theme push is needed.
 pub fn provide_localized_strings(i18n: &I18n) {
-    let base = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+    // A component's owner survives its rebuilds, so `use_context` alone would
+    // find this call's own earlier provision from the second build on. Read
+    // the parent's theme, so one pushed above reaches this subtree.
+    let base = Owner::current()
+        .and_then(|owner| owner.parent())
+        .and_then(|parent| parent.with(use_context::<Theme>))
+        .or_else(use_context::<Theme>)
+        .unwrap_or_else(frust_material::baseline);
     provide_context(localized_theme(base, i18n));
 }

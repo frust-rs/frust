@@ -361,7 +361,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs frust-reactive as a normal dependency to read the parent owner"]
     fn a_theme_pushed_on_the_parent_owner_reaches_a_rebuilt_provider() {
         let root_owner = Owner::new();
         root_owner.set();
@@ -392,6 +391,16 @@ mod tests {
             *seen.lock().unwrap(),
             [frust::Brightness::Light, frust::Brightness::Dark]
         );
+    }
+
+    #[test]
+    fn a_provider_on_a_root_owner_reads_that_owners_theme() {
+        let owner = Owner::new();
+        owner.set();
+        frust::provide_context(frust::Theme::neutral().with_brightness(frust::Brightness::Dark));
+        crate::provide_localized_strings(&i18n("en"));
+        let theme = frust::use_context::<frust::Theme>().expect("provided");
+        assert_eq!(theme.brightness, frust::Brightness::Dark);
     }
 
     #[test]
