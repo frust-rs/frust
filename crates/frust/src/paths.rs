@@ -6,8 +6,11 @@
 //! - [`data_dir`] is the platform's data root and [`cache_dir`] its cache root, shared by every
 //!   app on desktop: join your own subdirectory onto the returned base. Neither creates the
 //!   directory ([`atomic_write`] creates the parents of the file it writes).
-//! - Both return `None` when the platform cannot resolve one (`HOME` or `APPDATA` unset), never a
-//!   guess that could write into the current directory.
+//! - Both return `None` when the platform cannot resolve one, never a guess that could write into
+//!   the current directory, and never a relative path. That is: `HOME` on iOS, macOS and Linux
+//!   (other Unix), `APPDATA` for `data_dir` and `LOCALAPPDATA` for `cache_dir` on Windows, each
+//!   when unset, empty or not absolute; Android before the shell installs the directories; and
+//!   every other target, always.
 //!
 //! ```
 //! let thumbs = frust::paths::cache_dir().map(|d| d.join("my-app").join("thumbs"));
@@ -23,7 +26,7 @@
 //! | Linux and other Unix | `$XDG_DATA_HOME`, else `~/.local/share` | `$XDG_CACHE_HOME`, else `~/.cache` |
 //! | Windows | `%APPDATA%` | `%LOCALAPPDATA%` |
 //! | Android | `Context.getFilesDir()` | `Context.getCacheDir()` |
-//! | any other target | `None` | `None` |
+//! | any other target (the web included) | `None` | `None`; `atomic_write` returns `Unsupported` on the web |
 //!
 //! On macOS, `XDG_*` variables do not move the base; they only feed a read-through fallback for
 //! installs that predate the macOS-specific location. An `XDG_*` value that is not an absolute
@@ -59,10 +62,15 @@
 //! # Atomic writes
 //!
 //! [`atomic_write`] writes to a temporary file next to the target and renames it into place, so a
-//! reader never sees a partial file and a crash mid-write leaves the previous contents intact.
-//! Parent directories are created. The temporary name is keyed on the process id only, so two
-//! threads of one process writing the same path share a temp file: serialize them with a `Mutex`
-//! or a single writer thread.
+//! reader never sees a partial file. Parent directories are created.
+//!
+//! - The temporary name is unique per call, so no caller-side locking is needed; concurrent
+//!   writers of one path are last-writer-wins, never interleaved.
+//! - A process crash mid-write leaves the previous contents intact.
+//! - It is NOT power-loss durable: no fsync is done, so after an OS crash or power loss the file
+//!   may be empty or truncated on some filesystems.
+//! - On the web (`wasm32-unknown-unknown`) there is no filesystem and it returns an
+//!   `Unsupported` error.
 //!
 //! # Not re-exported
 //!

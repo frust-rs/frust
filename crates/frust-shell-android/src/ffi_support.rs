@@ -1985,11 +1985,11 @@ mod tests {
         write_pipeline_cache_atomic(&path, b"second").unwrap();
         assert_eq!(load_pipeline_cache(&path), Some(b"second".to_vec()));
         // The temp sibling must not linger after a successful rename.
-        // frust_paths::atomic_write uses extension format: `.tmp.<pid>`
-        let leftover = dir
-            .join("frust")
-            .join(format!("pipeline_cache.tmp.{}", std::process::id()));
-        assert!(!leftover.exists(), "temp file should be renamed away");
+        let names: Vec<_> = std::fs::read_dir(dir.join("frust"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("pipeline_cache.bin")]);
     }
 
     fn observation(json: &str) -> FrameObservation<'_> {

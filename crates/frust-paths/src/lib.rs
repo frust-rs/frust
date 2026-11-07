@@ -34,7 +34,8 @@
 //!   Other Unix (excluding iOS, macOS and Android) resolves `$XDG_DATA_HOME`
 //!   if set *and absolute*, else `$HOME/.local/share`. Windows resolves
 //!   `%APPDATA%`. Any other target, or an unresolvable environment (no
-//!   `HOME`/`APPDATA`, or an Android process before install), returns `None`
+//!   `HOME`/`APPDATA`, one that is empty or not absolute, or an Android
+//!   process before install), returns `None`
 //!   — this crate never guesses a fallback that could silently write into
 //!   the process's current directory.
 //! - **Cache directory** ([`cache_dir`]): iOS resolves `$HOME/Library/Caches`;
@@ -73,11 +74,16 @@
 //!   `data_dir()`/`cache_dir()` already resolve that same location and no
 //!   legacy concept exists.
 //! - **Atomic write** ([`atomic_write`]): `create_dir_all` the parent
-//!   directory, write to a process-unique temp file (the target path with
-//!   its extension replaced by `tmp.<pid>`), then `rename` into place. A
-//!   reader never observes a partially-written file, and a crash mid-write
-//!   leaves any previous contents intact. On a failed rename, the temp file
-//!   is best-effort removed before the error is returned.
+//!   directory, write to a temp file unique to this call (created with
+//!   `create_new`, so a pre-placed symlink is never followed), then
+//!   `rename` into place. Concurrent callers never share a temp file, so no
+//!   caller-side locking is needed; concurrent writers of one path are
+//!   last-rename-wins. A reader never observes a partially-written file,
+//!   and a process crash mid-write leaves any previous contents intact. No
+//!   fsync is done, so after an OS crash or power loss the file may be
+//!   empty or truncated on some filesystems. On a failed write or rename the
+//!   temp file is best-effort removed before the error is returned. Returns
+//!   `Unsupported` on the web (`wasm32-unknown-unknown`).
 //!
 //! # Compat contract
 //!
@@ -94,6 +100,7 @@
 #[cfg(any(target_os = "macos", test))]
 use std::ffi::OsStr;
 use std::ffi::OsString;
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -128,8 +135,8 @@ use std::path::{Path, PathBuf};
 /// - Windows: `%APPDATA%`.
 /// - Any other target: `None`.
 ///
-/// `None` when unresolvable (`HOME`/`APPDATA` unset, or — on Android — the
-/// directories not yet installed) — never guesses a fallback that could
+/// `None` when unresolvable (`HOME`/`APPDATA` unset, empty or not absolute,
+/// or — on Android — the directories not yet installed) — never guesses a fallback that could
 /// write into the current directory.
 pub fn data_dir() -> Option<PathBuf> {
     #[cfg(target_os = "ios")]
@@ -193,7 +200,8 @@ pub fn data_dir() -> Option<PathBuf> {
 /// - Windows: `%LOCALAPPDATA%`.
 /// - Any other target: `None`.
 ///
-/// `None` when unresolvable, or — on Android — the directories not yet
+/// `None` when unresolvable (`HOME`/`LOCALAPPDATA` unset, empty or not
+/// absolute), or — on Android — the directories not yet
 /// installed. Logs at `debug` (via the `log` crate) when a set-but-relative
 /// XDG var is ignored per the XDG Base Directory spec.
 pub fn cache_dir() -> Option<PathBuf> {
@@ -316,31 +324,90 @@ pub fn app_stem() -> OsString {
 
 /// Write `bytes` to `path` atomically.
 ///
-/// `create_dir_all`s `path`'s parent, writes to a process-unique temp file
-/// (`path` with its extension replaced by `tmp.<pid>`), then `rename`s into
-/// place — so a reader never observes a partially-written file, and a crash
-/// mid-write leaves any previous contents at `path` intact. On a failed
-/// rename, the temp file is best-effort removed (its own removal error is
-/// swallowed) before the rename error is returned.
+/// `create_dir_all`s `path`'s parent, writes to a temp file next to `path`
+/// that is unique to this call (opened with `create_new`, which does not
+/// follow a pre-placed symlink), then `rename`s it into place.
 ///
-/// # Concurrency contract
+/// - Concurrent calls never share a temp file, so callers need no locking.
+///   Concurrent writers of the same `path` are last-rename-wins, with no
+///   interleaving and no `NotFound`.
+/// - A reader never observes a partially-written file.
+/// - A *process* crash mid-write leaves any previous contents at `path`
+///   intact. No fsync is done, so after an OS crash or power loss the file
+///   may be empty or truncated on some filesystems.
+/// - On a failed write or rename the temp file is best-effort removed (its
+///   own removal error is swallowed) and the original error is returned.
 ///
-/// The temp path is keyed on **PID only**, not on the target `path` or a
-/// per-call nonce — two concurrent calls from the *same process* writing to
-/// the *same* `path` race on one shared temp file. Every current caller
-/// already serializes same-process writes to one target path (shared-
-/// preferences' `Mutex`, the desktop shell's cache writing from its single
-/// render thread, Android's single writer), so this has never been
-/// observed in practice; a caller writing to one `path` from multiple
-/// threads without its own external serialization must add one (a
-/// `Mutex`/single-writer-thread, per the existing call sites) before
-/// calling this function concurrently.
+/// # Errors
+///
+/// `InvalidInput` when `path` has no file name (e.g. `..` or `/`);
+/// `Unsupported` on the web target (`wasm32-unknown-unknown`), which has no
+/// filesystem; otherwise the underlying I/O error.
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    {
+        let _ = (path, bytes);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic_write: no filesystem on this target",
+        ))
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+    {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        write_via_temp(path, bytes, &mut || {
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        })
+    }
+}
+
+/// `<file_name>.tmp.<pid>.<n>` in `path`'s directory. The suffix is appended
+/// to the full file name, so `IMG_1.jpg` and `IMG_1.json` never share one.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn temp_candidate(path: &Path, n: u64) -> io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "atomic_write: path has no file name",
+        )
+    })?;
+    let mut temp_name = name.to_os_string();
+    temp_name.push(format!(".tmp.{}.{n}", std::process::id()));
+    Ok(path.with_file_name(temp_name))
+}
+
+/// Body of [`atomic_write`]; `next` supplies the per-call nonce.
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+fn write_via_temp(path: &Path, bytes: &[u8], next: &mut dyn FnMut() -> u64) -> io::Result<()> {
+    use std::io::Write;
+
+    const MAX_ATTEMPTS: usize = 16;
+
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-    fs::write(&temp_path, bytes)?;
+    let mut attempt = 0;
+    let (temp_path, mut file) = loop {
+        let candidate = temp_candidate(path, next())?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => break (candidate, file),
+            // A stale leftover of a crashed earlier process with the same pid.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempt + 1 < MAX_ATTEMPTS => {
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    if let Err(e) = file.write_all(bytes) {
+        drop(file);
+        let _ = fs::remove_file(&temp_path);
+        return Err(e);
+    }
+    drop(file);
     let rename_result = fs::rename(&temp_path, path);
     if rename_result.is_err() {
         // Best-effort cleanup so a failed rename doesn't leave the temp
@@ -442,12 +509,26 @@ pub fn android_dirs() -> Option<&'static AndroidDirs> {
     ANDROID_DIRS.get()
 }
 
+/// `home` when it is an absolute Unix path, else `None` (logging one `debug`
+/// line for a set-but-rejected value). Models Unix path semantics
+/// unconditionally, like [`legacy_xdg_or_home`], so the iOS/macOS helpers
+/// stay testable from any host.
+#[cfg(any(target_os = "ios", target_os = "macos", test))]
+fn unix_absolute_home(home: Option<&str>) -> Option<&str> {
+    let home = home?;
+    if home.starts_with('/') {
+        return Some(home);
+    }
+    log::debug!("frust-paths: ignoring empty or non-absolute HOME ({home})");
+    None
+}
+
 /// Env-parameterized body of [`data_dir`]'s iOS branch: `home` joined with
 /// `Library/Application Support`, `None` without a `HOME` — same
 /// no-guessing contract as every other arm.
 #[cfg(any(target_os = "ios", test))]
 fn ios_data_dir_from(home: Option<&str>) -> Option<PathBuf> {
-    home.map(|home| {
+    unix_absolute_home(home).map(|home| {
         let mut p = PathBuf::from(home);
         p.extend(["Library", "Application Support"]);
         p
@@ -458,7 +539,7 @@ fn ios_data_dir_from(home: Option<&str>) -> Option<PathBuf> {
 /// with `Library/Caches`.
 #[cfg(any(target_os = "ios", test))]
 fn ios_cache_dir_from(home: Option<&str>) -> Option<PathBuf> {
-    home.map(|home| {
+    unix_absolute_home(home).map(|home| {
         let mut p = PathBuf::from(home);
         p.extend(["Library", "Caches"]);
         p
@@ -522,11 +603,14 @@ fn xdg_or_home(
         }
         log::debug!("frust-paths: ignoring non-absolute {xdg_var_name} ({xdg})");
     }
-    home.map(|home| {
-        let mut p = PathBuf::from(home);
-        p.extend(suffix);
-        p
-    })
+    let home = home?;
+    if !Path::new(home).is_absolute() {
+        log::debug!("frust-paths: ignoring empty or non-absolute HOME ({home})");
+        return None;
+    }
+    let mut p = PathBuf::from(home);
+    p.extend(suffix);
+    Some(p)
 }
 
 /// Env-parameterized body of [`data_dir`]'s Unix branch — lets tests
@@ -584,7 +668,7 @@ fn legacy_xdg_or_home(
         }
         log::debug!("frust-paths: ignoring non-absolute {xdg_var_name} ({xdg})");
     }
-    home.map(|home| {
+    unix_absolute_home(home).map(|home| {
         let mut p = PathBuf::from(home);
         p.extend(suffix);
         p
@@ -635,7 +719,7 @@ fn macos_dir_from(
     app_stem: &OsStr,
     exists: &dyn Fn(&Path) -> bool,
 ) -> Option<PathBuf> {
-    let home = home?;
+    let home = unix_absolute_home(home)?;
     let mut new_base = PathBuf::from(home);
     new_base.extend(new_suffix);
 
@@ -658,13 +742,26 @@ fn macos_dir_from(
 /// Env-parameterized body of [`data_dir`]'s Windows branch.
 #[cfg(target_os = "windows")]
 fn data_dir_from(appdata: Option<&str>) -> Option<PathBuf> {
-    appdata.map(PathBuf::from)
+    absolute_env("APPDATA", appdata)
 }
 
 /// Env-parameterized body of [`cache_dir`]'s Windows branch.
 #[cfg(target_os = "windows")]
 fn cache_dir_from(localappdata: Option<&str>) -> Option<PathBuf> {
-    localappdata.map(PathBuf::from)
+    absolute_env("LOCALAPPDATA", localappdata)
+}
+
+/// `value` as a path when it is absolute, else `None` (logging one `debug`
+/// line for a set-but-rejected value).
+#[cfg(any(target_os = "windows", test))]
+fn absolute_env(name: &str, value: Option<&str>) -> Option<PathBuf> {
+    let value = value?;
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        return Some(path);
+    }
+    log::debug!("frust-paths: ignoring empty or non-absolute {name} ({value})");
+    None
 }
 
 #[cfg(test)]
@@ -1251,18 +1348,25 @@ mod tests {
         root.join("nested").join("file.bin")
     }
 
+    /// Asserts `dir` contains exactly the entries named in `expected`.
+    fn assert_dir_holds_only(dir: &Path, expected: &[&str]) {
+        let mut found: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        let mut want: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(found, want, "unexpected entries in {}", dir.display());
+    }
+
     #[test]
     fn atomic_write_creates_parent_dirs_and_no_temp_left_behind() {
         let path = scratch_path("round-trip");
         atomic_write(&path, b"hello").unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"hello");
-        assert!(
-            !path
-                .with_extension(format!("tmp.{}", std::process::id()))
-                .exists(),
-            "temp file left behind"
-        );
+        assert_dir_holds_only(path.parent().unwrap(), &["file.bin"]);
 
         let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
     }
@@ -1314,8 +1418,7 @@ mod tests {
         let result = atomic_write(&path, b"data");
         assert!(result.is_err());
 
-        let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-        assert!(!temp_path.exists(), "temp file left behind on failure");
+        assert!(fs::metadata(&base).unwrap().is_file());
 
         let _ = fs::remove_file(&base);
     }
@@ -1345,11 +1448,8 @@ mod tests {
             "renaming a file onto an existing non-empty directory must fail"
         );
 
-        let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
-        assert!(
-            !temp_path.exists(),
-            "temp file left behind after failed rename"
-        );
+        assert_dir_holds_only(path.parent().unwrap(), &["file.bin"]);
+        assert_dir_holds_only(&path, &["occupant"]);
         assert_eq!(
             fs::read(&occupant).unwrap(),
             b"do not touch",
@@ -1357,5 +1457,174 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn same_stem_targets_never_collide() {
+        let root = scratch_path("same-stem");
+        let dir = root.parent().unwrap().to_path_buf();
+        let run = |name: &'static str| {
+            let target = dir.join(name);
+            std::thread::spawn(move || {
+                for i in 0..200 {
+                    atomic_write(&target, format!("{name}-{i}").as_bytes()).unwrap();
+                }
+            })
+        };
+        let (a, b) = (run("a.jpg"), run("a.json"));
+        a.join().unwrap();
+        b.join().unwrap();
+        assert_eq!(fs::read(dir.join("a.jpg")).unwrap(), b"a.jpg-199");
+        assert_eq!(fs::read(dir.join("a.json")).unwrap(), b"a.json-199");
+        assert_dir_holds_only(&dir, &["a.jpg", "a.json"]);
+
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn concurrent_writers_of_one_path_all_succeed_with_complete_contents() {
+        let path = scratch_path("concurrent");
+        let payloads: Vec<Vec<u8>> = (0..8u8).map(|i| vec![i; 8192]).collect();
+        let handles: Vec<_> = payloads
+            .iter()
+            .cloned()
+            .map(|payload| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..50 {
+                        atomic_write(&path, &payload).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let last = fs::read(&path).unwrap();
+        assert!(
+            payloads.contains(&last),
+            "final contents must be one complete payload"
+        );
+        assert_dir_holds_only(path.parent().unwrap(), &["file.bin"]);
+
+        let _ = fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    fn seq_of(values: &'static [u64]) -> impl FnMut() -> u64 {
+        let mut it = values.iter().copied();
+        move || it.next().expect("sequence exhausted")
+    }
+
+    #[test]
+    fn stale_temp_leftover_is_skipped_and_untouched() {
+        let target = scratch_path("stale");
+        let dir = target.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let leftover = temp_candidate(&target, 0).unwrap();
+        fs::write(&leftover, b"stale").unwrap();
+
+        let mut seq = seq_of(&[0, 1]);
+        write_via_temp(&target, b"new", &mut seq).unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert_eq!(fs::read(&leftover).unwrap(), b"stale");
+        assert!(!temp_candidate(&target, 1).unwrap().exists());
+
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preplaced_symlink_temp_is_never_followed() {
+        let target = scratch_path("symlink");
+        let dir = target.parent().unwrap().to_path_buf();
+        fs::create_dir_all(&dir).unwrap();
+        let outside = dir.parent().unwrap().join("outside.txt");
+        fs::write(&outside, b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, temp_candidate(&target, 0).unwrap()).unwrap();
+
+        let mut seq = seq_of(&[0, 1]);
+        write_via_temp(&target, b"new", &mut seq).unwrap();
+
+        assert_eq!(fs::read(&outside).unwrap(), b"outside");
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn temp_candidate_rejects_path_without_file_name() {
+        for p in ["..", "/"] {
+            let err = temp_candidate(Path::new(p), 0).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{p}");
+        }
+    }
+
+    // --- absolute HOME / APPDATA validation -------------------------------
+
+    #[test]
+    fn ios_dirs_reject_empty_and_relative_home() {
+        for bad in ["", "rel/home"] {
+            assert_eq!(ios_data_dir_from(Some(bad)), None, "{bad:?}");
+            assert_eq!(ios_cache_dir_from(Some(bad)), None, "{bad:?}");
+        }
+        assert_eq!(
+            ios_cache_dir_from(Some("/home/x")),
+            Some(PathBuf::from("/home/x/Library/Caches"))
+        );
+    }
+
+    #[test]
+    fn macos_dir_from_rejects_empty_and_relative_home() {
+        for bad in ["", "rel/home"] {
+            assert_eq!(
+                macos_data_dir_from(None, Some(bad), "myapp", NEVER),
+                None,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(
+            macos_data_dir_from(None, Some("/Users/a"), "myapp", NEVER),
+            Some(PathBuf::from("/Users/a/Library/Application Support"))
+        );
+    }
+
+    #[test]
+    fn legacy_dirs_reject_empty_and_relative_home() {
+        for bad in ["", "rel/home"] {
+            assert_eq!(legacy_data_dir_from(None, Some(bad)), None, "{bad:?}");
+            assert_eq!(legacy_cache_dir_from(None, Some(bad)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+    fn unix_dirs_reject_empty_and_relative_home() {
+        for bad in ["", "rel/home"] {
+            assert_eq!(data_dir_from(None, Some(bad)), None, "{bad:?}");
+            assert_eq!(cache_dir_from(None, Some(bad)), None, "{bad:?}");
+        }
+        assert_eq!(
+            data_dir_from(None, Some("/home/u")),
+            Some(PathBuf::from("/home/u/.local/share"))
+        );
+    }
+
+    #[test]
+    fn absolute_env_rejects_empty_and_relative_and_keeps_absolute() {
+        assert_eq!(absolute_env("APPDATA", None), None);
+        assert_eq!(absolute_env("APPDATA", Some("")), None);
+        assert_eq!(absolute_env("APPDATA", Some("rel/home")), None);
+        let abs = std::env::temp_dir();
+        assert_eq!(absolute_env("APPDATA", abs.to_str()), Some(abs.clone()));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_dirs_reject_empty_and_relative() {
+        for bad in ["", "rel\\home"] {
+            assert_eq!(data_dir_from(Some(bad)), None, "{bad:?}");
+            assert_eq!(cache_dir_from(Some(bad)), None, "{bad:?}");
+        }
     }
 }
