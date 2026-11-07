@@ -304,7 +304,9 @@ let version = db.migrate(MIGRATIONS)?; // 2
   migration's `to_version`. A newer schema is an error rather than a silent
   skip, so a downgraded binary cannot read a schema it does not know. An empty
   list is `Ok(0)` on a fresh database and a `Migration` error on any database
-  already above version 0.
+  already above version 0. `migrate` returns the stored version, and reports
+  a schema newer than its list as an error whether that is seen before or
+  during a step.
 - **Concurrent migrators.** Each step re-reads the version inside its own
   transaction and skips a step another migrator already applied, so a step is
   never applied twice. Still, run `migrate` once at startup before other

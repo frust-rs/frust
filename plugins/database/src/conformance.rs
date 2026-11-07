@@ -158,7 +158,7 @@ pub(crate) fn run_conformance_suite(
     migrate_rejects_bad_lists_and_newer_schema(tag, open);
     migrate_resumes_after_failed_step(tag, open);
     migrate_version_range_and_empty_list(tag, open);
-    migrate_second_handle_skips_applied_step(tag, open);
+    migrate_interleaved_two_handles(tag, open);
     schema_calls_inside_transaction_are_reentrant(tag, open);
     execute_batch_commits_and_rolls_back(tag, open);
 }
@@ -883,57 +883,135 @@ fn migrate_version_range_and_empty_list(
     assert_eq!(fresh.schema_version().unwrap(), 2, "{tag}: untouched");
 }
 
-/// Handle A applies step 1 only; handle B on the same file then migrates the
-/// full list and must skip step 1 (the version is re-read inside each step's
-/// transaction) rather than apply it twice.
-fn migrate_second_handle_skips_applied_step(
+/// Two handles on one file, interleaved deterministically: while handle B is
+/// inside `migrate_with_hook`, the hook (run on this thread, before a step's
+/// transaction opens) changes the stored version through handle A. This
+/// reaches the per-step re-read branches that a sequential run never does.
+fn migrate_interleaved_two_handles(
     tag: &str,
     open: &dyn Fn(Target) -> Result<Database, DatabaseError>,
 ) {
-    let dir = scratch_dir(tag, "migrate-two-handles");
-    fs::create_dir_all(&dir).expect("create scratch dir");
-    let path = dir.join("shared.db");
+    use crate::Migration;
 
-    let step1 = crate::Migration {
-        to_version: 1,
-        statements: &[
-            "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)",
-            "INSERT INTO notes (id, body) VALUES (1, 'seed')",
-        ],
-    };
-    let a = must_open(tag, open, Target::Path(path.clone()));
-    assert_eq!(a.migrate(&[step1]).unwrap(), 1, "{tag}: handle A");
-
-    let b = must_open(tag, open, Target::Path(path));
-    let list = [
-        step1,
-        crate::Migration {
-            to_version: 2,
-            statements: &["CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT)"],
-        },
-        crate::Migration {
-            to_version: 3,
-            statements: &["ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"],
-        },
-    ];
-    // Either skipped cleanly, or refused by the engine's lock as `Sql` —
-    // never a double apply.
-    match b.migrate(&list) {
-        Ok(v) => assert_eq!(v, 3, "{tag}: handle B final version"),
-        Err(DatabaseError::Sql { .. }) => {
-            assert_eq!(b.migrate(&list).unwrap(), 3, "{tag}: handle B retry");
-        }
-        Err(e) => panic!("{tag}: handle B migrate failed unexpectedly: {e}"),
+    // (i) Another migrator applies step 1 between B's read and step 1's BEGIN:
+    // B skips it, never double-applies, and returns the stored version.
+    {
+        let dir = scratch_dir(tag, "migrate-interleave-skip");
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("shared.db");
+        let a = must_open(tag, open, Target::Path(path.clone()));
+        let b = must_open(tag, open, Target::Path(path));
+        let step1 = Migration {
+            to_version: 1,
+            statements: &[
+                "CREATE TABLE seed (id INTEGER PRIMARY KEY)",
+                "INSERT INTO seed (id) VALUES (1)",
+            ],
+        };
+        let list = [
+            step1,
+            Migration {
+                to_version: 2,
+                statements: &["CREATE TABLE s2 (id INTEGER PRIMARY KEY)"],
+            },
+            Migration {
+                to_version: 3,
+                statements: &["CREATE TABLE s3 (id INTEGER PRIMARY KEY)"],
+            },
+        ];
+        let result = b.migrate_with_hook(&list, &mut |to| {
+            if to == 1 {
+                assert_eq!(
+                    a.migrate(&[step1]).unwrap(),
+                    1,
+                    "{tag}: hook applies step 1"
+                );
+            }
+        });
+        assert!(
+            matches!(result, Ok(3)),
+            "{tag}: skip case must return Ok(3), got {result:?}"
+        );
+        assert_eq!(count_rows(tag, &b, "seed"), 1, "{tag}: step 1 applied once");
+        assert!(table_exists(tag, &b, "s2"), "{tag}: step 2 applied");
+        assert!(table_exists(tag, &b, "s3"), "{tag}: step 3 applied");
+        assert_eq!(b.schema_version().unwrap(), 3, "{tag}: skip case version");
+        let _ = fs::remove_dir_all(&dir);
     }
-    assert_eq!(a.schema_version().unwrap(), 3, "{tag}: A sees version 3");
-    assert!(table_exists(tag, &b, "tags"), "{tag}: step 2 present");
-    assert_eq!(
-        count_rows(tag, &b, "notes"),
-        1,
-        "{tag}: step 1 applied once"
-    );
 
-    let _ = fs::remove_dir_all(&dir);
+    // (ii) A schema newer than the whole list appears during a step.
+    {
+        let dir = scratch_dir(tag, "migrate-interleave-newer");
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("shared.db");
+        let a = must_open(tag, open, Target::Path(path.clone()));
+        let b = must_open(tag, open, Target::Path(path));
+        let list = [
+            Migration {
+                to_version: 1,
+                statements: &["CREATE TABLE n1 (id INTEGER PRIMARY KEY)"],
+            },
+            Migration {
+                to_version: 2,
+                statements: &["CREATE TABLE n2 (id INTEGER PRIMARY KEY)"],
+            },
+            Migration {
+                to_version: 3,
+                statements: &["CREATE TABLE n3 (id INTEGER PRIMARY KEY)"],
+            },
+        ];
+        let result = b.migrate_with_hook(&list, &mut |to| {
+            if to == 1 {
+                must_exec(tag, &a, "PRAGMA user_version = 9", ());
+            }
+        });
+        assert!(
+            matches!(result, Err(DatabaseError::Migration { .. })),
+            "{tag}: newer schema during a step must be Migration, got {result:?}"
+        );
+        for t in ["n1", "n2", "n3"] {
+            assert!(!table_exists(tag, &b, t), "{tag}: {t} must not exist");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // (iii) The base moves backwards between steps: the next step no longer
+    // builds on what the list expects.
+    {
+        let dir = scratch_dir(tag, "migrate-interleave-base");
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("shared.db");
+        let a = must_open(tag, open, Target::Path(path.clone()));
+        let b = must_open(tag, open, Target::Path(path));
+        let list = [
+            Migration {
+                to_version: 1,
+                statements: &["CREATE TABLE u1 (id INTEGER PRIMARY KEY)"],
+            },
+            Migration {
+                to_version: 3,
+                statements: &["CREATE TABLE u3 (id INTEGER PRIMARY KEY)"],
+            },
+            Migration {
+                to_version: 5,
+                statements: &["CREATE TABLE u5 (id INTEGER PRIMARY KEY)"],
+            },
+        ];
+        let result = b.migrate_with_hook(&list, &mut |to| {
+            if to == 3 {
+                must_exec(tag, &a, "PRAGMA user_version = 2", ());
+            }
+        });
+        assert!(
+            matches!(result, Err(DatabaseError::Migration { .. })),
+            "{tag}: unexpected base must be Migration, got {result:?}"
+        );
+        assert!(table_exists(tag, &b, "u1"), "{tag}: step 1 table exists");
+        assert!(!table_exists(tag, &b, "u3"), "{tag}: step 3 table absent");
+        assert!(!table_exists(tag, &b, "u5"), "{tag}: step 5 table absent");
+        assert_eq!(b.schema_version().unwrap(), 2, "{tag}: version reads 2");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 /// Bad lists and a newer-schema database return `Migration` without
