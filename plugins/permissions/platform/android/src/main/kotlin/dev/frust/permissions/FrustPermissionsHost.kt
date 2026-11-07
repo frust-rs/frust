@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -58,17 +59,31 @@ import androidx.core.content.ContextCompat
  * from [BLOCKED] the host records, per Android permission name, whether a
  * request has ever been answered: `SharedPreferences` file [PREFS_FILE]
  * (`frust.permissions`), key [ASKED_KEY_PREFIX] + the permission name, e.g.
- * `frust.permissions.asked.android.permission.CAMERA`, value `true`. Any other
- * frust plugin that requests a runtime permission itself must set the same key
- * so this host keeps reporting its status truthfully. The flag is only an
- * "ever requested" hint: it never makes a permission read as granted.
+ * `frust.permissions.asked.android.permission.CAMERA`, value `true`. Another
+ * frust plugin that requests a runtime permission itself should set the same
+ * key, but this host does not rely on it: such a plugin may not write it, and
+ * a refusal recorded elsewhere (Settings, a reinstall that keeps the system's
+ * record) never writes it either. Two rules recover from a missing flag. A
+ * permission that shows a rationale reads [DENIED] and gets its flag written,
+ * whatever the flag said ([currentCode]). A denial the system answers within
+ * [AUTO_DENY_MS] of the launch, without a dialog, is a refusal and gets its
+ * flag written, so the permission reads [BLOCKED] ([isSystemRefusal]). The
+ * flag is only an "ever requested" hint: it never makes a permission read as
+ * granted.
  *
  * A prompt dismissed without an answer (tapping outside the dialog on Android
  * 11+) is not counted by the system, so it leaves the flag unset: a denied
- * permission that shows no rationale after a first-ever request, and showed
- * none before it, was dismissed rather than refused. The flag lives in app
- * data, so clearing that data or reinstalling resets it while the system's own
- * record may differ.
+ * permission that shows no rationale after a first-ever request, showed none
+ * before it, and took longer than [AUTO_DENY_MS] to answer, was dismissed
+ * rather than refused. The flag lives in app data, so clearing that data or
+ * reinstalling resets it while the system's own record may differ.
+ *
+ * ## Denied and Blocked need a resumed Activity
+ *
+ * The rationale is read against the resumed Activity. Without one there is no
+ * rationale to read, so a permission that was asked and is not granted reads
+ * [DENIED], even one that is blocked: [DENIED] versus [BLOCKED] is
+ * authoritative only while an Activity is resumed.
  *
  * ## Photos and partial access
  *
@@ -104,6 +119,13 @@ import androidx.core.content.ContextCompat
  * it together with the media permissions in one operation; this API asks for
  * one kind per request, so ask for Photos first, then MediaLocation.
  *
+ * Android grants media location only alongside full photo access, and refuses
+ * it without a dialog otherwise. So while it is not granted and the photo
+ * library is anything but [GRANTED] (partial access or none), MediaLocation
+ * reads [DENIED] ([mediaLocationCode]), and a fast denial of it is never taken
+ * for a system refusal: it must not become [BLOCKED] when full photo access
+ * would let a new request succeed.
+ *
  * ## Delivering the answer
  *
  * [request] registers a one-shot `RequestMultiplePermissions` launcher on the
@@ -114,6 +136,13 @@ import androidx.core.content.ContextCompat
  * The embedding's `configChanges` keeps a rotation from recreating the
  * Activity; process death while the prompt is up loses the callback, and the
  * Rust side then times out and re-reads [status].
+ *
+ * One request is in flight at a time. While a launcher from an earlier
+ * request is still registered (its callback has not fired, e.g. the Rust side
+ * timed out with the prompt still on screen), [request] launches nothing and
+ * returns the current status code instead. The guard is dropped when that
+ * callback fires, when its launch fails, or when its Activity is destroyed.
+ * The Rust side also runs its requests one after another.
  */
 object FrustPermissionsHost {
     private const val TAG = "frust"
@@ -169,6 +198,19 @@ object FrustPermissionsHost {
     /** Asked-flag key prefix; the Android permission name follows it. */
     const val ASKED_KEY_PREFIX = "frust.permissions.asked."
 
+    /**
+     * The longest time, in milliseconds from the launch to the answer, in
+     * which a denial counts as the system refusing a blocked permission
+     * rather than a person dismissing the prompt ([isSystemRefusal]).
+     *
+     * A heuristic, not a platform value: the system answers a request for a
+     * blocked permission without showing a dialog, observed at about 90 ms on
+     * a Pixel 5 running Android 14, while a person dismissing a dialog takes
+     * longer than this. A slower denial keeps the dismissed-prompt inference
+     * (class doc, "The asked flag").
+     */
+    private const val AUTO_DENY_MS = 500L
+
     // --- Permission sets per kind and SDK: mirror `codes::android_permissions`,
     // pinned by `tests/kotlin_contract.rs`. One `listOf` per line.
 
@@ -202,6 +244,16 @@ object FrustPermissionsHost {
      */
     @Volatile
     private var resumedActivity: Activity? = null
+
+    /**
+     * The request whose launcher is registered and has not answered yet, or
+     * null. Read and written only through [claimInFlight], [releaseInFlight]
+     * and [releaseInFlightFor], which hold this object's monitor.
+     */
+    private var inFlight: InFlight? = null
+
+    /** One registered, unanswered request and the Activity it launched from. */
+    private class InFlight(val requestId: Long, val activity: Activity)
 
     /** Guards a single [Application.registerActivityLifecycleCallbacks] call. */
     @Volatile
@@ -252,6 +304,10 @@ object FrustPermissionsHost {
      * needed ([GRANTED], [NO_ACTIVITY], [NOT_DECLARED]), else launches the
      * prompt on the main thread and returns [PENDING]; the answer then
      * arrives through [nativeOnPermissionResult] carrying [requestId].
+     *
+     * One request is in flight at a time: while an earlier request's launcher
+     * is still registered, this launches nothing and returns the current
+     * status code (class doc, "Delivering the answer").
      */
     @JvmStatic
     fun request(requestId: Long, kind: Int): Int {
@@ -261,6 +317,10 @@ object FrustPermissionsHost {
         if (perms.isEmpty()) return GRANTED
         if (currentCode(ctx, kind, perms, resumedActivity) == GRANTED) return GRANTED
         val activity = resumedActivity as? ComponentActivity ?: return NO_ACTIVITY
+        if (!claimInFlight(requestId, activity)) {
+            Log.i(TAG, "frust-permissions: a prompt is still up; returning the current status")
+            return currentCode(ctx, kind, perms, activity)
+        }
         val toRequest = perms.filter { isDeclared(ctx, it) }
         if (Looper.myLooper() == Looper.getMainLooper()) {
             launch(ctx, requestId, kind, perms, toRequest, activity)
@@ -360,19 +420,33 @@ object FrustPermissionsHost {
     }
 
     /**
-     * The MediaLocation code when it is not granted: [DENIED] under partial
-     * photo access, null otherwise (the ordinary derivation applies). Android
-     * grants media location only alongside full photo access; under partial
-     * access it is refused without a dialog, so the plugin reports Denied and
-     * the app should ask for full photo access first. Decided from live grants
+     * The MediaLocation code when it is not granted: [DENIED] unless [photos]
+     * is [GRANTED] (partial photo access or none), null with full photo
+     * access (the ordinary derivation applies). Android grants media location
+     * only alongside full photo access; without it the request is refused
+     * without a dialog, so the plugin reports Denied and the app should ask
+     * for full photo access first. Decided from live grants
      * on every read, never from the asked flag, so granting full access later
      * lets a new request succeed.
      */
     internal fun mediaLocationCode(photos: Int?): Int? {
-        return if (photos == LIMITED) DENIED else null
+        return if (photos != GRANTED) DENIED else null
     }
 
-    /** The status code for [kind] right now, derived from live grants. */
+    /**
+     * The status code for [kind] right now, derived from live grants.
+     *
+     * The rationale wins over the asked flag: when [activity] is resumed and
+     * any of the kind's permissions that is not granted shows a rationale,
+     * the code is [DENIED] and the asked flag is written for those
+     * permissions, so a refusal another requester recorded never reads
+     * [NOT_DETERMINED]. Only then does a missing flag mean [NOT_DETERMINED].
+     *
+     * [DENIED] versus [BLOCKED] is authoritative only while an Activity is
+     * resumed: with [activity] null there is no rationale to read, and a
+     * permission that was asked and is not granted reads [DENIED], even a
+     * blocked one (class doc).
+     */
     private fun currentCode(ctx: Context, kind: Int, perms: List<String>, activity: Activity?): Int {
         if (perms.isEmpty()) return GRANTED
         val sdk = Build.VERSION.SDK_INT
@@ -383,10 +457,27 @@ object FrustPermissionsHost {
         } else if (kind == MEDIA_LOCATION) {
             mediaLocationCode(photosCode(ctx, sdk))?.let { return it }
         }
+        if (activity != null) {
+            val withRationale = perms.filter { !isGranted(ctx, it) && rationale(activity, it) }
+            if (withRationale.isNotEmpty()) {
+                withRationale.forEach { markAsked(ctx, it) }
+                return DENIED
+            }
+        }
         if (perms.none { wasAsked(ctx, it) }) return NOT_DETERMINED
         if (activity == null) return DENIED
-        return if (perms.any { rationale(activity, it) }) DENIED else BLOCKED
+        return BLOCKED
     }
+
+    /**
+     * Whether a denial is the system refusing a blocked permission without a
+     * dialog: no rationale after it, answered within [AUTO_DENY_MS] of the
+     * launch. Never for [MEDIA_LOCATION], whose silent refusal depends on
+     * photo access and must not become [BLOCKED] (class doc, "Media
+     * location").
+     */
+    internal fun isSystemRefusal(kind: Int, granted: Boolean, rationaleAfter: Boolean, elapsedMs: Long): Boolean =
+        kind != MEDIA_LOCATION && !granted && !rationaleAfter && elapsedMs < AUTO_DENY_MS
 
     /** Register, launch and answer one prompt. Main thread. */
     private fun launch(
@@ -398,27 +489,59 @@ object FrustPermissionsHost {
         activity: ComponentActivity,
     ) {
         if (activity.isFinishing || activity.isDestroyed) {
+            releaseInFlight(requestId)
             notifyResult(requestId, NO_ACTIVITY)
             return
         }
         val before = toRequest.associateWith { RequestState(wasAsked(ctx, it), rationale(activity, it)) }
         var launcher: ActivityResultLauncher<Array<String>>? = null
+        var launchedAt = 0L
         try {
             val registered = activity.activityResultRegistry.register(
                 "frust.permissions.$requestId",
                 ActivityResultContracts.RequestMultiplePermissions(),
             ) { results ->
+                val elapsedMs = SystemClock.elapsedRealtime() - launchedAt
                 launcher?.unregister()
-                recordAnswers(ctx, activity, results, before)
+                releaseInFlight(requestId)
+                recordAnswers(ctx, activity, kind, results, before, elapsedMs)
                 notifyResult(requestId, currentCode(ctx, kind, perms, activity))
             }
             launcher = registered
+            launchedAt = SystemClock.elapsedRealtime()
             registered.launch(toRequest.toTypedArray())
         } catch (e: Exception) {
             launcher?.unregister()
+            releaseInFlight(requestId)
             Log.w(TAG, "frust-permissions: launching the prompt failed: ${e.javaClass.name}")
             notifyResult(requestId, currentCode(ctx, kind, perms, activity))
         }
+    }
+
+    /**
+     * Take the single in-flight slot for [requestId], or return false when an
+     * earlier request's launcher is still registered. A slot whose Activity
+     * was destroyed is stale (its callback can no longer fire) and is taken
+     * over.
+     */
+    @Synchronized
+    private fun claimInFlight(requestId: Long, activity: Activity): Boolean {
+        val current = inFlight
+        if (current != null && !current.activity.isDestroyed) return false
+        inFlight = InFlight(requestId, activity)
+        return true
+    }
+
+    /** Free the in-flight slot if [requestId] holds it. */
+    @Synchronized
+    private fun releaseInFlight(requestId: Long) {
+        if (inFlight?.requestId == requestId) inFlight = null
+    }
+
+    /** Free the in-flight slot if it was launched from [activity]. */
+    @Synchronized
+    private fun releaseInFlightFor(activity: Activity) {
+        if (inFlight?.activity === activity) inFlight = null
     }
 
     /** One permission's asked flag and rationale just before its prompt. */
@@ -427,19 +550,28 @@ object FrustPermissionsHost {
     /**
      * Set the asked flag for every permission the system answered. An empty
      * result (the request was cancelled, e.g. another prompt was showing)
-     * records nothing. A first-ever denial with no rationale before or after
-     * is a dismissed prompt and is not recorded (class doc).
+     * records nothing. A denial that shows a rationale afterwards is always
+     * recorded (the rationale wins, as in [currentCode]). A first-ever denial
+     * with no rationale before or after is a dismissed prompt and is not
+     * recorded, unless it arrived within [AUTO_DENY_MS] of the launch
+     * ([isSystemRefusal]): then the system refused it without a dialog, and
+     * recording it makes the permission read [BLOCKED] (class doc).
      */
     private fun recordAnswers(
         ctx: Context,
         activity: Activity,
+        kind: Int,
         results: Map<String, Boolean>,
         before: Map<String, RequestState>,
+        elapsedMs: Long,
     ) {
         for ((perm, granted) in results) {
             val prior = before[perm] ?: continue
-            val dismissed = !granted && !prior.asked && !prior.rationale && !rationale(activity, perm)
-            if (!dismissed) markAsked(ctx, perm)
+            val rationaleAfter = !granted && rationale(activity, perm)
+            val dismissed = !granted && !prior.asked && !prior.rationale && !rationaleAfter
+            if (!dismissed || isSystemRefusal(kind, granted, rationaleAfter, elapsedMs)) {
+                markAsked(ctx, perm)
+            }
         }
     }
 
@@ -513,6 +645,7 @@ object FrustPermissionsHost {
 
             override fun onActivityDestroyed(activity: Activity) {
                 if (activity === resumedActivity) resumedActivity = null
+                releaseInFlightFor(activity)
             }
         }
 }
