@@ -124,8 +124,8 @@ fn build_table(key: &str) -> MaterialStrings {
 ///
 /// Region is ignored: `de-CH` and `de` share one table. Chinese is keyed by
 /// script instead: `zh`, `zh-CN`, `zh-SG` and `zh-Hans` share the Simplified
-/// table, while `zh-Hant`, `zh-TW`, `zh-HK` and `zh-MO` have no table yet and
-/// get English (with one logged warning) rather than Simplified strings.
+/// table, while `zh-Hant`, `zh-TW`, `zh-HK`, `zh-MO`, `zh-US` and `zh-GB`
+/// have no table yet and get English (with one logged warning) rather than Simplified strings.
 /// Month and weekday names come from CLDR; every other string is
 /// hand-written.
 pub fn material_strings_for(locale: &Locale) -> MaterialStrings {
@@ -161,12 +161,25 @@ pub fn localized_theme(mut theme: Theme, i18n: &I18n) -> Theme {
 /// localizes the subtree; no shell theme push is needed.
 pub fn provide_localized_strings(i18n: &I18n) {
     // A component's owner survives its rebuilds, so `use_context` alone would
-    // find this call's own earlier provision from the second build on. Read
-    // the parent's theme, so one pushed above reaches this subtree.
-    let base = Owner::current()
-        .and_then(|owner| owner.parent())
-        .and_then(|parent| parent.with(use_context::<Theme>))
-        .or_else(use_context::<Theme>)
-        .unwrap_or_else(frust_material::baseline);
-    provide_context(localized_theme(base, i18n));
+    // find this call's own earlier provision from the second build on and
+    // freeze the base. A private marker on what this call provides tells that
+    // provision apart from a theme the caller (or an ancestor) provided: an
+    // unmarked theme on the current owner is the base; a marked one may be
+    // this call's own, so the parent's theme (pushed from above) is read
+    // instead, falling back to the marked one when no parent has a theme.
+    let own = use_context::<Theme>();
+    let base = match own {
+        Some(theme) if theme.extensions.get::<Provided>().is_none() => theme,
+        marked => Owner::current()
+            .and_then(|owner| owner.parent())
+            .and_then(|parent| parent.with(use_context::<Theme>))
+            .or(marked)
+            .unwrap_or_else(frust_material::baseline),
+    };
+    let mut theme = localized_theme(base, i18n);
+    theme.extensions.insert(Provided);
+    provide_context(theme);
 }
+
+/// Marks a [`Theme`] that [`provide_localized_strings`] provided itself.
+struct Provided;

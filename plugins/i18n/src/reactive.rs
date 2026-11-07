@@ -239,20 +239,29 @@ impl I18n {
     /// that originally detected `de-CH` keeps `format_locale()` at `de-CH`
     /// rather than collapsing to bare `de`. Pass a region-qualified tag
     /// (`set_locale("de-AT".parse()?)`) to replace the retained region
-    /// outright — a requested tag with its own region is never touched. The
+    /// outright — a requested tag with its own region is never touched. A region
+    /// retained from a tag of a *different* language also pins the script the
+    /// bare request implies (`en-US` then `zh` composes `zh-Hans-US`), so the
+    /// foreign region cannot change which script the request stands for. The
     /// write goes through the normal `RwSignal::set` → tracked-scope →
     /// `FrameWaker` path — no direct wake call here (see the module doc).
     pub fn set_locale(&self, requested: Locale) {
         let requested = if requested.region().is_none() {
-            let retained_region = self
+            let retained = self
                 .inner
                 .requested
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .iter()
-                .find_map(Locale::region);
-            match retained_region {
-                Some(region) => Locale::compose_region(&requested, region),
+                .find_map(|tag| tag.region().map(|region| (tag.language(), region)));
+            match retained {
+                // A region inherited from another language also pins the
+                // script the bare request implies, so `en-US` + "zh" stays
+                // Simplified instead of becoming likely-Traditional `zh-US`.
+                Some((language, region)) if language != requested.language() => {
+                    Locale::compose_region_keeping_script(&requested, region)
+                }
+                Some((_, region)) => Locale::compose_region(&requested, region),
                 None => requested,
             }
         } else {
@@ -744,6 +753,99 @@ only-en = English only";
         assert_eq!(i18n.locale().to_string(), "sr-Latn");
         assert_eq!(i18n.format_locale().to_string(), "sr-Latn-US");
         assert_eq!(i18n.t("which"), "latn");
+    }
+
+    const EN_ONLY: &str = "which = en";
+    const ZH_ONLY: &str = "which = zh";
+
+    /// Bundles `en` plus the given Chinese bundle locales.
+    fn en_plus(zh: &[&str]) -> LocaleSet {
+        let mut set =
+            LocaleSet::new(locale("en")).with_locale(locale("en"), [("app.ftl", EN_ONLY)]);
+        for tag in zh {
+            set = set.with_locale(locale(tag), [("app.ftl", ZH_ONLY)]);
+        }
+        set.with_isolating(false)
+    }
+
+    fn active_after(device: &str, bundles: &[&str], switch: &str) -> (String, Locale) {
+        let i18n = I18n::new(en_plus(bundles), &[locale(device)]).expect("engine builds");
+        i18n.set_locale(locale(switch));
+        (i18n.locale().to_string(), i18n.format_locale())
+    }
+
+    #[test]
+    fn a_language_only_switch_keeps_the_script_its_tag_implies() {
+        let _owner = ambient_owner();
+        for device in ["en-US", "en-GB", "en-AU"] {
+            for (bundles, expected) in [
+                (&["zh-CN"][..], "zh-CN"),
+                (&["zh-Hans"][..], "zh-Hans"),
+                (&["zh-Hant", "zh-Hans"][..], "zh-Hans"),
+            ] {
+                let (active, format) = active_after(device, bundles, "zh");
+                assert_eq!(active, expected, "{device} {bundles:?}");
+                assert_eq!(format.language().as_str(), "zh", "{device}");
+                assert_eq!(
+                    format.region().map(|r| r.to_string()),
+                    Some(device[3..].to_string()),
+                    "{device}"
+                );
+                assert_eq!(
+                    format.script().map(|s| s.to_string()).as_deref(),
+                    Some("Hans")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_language_only_switch_retains_a_same_language_region_and_its_script() {
+        let _owner = ambient_owner();
+        assert_eq!(active_after("zh-TW", &["zh-Hans"], "zh").0, "en");
+        assert_eq!(active_after("zh-TW", &["zh-Hant"], "zh").0, "zh-Hant");
+        assert_eq!(
+            active_after("zh-TW", &["zh-Hant"], "zh").1.to_string(),
+            "zh-TW"
+        );
+    }
+
+    #[test]
+    fn a_language_without_a_script_row_composes_as_before() {
+        let _owner = ambient_owner();
+        let (_, de) = active_after("de-CH", &["de"], "de");
+        assert_eq!(de.to_string(), "de-CH");
+        let (_, pt) = active_after("en-BR", &["pt"], "pt");
+        assert_eq!(pt.to_string(), "pt-BR");
+    }
+
+    #[test]
+    fn an_explicit_traditional_request_and_traditional_device_locales_stay_traditional() {
+        let _owner = ambient_owner();
+        assert_eq!(active_after("en-US", &["zh-CN"], "zh-TW").0, "en");
+        for device in ["zh-US", "zh-GB"] {
+            let i18n = I18n::new(en_plus(&["zh-CN"]), &[locale(device)]).expect("engine builds");
+            assert_eq!(i18n.locale().to_string(), "en", "{device}");
+        }
+    }
+
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn a_saved_scripted_tag_restores_the_same_active_locale() {
+        let _owner = ambient_owner();
+        let prefs = frust_shared_preferences::SharedPreferences::in_memory();
+        let first = I18n::with_persistence(en_plus(&["zh-CN"]), &[locale("en-US")], prefs.clone())
+            .expect("engine builds");
+        first.set_locale(locale("zh"));
+        assert_eq!(first.locale().to_string(), "zh-CN");
+        assert_eq!(
+            crate::persist::persisted_locale(&prefs).map(|l| l.to_string()),
+            Some("zh-Hans-US".to_string())
+        );
+        let second = I18n::with_persistence(en_plus(&["zh-CN"]), &[locale("en-US")], prefs)
+            .expect("engine builds");
+        assert_eq!(second.locale(), first.locale());
+        assert_eq!(second.format_locale(), first.format_locale());
     }
 
     #[test]

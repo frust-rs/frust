@@ -347,12 +347,17 @@ mod tests {
     struct Probe {
         i18n: I18n,
         seen: std::sync::Arc<std::sync::Mutex<Vec<frust::Brightness>>>,
+        /// A theme the component itself provides just before the call.
+        caller: Option<frust::Brightness>,
     }
 
     impl Component for Probe {
         type State = ();
         fn init(&self) {}
         fn build(&self, _state: &mut ()) -> impl View<()> {
+            if let Some(brightness) = self.caller {
+                frust::provide_context(frust::Theme::neutral().with_brightness(brightness));
+            }
             provide_localized_strings(&self.i18n);
             let theme = frust::use_context::<frust::Theme>().expect("theme provided");
             self.seen.lock().unwrap().push(theme.brightness);
@@ -377,6 +382,7 @@ mod tests {
             component(Probe {
                 i18n: host.clone(),
                 seen: probe_seen.clone(),
+                caller: None,
             })
         };
         let mut state = ();
@@ -391,6 +397,50 @@ mod tests {
             *seen.lock().unwrap(),
             [frust::Brightness::Light, frust::Brightness::Dark]
         );
+    }
+
+    /// Rebuilds a `Probe` three times and returns the brightness each build saw.
+    fn probe_builds(caller: Option<frust::Brightness>) -> Vec<frust::Brightness> {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let i18n = i18n("en");
+        let mut root: RenderRoot<(), ComponentView<Probe>> = RenderRoot::new();
+        let (host, probe_seen) = (i18n.clone(), seen.clone());
+        let mut logic = move |_: &mut ()| {
+            component(Probe {
+                i18n: host.clone(),
+                seen: probe_seen.clone(),
+                caller,
+            })
+        };
+        let mut state = ();
+        for _ in 0..3 {
+            root.rebuild(&mut logic, &mut state);
+        }
+        seen.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_theme_the_caller_provided_on_the_same_owner_is_the_base_on_every_build() {
+        let root_owner = Owner::new();
+        root_owner.set();
+        root_owner.with(|| {
+            frust::provide_context(
+                frust::Theme::neutral().with_brightness(frust::Brightness::Light),
+            );
+        });
+        assert_eq!(
+            probe_builds(Some(frust::Brightness::Dark)),
+            [frust::Brightness::Dark; 3]
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_provider_with_no_ancestor_theme_is_stable() {
+        let root_owner = Owner::new();
+        root_owner.set();
+        let seen = probe_builds(None);
+        assert_eq!(seen[0], seen[1]);
+        assert_eq!(seen[1], seen[2]);
     }
 
     #[test]

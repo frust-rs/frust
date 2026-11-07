@@ -260,8 +260,9 @@ struct AuthoredTypeScale {
 ///
 /// Absent means `1.0`. `factor` is stored already clamped to the body range
 /// by [`Theme::with_text_scale`]; read it through [`Theme::text_scale`].
-/// Shells compare [`TextScale::clamped`] of the new OS value with
-/// [`Theme::text_scale`] to decide whether the theme needs re-pushing.
+/// Shells dedupe on the OS text scale they stored themselves (compared after
+/// [`TextScale::clamped`]), not on [`Theme::text_scale`], so a theme the app
+/// derived or replaced does not change when a re-push happens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextScale {
     /// The (body-clamped) scale factor.

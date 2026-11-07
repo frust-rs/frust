@@ -95,6 +95,23 @@ impl Locale {
     }
 }
 
+impl Locale {
+    /// [`Locale::compose_region`] that also pins the script a region-less
+    /// `base` implies (`zh` is `Hans`, `sr` is `Cyrl`) before the foreign
+    /// region is grafted on, so the grafted region cannot change which script
+    /// the tag stands for (`zh` + `US` would otherwise be likely `Hant`).
+    /// A `base` with its own script, or a language with no table row, composes
+    /// exactly like [`Locale::compose_region`].
+    #[cfg(feature = "frust-api")]
+    pub(crate) fn compose_region_keeping_script(base: &Locale, region: Region) -> Self {
+        let mut id = base.as_lang_id().clone();
+        if id.script.is_none() && id.region.is_none() {
+            id.script = crate::engine::likely_script(id.language, None);
+        }
+        Self::compose_region(&Locale(id), region)
+    }
+}
+
 impl FromStr for Locale {
     type Err = unic_langid::LanguageIdentifierError;
 

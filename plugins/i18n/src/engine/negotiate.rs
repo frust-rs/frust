@@ -19,7 +19,10 @@
 //! is dropped. Without this, `fluent-langneg`'s built-in table does not
 //! maximize `zh-TW`/`zh-HK`/`zh-MO`, and the language-only match hands a
 //! Traditional-Chinese request a `zh-Hans` bundle. The declared fallback is
-//! exempt, so a script mismatch ends at the app's fallback.
+//! exempt, so a script mismatch ends at the app's fallback. A region-tagged
+//! bundle takes part in the filtering too: it counts as the script its own
+//! likely-script row gives it (`zh-CN` is `Hans`, `zh-TW` is `Hant`), so a
+//! `zh-TW` request never lands on a `zh-CN` bundle.
 //!
 //! A script-less available bundle (e.g. `zh`) stays a language-wide match for
 //! every request of that language; name bundles with a script (`zh-Hans`,
