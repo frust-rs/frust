@@ -8906,7 +8906,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ### `device-info-desktop-headroom-unavailable` — desktop reports no per-process memory headroom
 
-**Observed**: on macOS, Linux and Windows `DeviceMemory::process_headroom_bytes` is `None`. Only iOS exposes a process memory limit (`os_proc_available_memory`, unavailable on macOS). macOS also reports no `system_available_bytes`, because `host_statistics64` would need hand-written Mach FFI (deferred); Linux (`MemAvailable`) and Windows (`ullAvailPhys`) do report it.
+**Observed**: on macOS, Linux and Windows `DeviceMemory::process_headroom_bytes` is `None`. Only iOS exposes a process memory limit (`os_proc_available_memory`, unavailable on macOS). macOS also reports no `system_available_bytes`, because `host_statistics64` would need hand-written Mach FFI (deferred); Linux (`MemAvailable`) and Windows (`ullAvailPhys`) do report it. On Linux `total_bytes` and `system_available_bytes` come from `/proc/meminfo`, which inside a container, a systemd slice or WSL under a cgroup memory limit reports the host's memory rather than the process's ceiling, so apps there should treat both figures as an upper bound.
 
 **Applies to**: macOS, Linux and Windows.
 
