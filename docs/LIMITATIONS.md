@@ -9045,3 +9045,19 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Evidence**: (2026-11-07) `plugins/i18n/src/locale.rs` (`Locale::likely_script`) and `plugins/i18n/src/engine/negotiate.rs`.
 
 ---
+
+### `rich-text-no-span-hit-test` — no per-span tap, link or semantics
+
+**Observed**: a `rich_text` is one paragraph with one `Role::Label` semantics node whose value is the concatenated text. A span cannot be tapped, cannot act as a link, and has no semantics node of its own.
+
+**Applies to**: apps that want inline links, tappable mentions or per-span accessibility actions inside a `rich_text`.
+
+**Workaround**: lay the tappable pieces out as separate widgets (`TextView`s in gesture detectors) instead of spans of one paragraph.
+
+**Why accepted**: the layout API takes styled pieces without byte ranges, and a span hit-test and per-span semantics need a position-to-span query that no consumer has required yet.
+
+**Trigger for removal**: a span hit-test API on the rich layout.
+
+**Evidence**: (2026-11-07) `crates/frust-widgets/src/rich_text.rs`.
+
+---

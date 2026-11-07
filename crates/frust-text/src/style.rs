@@ -419,6 +419,28 @@ pub struct TextStyle {
     pub decoration: TextDecoration,
 }
 
+/// One piece of a multi-style paragraph: `text` drawn in `style`.
+///
+/// [`TextContext::layout_rich`](crate::TextContext::layout_rich) lays a slice
+/// of spans out as one paragraph. The pieces are concatenated in order, so the
+/// caller never states byte ranges. Paragraph-level properties
+/// ([`TextStyle::align`], [`TextStyle::overflow_wrap`]) are read from the
+/// first span's style; everything else applies per span.
+#[derive(Clone, Copy, Debug)]
+pub struct TextSpan<'a> {
+    /// The piece of text.
+    pub text: &'a str,
+    /// The style the piece is drawn in.
+    pub style: &'a TextStyle,
+}
+
+impl<'a> TextSpan<'a> {
+    /// A span of `text` in `style`.
+    pub fn new(text: &'a str, style: &'a TextStyle) -> Self {
+        Self { text, style }
+    }
+}
+
 impl TextStyle {
     /// A style with the given `size` and `color`; every other knob keeps its
     /// [`Default`] value.
