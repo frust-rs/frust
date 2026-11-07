@@ -40,6 +40,8 @@ mod negotiate;
 mod resolve;
 
 pub(crate) use negotiate::likely_script;
+#[cfg(feature = "frust-api")]
+pub(crate) use negotiate::region_settles_script;
 
 use std::sync::Arc;
 

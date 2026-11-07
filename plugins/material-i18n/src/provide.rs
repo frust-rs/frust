@@ -125,7 +125,8 @@ fn build_table(key: &str) -> MaterialStrings {
 /// Region is ignored: `de-CH` and `de` share one table. Chinese is keyed by
 /// script instead: `zh`, `zh-CN`, `zh-SG` and `zh-Hans` share the Simplified
 /// table, while `zh-Hant`, `zh-TW`, `zh-HK`, `zh-MO`, `zh-US` and `zh-GB`
-/// have no table yet and get English (with one logged warning) rather than Simplified strings.
+/// have no table yet and get English (with one logged warning) rather than
+/// Simplified strings.
 /// Month and weekday names come from CLDR; every other string is
 /// hand-written.
 pub fn material_strings_for(locale: &Locale) -> MaterialStrings {
@@ -159,6 +160,11 @@ pub fn localized_theme(mut theme: Theme, i18n: &I18n) -> Theme {
 /// provided yet. Every Material widget created below resolves its strings
 /// from the provided theme when its view is created, so this call alone
 /// localizes the subtree; no shell theme push is needed.
+///
+/// A theme the caller provides on the same owner is the base only when it is
+/// provided again before this call on every build: this call replaces it on
+/// that owner, so a theme provided once (in `init`) gives way to the parent's
+/// theme from the second build on.
 pub fn provide_localized_strings(i18n: &I18n) {
     // A component's owner survives its rebuilds, so `use_context` alone would
     // find this call's own earlier provision from the second build on and
