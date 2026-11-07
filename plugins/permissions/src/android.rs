@@ -53,6 +53,21 @@
 //! ([`frust_plugin::android::with_jni_env`] has returned), so a blocked
 //! caller pins no JVM attachment.
 //!
+//! # One request at a time
+//!
+//! [`request`] holds the process-wide [`REQUEST_LOCK`] from just after the
+//! UI-thread check until it returns, so concurrent `request` calls run one
+//! after another, each with its own prompt. A caller that waited re-reads
+//! [`status`] once it holds the lock, so a permission the previous request
+//! decided returns without another prompt. The Kotlin host keeps its own
+//! guard for the case this lock cannot see: a request that timed out here
+//! while its prompt is still on screen. Until that prompt is answered, the
+//! host launches nothing and returns the current status code. The lock is a
+//! plain `std::sync::Mutex<()>` taken through this module's poison-tolerant
+//! `lock`; it is not factored out for a host test because this module builds
+//! for Android only, and `tests/kotlin_contract.rs` pins its use by a source
+//! scan instead.
+//!
 //! # Never on the UI thread
 //!
 //! The prompt is launched and answered on the main `Looper`; a caller parked
@@ -115,6 +130,11 @@ static PENDING: LazyLock<Mutex<HashMap<u64, Option<i32>>>> =
 /// Woken by `nativeOnPermissionResult`; waited on by [`request`].
 static ANSWERED: Condvar = Condvar::new();
 
+/// Held by [`request`] for the whole request, so concurrent requests run one
+/// after another (module doc, "One request at a time"). Never taken by
+/// [`deliver`], so the answer that ends a held request can always arrive.
+static REQUEST_LOCK: Mutex<()> = Mutex::new(());
+
 /// The next request id. Starts at 1 so a zeroed id is never live.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -143,12 +163,23 @@ pub(crate) fn status(p: Permission) -> Result<PermissionStatus, PermissionError>
 
 /// The crate root's `request` arm. Blocks while the prompt is up; see the
 /// module doc.
+///
+/// One request runs at a time: this holds [`REQUEST_LOCK`] from the
+/// UI-thread check until it returns, so a concurrent call waits for this one
+/// to finish (module doc, "One request at a time").
 pub(crate) fn request(p: Permission) -> Result<PermissionStatus, PermissionError> {
     let current = status(p)?;
     if is_decided(current) {
         return Ok(current);
     }
     with_host(|env, _class| ensure_off_ui_thread(env))?;
+
+    let _one_at_a_time = lock(&REQUEST_LOCK);
+    // A request that held the lock before this one may have decided `p`.
+    let current = status(p)?;
+    if is_decided(current) {
+        return Ok(current);
+    }
 
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     lock(&PENDING).insert(request_id, None);

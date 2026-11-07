@@ -19,7 +19,12 @@
 //! - the asked-flag storage names, a contract other plugins rely on;
 //! - the photo library's limited-access derivation reads grants only, so
 //!   declaring `READ_MEDIA_VISUAL_USER_SELECTED` (which Android adds when an
-//!   app declares `ACCESS_MEDIA_LOCATION`) cannot change it.
+//!   app declares `ACCESS_MEDIA_LOCATION`) cannot change it;
+//! - a missing asked flag cannot pin a permission at NotDetermined: the
+//!   rationale is read before the flag, and a fast denial is recorded as a
+//!   system refusal (never for MediaLocation);
+//! - MediaLocation reads Denied unless photo access is full;
+//! - one request is in flight at a time, on both sides.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -398,7 +403,7 @@ fn limited_derivation_ignores_what_the_manifest_declares() {
 }
 
 #[test]
-fn media_location_is_denied_while_photos_access_is_partial() {
+fn media_location_is_denied_without_full_photos_access() {
     let kotlin = read(KOTLIN_HOST);
     let current = kotlin_fn(&kotlin, "currentCode");
     assert!(
@@ -414,12 +419,179 @@ fn media_location_is_denied_while_photos_access_is_partial() {
 
     let mapping = kotlin_fn(&kotlin, "mediaLocationCode");
     assert!(
-        mapping.contains("if (photos == LIMITED) DENIED else null"),
-        "partial photo access must map to DENIED"
+        mapping.contains("if (photos != GRANTED) DENIED else null"),
+        "any photo access short of GRANTED (partial or none) must map to DENIED"
+    );
+    assert!(
+        !mapping.contains("LIMITED"),
+        "the mapping must not single out partial access"
     );
     assert!(
         !mapping.contains("wasAsked") && !mapping.contains("markAsked"),
-        "the partial-access decision must not use the asked flag"
+        "the photo-access decision must not use the asked flag"
+    );
+}
+
+/// The byte offset of `needle` in `haystack`, failing with `what`.
+fn offset(haystack: &str, needle: &str, what: &str) -> usize {
+    haystack
+        .find(needle)
+        .unwrap_or_else(|| panic!("{what}: `{needle}` not found"))
+}
+
+#[test]
+fn rationale_is_read_before_the_not_determined_return() {
+    let kotlin = read(KOTLIN_HOST);
+    let current = kotlin_fn(&kotlin, "currentCode");
+    let rationale = offset(
+        current,
+        "perms.filter { !isGranted(ctx, it) && rationale(activity, it) }",
+        "currentCode must read the rationale of the non-granted permissions",
+    );
+    let not_determined = offset(
+        current,
+        "return NOT_DETERMINED",
+        "currentCode must still return NOT_DETERMINED",
+    );
+    assert!(
+        rationale < not_determined,
+        "the rationale check must run before the NOT_DETERMINED return"
+    );
+    let mark = offset(
+        current,
+        "withRationale.forEach { markAsked(ctx, it) }",
+        "a rationale must write the asked flag",
+    );
+    let denied = offset(current, "return DENIED", "a rationale must read DENIED");
+    assert!(rationale < mark && mark < denied && denied < not_determined);
+    assert!(
+        !current.contains("perms.any { rationale(activity, it) }"),
+        "the rationale is decided once, before the asked flag"
+    );
+
+    // Recording an answer: a denial with a rationale after it is never a
+    // dismissed prompt.
+    let record = kotlin_fn(&kotlin, "recordAnswers");
+    assert!(record.contains("val rationaleAfter = !granted && rationale(activity, perm)"));
+    assert!(
+        record.contains("!prior.asked && !prior.rationale && !rationaleAfter"),
+        "a rationale after the answer must rule out the dismissed-prompt inference"
+    );
+}
+
+#[test]
+fn a_fast_denial_is_recorded_as_a_system_refusal_except_media_location() {
+    let kotlin = read(KOTLIN_HOST);
+    assert!(
+        kotlin.contains("private const val AUTO_DENY_MS = 500L"),
+        "the auto-denial bound must be the named 500 ms constant"
+    );
+
+    let refusal = kotlin_fn(&kotlin, "isSystemRefusal");
+    assert!(refusal.contains(
+        "isSystemRefusal(kind: Int, granted: Boolean, rationaleAfter: Boolean, elapsedMs: Long): Boolean"
+    ));
+    for needle in [
+        "kind != MEDIA_LOCATION",
+        "!granted",
+        "!rationaleAfter",
+        "elapsedMs < AUTO_DENY_MS",
+    ] {
+        assert!(
+            refusal.contains(needle),
+            "isSystemRefusal must require `{needle}`"
+        );
+    }
+
+    let record = kotlin_fn(&kotlin, "recordAnswers");
+    let decision = offset(
+        record,
+        "if (!dismissed || isSystemRefusal(kind, granted, rationaleAfter, elapsedMs)) {",
+        "recordAnswers must record a system refusal",
+    );
+    assert!(
+        record[decision..].contains("markAsked(ctx, perm)"),
+        "a system refusal must write the asked flag"
+    );
+
+    let launch = kotlin_fn(&kotlin, "launch");
+    let stamped = offset(
+        launch,
+        "launchedAt = SystemClock.elapsedRealtime()",
+        "launch must record the launch time",
+    );
+    let launched = offset(
+        launch,
+        "registered.launch(",
+        "launch must launch the launcher",
+    );
+    assert!(
+        stamped < launched,
+        "the launch time is taken before the launch"
+    );
+    assert!(launch.contains("val elapsedMs = SystemClock.elapsedRealtime() - launchedAt"));
+    assert!(launch.contains("recordAnswers(ctx, activity, kind, results, before, elapsedMs)"));
+}
+
+#[test]
+fn one_request_is_in_flight_at_a_time() {
+    let kotlin = read(KOTLIN_HOST);
+    let request = kotlin_fn(&kotlin, "request");
+    let guard = offset(
+        request,
+        "if (!claimInFlight(requestId, activity)) {",
+        "request must check the in-flight guard",
+    );
+    let current = offset(
+        request,
+        "return currentCode(ctx, kind, perms, activity)",
+        "a guarded request must return the current status code",
+    );
+    let launch = offset(
+        request,
+        "launch(ctx, requestId,",
+        "request must still launch an unguarded prompt",
+    );
+    assert!(
+        guard < current && current < launch,
+        "the in-flight guard must return the current code before any launch"
+    );
+
+    let claim = kotlin_fn(&kotlin, "claimInFlight");
+    assert!(claim.contains("if (current != null && !current.activity.isDestroyed) return false"));
+    let launch_fn = kotlin_fn(&kotlin, "launch");
+    assert_eq!(
+        launch_fn.matches("releaseInFlight(requestId)").count(),
+        3,
+        "the slot is freed when the Activity is gone, in the callback, and on a failed launch"
+    );
+    assert!(kotlin.contains("releaseInFlightFor(activity)"));
+
+    // Rust: one process-wide mutex held for the whole request.
+    let rust = read(RUST_ANDROID);
+    assert!(rust.contains("static REQUEST_LOCK: Mutex<()> = Mutex::new(());"));
+    let body = &rust[offset(
+        &rust,
+        "pub(crate) fn request(p: Permission)",
+        "src/android.rs must define request",
+    )..];
+    let body = &body[..offset(body, "\n}\n", "request must end")];
+    let held = offset(
+        body,
+        "let _one_at_a_time = lock(&REQUEST_LOCK);",
+        "request must hold REQUEST_LOCK in a named guard",
+    );
+    let minted = offset(body, "NEXT_REQUEST_ID.fetch_add", "request must mint an id");
+    let awaited = offset(body, "await_answer(request_id)", "request must wait");
+    assert!(
+        held < minted && minted < awaited,
+        "REQUEST_LOCK must be held before the id is minted and across the wait"
+    );
+    let deliver = &rust[offset(&rust, "fn deliver(", "src/android.rs must define deliver")..];
+    let deliver = &deliver[..offset(deliver, "\n}\n", "deliver must end")];
+    assert!(
+        !deliver.contains("REQUEST_LOCK"),
+        "deliver must never take REQUEST_LOCK, or a held request could not be answered"
     );
 }
 
