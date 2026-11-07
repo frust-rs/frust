@@ -1,16 +1,18 @@
 //! `/proc/meminfo` parser. Compiled on every target so it is tested on every host; only the
-//! Linux backend (and, later, nothing else) reads the file itself.
+//! Linux backend reads the file itself.
 
 /// The two figures read from `/proc/meminfo`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Meminfo {
     pub(crate) total_bytes: u64,
-    /// `None` on Linux before 3.14, which has no `MemAvailable`.
+    /// `None` on Linux before 3.14, which has no `MemAvailable`, and when the `MemAvailable:`
+    /// line is malformed.
     pub(crate) available_bytes: Option<u64>,
 }
 
 /// Reads `MemTotal:` and `MemAvailable:` (`<n> kB`, kB = 1024). `None` when `MemTotal` is
-/// missing or either line is malformed.
+/// missing or malformed. A malformed or absent `MemAvailable:` line does not discard the
+/// reading: `available_bytes` is `None` instead.
 #[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 pub(crate) fn parse(text: &str) -> Option<Meminfo> {
     let mut total = None;
@@ -19,7 +21,7 @@ pub(crate) fn parse(text: &str) -> Option<Meminfo> {
         if let Some(rest) = line.strip_prefix("MemTotal:") {
             total = Some(parse_kb(rest)?);
         } else if let Some(rest) = line.strip_prefix("MemAvailable:") {
-            available = Some(parse_kb(rest)?);
+            available = parse_kb(rest);
         }
     }
     Some(Meminfo {
@@ -61,6 +63,18 @@ mod tests {
     #[test]
     fn missing_available_is_none() {
         let text = "MemTotal:        2048 kB\nMemFree: 100 kB\n";
+        assert_eq!(
+            parse(text),
+            Some(Meminfo {
+                total_bytes: 2048 * 1024,
+                available_bytes: None,
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_available_keeps_total() {
+        let text = "MemTotal:        2048 kB\nMemAvailable:  lots kB\n";
         assert_eq!(
             parse(text),
             Some(Meminfo {

@@ -38,7 +38,7 @@
 use jni::objects::{JObject, JValue};
 use jni::{Env, jni_sig, jni_str};
 
-use crate::DeviceMemory;
+use crate::{DeviceMemory, android_reading};
 
 /// `Context.ACTIVITY_SERVICE`.
 const ACTIVITY_SERVICE: &str = "activity";
@@ -126,13 +126,7 @@ fn read_inner(env: &mut Env, context: &JObject) -> Option<DeviceMemory> {
     log::debug!(
         "frust-device-info android: total={total} avail={avail} low={low} threshold={threshold} low_ram={low_ram}"
     );
-    Some(DeviceMemory {
-        total_bytes: total.max(0) as u64,
-        low_ram_device: low_ram,
-        system_available_bytes: Some(avail.max(0) as u64),
-        process_headroom_bytes: None,
-        system_low: Some(low),
-    })
+    android_reading(total, avail, low, low_ram)
 }
 
 /// Logs a failed JNI step at debug and converts the result to an `Option`.
