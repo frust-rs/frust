@@ -71,6 +71,43 @@ pub struct ShapeCacheStats {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ShapeKey {
     text: String,
+    /// The style of a single-style text; the first span's for a rich one.
+    style: StyleKey,
+    /// Empty for a single-style text. For a rich one, every span's byte
+    /// length and style in order, so the same text split or styled
+    /// differently never shares an entry (and never collides with a
+    /// single-style key).
+    pieces: Vec<(usize, StyleKey)>,
+}
+
+impl ShapeKey {
+    /// Projects the shaping inputs (text + style, width-independent) into a
+    /// hashable key.
+    pub(crate) fn new(text: &str, style: &TextStyle) -> Self {
+        Self {
+            text: text.to_string(),
+            style: StyleKey::new(style),
+            pieces: Vec::new(),
+        }
+    }
+
+    /// The key of `text` (the spans' pieces concatenated) styled piecewise by
+    /// `spans`, each a (byte length, style) pair; `spans` must not be empty.
+    pub(crate) fn rich(text: &str, spans: &[(usize, &TextStyle)]) -> Self {
+        Self {
+            text: text.to_string(),
+            style: StyleKey::new(spans[0].1),
+            pieces: spans
+                .iter()
+                .map(|&(len, style)| (len, StyleKey::new(style)))
+                .collect(),
+        }
+    }
+}
+
+/// One style's share of a [`ShapeKey`].
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct StyleKey {
     family: FamilyBits,
     weight: u32,
     slant: SlantBits,
@@ -88,12 +125,9 @@ pub(crate) struct ShapeKey {
     decoration: DecorationBits,
 }
 
-impl ShapeKey {
-    /// Projects the shaping inputs (text + style, width-independent) into a
-    /// hashable key.
-    pub(crate) fn new(text: &str, style: &TextStyle) -> Self {
+impl StyleKey {
+    fn new(style: &TextStyle) -> Self {
         Self {
-            text: text.to_string(),
             family: FamilyBits::from(&style.family),
             weight: style.weight.value().to_bits(),
             slant: SlantBits::from(style.style),
@@ -246,7 +280,18 @@ impl LaidOut {
         max_width: Option<f32>,
         notdef: &NotdefCounter,
     ) -> Self {
-        let styles: Arc<[TextStyle]> = Arc::from([style.clone()]);
+        Self::with_styles(text, shaped, Arc::from([style.clone()]), max_width, notdef)
+    }
+
+    /// Lays `shaped` (`text` styled piecewise by `styles`, by span index) out
+    /// at `max_width`.
+    pub(crate) fn with_styles(
+        text: &str,
+        shaped: Arc<Shaped>,
+        styles: Arc<[TextStyle]>,
+        max_width: Option<f32>,
+        notdef: &NotdefCounter,
+    ) -> Self {
         let lines = Arc::new(lay_out(
             &Paragraph::new(&shaped, &styles, None),
             max_width,

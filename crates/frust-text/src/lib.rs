@@ -40,7 +40,7 @@ pub use oracle::cache::FontCacheStats;
 pub use shape_cache::ShapeCacheStats;
 pub use style::{
     FamilyName, FontFamily, FontStyle, FontWeight, GenericSlot, LineHeight, OverflowWrap,
-    TextAlign, TextDecoration, TextOverflow, TextStyle,
+    TextAlign, TextDecoration, TextOverflow, TextSpan, TextStyle,
 };
 
 /// The process-wide count of visible-text glyphs that shaped to glyph 0

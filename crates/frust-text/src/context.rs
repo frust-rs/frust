@@ -49,7 +49,7 @@ use crate::oracle::{self, CacheLocation, Oracle, RenderCapabilities};
 use crate::shape_cache::{
     DEFAULT_CAPACITY, LaidOut, LayoutCache, ShapeCacheStats, ShapeKey, ShapedCache,
 };
-use crate::style::{GenericSlot, TextOverflow, TextStyle};
+use crate::style::{GenericSlot, TextOverflow, TextSpan, TextStyle};
 
 use crate::shape;
 
@@ -165,6 +165,11 @@ fn visible_line_count(layout: &TextLayout, text_len: usize) -> usize {
         Some(last) if last.range.is_empty() && last.range.end >= text_len => count - 1,
         _ => count,
     }
+}
+
+/// The style index of span `index` (see [`TextContext::layout_rich`]).
+fn span_style_index(index: usize) -> u16 {
+    u16::try_from(index).expect("too many style spans")
 }
 
 /// Where [`TextContext::new_with_timings`] spent its time (startup evidence).
@@ -475,7 +480,30 @@ impl TextContext {
         }
 
         let full = self.layout(text, style, max_width);
-        let visible_lines = visible_line_count(&full, text.len());
+        self.cap_lines(
+            full,
+            text.len(),
+            max_width,
+            max_lines,
+            overflow,
+            &mut |cx, _| cx.ellipsis_in(style, 0),
+        )
+    }
+
+    /// Caps `full` (a layout of `text_len` bytes of text, already laid out
+    /// at `max_width`) to `max_lines` (at least 1) as [`Self::layout_bounded`]
+    /// documents; `ellipsis` builds the ellipsis an
+    /// [`TextOverflow::Ellipsis`] cut is marked with, given the full layout.
+    fn cap_lines(
+        &mut self,
+        full: TextLayout,
+        text_len: usize,
+        max_width: Option<f32>,
+        max_lines: usize,
+        overflow: TextOverflow,
+        ellipsis: &mut dyn FnMut(&mut Self, &TextLayout) -> Ellipsis,
+    ) -> TextLayout {
+        let visible_lines = visible_line_count(&full, text_len);
         let has_extra_lines = visible_lines > max_lines;
         let Some(last_line) = full.line_info(max_lines - 1) else {
             // Fewer than `max_lines` lines exist at all: nothing overflowed.
@@ -497,17 +525,142 @@ impl TextContext {
             TextOverflow::Clip if !has_extra_lines => full,
             TextOverflow::Clip => full.truncated(max_lines, None),
             TextOverflow::Ellipsis => {
-                let mut glyph = [0u8; 4];
-                let ellipsis = Ellipsis {
-                    shaped: Arc::clone(
-                        self.layout(ELLIPSIS.encode_utf8(&mut glyph), style, None)
-                            .shaped(),
-                    ),
-                    style_index: 0,
-                };
+                let ellipsis = ellipsis(self, &full);
                 full.truncated(max_lines, Some(ellipsis))
             }
         }
+    }
+
+    /// A shaped [`ELLIPSIS`] in `style`, to mark a cut with as span
+    /// `style_index`.
+    fn ellipsis_in(&mut self, style: &TextStyle, style_index: u16) -> Ellipsis {
+        let mut glyph = [0u8; 4];
+        Ellipsis {
+            shaped: Arc::clone(
+                self.layout(ELLIPSIS.encode_utf8(&mut glyph), style, None)
+                    .shaped(),
+            ),
+            style_index,
+        }
+    }
+
+    /// Lays out `spans` as one paragraph: the pieces concatenated in order,
+    /// each drawn in its own style, wrapped to `max_width` when supplied.
+    ///
+    /// Everything [`Self::layout`] documents holds across the whole text. Per
+    /// span: family, weight, slant, width, variations, features, locale, size,
+    /// colour, letter spacing, line height and decoration. Paragraph-level
+    /// properties ([`TextStyle::align`], [`TextStyle::overflow_wrap`]) come
+    /// from the first span's style. A line's height is that of its tallest
+    /// run. Breaking, shaping and bidi see the concatenated text, so a word
+    /// split across spans still wraps as one word. With every span in one
+    /// style the layout is identical to [`Self::layout`] of the joined text.
+    ///
+    /// No spans (or only empty pieces) yield the empty layout of the first
+    /// span's style (`TextStyle::default()` with no spans).
+    ///
+    /// A single-span call is exactly [`Self::layout`]. A multi-span layout is
+    /// cached by the text plus every span's length and style, in the same
+    /// cache and with the same width-change behaviour as [`Self::layout`].
+    ///
+    /// # Panics
+    ///
+    /// When there are more than `u16::MAX` spans.
+    pub fn layout_rich(&mut self, spans: &[TextSpan<'_>], max_width: Option<f32>) -> TextLayout {
+        let Some(first) = spans.first() else {
+            return self.layout("", &TextStyle::default(), max_width);
+        };
+        let text: String = spans.iter().map(|span| span.text).collect();
+        if spans.len() == 1 || text.is_empty() {
+            return self.layout(&text, first.style, max_width);
+        }
+        let pieces: Vec<(usize, &TextStyle)> =
+            spans.iter().map(|s| (s.text.len(), s.style)).collect();
+        let key = ShapeKey::rich(&text, &pieces);
+        if let Some(layout) = self.shape_cache.get(&key, max_width) {
+            return layout;
+        }
+        let mut start = 0;
+        let ranges: Vec<(std::ops::Range<usize>, &TextStyle)> = pieces
+            .iter()
+            .map(|&(len, style)| {
+                let range = start..start + len;
+                start += len;
+                (range, style)
+            })
+            .collect();
+        let shaped = Arc::new(self.shape_cx.shape_spans(&mut self.oracle, &text, &ranges));
+        let styles: Arc<[TextStyle]> = spans.iter().map(|s| s.style.clone()).collect();
+        let laid_out = LaidOut::with_styles(&text, shaped, styles, max_width, &self.notdef);
+        let layout = laid_out.layout();
+        self.shape_cache.insert(key, laid_out);
+        layout
+    }
+
+    /// Lays out `spans` exactly like [`Self::layout_rich`], then caps it to
+    /// `max_lines` (when `Some`) as [`Self::layout_bounded`] does.
+    ///
+    /// The guarantee: an overflowing paragraph always paints the ellipsis,
+    /// and the line never exceeds `max_width` unless the ellipsis alone is
+    /// wider, when it is drawn bare. The ellipsis takes the style of
+    /// the span where the cut settles after at most two passes: the span the
+    /// uncut last line ends in is the guess, the text is cut with that
+    /// span's ellipsis, and when the cut ends in another span the ellipsis is
+    /// re-made in that span's style and the text re-cut once. The kept text
+    /// depends on the ellipsis's width, so when adjacent spans differ in
+    /// size, family, weight, width or letter spacing, the ellipsis can follow
+    /// a glyph of another span.
+    pub fn layout_rich_bounded(
+        &mut self,
+        spans: &[TextSpan<'_>],
+        max_width: Option<f32>,
+        max_lines: Option<usize>,
+        overflow: TextOverflow,
+    ) -> TextLayout {
+        let Some(max_lines) = max_lines else {
+            return self.layout_rich(spans, max_width);
+        };
+        if max_lines == 0 {
+            // No visible lines at all, sized by the first span's style.
+            let style = spans
+                .first()
+                .map_or_else(TextStyle::default, |s| s.style.clone());
+            return self.layout("", &style, max_width);
+        }
+        let full = self.layout_rich(spans, max_width);
+        let text_len: usize = spans.iter().map(|s| s.text.len()).sum();
+        // The span holding byte `at`, else the last one.
+        let span_at = |at: usize| {
+            let mut end = 0;
+            for (index, span) in spans.iter().enumerate() {
+                end += span.text.len();
+                if end > at {
+                    return index;
+                }
+            }
+            spans.len().saturating_sub(1)
+        };
+        self.cap_lines(
+            full,
+            text_len,
+            max_width,
+            max_lines,
+            overflow,
+            &mut |cx, full| {
+                let index_of = |layout: &TextLayout| {
+                    let range = layout.line_info(max_lines - 1).map(|l| l.range);
+                    span_at(range.map_or(0, |r| r.end.saturating_sub(1)))
+                };
+                let guess = index_of(full);
+                let ellipsis = cx.ellipsis_in(spans[guess].style, span_style_index(guess));
+                let settled = index_of(&full.truncated(max_lines, Some(ellipsis.clone())));
+                if settled == guess {
+                    ellipsis
+                } else {
+                    cx.ellipsis_in(spans[settled].style, span_style_index(settled))
+                }
+            },
+        )
     }
 
     /// The shape cache's instrumentation counters (shapes performed,
@@ -2762,5 +2915,398 @@ mod tests {
                 .zip(&b)
                 .all(|(a, b)| a.glyphs == b.glyphs && a.transform != b.transform)
         );
+    }
+
+    // ---- rich (multi-span) layout ----
+
+    const RED: Color = Color::from_rgba8(255, 0, 0, 255);
+
+    /// The brush colours of `runs`, in order.
+    fn run_colors(runs: &[frust_scene::GlyphRun]) -> Vec<Color> {
+        runs.iter()
+            .map(|r| match &r.brush {
+                peniko::Brush::Solid(c) => *c,
+                other => panic!("expected a solid brush, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rich_spans_colour_their_runs_and_underline_only_the_styled_span() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, regular) = noto_cx();
+        let bold = regular.clone().with_weight(crate::FontWeight::BOLD);
+        let link = TextStyle {
+            color: RED,
+            ..regular.clone()
+        }
+        .with_decoration(crate::TextDecoration {
+            underline: true,
+            ..crate::TextDecoration::default()
+        });
+        let spans = [
+            TextSpan::new("Plain ", &regular),
+            TextSpan::new("bold ", &bold),
+            TextSpan::new("link", &link),
+        ];
+        let layout = cx.layout_rich(&spans, None);
+        let colors = run_colors(&layout.to_scene_runs(kurbo::Point::ORIGIN));
+        assert!(colors.contains(&Color::BLACK) && colors.contains(&RED));
+        let first_red = colors.iter().position(|c| *c == RED).expect("a red run");
+        assert!(colors[..first_red].iter().all(|c| *c == Color::BLACK));
+        assert!(colors[first_red..].iter().all(|c| *c == RED), "{colors:?}");
+
+        let rects = layout.decoration_rects(kurbo::Point::ORIGIN);
+        // One underline per run of the third span (a face change splits it).
+        assert!(!rects.is_empty());
+        let before = cx.layout_rich(&spans[..2], None).size().width;
+        let total = layout.size().width;
+        assert!(rects.iter().all(|r| r.color == RED), "{rects:?}");
+        let (x0, x1) = rects.iter().fold((f64::MAX, f64::MIN), |(lo, hi), r| {
+            (lo.min(r.rect.x0), hi.max(r.rect.x1))
+        });
+        // The trailing space of the first two spans hangs, so it is not in `before`.
+        assert!(x0 >= before && x0 < total, "{x0} vs {before}..{total}");
+        assert!((x1 - total).abs() < 1.5, "{x1} vs {total}");
+    }
+
+    #[test]
+    fn a_size_change_mid_paragraph_takes_the_tallest_runs_line_height() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, small) = noto_cx();
+        let small = TextStyle {
+            size: 12.0,
+            ..small
+        };
+        let large = TextStyle {
+            size: 36.0,
+            ..small.clone()
+        };
+        let mixed = cx.layout_rich(
+            &[
+                TextSpan::new("small ", &small),
+                TextSpan::new("large", &large),
+            ],
+            None,
+        );
+        let only_small = cx.layout("small ", &small, None).size().height;
+        let only_large = cx.layout("large", &large, None).size().height;
+        assert!(only_large > only_small);
+        assert!(
+            (mixed.size().height - only_large).abs() < 0.5,
+            "{} vs {only_large}",
+            mixed.size().height
+        );
+    }
+
+    #[test]
+    fn same_style_spans_lay_out_like_the_joined_single_style_text() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, s) = noto_cx();
+        let text = "The quick brown fox jumps over the lazy dog and keeps running";
+        let spans = [
+            TextSpan::new(&text[..13], &s),
+            TextSpan::new(&text[13..14], &s),
+            TextSpan::new(&text[14..], &s),
+        ];
+        for width in [None, Some(90.0), Some(160.0)] {
+            let rich = cx.layout_rich(&spans, width);
+            let plain = cx.layout(text, &s, width);
+            assert_eq!(rich.size(), plain.size(), "{width:?}");
+            assert_eq!(
+                glyphs_of(&rich.to_scene_runs(kurbo::Point::ORIGIN)),
+                glyphs_of(&plain.to_scene_runs(kurbo::Point::ORIGIN)),
+                "{width:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_span_is_the_plain_layout_and_shares_its_cache_entry() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, s) = noto_cx();
+        let _ = cx.layout("Hello", &s, None);
+        let _ = cx.layout_rich(&[TextSpan::new("Hello", &s)], None);
+        let stats = cx.shape_cache_stats();
+        assert_eq!((stats.shapes, stats.hits), (1, 1));
+    }
+
+    #[test]
+    fn no_spans_lay_out_empty_and_empty_pieces_are_ignored() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, s) = noto_cx();
+        let none = cx.layout_rich(&[], None);
+        assert_eq!(none.size().width, 0.0);
+        assert!(none.size().height > 0.0);
+        assert!(none.to_scene_runs(kurbo::Point::ORIGIN).is_empty());
+
+        let red = TextStyle {
+            color: RED,
+            ..s.clone()
+        };
+        let spans = [
+            TextSpan::new("", &red),
+            TextSpan::new("Hi", &s),
+            TextSpan::new("", &red),
+        ];
+        let layout = cx.layout_rich(&spans, None);
+        let colors = run_colors(&layout.to_scene_runs(kurbo::Point::ORIGIN));
+        assert!(!colors.is_empty() && colors.iter().all(|c| *c == s.color));
+        let plain = cx.layout("Hi", &s, None);
+        assert_eq!(layout.size(), plain.size());
+    }
+
+    #[test]
+    fn rich_layouts_hit_the_cache_until_a_span_changes() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, s) = noto_cx();
+        let red = TextStyle {
+            color: RED,
+            ..s.clone()
+        };
+        let blue = TextStyle {
+            color: Color::from_rgba8(0, 0, 255, 255),
+            ..s.clone()
+        };
+        let layout = |cx: &mut TextContext, tail: &TextStyle, width| {
+            cx.layout_rich(
+                &[TextSpan::new("one ", &s), TextSpan::new("two", tail)],
+                width,
+            )
+        };
+        let _ = layout(&mut cx, &red, None);
+        let _ = layout(&mut cx, &red, None);
+        let stats = cx.shape_cache_stats();
+        assert_eq!((stats.shapes, stats.hits), (1, 1));
+
+        let _ = layout(&mut cx, &blue, None);
+        assert_eq!(cx.shape_cache_stats().shapes, 2, "a colour change misses");
+
+        let before = cx.shape_cache_stats();
+        let _ = layout(&mut cx, &red, Some(30.0));
+        let after = cx.shape_cache_stats();
+        assert_eq!(after.shapes, before.shapes, "a width change never reshapes");
+        assert_eq!(after.line_breaks, before.line_breaks + 1);
+
+        // The same text split elsewhere is a different entry.
+        let _ = cx.layout_rich(
+            &[TextSpan::new("one t", &s), TextSpan::new("wo", &red)],
+            None,
+        );
+        assert_eq!(cx.shape_cache_stats().shapes, after.shapes + 1);
+    }
+
+    #[test]
+    fn mixed_locale_spans_shape_with_their_own_languages() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = test_cx();
+        let th = style(16.0).with_locale(Some("th"));
+        let ja = style(16.0).with_locale(Some("ja"));
+        let layout = cx.layout_rich(
+            &[
+                TextSpan::new("\u{0e2a}\u{0e27}\u{0e31}\u{0e2a}\u{0e14}\u{0e35}", &th),
+                TextSpan::new("\u{6f22}\u{5b57}", &ja),
+            ],
+            None,
+        );
+        let languages = |index: u16| -> Vec<Option<String>> {
+            layout
+                .shaped()
+                .runs
+                .iter()
+                .filter(|r| r.style_index == index)
+                .map(|r| r.language.clone())
+                .collect()
+        };
+        let (first, second) = (languages(0), languages(1));
+        assert!(!first.is_empty() && !second.is_empty());
+        assert!(
+            first.iter().all(|l| l.as_deref() == Some("th")),
+            "{first:?}"
+        );
+        assert!(
+            second.iter().all(|l| l.as_deref() == Some("ja")),
+            "{second:?}"
+        );
+    }
+
+    const RICH_TAIL: &str = "world and then a very long tail of words that cannot fit";
+
+    #[test]
+    fn rich_ellipsis_takes_the_style_of_the_span_it_cuts() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, black) = noto_cx();
+        let red = TextStyle {
+            color: RED,
+            ..black.clone()
+        };
+        let mut ellipsis_color = |spans: &[TextSpan<'_>]| {
+            let layout =
+                cx.layout_rich_bounded(spans, Some(120.0), Some(1), TextOverflow::Ellipsis);
+            assert_eq!(layout.line_count(), 1);
+            assert!(
+                layout.size().width <= 120.0 + 0.01,
+                "{}",
+                layout.size().width
+            );
+            let colors = run_colors(&layout.to_scene_runs(kurbo::Point::ORIGIN));
+            *colors.last().expect("a run")
+        };
+        // The cut falls in the red tail.
+        assert_eq!(
+            ellipsis_color(&[
+                TextSpan::new("Hello ", &black),
+                TextSpan::new(RICH_TAIL, &red),
+            ]),
+            RED
+        );
+        // The cut falls in the black head; the red tail is dropped.
+        assert_eq!(
+            ellipsis_color(&[
+                TextSpan::new(
+                    "alpha beta gamma delta epsilon zeta eta theta iota kappa ",
+                    &black
+                ),
+                TextSpan::new("tail", &red),
+            ]),
+            Color::BLACK
+        );
+    }
+
+    /// A two-span fixture: a 12px black head style and a 36px red tail style.
+    fn mixed_size_cx() -> (TextContext, TextStyle, TextStyle) {
+        let (cx, base) = noto_cx();
+        let small = TextStyle {
+            size: 12.0,
+            ..base.clone()
+        };
+        let big = TextStyle {
+            size: 36.0,
+            color: RED,
+            ..base
+        };
+        (cx, small, big)
+    }
+
+    /// The size the layout's last glyph is painted at when that glyph is
+    /// [`ELLIPSIS`] in `style`'s font, `None` when it is any other glyph.
+    fn trailing_ellipsis_size(
+        cx: &mut TextContext,
+        layout: &TextLayout,
+        style: &TextStyle,
+    ) -> Option<f32> {
+        let ellipsis = cx.layout(&ELLIPSIS.to_string(), style, None);
+        let ellipsis_runs = ellipsis.to_scene_runs(kurbo::Point::ORIGIN);
+        let id = ellipsis_runs.last()?.glyphs.last()?.id;
+        let runs = layout.to_scene_runs(kurbo::Point::ORIGIN);
+        let last = runs.last()?;
+        (last.glyphs.last()?.id == id).then_some(last.font_size)
+    }
+
+    #[test]
+    fn rich_ellipsis_paints_when_only_a_narrow_ellipsis_fits_beside_one_big_glyph() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, small, big) = mixed_size_cx();
+        let spans = [TextSpan::new("a", &small), TextSpan::new("iiii", &big)];
+        // Wide enough for "a", one big "i" and the small ellipsis, but not
+        // for "a" and the big ellipsis.
+        let kept = cx.layout_rich(
+            &[TextSpan::new("a", &small), TextSpan::new("i", &big)],
+            None,
+        );
+        let small_ellipsis = cx.layout(&ELLIPSIS.to_string(), &small, None);
+        let width = kept.size().width as f32 + small_ellipsis.size().width as f32;
+        let layout = cx.layout_rich_bounded(&spans, Some(width), Some(1), TextOverflow::Ellipsis);
+        assert!(layout.size().width <= f64::from(width) + 0.01);
+        // The uncut line ends in the big span, but the big ellipsis cut keeps
+        // only "a", so the second pass re-makes it in the small style.
+        assert_eq!(
+            trailing_ellipsis_size(&mut cx, &layout, &small),
+            Some(small.size),
+            "the small ellipsis is painted"
+        );
+    }
+
+    #[test]
+    fn rich_ellipsis_settled_in_a_second_pass_still_paints_within_the_width() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, small, big) = mixed_size_cx();
+        let spans = [
+            TextSpan::new("aaaa", &small),
+            TextSpan::new("bbbbbbbbbb", &big),
+        ];
+        let head = cx.layout_rich(
+            &[TextSpan::new("aaaa", &small), TextSpan::new("b", &big)],
+            None,
+        );
+        let small_ellipsis = cx.layout(&ELLIPSIS.to_string(), &small, None);
+        let width = head.size().width as f32 + small_ellipsis.size().width as f32;
+        let layout = cx.layout_rich_bounded(&spans, Some(width), Some(1), TextOverflow::Ellipsis);
+        assert_eq!(layout.line_count(), 1);
+        assert!(
+            layout.size().width <= f64::from(width) + 0.01,
+            "{} > {width}",
+            layout.size().width
+        );
+        assert_eq!(
+            trailing_ellipsis_size(&mut cx, &layout, &small),
+            Some(small.size),
+            "settled on the small head after guessing the big tail"
+        );
+    }
+
+    #[test]
+    fn rich_ellipsis_with_mismatched_sizes_paints_within_the_width() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, small, big) = mixed_size_cx();
+        let spans = [
+            TextSpan::new("aaaaaaaa", &small),
+            TextSpan::new("bbbbbbbbbb", &big),
+        ];
+        let six = cx.layout_rich(&[TextSpan::new("aaaaaa", &small)], None);
+        let big_ellipsis = cx.layout(&ELLIPSIS.to_string(), &big, None);
+        let width = six.size().width as f32 + big_ellipsis.size().width as f32;
+        let layout = cx.layout_rich_bounded(&spans, Some(width), Some(1), TextOverflow::Ellipsis);
+        assert!(layout.size().width <= f64::from(width) + 0.01);
+        assert!(
+            trailing_ellipsis_size(&mut cx, &layout, &small).is_some(),
+            "the ellipsis is painted"
+        );
+    }
+
+    #[test]
+    fn rich_ellipsis_with_two_lines_keeps_two_lines_when_the_text_overflows() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, black) = noto_cx();
+        let red = TextStyle {
+            color: RED,
+            ..black.clone()
+        };
+        let spans = [
+            TextSpan::new("Hello ", &black),
+            TextSpan::new(RICH_TAIL, &red),
+            TextSpan::new(RICH_TAIL, &black),
+        ];
+        let layout = cx.layout_rich_bounded(&spans, Some(120.0), Some(2), TextOverflow::Ellipsis);
+        assert_eq!(layout.line_count(), 2);
+        assert!(layout.size().width <= 120.0 + 0.01);
+    }
+
+    #[test]
+    fn rich_bounded_without_a_cap_or_overflow_is_the_plain_rich_layout() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let (mut cx, s) = noto_cx();
+        let red = TextStyle {
+            color: RED,
+            ..s.clone()
+        };
+        let spans = [TextSpan::new("short ", &s), TextSpan::new("text", &red)];
+        let plain = cx.layout_rich(&spans, Some(200.0));
+        let none = cx.layout_rich_bounded(&spans, Some(200.0), None, TextOverflow::Ellipsis);
+        let fits = cx.layout_rich_bounded(&spans, Some(200.0), Some(3), TextOverflow::Ellipsis);
+        assert_eq!(none.size(), plain.size());
+        assert_eq!(fits.size(), plain.size());
+        let zero = cx.layout_rich_bounded(&spans, Some(200.0), Some(0), TextOverflow::Clip);
+        assert!(zero.to_scene_runs(kurbo::Point::ORIGIN).is_empty());
     }
 }
