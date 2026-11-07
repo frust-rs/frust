@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between twenty-two sections
+`pattern_switcher`-hosted section body, selecting between the sections in `SECTION_LABELS`
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,8 +22,8 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twenty-two
-  sections directly, in a column beside the page body — nothing is ever
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists every
+  section directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
 The sections, in order:
@@ -219,6 +219,14 @@ The sections, in order:
     `frust-gate device-memory: pressure=<level>`. Android 14 and later deliver no
     foreground trim level, so poll this section instead. Deep link:
     `frustplay://section/memory`.
+23. **Photos** — the `frust-permissions` gate vehicle. A Permissions panel lists
+    Photos (read/write), Photos (add-only), Camera, Microphone and Media location,
+    each with its last-read status and a **Request** button. **Refresh** re-reads
+    every status and **Open settings** opens the app's system settings page. The
+    request runs off the UI thread; an error (feature disabled, missing usage
+    description, unsupported platform) shows its message in the row. Status is
+    read only on a button press or after a request finishes, never while the page
+    builds. Deep link: `frustplay://section/photos`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
