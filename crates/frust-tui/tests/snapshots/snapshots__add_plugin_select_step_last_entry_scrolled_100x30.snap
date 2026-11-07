@@ -7,25 +7,25 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (17-25 of 25)       │▓▓                
- DEVICES ↻ R      │    ( ) cupertino                                             │▓▓                
-   none found     │        Cupertino catalog; needs frust_cupertino::install()   │▓▓                
-                  │    ( ) shadcn                                                │▓▓                
- SESSIONS         │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
-   none running   │    ( ) network-image                                         │▓▓                
-                  │        Network image view: URL images with an in-memory +    │▓▓                
- ACTIONS          │    ( ) share                                                 │▓▓                
-   New project · n│        Share text or a URL through the platform share sheet  │▓▓                
-   Add plugin · a │    ( ) connectivity                                          │▓▓                
-   Doctor · i     │        Default-network availability and change events        │▓▓                
-   Build · b      │    ( ) qr                                                    │▓▓                
-   Clean · c      │        QR code view (qrcode encoder, canvas-painted)         │▓▓                
-   MCP off · M    │    ( ) file-dialogs                                          │▓▓                
-   DAP off · D    │        Native file open/save dialogs on Linux, macOS and     │▓▓                
-                  │    ( ) material-i18n                                         │▓▓                
-                  │        Localized Material widget strings that follow the     │▓▓                
-                  │  ▸ (o) device-info                                           │▓▓                
+                  │  Choose a plugin to add to this project  (18-26 of 26)       │▓▓                
+ DEVICES ↻ R      │    ( ) shadcn                                                │▓▓                
+   none found     │        shadcn/ui catalog; needs frust_shadcn::install() in   │▓▓                
+                  │    ( ) network-image                                         │▓▓                
+ SESSIONS         │        Network image view: URL images with an in-memory +    │▓▓                
+   none running   │    ( ) share                                                 │▓▓                
+                  │        Share text or a URL through the platform share sheet  │▓▓                
+ ACTIONS          │    ( ) connectivity                                          │▓▓                
+   New project · n│        Default-network availability and change events        │▓▓                
+   Add plugin · a │    ( ) qr                                                    │▓▓                
+   Doctor · i     │        QR code view (qrcode encoder, canvas-painted)         │▓▓                
+   Build · b      │    ( ) file-dialogs                                          │▓▓                
+   Clean · c      │        Native file open/save dialogs on Linux, macOS and     │▓▓                
+   MCP off · M    │    ( ) material-i18n                                         │▓▓                
+   DAP off · D    │        Localized Material widget strings that follow the     │▓▓                
+                  │    ( ) device-info                                           │▓▓                
                   │        Device memory query (total RAM, low-RAM flag,         │▓▓                
+                  │  ▸ (o) permissions                                           │▓▓                
+                  │        Permission status, request and open_settings;         │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
