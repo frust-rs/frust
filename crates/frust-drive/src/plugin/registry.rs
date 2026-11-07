@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — twenty-five entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty-six entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -61,8 +61,12 @@
 //! key, no manifest permission, no Swift package, no app-crate macro, and
 //! no contribution at all on macOS, whose factory self-registers into
 //! `frust_plugin::desktop` at first use — see `VIDEO_PLAYER_BASE`'s doc
-//! comment for the full accounting). The newest entry, `device-info`, is dependency only: a
+//! comment for the full accounting). `device-info` is dependency only: a
 //! device-memory query needing no permission, Gradle module or plist key.
+//! The newest entry, `permissions` (dependency, the plugin's own Android
+//! library module, and five optional features carrying the app-side
+//! manifest permissions, usage strings, framework links and macOS
+//! entitlements each permission needs), is described at `PERMISSIONS`.
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -751,6 +755,190 @@ const DEVICE_INFO: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `permissions`' feature contributions. Every feature turns on the matching
+/// cargo feature of `frust-permissions` and adds the app-side declarations
+/// the OS requires before it will show that permission's prompt.
+///
+/// The usage-string values are scaffold defaults: the app edits them in
+/// `Info.plist` to say why it needs the permission. An entry the app already
+/// has is left alone, so an app that adds both `camera` and
+/// `permissions` with its `camera` feature keeps the `camera` plugin's
+/// `NSCameraUsageDescription` string.
+///
+/// The macOS entitlement keys are the hardened-runtime resource-access keys
+/// `com.apple.security.device.camera` and
+/// `com.apple.security.device.audio-input`; signed macOS builds run with the
+/// hardened runtime on, so they are needed there. UNVERIFIED against Apple's
+/// live documentation from this checkout (no network lookup was possible);
+/// confirm before release.
+///
+/// `READ_EXTERNAL_STORAGE` is written without a `maxSdkVersion` attribute
+/// because [`Contribution::ManifestPermission`] carries only the permission
+/// name; it is harmless on newer Android versions.
+const PERMISSIONS_PHOTOS: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-permissions",
+        feature: "photos",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_IMAGES",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VIDEO",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_EXTERNAL_STORAGE",
+    },
+    Contribution::PlistEntry {
+        key: "NSPhotoLibraryUsageDescription",
+        value: "Choose photos from your library.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Photo library usage description, required by Apple in the \
+                  app's own Info.plist. Edit the text to match your app.",
+    },
+    Contribution::IosFramework { name: "Photos" },
+];
+
+const PERMISSIONS_PHOTOS_ADD: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-permissions",
+        feature: "photos",
+    },
+    Contribution::PlistEntry {
+        key: "NSPhotoLibraryAddUsageDescription",
+        value: "Save photos to your library.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Photo library add-only usage description, required by \
+                  Apple in the app's own Info.plist. Edit the text to match \
+                  your app.",
+    },
+    Contribution::IosFramework { name: "Photos" },
+];
+
+const PERMISSIONS_CAMERA: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-permissions",
+        feature: "camera",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.CAMERA",
+    },
+    Contribution::PlistEntry {
+        key: "NSCameraUsageDescription",
+        value: "Take photos and record video.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Camera usage description, required by Apple in the app's \
+                  own Info.plist. Edit the text to match your app.",
+    },
+    Contribution::MacosPlistEntry {
+        key: "NSCameraUsageDescription",
+        value: "Take photos and record video.",
+        comment: "Camera usage description for the macOS bundle.",
+    },
+    Contribution::MacosEntitlement {
+        key: "com.apple.security.device.camera",
+        comment: "Hardened-runtime camera access.",
+    },
+    Contribution::IosFramework {
+        name: "AVFoundation",
+    },
+];
+
+const PERMISSIONS_MICROPHONE: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-permissions",
+        feature: "microphone",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.RECORD_AUDIO",
+    },
+    Contribution::PlistEntry {
+        key: "NSMicrophoneUsageDescription",
+        value: "Record audio.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Microphone usage description, required by Apple in the \
+                  app's own Info.plist. Edit the text to match your app.",
+    },
+    Contribution::MacosPlistEntry {
+        key: "NSMicrophoneUsageDescription",
+        value: "Record audio.",
+        comment: "Microphone usage description for the macOS bundle.",
+    },
+    Contribution::MacosEntitlement {
+        key: "com.apple.security.device.audio-input",
+        comment: "Hardened-runtime microphone access.",
+    },
+    Contribution::IosFramework {
+        name: "AVFoundation",
+    },
+];
+
+const PERMISSIONS_MEDIA_LOCATION: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-permissions",
+        feature: "media-location",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.ACCESS_MEDIA_LOCATION",
+    },
+];
+
+const PERMISSIONS_FEATURES: &[FeatureSpec] = &[
+    FeatureSpec {
+        id: "photos",
+        summary: "Photo library read access (Android media permissions, \
+                  NSPhotoLibraryUsageDescription, Photos framework).",
+        contributions: PERMISSIONS_PHOTOS,
+    },
+    FeatureSpec {
+        id: "photos-add",
+        summary: "Photo library add-only access (NSPhotoLibraryAddUsageDescription, \
+                  Photos framework).",
+        contributions: PERMISSIONS_PHOTOS_ADD,
+    },
+    FeatureSpec {
+        id: "camera",
+        summary: "Camera permission (CAMERA, NSCameraUsageDescription, macOS \
+                  camera entitlement).",
+        contributions: PERMISSIONS_CAMERA,
+    },
+    FeatureSpec {
+        id: "microphone",
+        summary: "Microphone permission (RECORD_AUDIO, NSMicrophoneUsageDescription, \
+                  macOS audio-input entitlement).",
+        contributions: PERMISSIONS_MICROPHONE,
+    },
+    FeatureSpec {
+        id: "media-location",
+        summary: "Photo location metadata (ACCESS_MEDIA_LOCATION on Android).",
+        contributions: PERMISSIONS_MEDIA_LOCATION,
+    },
+];
+
+/// `permissions`' base: the Cargo dependency and the plugin's own Android
+/// library module (the Kotlin host and init provider). Each permission the
+/// app uses is an opt-in feature, since the declarations are app policy.
+const PERMISSIONS: PluginSpec = PluginSpec {
+    id: "permissions",
+    summary: "Permission status, request and open_settings; features: photos, \
+              photos-add, camera, microphone, media-location.",
+    crate_dir: "permissions",
+    base: &[
+        Contribution::CargoDep {
+            name: "frust-permissions",
+        },
+        Contribution::GradleModule {
+            gradle_name: ":frust-permissions",
+            rel_path: "plugins/permissions/platform/android",
+        },
+    ],
+    optional_features: PERMISSIONS_FEATURES,
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -781,6 +969,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         FILE_DIALOGS,
         MATERIAL_I18N,
         DEVICE_INFO,
+        PERMISSIONS,
     ]
 }
 
@@ -800,7 +989,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_twenty_five_v1_plugins() {
+    fn registry_lists_the_twenty_six_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -830,6 +1019,7 @@ mod tests {
                 "file-dialogs",
                 "material-i18n",
                 "device-info",
+                "permissions",
             ]
         );
     }
@@ -1825,6 +2015,216 @@ mod tests {
                 .items
                 .iter()
                 .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `permissions` entry: Cargo dependency plus the plugin's Android
+    /// module as base, and five opt-in features in order.
+    #[test]
+    fn permissions_base_and_features_match_the_final_accounting() {
+        let spec = find_plugin("permissions").unwrap();
+        assert_eq!(spec.crate_dir, "permissions");
+        assert_eq!(spec.requires_sibling, None);
+
+        assert_eq!(spec.base.len(), 2);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-permissions"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-permissions",
+                rel_path: "plugins/permissions/platform/android",
+            }
+        ));
+
+        let ids: Vec<&str> = spec.optional_features.iter().map(|f| f.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "photos",
+                "photos-add",
+                "camera",
+                "microphone",
+                "media-location"
+            ]
+        );
+        let feature = |id: &str| {
+            spec.optional_features
+                .iter()
+                .find(|f| f.id == id)
+                .unwrap()
+                .contributions
+        };
+        let perms = |id: &str| -> Vec<&'static str> {
+            feature(id)
+                .iter()
+                .filter_map(|c| match c {
+                    Contribution::ManifestPermission { permission } => Some(*permission),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            perms("photos"),
+            vec![
+                "android.permission.READ_MEDIA_IMAGES",
+                "android.permission.READ_MEDIA_VIDEO",
+                "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+                "android.permission.READ_EXTERNAL_STORAGE",
+            ]
+        );
+        assert_eq!(feature("photos").len(), 7);
+        assert!(perms("photos-add").is_empty());
+        assert_eq!(feature("photos-add").len(), 3);
+        assert_eq!(perms("camera"), vec!["android.permission.CAMERA"]);
+        assert_eq!(feature("camera").len(), 6);
+        assert_eq!(perms("microphone"), vec!["android.permission.RECORD_AUDIO"]);
+        assert_eq!(feature("microphone").len(), 6);
+        assert_eq!(
+            perms("media-location"),
+            vec!["android.permission.ACCESS_MEDIA_LOCATION"]
+        );
+        assert_eq!(feature("media-location").len(), 2);
+
+        // Every feature starts with the cargo feature of the same name
+        // (photos-add shares `photos`).
+        for f in spec.optional_features {
+            let want = if f.id == "photos-add" { "photos" } else { f.id };
+            assert!(
+                matches!(
+                    f.contributions[0],
+                    Contribution::CargoFeature { name: "frust-permissions", feature } if feature == want
+                ),
+                "{}",
+                f.id
+            );
+        }
+        assert!(feature("camera").iter().any(|c| matches!(
+            c,
+            Contribution::MacosEntitlement {
+                key: "com.apple.security.device.camera",
+                ..
+            }
+        )));
+        assert!(feature("microphone").iter().any(|c| matches!(
+            c,
+            Contribution::MacosEntitlement {
+                key: "com.apple.security.device.audio-input",
+                ..
+            }
+        )));
+    }
+
+    /// The `permissions` module path must exist in this checkout.
+    #[test]
+    fn permissions_gradle_module_path_exists_in_this_checkout() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let spec = find_plugin("permissions").unwrap();
+        let mut seen = 0;
+        for c in spec.base {
+            if let Contribution::GradleModule { rel_path, .. } = c {
+                seen += 1;
+                assert!(
+                    repo_root.join(rel_path).join("build.gradle.kts").is_file(),
+                    "`{rel_path}` must be a Gradle module directory in this checkout"
+                );
+            }
+        }
+        assert_eq!(seen, 1);
+    }
+
+    /// `photos`, `microphone` and `media-location` applied twice: the
+    /// manifest, plist, Cargo feature list and framework flags land once,
+    /// and a re-apply leaves a byte-identical tree. The two macOS items are
+    /// recorded for build time and report `AppliedAtBuild` on every apply.
+    #[test]
+    fn permissions_add_plugin_with_photos_and_microphone_features_is_idempotent() {
+        let root = scaffold_project("permissions-idempotence");
+        let features = ["photos", "microphone", "media-location"];
+
+        let first = add_plugin(&root, "permissions", &features).unwrap();
+        assert_eq!(first.plugin_id, "permissions");
+        let at_build = |r: &crate::plugin::AddReport| {
+            r.items
+                .iter()
+                .filter(|i| i.outcome == AddOutcome::AppliedAtBuild)
+                .count()
+        };
+        assert_eq!(at_build(&first), 2, "{first:?}");
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|i| matches!(i.outcome, AddOutcome::Applied | AddOutcome::AppliedAtBuild)),
+            "{first:?}"
+        );
+
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        for p in [
+            "READ_MEDIA_IMAGES",
+            "READ_MEDIA_VIDEO",
+            "READ_MEDIA_VISUAL_USER_SELECTED",
+            "READ_EXTERNAL_STORAGE",
+            "RECORD_AUDIO",
+            "ACCESS_MEDIA_LOCATION",
+        ] {
+            assert_eq!(
+                manifest
+                    .matches(&format!("android.permission.{p}\""))
+                    .count(),
+                1,
+                "{p}: {manifest}"
+            );
+        }
+
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert!(plist.contains("NSPhotoLibraryUsageDescription"), "{plist}");
+        assert!(plist.contains("NSMicrophoneUsageDescription"), "{plist}");
+
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(
+            cargo.contains("features = [\"photos\", \"microphone\", \"media-location\"]"),
+            "{cargo}"
+        );
+
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        let lists = pbxproj.matches("OTHER_LDFLAGS = (").count();
+        assert!(lists >= 2, "{pbxproj}");
+        for fw in ["Photos", "AVFoundation"] {
+            assert_eq!(
+                pbxproj
+                    .matches(&format!("\"-framework\",\n\t\t\t\t\t{fw},\n"))
+                    .count(),
+                lists,
+                "{fw}: {pbxproj}"
+            );
+        }
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "permissions", &features).unwrap();
+        assert_eq!(second.items.len(), first.items.len());
+        assert_eq!(at_build(&second), 2, "{second:?}");
+        assert!(
+            second.items.iter().all(|i| matches!(
+                i.outcome,
+                AddOutcome::AlreadyPresent | AddOutcome::AppliedAtBuild
+            )),
             "{second:?}"
         );
         assert_eq!(
