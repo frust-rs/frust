@@ -630,8 +630,8 @@ impl Database {
     /// calling thread is already inside a [`Self::transaction`] closure on
     /// this same handle.
     pub fn schema_version(&self) -> Result<u32, DatabaseError> {
-        let rows = self.query("PRAGMA user_version", ())?;
-        parse_user_version(&rows)
+        let mut locked = self.lock_conn()?;
+        read_user_version(locked.conn())
     }
 
     /// Bring the schema up to date: apply every [`Migration`] whose
@@ -646,6 +646,21 @@ impl Database {
     /// failure mid-list resumes at the next unapplied step on the next call.
     /// The call is idempotent: re-running the same list applies nothing.
     ///
+    /// Inside each step's transaction the stored version is read again
+    /// before any statement runs: if another migrator already brought the
+    /// database to that step's `to_version`, the step is skipped, never
+    /// applied twice. If the stored version is neither the version this step
+    /// builds on nor already past it, the call fails with
+    /// [`DatabaseError::Migration`] (the file moved in a way the list does
+    /// not explain). The recommended pattern is still to run `migrate` once
+    /// at startup, before any other handle opens the file. A concurrent
+    /// migrator on another connection may instead receive
+    /// [`DatabaseError::Sql`] from the engine's write lock (no busy timeout
+    /// is set); it should retry, or defer to the first migrator.
+    ///
+    /// Steps are schema and data statements only: connection pragmas are
+    /// no-ops or refused inside a transaction and belong outside `migrate`.
+    ///
     /// The list is validated first; no statement runs on a bad list.
     ///
     /// Blocking, like every call on this handle — pair with
@@ -653,10 +668,16 @@ impl Database {
     ///
     /// # Errors
     /// [`DatabaseError::Migration`] if `to_version` values are not strictly
-    /// increasing, any is 0, or the database's version is above the last
-    /// migration's `to_version` (a newer schema is an error, never a silent
-    /// skip, so a downgraded binary cannot read a schema it does not know);
-    /// [`DatabaseError::Sql`] from a failing statement;
+    /// increasing, any is 0 or above `i32::MAX` (the accepted range is
+    /// `1..=i32::MAX`), the database's version is above the last migration's
+    /// `to_version` (a newer schema is an error, never a silent skip, so a
+    /// downgraded binary cannot read a schema it does not know), or the
+    /// stored version changed underneath a step as described above. An empty
+    /// list means the app knows no schema: a fresh database (version 0)
+    /// returns `Ok(0)`, while a database at any version above 0 is newer than
+    /// the last known migration (0) and errors;
+    /// [`DatabaseError::Sql`] from a failing statement or a held engine
+    /// write lock;
     /// [`DatabaseError::Reentrant`] if the calling thread is already inside
     /// a [`Self::transaction`] closure on this same handle.
     pub fn migrate(&self, migrations: &[Migration<'_>]) -> Result<u32, DatabaseError> {
@@ -665,6 +686,15 @@ impl Database {
             if m.to_version == 0 {
                 return Err(DatabaseError::Migration {
                     message: "a migration's to_version must be at least 1".to_owned(),
+                });
+            }
+            if m.to_version > MAX_SCHEMA_VERSION {
+                return Err(DatabaseError::Migration {
+                    message: format!(
+                        "a migration's to_version must be at most {MAX_SCHEMA_VERSION} \
+                         (SQLite's user_version is a signed 32-bit field), got {}",
+                        m.to_version
+                    ),
                 });
             }
             if m.to_version <= previous {
@@ -679,17 +709,34 @@ impl Database {
             previous = m.to_version;
         }
         let start = self.schema_version()?;
-        let mut current = start;
-        if current > previous {
+        if start > previous {
             return Err(DatabaseError::Migration {
                 message: format!(
-                    "the database is at schema version {current}, newer than the last \
+                    "the database is at schema version {start}, newer than the last \
                      known migration ({previous})"
                 ),
             });
         }
+        // The version this step is expected to build on: `start` for the
+        // first applicable step, then each step's own `to_version`.
+        let mut expected = start;
         for m in migrations.iter().filter(|m| m.to_version > start) {
             self.transaction(|txn| {
+                // Re-read inside the transaction: another migrator may have
+                // advanced the version since the read above.
+                let stored = txn.schema_version()?;
+                if stored >= m.to_version {
+                    return Ok(());
+                }
+                if stored != expected {
+                    return Err(DatabaseError::Migration {
+                        message: format!(
+                            "the database is at schema version {stored}, but migration \
+                             {} expected to build on version {expected}",
+                            m.to_version
+                        ),
+                    });
+                }
                 for statement in m.statements {
                     txn.execute(statement, ())?;
                 }
@@ -697,9 +744,9 @@ impl Database {
                 txn.execute(&format!("PRAGMA user_version = {}", m.to_version), ())?;
                 Ok(())
             })?;
-            current = m.to_version;
+            expected = m.to_version;
         }
-        Ok(current)
+        Ok(expected)
     }
 
     /// Run every `(sql, params)` statement in order inside one
@@ -730,10 +777,15 @@ impl Database {
 /// An ordered schema step for [`Database::migrate`]: the statements that
 /// bring the schema to `to_version`.
 ///
-/// One statement per entry — both engines prepare exactly one statement per
-/// call. A list is strictly increasing in `to_version`, starting at 1:
+/// Each `statements` entry is exactly one SQL statement — both engines
+/// prepare one statement per call, so a multi-statement entry fails the step
+/// with [`DatabaseError::Sql`]. A list is strictly increasing in
+/// `to_version`, within `1..=i32::MAX` (SQLite's `user_version` is a signed
+/// 32-bit field and does not round-trip larger values):
 ///
-/// ```ignore
+/// ```
+/// use frust_database::{Database, Migration};
+///
 /// const MIGRATIONS: &[Migration] = &[
 ///     Migration {
 ///         to_version: 1,
@@ -744,15 +796,32 @@ impl Database {
 ///         statements: &["ALTER TABLE notes ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"],
 ///     },
 /// ];
-/// db.migrate(MIGRATIONS)?;
+///
+/// # fn main() -> Result<(), frust_database::DatabaseError> {
+/// let db = Database::open_in_memory()?;
+/// assert_eq!(db.migrate(MIGRATIONS)?, 2);
+/// assert_eq!(db.migrate(MIGRATIONS)?, 2); // idempotent
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Migration<'a> {
-    /// The schema version this migration leaves the database at. Must be at
-    /// least 1 and above the previous migration's.
+    /// The schema version this migration leaves the database at. Must be in
+    /// `1..=i32::MAX` and above the previous migration's.
     pub to_version: u32,
-    /// The statements to run, in order, one statement per entry.
+    /// The statements to run, in order; each entry is exactly one statement.
     pub statements: &'a [&'a str],
+}
+
+/// The largest `to_version` a migration may name: `user_version` is a signed
+/// 32-bit header field.
+const MAX_SCHEMA_VERSION: u32 = i32::MAX as u32;
+
+/// Read `PRAGMA user_version` over a connection — the one body behind
+/// [`Database::schema_version`] and [`Transaction::schema_version`].
+fn read_user_version(conn: &mut dyn EngineConn) -> Result<u32, DatabaseError> {
+    let rows = conn.query("PRAGMA user_version", &[])?;
+    parse_user_version(&rows)
 }
 
 /// Read a `PRAGMA user_version` result: first row, first column, an integer
@@ -906,8 +975,7 @@ impl Transaction<'_> {
     /// [`DatabaseError::Sql`] if the engine rejects the pragma or reports a
     /// value outside `0..=u32::MAX`.
     pub fn schema_version(&self) -> Result<u32, DatabaseError> {
-        let rows = self.query("PRAGMA user_version", ())?;
-        parse_user_version(&rows)
+        read_user_version(&mut **self.conn.borrow_mut())
     }
 }
 

@@ -299,9 +299,21 @@ let version = db.migrate(MIGRATIONS)?; // 2
   inside a closure) reads it; a fresh database is 0.
 - **Error cases.** `DatabaseError::Migration` is returned, before any
   statement runs, for a list that is not strictly increasing, has a
-  `to_version` of 0, or targets a database whose version is above the last
+  `to_version` outside `1..=i32::MAX` (SQLite's `user_version` is a signed
+  32-bit field), or targets a database whose version is above the last
   migration's `to_version`. A newer schema is an error rather than a silent
-  skip, so a downgraded binary cannot read a schema it does not know.
+  skip, so a downgraded binary cannot read a schema it does not know. An empty
+  list is `Ok(0)` on a fresh database and a `Migration` error on any database
+  already above version 0.
+- **Concurrent migrators.** Each step re-reads the version inside its own
+  transaction and skips a step another migrator already applied, so a step is
+  never applied twice. Still, run `migrate` once at startup before other
+  handles open. A concurrent migrator on another connection may get
+  `DatabaseError::Sql` from the engine's write lock (no busy timeout is set);
+  retry, or defer to the first migrator.
+- **Statements only.** Each entry is exactly one statement (a multi-statement
+  entry fails the step with `Sql`). Connection pragmas are no-ops or refused
+  inside a transaction; set them outside `migrate`.
 - **Reentrant rule.** `migrate` and `schema_version` lock the connection:
   calling them on the same handle from inside a `transaction` closure returns
   `DatabaseError::Reentrant`.
