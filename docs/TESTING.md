@@ -67,8 +67,9 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
 - Time enters only through paint: `pump(dt)` advances the manual clock and paints one frame; nothing
   else moves it. `pump_until(what, timeout, predicate)` is the only real-time wait, for
   `spawn_blocking` or background work.
-- `tap` does not pump. Callbacks that fire on a frame (timers, a Housekeeping-delivered fire, the
-  callback owed by a `Cancel`) need a pump; a Housekeeping fire costs two pumps to settle.
+- `tap` does not pump. Callbacks that fire on a frame (a long press, the callback owed by a
+  `Cancel`, any other Housekeeping-delivered fire) need a pump; such a fire costs two pumps to
+  settle.
 - `start_gesture` and `start_touch` return a `Gesture`; drive it with `move_by`, `move_to`, `up`,
   `cancel` on the Tester. `drag` sends a 37 px lead-in move past the slop first, so the drag
   updates add up to exactly `delta` while the pointer ends lead-in past `at + delta`; use
@@ -619,9 +620,6 @@ investigate, not a flake. `testing/goldens/CALIBRATION.md` records the measureme
 The golden catalog should cover representative states without replacing
 semantic tests:
 
-Interaction behavior (tap, drag, long-press, multi-touch, settle) is covered by `Tester` tests, not
-goldens; see Headless interaction tests.
-
 | Area | Required visual cases |
 |---|---|
 | Primitives | Solid/gradient fill, stroke, path, arc, rounded rect, clip, layer alpha, transform nesting, shadow |
@@ -636,6 +634,9 @@ goldens; see Headless interaction tests.
 | Insets/theme | Safe areas, keyboard inset, light/dark, Material/Cupertino, accent variations |
 | External GPU pass | An app's own `ExternalPass` rendered through `frust::gpu::headless::HeadlessRenderer::render_with_passes`; the probe example is `examples/playground/tests/gpu_pass_headless.rs` (ignored, run from `examples/playground`). The playground's "GPU pass" section is the on-device gate vehicle (verified on a Pixel 4a, an iPhone 13 mini and a windowed macOS run) |
 | App screens | Stable Huddle home/feed/thread/search/profile/settings states and loading/empty/error variants |
+
+Interaction behavior (tap, drag, long press, multi-touch, settle) is covered by `Tester` tests,
+not goldens; see [Headless interaction tests](#headless-interaction-tests).
 
 Animations should use a small set of meaningful fixed timestamps: start,
 midpoint, threshold/crossover where relevant, and settled/end. Do not snapshot
