@@ -264,8 +264,9 @@ pub struct RichTextWidget {
     layout: Option<TextLayout>,
     /// The width the cached layout was broken at.
     laid_out_max_width: Option<f32>,
-    /// The per-span effective styles the cached layout was shaped with, so a
-    /// bare theme swap or text-scale change re-shapes without a view change.
+    /// The effective style of each shaped span group (see [`group_spans`]),
+    /// so a bare theme swap or text-scale change re-shapes without a view
+    /// change.
     laid_out_styles: Vec<TextStyle>,
     /// The locale stamp read just before shaping.
     laid_out_locale_stamp: LocaleStamp,
@@ -291,13 +292,63 @@ impl RichTextWidget {
     }
 }
 
+/// A run of adjacent spans shaped as one: the index of the span whose style
+/// they all share, and the spans' range.
+struct SpanGroup {
+    style: usize,
+    spans: std::ops::Range<usize>,
+}
+
+/// Groups the non-empty spans (`contents`, with effective `styles`) for
+/// shaping: empty spans are dropped, adjacent spans of equal style merge, and
+/// past `limit` groups the excess folds into the last kept one (its text
+/// takes that group's style) instead of overflowing the shaper's span index.
+///
+/// Text with no non-empty span keeps its first span so the empty layout is
+/// still sized by that span's style.
+fn group_spans<'a>(
+    contents: impl ExactSizeIterator<Item = &'a str>,
+    styles: &[TextStyle],
+    limit: usize,
+) -> Vec<SpanGroup> {
+    let mut groups: Vec<SpanGroup> = Vec::new();
+    let count = contents.len();
+    for (index, content) in contents.enumerate() {
+        if content.is_empty() {
+            continue;
+        }
+        let full = groups.len() >= limit;
+        match groups.last_mut() {
+            Some(last) if styles[last.style] == styles[index] => last.spans.end = index + 1,
+            Some(last) if full => last.spans.end = index + 1,
+            _ => groups.push(SpanGroup {
+                style: index,
+                spans: index..index + 1,
+            }),
+        }
+    }
+    if groups.is_empty() && count > 0 {
+        groups.push(SpanGroup {
+            style: 0,
+            spans: 0..1,
+        });
+    }
+    groups
+}
+
 impl Widget for RichTextWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let max_width = {
             let w = bc.max().width;
             if w.is_finite() { Some(w as f32) } else { None }
         };
-        let styles = self.effective_styles(Theme::from_layout_ctx(ctx));
+        let all_styles = self.effective_styles(Theme::from_layout_ctx(ctx));
+        let groups = group_spans(
+            self.view.spans.iter().map(|s| s.content.as_str()),
+            &all_styles,
+            usize::from(u16::MAX),
+        );
+        let styles: Vec<TextStyle> = groups.iter().map(|g| all_styles[g.style].clone()).collect();
         let locale_stamp = LocaleStamp::for_style(None);
         if let Some(cached) = &self.layout
             && self.laid_out_max_width == max_width
@@ -307,12 +358,19 @@ impl Widget for RichTextWidget {
             return bc.constrain(cached.size());
         }
 
-        let spans: Vec<TextSpan<'_>> = self
-            .view
-            .spans
+        let texts: Vec<String> = groups
+            .iter()
+            .map(|g| {
+                self.view.spans[g.spans.clone()]
+                    .iter()
+                    .map(|s| s.content.as_str())
+                    .collect()
+            })
+            .collect();
+        let spans: Vec<TextSpan<'_>> = texts
             .iter()
             .zip(&styles)
-            .map(|(span, style)| TextSpan::new(&span.content, style))
+            .map(|(text, style)| TextSpan::new(text, style))
             .collect();
         let text_ctx = ctx.text_context::<TextContext>();
         let layout = text_ctx.layout_rich_bounded(
@@ -553,7 +611,9 @@ mod tests {
 
     #[test]
     fn text_scale_enlarges_only_default_sized_spans() {
-        let view = rich_text([span("auto "), span("pinned").size(16.0)]);
+        // A pinned size differing from the default, so the two spans stay
+        // separate groups.
+        let view = rich_text([span("auto "), span("pinned").size(17.0)]);
         let base = Theme::neutral();
         let authored = base.type_scale.clone();
         let scaled = base.clone().with_text_scale(&authored, 1.5);
@@ -597,5 +657,57 @@ mod tests {
         assert!(flags.contains(ChangeFlags::LAYOUT));
         layout_widget(&mut widget, None, 300.0, &mut tcx);
         assert_eq!(tcx.shape_cache_stats().shapes, 2);
+    }
+
+    #[test]
+    fn empty_spans_drop_and_equal_neighbours_merge() {
+        let view = rich_text([
+            span("one "),
+            span(""),
+            span("two ").color(red()),
+            span("three").color(red()),
+            span("").color(green()),
+            span("four"),
+        ]);
+        {
+            let _slot = crate::test_support::LocaleSlotGuard::hold();
+            let mut tcx = TextContext::new();
+            let (widget, _) = lay_out(&view, None, 300.0, &mut tcx);
+            assert_eq!(widget.laid_out_styles.len(), 3);
+        }
+        let colors = glyph_colors(&painted(&view, None));
+        assert_eq!(colors.len(), 3);
+        assert_eq!(colors[1], red());
+    }
+
+    #[test]
+    fn grouping_folds_the_excess_into_the_last_kept_group() {
+        let styles: Vec<TextStyle> = (0..6)
+            .map(|i| TextStyle::new(10.0 + (i % 2) as f32, Color::BLACK))
+            .collect();
+        let texts = ["a"; 6];
+        let groups = group_spans(texts.iter().copied(), &styles, 4);
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[3].style, 3);
+        assert_eq!(
+            groups[3].spans,
+            3..6,
+            "the excess joins the last kept group"
+        );
+        let none = group_spans(["", ""].into_iter(), &styles, 4);
+        assert_eq!(none.len(), 1, "all-empty text keeps its first span");
+    }
+
+    #[test]
+    fn more_spans_than_the_shaper_indexes_degrade_instead_of_panicking() {
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        // Alternating explicit sizes, so no neighbours merge.
+        let count = usize::from(u16::MAX) + 4_000;
+        let view =
+            rich_text((0..count).map(|i| span("a").size(if i % 2 == 0 { 12.0 } else { 13.0 })));
+        let mut tcx = TextContext::new();
+        let (widget, size) = lay_out(&view, None, 300.0, &mut tcx);
+        assert_eq!(widget.laid_out_styles.len(), usize::from(u16::MAX));
+        assert!(size.width > 0.0);
     }
 }
