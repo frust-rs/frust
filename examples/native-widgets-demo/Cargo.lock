@@ -1296,6 +1296,8 @@ dependencies = [
 name = "frust-shell-macos"
 version = "0.6.5"
 dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
  "frust-plugin",
  "frust-reactive",
  "frust-shell-common",

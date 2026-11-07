@@ -14,7 +14,7 @@
 //!
 //! # The `unsafe` in this module
 //!
-//! Five sites, each with a `SAFETY:` note at its call site, mirroring the
+//! Seven sites, each with a `SAFETY:` note at its call site, mirroring the
 //! audit discipline of `frust-shell-android`'s `jni_glue` and
 //! `frust-shell-ios`'s `ffi_glue`:
 //!
@@ -36,6 +36,14 @@
 //!    [`window_is_zoomed`] — how the `NSWindow` is reached (the
 //!    `title_buttons` shape); everything after it is safe bindings.
 //!
+//! 6. `DispatchSource::new` with the memory-pressure source type — the raw
+//!    `dispatch_source_create`, whose type/handle/mask arguments are unchecked,
+//!    plus the read of the `_dispatch_source_type_memorypressure` `extern`
+//!    static that names the type ([`MemoryPressureSource`]).
+//! 7. `DispatchSource::set_event_handler_with_block` — hands libdispatch the
+//!    handler block pointer, which it copies. Resume and cancel go through
+//!    `dispatch2`'s safe bindings.
+//!
 //! # No unwind across the AppKit boundary
 //!
 //! The observer method is called by AppKit, so a panic escaping it would
@@ -54,6 +62,11 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
+use block2::RcBlock;
+use dispatch2::{
+    _dispatch_source_type_memorypressure, DispatchObject, DispatchQueue, DispatchQueueAttr,
+    DispatchRetained, DispatchSource,
+};
 use objc2::rc::Retained;
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
@@ -63,7 +76,9 @@ use objc2_foundation::{NSBundle, NSNotification, NSNotificationCenter, NSString}
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
+use crate::PendingPressure;
 use crate::lifecycle::Lifecycle;
+use crate::menu::MenuWaker;
 
 define_class!(
     // SAFETY:
@@ -240,4 +255,74 @@ pub(crate) fn terminate_app() -> bool {
     };
     NSApplication::sharedApplication(mtm).terminate(None);
     true
+}
+
+/// The label of the private serial queue the memory-pressure handler runs on.
+const PRESSURE_QUEUE_LABEL: &str = "dev.frust.shell-macos.memory-pressure";
+
+/// A live libdispatch memory-pressure source: while it exists, `WARN` and
+/// `CRITICAL` transitions are recorded in the shared [`PendingPressure`] slot
+/// and `waker` is asked for one frame so `pump` delivers them on the UI thread.
+///
+/// The handler runs on a private serial queue, never the UI thread, so it only
+/// touches the atomic slot and the waker (`request_redraw` is callable from
+/// any thread). It fires solely when the OS reports a transition, so an app
+/// under no pressure is never woken by it. Dropping the handle cancels the
+/// source.
+pub(crate) struct MemoryPressureSource {
+    source: DispatchRetained<DispatchSource>,
+}
+
+impl MemoryPressureSource {
+    /// Create, arm and resume the source.
+    pub(crate) fn install(pending: Arc<PendingPressure>, waker: Arc<dyn MenuWaker>) -> Self {
+        let queue = DispatchQueue::new(PRESSURE_QUEUE_LABEL, DispatchQueueAttr::SERIAL);
+        let mask = crate::FLAG_WARN | crate::FLAG_CRITICAL;
+        // SAFETY: the type is libdispatch's own memory-pressure source type
+        // (its `extern` static is address-taken, never read); handle 0 is what
+        // that type requires, and `mask` holds only flags defined for it.
+        let source = unsafe {
+            DispatchSource::new(
+                std::ptr::addr_of!(_dispatch_source_type_memorypressure).cast_mut(),
+                0,
+                mask,
+                Some(&queue),
+            )
+        };
+        let handler_source = source.clone();
+        let handler = RcBlock::new(move || {
+            // A panic must not unwind into libdispatch (see the module docs).
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if let Some(level) = crate::level_from_flags(handler_source.data()) {
+                    pending.record(level);
+                    waker.wake();
+                }
+            }));
+            if result.is_err() {
+                log::error!("frust-shell-macos: panic in the memory-pressure handler");
+            }
+        });
+        // SAFETY: `source` is live and not yet resumed; the pointer is a valid
+        // `void (^)(void)` block, which libdispatch copies before returning,
+        // so our `RcBlock` may drop afterwards.
+        unsafe {
+            source.set_event_handler_with_block(
+                std::ptr::from_ref::<block2::DynBlock<dyn Fn()>>(&handler).cast_mut(),
+            );
+        }
+        source.resume();
+        Self { source }
+    }
+}
+
+impl Drop for MemoryPressureSource {
+    fn drop(&mut self) {
+        self.source.cancel();
+    }
+}
+
+impl std::fmt::Debug for MemoryPressureSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryPressureSource").finish()
+    }
 }
