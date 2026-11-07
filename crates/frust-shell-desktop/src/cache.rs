@@ -246,12 +246,11 @@ mod tests {
             load_cache_from(&path).as_deref(),
             Some(&b"test-cache-data"[..])
         );
-        assert!(
-            !path
-                .with_extension(format!("tmp.{}", std::process::id()))
-                .exists(),
-            "temp file left behind"
-        );
+        let names: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![path.file_name().unwrap().to_owned()]);
 
         save_cache_to(&path, b"second-write");
         assert_eq!(
