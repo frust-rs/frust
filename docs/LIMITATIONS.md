@@ -9064,17 +9064,17 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ### `permissions-android-asked-flag-local` — Android's "never asked" state is a flag the plugin keeps, not one the system reports
 
-**Observed**: Android has no never-asked state: an unasked permission and one refused for good both read as not granted with no rationale. `frust-permissions` tells `NotDetermined` from `Blocked` with its own flag, a boolean per Android permission in the `frust.permissions` `SharedPreferences` file (key `frust.permissions.asked.<permission>`). Granted and Limited always come from `checkSelfPermission`; the flag is only a never-asked hint. It lives in app data, so clearing the data or reinstalling resets it while the system's own record may differ (a permission refused earlier then reads `NotDetermined` until the next ask). A prompt dismissed without an answer, which Android 11+ does not count, is recognised only by inference: a first denial with no rationale before or after the request leaves the flag unset. A permission requested by other code (another plugin, the app) is invisible to the flag unless that code sets the same key.
+**Observed**: Android has no never-asked state: an unasked permission and one refused for good both read as not granted with no rationale. `frust-permissions` tells `NotDetermined` from `Blocked` with its own flag, a boolean per Android permission in the `frust.permissions` `SharedPreferences` file (key `frust.permissions.asked.<permission>`). Granted and Limited always come from `checkSelfPermission`; the flag is only a never-asked hint. It lives in app data, so clearing the data or reinstalling resets it while the system's own record may differ (a permission refused earlier then reads `NotDetermined` until the next ask). A prompt dismissed without an answer, which Android 11+ does not count, is recognised only by inference: a first denial with no rationale before or after the request, answered after more than 500 ms, leaves the flag unset. Other requesters (another plugin such as `frust-camera`, the app) may not write the flag, so two rules recover from that: a permission that shows a rationale reads `Denied` and gets its flag written; a denial the system answers within 500 ms (`AUTO_DENY_MS`) with no rationale is taken as a system refusal and the flag is written, so the status reads `Blocked` after one request. The 500 ms rule is a heuristic: a person who dismisses the dialog faster than 500 ms reads `Blocked` although nothing was refused for good. Media location is excluded from it.
 
 **Applies to**: Android.
 
-**Workaround**: treat `NotDetermined` after a data clear as "ask again"; the prompt then either appears or the system answers at once. An app or plugin that requests a runtime permission itself writes the documented key.
+**Workaround**: treat `NotDetermined` after a data clear as "ask again"; the prompt then either appears or the system answers at once. An app or plugin that requests a runtime permission itself should write the documented key; the recovery rules cover it when it does not. A `Blocked` that follows a very fast dismissal is cleared from system settings.
 
 **Why accepted**: the platform exposes no query for "has this app ever asked", and the flag is the standard way to tell the two cases apart; a lost flag only makes a refused permission read `NotDetermined` until the next ask; it never grants anything.
 
 **Trigger for removal**: Android reports a never-asked state.
 
-**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*The asked flag*); gate k2-pm-07 (Pixel 5, Android 14: Denied, then Blocked with no dialog; `pm clear` returns every row to `NotDetermined`).
+**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*The asked flag*); gate k2-pm-07 (Pixel 5, Android 14: Denied, then Blocked with no dialog; `pm clear` returns every row to `NotDetermined`); the recovery rules are `currentCode` and `isSystemRefusal` in the same file, with the round-1 re-check legs in `docs/PLUGINS_DEVELOPMENT.md` (*Permissions manual test*).
 
 ---
 
@@ -9128,16 +9128,34 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ### `permissions-media-location-android-only` — `MediaLocation` needs full photo access on Android and is not a permission elsewhere
 
-**Observed**: `Permission::MediaLocation` is the right to read the location already stored inside photos (`ACCESS_MEDIA_LOCATION`), never the device position. Android grants it only alongside full photo access: with "Allow all" it was granted with no dialog of its own; under partial access ("Select photos") the system refuses it silently (the permission screen opens and closes in about 90 ms, nothing is granted), and the plugin reports `Denied` rather than `NotDetermined`. It cannot be requested usefully until the user grants full access through the Photos request or system settings. On iOS there is no separate permission: it reads `Granted` with no prompt, and reading the metadata still needs Photos access. On macOS it answers `Unsupported`.
+**Observed**: `Permission::MediaLocation` is the right to read the location already stored inside photos (`ACCESS_MEDIA_LOCATION`), never the device position. Android grants it only alongside full photo access: with "Allow all" it was granted with no dialog of its own; with partial access ("Select photos") or none, the system refuses it silently (the permission screen opens and closes in about 90 ms, nothing is granted), so the plugin reads `Denied` unless Photos read access is fully granted. It never becomes `Blocked`. It cannot be requested usefully until the user grants full access through the Photos request or system settings. On iOS it has no prompt of its own: it mirrors the Photos read-write status, so it reads `NotDetermined` until Photos is asked, then follows that answer. On macOS it answers `Unsupported`.
 
 **Applies to**: all platforms; the refusal under partial access is Android 14+.
 
-**Workaround**: ask for Photos first, offer `open_settings()` when `MediaLocation` reads `Denied` while Photos is `Limited`, and treat the location as absent otherwise.
+**Workaround**: ask for Photos first, offer `open_settings()` when `MediaLocation` reads `Denied` while Photos is not fully granted, and treat the location as absent otherwise.
 
 **Why accepted**: the platform ties the grant to full photo access, and the plugin reports the system's answer rather than hiding it.
 
 **Trigger for removal**: Android grants `ACCESS_MEDIA_LOCATION` under partial access, or the API adds a way to read photo location without it.
 
-**Evidence**: (2026-11-08) `plugins/permissions/src/codes.rs` (`MEDIA_LOCATION`); `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Media location*); gate k2-pm-07 (Pixel 5: full access Granted with no dialog; Limited access refused silently, recorded and fixed to report `Denied`); gate k2-pm-06 (iPhone 13 mini: Granted, no prompt); gate k2-pm-08 (Mac: `Unsupported`).
+**Evidence**: (2026-11-08) `plugins/permissions/src/codes.rs` (`MEDIA_LOCATION`); `plugins/permissions/src/apple.rs` (`media_location`); `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Media location*); gate k2-pm-07 (Pixel 5: full access Granted with no dialog; Limited access refused silently, recorded and fixed to report `Denied`); gate k2-pm-06 (iPhone 13 mini: Granted, no prompt, before it mirrored Photos; re-check owed); gate k2-pm-08 (Mac: `Unsupported`).
+
+---
+
+---
+
+### `permissions-android-status-needs-activity` — Android tells `Denied` from `Blocked` only while an Activity is resumed
+
+**Observed**: the rationale that separates `Denied` from `Blocked` is read against the resumed Activity. With none (the app in the background, between Activities), a permission that was asked and is not granted reads `Denied`, even one that is blocked. `Granted`, `Limited` and `NotDetermined` do not depend on an Activity.
+
+**Applies to**: Android.
+
+**Workaround**: read `status` after the app resumes, and offer `open_settings()` for `Denied` as well when the status was read in the background.
+
+**Why accepted**: the platform exposes the rationale only through an Activity; `Denied` is the safe answer, since a request on a blocked permission returns at once.
+
+**Trigger for removal**: the platform reports a blocked state without an Activity.
+
+**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Denied and Blocked need a resumed Activity*, `currentCode`); gate k2-pm-07 (Pixel 5: Blocked read with the app resumed). The no-Activity read is derived from the code and has not been run on a device.
 
 ---

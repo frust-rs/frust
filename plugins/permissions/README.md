@@ -80,9 +80,22 @@ is exempt. `open_settings` is fire-and-forget.
 - `MediaLocation` covers reading the location already stored inside a photo.
   It never reads the device position.
 - On Linux, Windows and web every call returns `Unsupported`.
-- `MediaLocation` is granted by Android only alongside full photo access: under
-  "Select photos" the status is `Denied`. iOS reports it `Granted` with no
-  prompt, macOS `Unsupported`.
+- `MediaLocation` is granted by Android only alongside full photo access: with
+  partial or no access the status is `Denied`, never `Blocked`. On iOS it
+  mirrors Photos read access (no prompt of its own, `NotDetermined` until
+  Photos is asked); macOS `Unsupported`.
+- Android keeps its own "asked" flag. Where another requester (such as
+  `frust-camera`) did not write it, a permission showing a rationale reads
+  `Denied`, and a denial the system answers within 500 ms without a dialog
+  reads `Blocked` after one request. A person dismissing the dialog faster
+  than 500 ms also reads `Blocked`.
+- `Denied` versus `Blocked` on Android is authoritative only while an Activity
+  is resumed; without one a blocked permission reads `Denied`.
+- Android runs one request at a time; a request made while an earlier prompt
+  is still showing (for example after the 120 s timeout) returns the current
+  status without a second dialog.
+- `open_settings` returns `Ok` when the open was dispatched, not when Settings
+  opened; failures are logged at warn.
 - macOS answers `Unsupported` for photos.
 - The app manifest may omit `READ_MEDIA_VISUAL_USER_SELECTED`; without it
   Android runs the app in compatibility mode and a partial selection reads
@@ -100,7 +113,7 @@ is exempt. `open_settings` is fire-and-forget.
 Accepted limitations are recorded in the repository's `docs/LIMITATIONS.md`
 (`permissions-android-asked-flag-local`, `permissions-request-lost-on-process-death`,
 `permissions-photos-macos-unsupported`, `permissions-read-external-storage-no-maxsdk`,
-`permissions-media-location-android-only`).
+`permissions-media-location-android-only`, `permissions-android-status-needs-activity`).
 
 ## License
 

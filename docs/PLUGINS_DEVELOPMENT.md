@@ -274,16 +274,22 @@ first; on Android `adb shell pm clear <pkg>` also resets every grant).
 - **Camera:** deny reads `Blocked` on iOS; on Android the first denial reads `Denied`, the second
   `Blocked` with no dialog. *Open settings*, enable, *Refresh* reads `Granted`.
 - **Microphone:** the prompt shows the playground's usage text; *Allow* reads `Granted`.
-- **Media location:** Android with full photo access reads `Granted` with no dialog of its own; under
-  *Select photos* the system refuses it silently and the row reads `Denied`. iOS reads `Granted`
-  with no prompt, macOS `Unsupported`. This is location stored in photos, never device position.
+- **Media location:** Android with full photo access reads `Granted` with no dialog of its own; with
+  no or partial photo access (*Select photos*) the system refuses it silently and the row reads
+  `Denied`, never `Blocked`. iOS follows Photos: `NotDetermined` until Photos is asked, then the
+  Photos read-write answer, with no prompt of its own. macOS `Unsupported`. This is location stored
+  in photos, never device position.
+- **Blocked without the asked flag (Android):** `adb shell pm set-permission-flags <pkg>
+  <permission> user-fixed` on a never-asked permission, then *Request*: the system answers at once
+  and the row reads `Blocked` after that one request.
 - **Robustness:** rotate while a dialog is up (the answer still arrives); `pm clear` then relaunch
   (rows `NotDetermined`); no crash or plugin exception in `adb logcat`.
 - **macOS:** an unbundled `cargo run` has no Info.plist, so *Request* on Camera/Microphone reports
   the missing usage description without aborting; Photos rows read `Unsupported`; *Open settings*
   lands on Privacy & Security.
-- **Open:** the API 30 emulator leg (the `READ_EXTERNAL_STORAGE` path) has not been run; the macOS
-  camera/audio-input entitlement keys are unverified against Apple's hardened-runtime documentation.
+- **Open:** the API 30 emulator leg (the `READ_EXTERNAL_STORAGE` path) has not been run. The macOS
+  entitlement keys are cited in the registry (Apple's audio-input entitlement page; the App Sandbox
+  entitlement key reference for camera).
 
 ## Material asset regeneration
 
