@@ -352,16 +352,36 @@ object FrustPermissionsHost {
         else -> null
     }
 
+    /** The photo library's grant code right now, from live grants (null when none held). */
+    private fun photosCode(ctx: Context, sdk: Int): Int? {
+        val full = if (sdk >= 33) READ_MEDIA_IMAGES else READ_EXTERNAL_STORAGE
+        val selected = sdk >= 34 && isGranted(ctx, READ_MEDIA_VISUAL_USER_SELECTED)
+        return photosGrantCode(sdk, isGranted(ctx, full), selected)
+    }
+
+    /**
+     * The MediaLocation code when it is not granted: [DENIED] under partial
+     * photo access, null otherwise (the ordinary derivation applies). Android
+     * grants media location only alongside full photo access; under partial
+     * access it is refused without a dialog, so the plugin reports Denied and
+     * the app should ask for full photo access first. Decided from live grants
+     * on every read, never from the asked flag, so granting full access later
+     * lets a new request succeed.
+     */
+    internal fun mediaLocationCode(photos: Int?): Int? {
+        return if (photos == LIMITED) DENIED else null
+    }
+
     /** The status code for [kind] right now, derived from live grants. */
     private fun currentCode(ctx: Context, kind: Int, perms: List<String>, activity: Activity?): Int {
         if (perms.isEmpty()) return GRANTED
         val sdk = Build.VERSION.SDK_INT
         if (kind == PHOTOS_READ_WRITE) {
-            val full = if (sdk >= 33) READ_MEDIA_IMAGES else READ_EXTERNAL_STORAGE
-            val selected = sdk >= 34 && isGranted(ctx, READ_MEDIA_VISUAL_USER_SELECTED)
-            photosGrantCode(sdk, isGranted(ctx, full), selected)?.let { return it }
+            photosCode(ctx, sdk)?.let { return it }
         } else if (perms.all { isGranted(ctx, it) }) {
             return GRANTED
+        } else if (kind == MEDIA_LOCATION) {
+            mediaLocationCode(photosCode(ctx, sdk))?.let { return it }
         }
         if (perms.none { wasAsked(ctx, it) }) return NOT_DETERMINED
         if (activity == null) return DENIED
