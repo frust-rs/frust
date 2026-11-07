@@ -6558,7 +6558,9 @@ p2-round1-integration-root). A Critical memory event (the iOS memory warning; on
 foreground, COMPLETE or `onLowMemory`; `RenderCommand::TrimMemory` ->
 `EngineRenderer::trim_memory`) drops the retained pages to the plain 32 MiB budget
 and clamps atlas growth to the plain tier's bytes, one-way until the renderer is
-rebuilt, so a transient foreground RUNNING_CRITICAL lowers the budgets until then (accepted); macOS
+rebuilt, so a transient foreground RUNNING_CRITICAL lowers the budgets until then (accepted). The
+converse also holds: Android 14+ (API 34) itself sends only UI_HIDDEN and BACKGROUND, so there the trim
+runs only on `onLowMemory` (the device gate reached the other levels through `am send-trim-memory`); macOS
 reports the event without trimming. The atlas has no layer-release primitive (`vello_common` 0.2.0's packer
 only appends), so a trim cannot give a layer back: it only stops the array growing,
 and resident glyphs keep serving. The trim is host-tested; on-device delivery was
