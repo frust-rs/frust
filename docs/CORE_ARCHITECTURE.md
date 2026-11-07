@@ -28,8 +28,8 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how CORE relates to the other units.
 | `frust-reactive::runtime` | Process-wide `ReactiveRuntime`: background executor, root `Owner`, and the `FrameWaker` rebuild-wake bridge |
 | `frust-reactive::tracked` | `TrackedScope` — dependency tracking that wakes the shell when a tracked signal it read later changes |
 | `frust-reactive::task` / `deep_link` / `back` / `app_lifecycle` | `AsyncValue`/`use_task` heavy-work idiom, plus process-wide deep-link, back-press and app-lifecycle sources (`app_lifecycle` is a Flutter-parity state machine, see App Lifecycle) — each delivered `DeepLink` carries a monotonic per-process `sequence`; consumers dedupe a delivery by comparing `sequence`, not the URL text |
-| `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback and an Android install slot the Android shell fills from `Context.getFilesDir()`/`getCacheDir()` at `nativeInitPlatform`) and an atomic-write helper for desktop and mobile shells |
-| `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko`. The facade-only `test-support` feature (enabled from `[dev-dependencies]`) exposes `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, a semantics pass over a real text context, and `scene_of(build, size)` / `scene_of_with(build, size, &SceneOptions)` (theme, final-paint clock, warm frames), which return the painted `Scene`; a recorded `BackdropBlur` count is an upper bound on what counts toward the backdrop cap. The feature also forwards `frust-core/test-support` (`PaintCtx::for_test`), so an out-of-tree crate can test `Widget::semantics` and `paint`. With the `gpu` feature, `app!(Root, gpu_features = { .. }, ..)` (first key, combinable with `setup`/`desktop`) requests optional device features: desktop in the generated `main` before the run, web first in the state factory, Android/iOS through the `@pre_init` prefix of `android_app!`/`ios_app!` evaluated before shell init |
+| `frust-paths::lib` | Per-platform data/cache-dir resolution (including a macOS legacy-XDG read-through fallback and an Android install slot the Android shell fills from `Context.getFilesDir()`/`getCacheDir()` at `nativeInitPlatform`) and an atomic-write helper for desktop and mobile shells; `data_dir`/`cache_dir`/`atomic_write` reach apps as `frust::paths` |
+| `frust::lib` (facade) | Curates core/widgets/theme/reactive/shells into one flat API via `app!`/`run`/`Component`, plus `frust::authoring` — the widget-authoring vocabulary (trait lifecycle, child/event plumbing, geometry) an app needs to implement its own `View`/`Widget` pair without a direct dependency on `frust-core`/`frust-scene`/`frust-text`/`kurbo`/`peniko`, and `frust::paths` (the platform data/cache dirs and atomic write). The facade-only `test-support` feature (enabled from `[dev-dependencies]`) exposes `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, a semantics pass over a real text context, and `scene_of(build, size)` / `scene_of_with(build, size, &SceneOptions)` (theme, final-paint clock, warm frames), which return the painted `Scene`; a recorded `BackdropBlur` count is an upper bound on what counts toward the backdrop cap. The feature also forwards `frust-core/test-support` (`PaintCtx::for_test`), so an out-of-tree crate can test `Widget::semantics` and `paint`. With the `gpu` feature, `app!(Root, gpu_features = { .. }, ..)` (first key, combinable with `setup`/`desktop`) requests optional device features: desktop in the generated `main` before the run, web first in the state factory, Android/iOS through the `@pre_init` prefix of `android_app!`/`ios_app!` evaluated before shell init |
 
 ## Layer Dependencies
 
@@ -46,18 +46,18 @@ drive the tracked-scope machinery its render loop needs.
 
 `frust-scene` exposes only `kurbo`/`peniko` types in its public API; this is the CORE side of the
 scene-layer purity boundary enforced against `frust-render` (see
-[ARCHITECTURE.md](ARCHITECTURE.md)). `frust-paths` is consumed by shells and plugins outside CORE
-for directory resolution — its leaf charter and cross-unit callers are also covered in the index. On
-macOS, `data_dir()`/`cache_dir()` resolve under `~/Library` (XDG vars never override it) and read
-through, never migrating, to the legacy XDG location when only it holds the app's `app_stem()`
-directory; the two differently-shaped in-repo callers (`plugins/database`, the desktop pipeline
-cache) use the public `legacy_data_dir()`/`legacy_cache_dir()` for their own file-level read-through
-(runtime status: `paths-macos-legacy-fallback-runtime-unverified` in
-[LIMITATIONS.md](LIMITATIONS.md)). On Android they resolve the slot the shell installs at
-`nativeInitPlatform` (`install_android_dirs`, first-wins, absolute paths only) and answer `None`
-before it; `HOME`/`XDG_*` are never consulted there. The
-facade's dependency on `frust-widgets`/`frust-theme` (WIDGETS) and the shell crates (SHELLS) is
-the facade/plugin boundary described in the index; CORE itself never depends on either.
+[ARCHITECTURE.md](ARCHITECTURE.md)). `frust-paths` is consumed by shells and plugins outside CORE,
+and by apps through the facade's `paths` module, for directory resolution — its leaf charter and
+cross-unit callers are also covered in the index. On macOS, `data_dir()`/`cache_dir()` resolve under
+`~/Library` (XDG vars never override it) and read through, never migrating, to the legacy XDG
+location when only it holds the app's `app_stem()` directory; the two differently-shaped in-repo
+callers (`plugins/database`, the desktop pipeline cache) use the public
+`legacy_data_dir()`/`legacy_cache_dir()` for their own file-level read-through (runtime status:
+`paths-macos-legacy-fallback-runtime-unverified` in [LIMITATIONS.md](LIMITATIONS.md)). On Android
+they resolve the slot the shell installs at `nativeInitPlatform` (`install_android_dirs`,
+first-wins, absolute paths only) and answer `None` before it; `HOME`/`XDG_*` are never consulted
+there. The facade's dependency on `frust-widgets`/`frust-theme` (WIDGETS) and the shell crates
+(SHELLS) is the facade/plugin boundary described in the index; CORE itself never depends on either.
 
 ## Data Flow
 
