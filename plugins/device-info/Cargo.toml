@@ -1,0 +1,37 @@
+[package]
+name = "frust-device-info"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Device memory query for Frust apps: total RAM, low-RAM flag, system-available memory and the iOS per-process headroom."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+# Backend failures are logged at `debug` and surface as `None`.
+log = { workspace = true }
+# Only `frust-*` dependency a platform plugin may carry (platform-plugin charter,
+# docs/PLUGINS_ARCHITECTURE.md). Unconditional: the crate is inert off Android.
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.5" }
+
+# The Android backend calls `ActivityManager` over plain JNI; no Gradle module.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+
+# `sysctl hw.memsize` (iOS and macOS) and `os_proc_available_memory` (iOS) are plain C.
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+libc = { workspace = true }
+
+# `GlobalMemoryStatusEx`. Features are exactly what the call needs (Version-Pin Policy: the
+# root `windows-sys` row carries none; per-crate lists are the rule).
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_System_SystemInformation",
+] }
+
+# Every other target (web, other Unix): no dependency. `src/noop.rs` reports nothing.

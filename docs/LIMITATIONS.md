@@ -8904,6 +8904,34 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ---
 
+### `device-info-desktop-headroom-unavailable` — desktop reports no per-process memory headroom
+
+**Observed**: on macOS, Linux and Windows `DeviceMemory::process_headroom_bytes` is `None`. Only iOS exposes a process memory limit (`os_proc_available_memory`, unavailable on macOS). macOS also reports no `system_available_bytes`, because `host_statistics64` would need hand-written Mach FFI (deferred); Linux (`MemAvailable`) and Windows (`ullAvailPhys`) do report it. On Linux `total_bytes` and `system_available_bytes` come from `/proc/meminfo`, which inside a container, a systemd slice or WSL under a cgroup memory limit reports the host's memory rather than the process's ceiling, so apps there should treat both figures as an upper bound.
+
+**Applies to**: macOS, Linux and Windows.
+
+**Workaround**: use `total_bytes` (all desktop targets) and, on Linux/Windows, `system_available_bytes` as the budget signal.
+
+**Why accepted**: desktop processes have no OS-imposed memory ceiling to report, and the macOS available-memory figure is not worth the unsafe Mach bindings.
+
+**Evidence**: `plugins/device-info/src/apple.rs` (`headroom()` cfg arms); `plugins/device-info/src/linux.rs`; `plugins/device-info/src/windows.rs`.
+
+---
+
+### `device-info-web-unsupported` — `DeviceMemory::query()` returns None on web
+
+**Observed**: on wasm32 `DeviceMemory::query()` always returns `None`.
+
+**Applies to**: web (wasm32) and every target without a backend.
+
+**Workaround**: none; treat `None` as "unknown" and fall back to a conservative budget.
+
+**Why accepted**: `navigator.deviceMemory` is Chromium-only, a coarse power-of-two GiB bucket, and secure-context-gated, so it is not a reliable figure.
+
+**Evidence**: `plugins/device-info/src/noop.rs`.
+
+---
+
 ### `app-lifecycle-ui-thread-callbacks` — lifecycle callbacks run on the UI thread, inside the platform callback
 
 **Observed**: every `AppLifecycleListener` callback runs synchronously on the UI thread, inside the shell's platform callback (`onPause`, `applicationDidEnterBackground`, a winit event). A callback that blocks stalls that platform callback and the UI thread with it. A panic is caught and logged, and the remaining callbacks still run.

@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — twenty-four entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty-five entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -61,7 +61,8 @@
 //! key, no manifest permission, no Swift package, no app-crate macro, and
 //! no contribution at all on macOS, whose factory self-registers into
 //! `frust_plugin::desktop` at first use — see `VIDEO_PLAYER_BASE`'s doc
-//! comment for the full accounting).
+//! comment for the full accounting). The newest entry, `device-info`, is dependency only: a
+//! device-memory query needing no permission, Gradle module or plist key.
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -736,6 +737,20 @@ const MATERIAL_I18N: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `device-info`'s single base contribution: a Cargo dependency only (a plain-JNI and
+/// plain-C memory query; no permission, Gradle module or plist key).
+const DEVICE_INFO: PluginSpec = PluginSpec {
+    id: "device-info",
+    summary: "Device memory query (total RAM, low-RAM flag, available memory, iOS headroom); \
+              no permission, Gradle module or plist key.",
+    crate_dir: "device-info",
+    base: &[Contribution::CargoDep {
+        name: "frust-device-info",
+    }],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -765,6 +780,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         QR,
         FILE_DIALOGS,
         MATERIAL_I18N,
+        DEVICE_INFO,
     ]
 }
 
@@ -784,7 +800,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_twenty_four_v1_plugins() {
+    fn registry_lists_the_twenty_five_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -813,6 +829,7 @@ mod tests {
                 "qr",
                 "file-dialogs",
                 "material-i18n",
+                "device-info",
             ]
         );
     }

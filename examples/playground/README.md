@@ -14,7 +14,7 @@ neutral backdrop for the capabilities under test.
 
 A Material `app_bar` (a plug brand mark, the title, and the
 brightness / reduce-motion / animations toggles) sits above the
-`pattern_switcher`-hosted section body, selecting between twenty-one sections
+`pattern_switcher`-hosted section body, selecting between twenty-two sections
 through one of two responsive navigation shapes (`use_context::<WindowMetrics>()`
 against a 600px width breakpoint — `pages::responsive`'s own named-breakpoint
 convention, applied to the shell itself):
@@ -22,7 +22,7 @@ convention, applied to the shell itself):
 - **Narrow** (< 600px, e.g. a phone): a bottom `navigation_bar` shows the
   first five sections directly, plus a trailing "More" destination that opens
   an overlay listing every section.
-- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twenty-one
+- **Wide** (≥ 600px, e.g. a desktop window): a side rail lists all twenty-two
   sections directly, in a column beside the page body — nothing is ever
   behind an overflow menu at this width.
 
@@ -207,6 +207,18 @@ The sections, in order:
     continuous frames. The ignored `tests/gpu_pass_headless.rs` renders the same
     pass offscreen on a GPU host (`cargo test --test gpu_pass_headless --
     --ignored`).
+22. **Memory** — the `frust-device-info` device-gate vehicle. It shows the five
+    figures of `DeviceMemory::query()`: total RAM (GiB and bytes), the low-RAM
+    flag, system available, process headroom and the system low flag. A figure the
+    platform does not report reads "not reported on this platform". A **Query**
+    button re-reads them, and so does every `on_memory_pressure` event; the
+    newest-first log (20 rows) keeps each read. Each read writes one line to the
+    platform log with the prefix `frust-gate device-memory:` (`total=`,
+    `low_ram=`, `system_available=`, `headroom=`, `system_low=`; `none` for an
+    unreported figure), and a pressure event first writes
+    `frust-gate device-memory: pressure=<level>`. Android 14 and later deliver no
+    foreground trim level, so poll this section instead. Deep link:
+    `frustplay://section/memory`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -289,6 +301,9 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Drag: desktop pointer drag / Esc cancel / keyboard reorder / OS file drop | macOS 27.0.1 (MacBook, Apple M4), 2026-10-18 | PASS except a two-file drop (conductor-driven synthetic input at main 0c941464, window captures as evidence: a vertical-first drag lands the card in Doing with the ghost under the pointer, the source dimmed and the column highlighted, and drags back; Escape while held clears ghost and highlight and the later release changes nothing; click Item 1, Enter, ArrowDown ×4, Enter → "Last move: 0 -> 2"; a pointer drag of a row onto the 8 px gap reorders ("0 -> 1") and a release on a row cancels; Finder drag: the zone highlights while hovering, one file drops and its name is listed, Escape in Finder clears the highlight and the release drops nothing, dragging away clears it; a plain click on a card and a wheel over the board behave normally afterwards. NOT RUN: a two-file drop — synthetic Finder drags stopped initiating after the Escape-cancelled drag; needs a hand) |
 | Drag: desktop pointer drag / Esc cancel / keyboard reorder / OS file drop | Windows | OWED (binary builds and launches on the Windows 11 rig; the leg needs an interactive desktop session) |
 | Drag: long-press drag (kanban card between columns) | Pixel 5 (redfin), Android 14, 2026-10-06 | PASS (long-press lift, ghost, column highlight; drop lands both directions incl. a ~300 px vertical leg; reorder onto a gap → "Last move: 0 -> 2"; short tap / quick swipe unaffected) |
+| Memory: `DeviceMemory::query()` readout and the `frust-gate device-memory:` log line (open + Query) | macOS 27.0.1 (MacBook, Apple M4), 2026-11-07 | PASS (feat/device-info b0bcad0d6: Total 24.00 GiB = `sysctl hw.memsize` 25769803776 bytes, Low-RAM no, system available / process headroom / system low 'not reported on this platform' by design; two identical log lines, one on open and one on Query) |
+| Memory: the same readout plus `process_headroom_bytes` > 0 | iPhone 13 mini (iPhone14,4), iOS 27.2, 2026-11-07 | PASS (feat/device-info ada443d3b, XCUITest-driven More → Memory → Query: Total 3.59 GiB (3853369344 bytes), Low-RAM no, Process headroom 1.87 GiB (2007939184) on open and 1.88 GiB (2023553136) after Query, system available / system low 'not reported on this platform'; two on-screen log rows) |
+| Memory: the same readout plus `system_available_bytes`, `system_low`, and the `am send-trim-memory RUNNING_CRITICAL` re-query line | Pixel 5 (redfin), Android 14 (API 34), 2026-11-07 | PASS (feat/device-info ada443d3b, opened via `frustplay://section/memory`: Total 7.29 GiB (7823970304 bytes), Low-RAM no, System available 3.96 GiB (4256919552), System low no, headroom 'not reported'; `am send-trim-memory it.f0x.playground RUNNING_CRITICAL` logged `pressure=Critical` followed by a re-query line; the Query tap logged a fourth line — all under `frust-gate device-memory:` in logcat) |
 
 ### Drag gate notes
 
