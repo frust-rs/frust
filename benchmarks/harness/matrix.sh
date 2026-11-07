@@ -100,6 +100,7 @@ STAGE_RAW="$OUT/raw/$DEVICE_NAME"
 ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
 log() { echo "$(ts) $*" | tee -a "$PROGRESS"; }
 run_or_echo() { if [ "$DRY_RUN" = 1 ]; then echo "DRY: $*"; else "$@"; fi; }
+file_md5() { if command -v md5 >/dev/null 2>&1; then md5 -q "$1"; else md5sum "$1" | cut -d' ' -f1; fi; }   # macOS md5 / Linux md5sum
 DONE_OK=0
 
 # ---------------------------------------------------------------- android helpers
@@ -175,7 +176,7 @@ android_install() {
   for p in "$FRUST_PKG" "$FLUTTER_PKG"; do run_or_echo adb -s "$DEVICE" uninstall "$p" >/dev/null 2>&1 || true; done
   run_or_echo adb -s "$DEVICE" install -r "$FRUST_APK" >/dev/null || { log "FATAL: frust apk install failed"; exit 1; }
   run_or_echo adb -s "$DEVICE" install -r "$FLUTTER_APK" >/dev/null || { log "FATAL: flutter apk install failed"; exit 1; }
-  [ "$DRY_RUN" = 1 ] || log "installed: $(ash pm list packages | grep -E 'frustbench|flutter_bench' | tr '\n' ' ') frust_md5=$(md5 -q "$FRUST_APK") flutter_md5=$(md5 -q "$FLUTTER_APK")"
+  [ "$DRY_RUN" = 1 ] || log "installed: $(ash pm list packages | grep -E 'frustbench|flutter_bench' | tr '\n' ' ') frust_md5=$(file_md5 "$FRUST_APK") flutter_md5=$(file_md5 "$FLUTTER_APK")"
 }
 android_battery_guard() {
   [ "$MIN_LEVEL" -gt 0 ] || return 0
@@ -323,7 +324,8 @@ PY
 }
 
 # ---------------------------------------------------------------- block runner
-count_lines() { local n; n="$(grep -c -E "$1" "$2" 2>/dev/null | head -1)"; echo "${n:-0}"; }
+# `-e`: the scenario patterns below start with `-`, which GNU grep would otherwise read as options.
+count_lines() { local n; n="$(grep -c -E -e "$1" -- "$2" 2>/dev/null | head -1)"; echo "${n:-0}"; }
 block_sanity() { # $1 scenario, $2 dir -> prints "min-max" line counts over kept logs; returns 1 if degenerate
   local s="$1" d="$2" pat min= max= n i log lines bad=0
   case "$s" in s8) pat='-perf plugin( scenario=[^ ]+)? op='; ;; *) pat='-perf raw'; ;; esac
