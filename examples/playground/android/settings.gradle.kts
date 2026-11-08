@@ -176,3 +176,17 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("../build/android/frust-photo-library"))
     }
 }
+
+// frust-share: the same include/projectDir/build-dir-redirect trio as
+// `:frust-photo-library` above. The module supplies the file-share host
+// (`FrustShareHost`) and its `FileProvider` subclass; text and URL sharing
+// need no module.
+include(":frust-share")
+project(":frust-share").projectDir =
+    file("../../../plugins/share/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-share") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-share"))
+    }
+}
