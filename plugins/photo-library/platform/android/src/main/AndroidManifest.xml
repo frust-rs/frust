@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This module declares NO permission. The system photo picker runs in its own
+  process and hands the app read access to exactly the items the user chose,
+  so picking needs no storage or media permission at all.
+
+  The provider below is how `FrustPhotoLibraryHost` obtains an application
+  `Context`, and registers its Activity lifecycle callbacks, before any
+  Activity exists: the `plugins/permissions` init-provider shape, a no-op
+  `ContentProvider` whose `onCreate` runs at process start.
+  `${applicationId}` is substituted at manifest-merge time, so the authority is
+  unique per consuming app; `exported="false"` because it exposes no data and
+  nothing outside the app may reach it.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.photolibrary`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <provider
+            android:name="dev.frust.photolibrary.FrustPhotoLibraryInitProvider"
+            android:authorities="${applicationId}.frustphotolibraryinit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>

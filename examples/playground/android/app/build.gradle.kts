@@ -216,6 +216,9 @@ dependencies {
     // + its process-start init provider. The module declares no permission;
     // this app's manifest declares the ones it asks for.
     implementation(project(":frust-permissions"))
+    // frust-photo-library: the system photo-picker host (`FrustPhotoLibraryHost`)
+    // + its process-start init provider. The picker needs no permission.
+    implementation(project(":frust-photo-library"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each
