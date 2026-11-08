@@ -232,7 +232,9 @@ The sections, in order:
     kind, mime, byte size, copy or original), a preview of the first image
     (PNG and JPEG decode; HEIC, WebP and GIF show a decode error),
     **Share picked** (`Share::files_anchored` with a fixed anchor rectangle) and
-    **Clear cache**. Deep link: `frustplay://section/photos`.
+    **Clear cache**. While a pick runs the Picker panel shows loading progress
+    ("Loading N of M (P%)") with a **Cancel** button; Pick and Clear cache are
+    disabled until it ends. Deep link: `frustplay://section/photos`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -326,6 +328,8 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Picker panel Share picked (files) | macOS | OWED |
 | Photos: Picker panel Clear cache | iPhone | OWED |
 | Photos: Picker panel Clear cache | Android device | OWED |
+| Photos: Picker panel Cancel while an iCloud item downloads | iPhone | OWED |
+| Photos: Picker panel Cancel during a large video copy | Android device | OWED |
 
 ### Drag gate notes
 
