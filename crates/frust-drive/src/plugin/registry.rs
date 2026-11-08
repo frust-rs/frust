@@ -63,10 +63,13 @@
 //! `frust_plugin::desktop` at first use — see `VIDEO_PLAYER_BASE`'s doc
 //! comment for the full accounting). `device-info` is dependency only: a
 //! device-memory query needing no permission, Gradle module or plist key.
-//! The newest entry, `permissions` (dependency, the plugin's own Android
-//! library module, and five optional features carrying the app-side
-//! manifest permissions, usage strings, framework links and macOS
-//! entitlements each permission needs), is described at `PERMISSIONS`.
+//! `permissions` (dependency, the plugin's own Android library module, and
+//! five optional features carrying the app-side manifest permissions, usage
+//! strings, framework links and macOS entitlements each permission needs) is
+//! described at `PERMISSIONS`. The newest entry, `photo-library`
+//! (dependency, the plugin's own Android library module and the `PhotosUI`
+//! framework link; no permission or plist key), is described at
+//! `PHOTO_LIBRARY`.
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
