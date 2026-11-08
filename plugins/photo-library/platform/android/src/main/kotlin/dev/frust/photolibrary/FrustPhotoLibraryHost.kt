@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.ext.SdkExtensions
 import android.provider.MediaStore
 import android.provider.OpenableColumns
@@ -20,6 +21,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
@@ -31,18 +34,20 @@ import java.util.concurrent.Executors
  * ## The contract (LAW — see `plugins/photo-library/src/android.rs`)
  *
  * This object's fully-qualified name (`dev.frust.photolibrary.FrustPhotoLibraryHost`)
- * and its `@JvmStatic` entry point are looked up by string from Rust through
+ * and its `@JvmStatic` entry points are looked up by string from Rust through
  * the application classloader, and the mangled JNI symbols of
- * [nativeOnPickResult] and [nativeOnPickError] are exported by that same
- * module. **The class may never move and no signature may change without a
+ * [nativeOnPickResult], [nativeOnPickError] and [nativeOnPickProgress] are
+ * exported by that same module. **The class may never move and no signature may change without a
  * coordinated change on both sides.** The integer codes below are pinned
  * against their Rust twins by `plugins/photo-library/tests/kotlin_contract.rs`.
  *
  * | Direction | Member | Returns |
  * |---|---|---|
  * | Rust → Kotlin | `pick(requestId: Long, filter: Int, limit: Int, destDir: String): Int` — `(JIILjava/lang/String;)I` | [PENDING] after posting the launch, [NO_ACTIVITY], [BUSY], [NOT_INITIALIZED], or [LAUNCH_FAILED] for an unknown filter |
+ * | Rust → Kotlin | `cancel(requestId: Long)` — `(J)V` | nothing; an id that does not hold the slot is ignored |
  * | Kotlin → Rust | `nativeOnPickResult(requestId: Long, paths: Array<String>, names: Array<String?>, mimes: Array<String?>)` | the copies, in pick order; three empty arrays mean cancelled |
- * | Kotlin → Rust | `nativeOnPickError(requestId: Long, code: Int)` | [NO_ACTIVITY], [LAUNCH_FAILED] or [COPY_FAILED] |
+ * | Kotlin → Rust | `nativeOnPickError(requestId: Long, code: Int)` | [NO_ACTIVITY], [LAUNCH_FAILED], [COPY_FAILED] or [CANCELLED] |
+ * | Kotlin → Rust | `nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)` | copy progress, never an answer |
  *
  * Every request that returned [PENDING] gets exactly one of the two answers.
  *
@@ -63,6 +68,18 @@ import java.util.concurrent.Executors
  * `maxOf(limit, 2)` capped at the platform maximum ([multipleMaxItems]), and
  * the result is truncated to the limit: the `ACTION_OPEN_DOCUMENT` fallback
  * enforces no maximum at all.
+ *
+ * ## Cancel and progress
+ *
+ * [cancel] marks the request cancelled. The system picker has no dismissal
+ * API, so while it is still up the slot is freed at once, [CANCELLED] is
+ * answered, and the picker's eventual result is discarded. Once copies run,
+ * the copy loop checks the flag between items and between [COPY_CHUNK_BYTES]
+ * chunks, deletes this call's staging files and answers [CANCELLED]. The copy
+ * thread reports [nativeOnPickProgress] when copying starts (0 done, 0.0), at
+ * most every [PROGRESS_INTERVAL_MS] during a copy, and after each item; the
+ * fraction counts bytes when `OpenableColumns.SIZE` is known for every item,
+ * items otherwise. It is never called while holding a monitor.
  *
  * ## Copies
  *
@@ -108,6 +125,8 @@ object FrustPhotoLibraryHost {
     const val LAUNCH_FAILED = 4
     /** A chosen item could not be copied. */
     const val COPY_FAILED = 5
+    /** The pick was cancelled through [cancel]. */
+    const val CANCELLED = 6
 
     // --- Filter codes: mirror `src/android.rs`.
 
@@ -128,6 +147,12 @@ object FrustPhotoLibraryHost {
     /** Activity-result registry key prefix; the request id follows. */
     const val LAUNCHER_KEY_PREFIX = "frust.photolibrary."
 
+    /** Bytes per read of the copy loop; the cancel flag is checked between chunks. */
+    const val COPY_CHUNK_BYTES = 64 * 1024
+
+    /** Minimum spacing of in-copy progress reports. */
+    const val PROGRESS_INTERVAL_MS = 100L
+
     /** The application [Context], installed once by [FrustPhotoLibraryInitProvider]. */
     @Volatile
     private var appContext: Context? = null
@@ -141,16 +166,24 @@ object FrustPhotoLibraryHost {
 
     /**
      * The pick holding the single in-flight slot, or null. Read and written
-     * only through [claimInFlight], [releaseInFlight], [detachInFlight] and
-     * [releaseInFlightFor], which hold this object's monitor.
+     * only through the `*InFlight*` helpers and [releaseCopied], which hold
+     * this object's monitor.
      */
     private var inFlight: InFlight? = null
 
     /**
      * One unanswered pick. [activity] is the Activity its picker launched
      * from, or null once its copies started (it no longer depends on one).
+     * [cancelled] is set by [cancel] and read by the copy loop.
      */
-    private class InFlight(val requestId: Long, var activity: Activity?)
+    private class InFlight(val requestId: Long, var activity: Activity?) {
+        @Volatile
+        var cancelled: Boolean = false
+    }
+
+    /** Set once [nativeOnPickProgress] is found missing, so it is not retried. */
+    @Volatile
+    private var progressUnavailable: Boolean = false
 
     /** Guards a single [Application.registerActivityLifecycleCallbacks] call. */
     @Volatile
@@ -212,6 +245,15 @@ object FrustPhotoLibraryHost {
         return PENDING
     }
 
+    /**
+     * Cancel the pick [requestId] (class doc, "Cancel and progress"). Any
+     * thread; an id that does not hold the in-flight slot is ignored.
+     */
+    @JvmStatic
+    fun cancel(requestId: Long) {
+        if (cancelInFlight(requestId)) notifyError(requestId, CANCELLED)
+    }
+
     // --- Kotlin -> Rust -----------------------------------------------------
 
     /**
@@ -233,6 +275,10 @@ object FrustPhotoLibraryHost {
     /** Fails the [pick] that returned [PENDING] with the same [requestId]. */
     @JvmStatic
     external fun nativeOnPickError(requestId: Long, code: Int)
+
+    /** Copy progress of the [pick] with the same [requestId]; [fraction] is 0.0..1.0. */
+    @JvmStatic
+    external fun nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)
 
     // Every native call is guarded: a missing symbol (an app that depends on
     // this Gradle module without the `frust-photo-library` Rust crate) must
@@ -260,6 +306,16 @@ object FrustPhotoLibraryHost {
             nativeOnPickError(requestId, code)
         } catch (e: Throwable) {
             Log.w(TAG, "frust-photo-library: nativeOnPickError unavailable", e)
+        }
+    }
+
+    private fun notifyProgress(requestId: Long, done: Int, items: Int, fraction: Double) {
+        if (progressUnavailable) return
+        try {
+            nativeOnPickProgress(requestId, done, items, fraction)
+        } catch (e: Throwable) {
+            progressUnavailable = true
+            Log.w(TAG, "frust-photo-library: nativeOnPickProgress unavailable", e)
         }
     }
 
@@ -306,6 +362,8 @@ object FrustPhotoLibraryHost {
         destDir: File,
         activity: ComponentActivity,
     ) {
+        // Cancelled before the launch ran: open nothing.
+        if (!holdsInFlight(requestId)) return
         if (activity.isFinishing || activity.isDestroyed) {
             if (releaseInFlight(requestId)) notifyError(requestId, NO_ACTIVITY)
             return
@@ -353,7 +411,10 @@ object FrustPhotoLibraryHost {
 
     /**
      * The picker answered with [uris] (empty when cancelled). Truncates to
-     * [limit], then copies on [copyExecutor] and answers Rust. Main thread.
+     * [limit], then copies on [copyExecutor] and answers Rust exactly once:
+     * the copies, [COPY_FAILED], or [CANCELLED] after deleting the staging
+     * files. A result for a request that no longer holds the slot (it was
+     * cancelled while the picker was up) is discarded. Main thread.
      */
     private fun onPicked(ctx: Context, requestId: Long, uris: List<Uri>, limit: Int, destDir: File) {
         val chosen = if (limit > 0) uris.take(limit) else uris
@@ -362,22 +423,34 @@ object FrustPhotoLibraryHost {
             return
         }
         // Detached from its Activity: a destroy from here on must not cancel it.
-        if (!detachInFlight(requestId)) return
+        val flight = detachInFlight(requestId) ?: return
         copyExecutor.execute {
+            val staging = chosen.indices.map { index -> File(destDir, STAGING_PREFIX + index) }
             val copies = try {
-                chosen.mapIndexed { index, uri -> copyOne(ctx, uri, File(destDir, STAGING_PREFIX + index)) }
+                copyAll(ctx, requestId, chosen, staging, flight)
             } catch (e: Exception) {
-                Log.w(TAG, "frust-photo-library: copying a picked item failed: ${e.javaClass.name}")
-                if (releaseInFlight(requestId)) notifyError(requestId, COPY_FAILED)
-                return@execute
+                if (!flight.cancelled) {
+                    Log.w(TAG, "frust-photo-library: copying a picked item failed: ${e.javaClass.name}")
+                }
+                null
             }
-            if (releaseInFlight(requestId)) {
-                notifyResult(
-                    requestId,
-                    copies.map { it.path }.toTypedArray(),
-                    copies.map { it.name }.toTypedArray(),
-                    copies.map { it.mime }.toTypedArray(),
-                )
+            when (releaseCopied(flight)) {
+                null -> Unit
+                true -> {
+                    staging.forEach { it.delete() }
+                    notifyError(requestId, CANCELLED)
+                }
+                false -> if (copies == null) {
+                    staging.forEach { it.delete() }
+                    notifyError(requestId, COPY_FAILED)
+                } else {
+                    notifyResult(
+                        requestId,
+                        copies.map { it.path }.toTypedArray(),
+                        copies.map { it.name }.toTypedArray(),
+                        copies.map { it.mime }.toTypedArray(),
+                    )
+                }
             }
         }
     }
@@ -385,24 +458,110 @@ object FrustPhotoLibraryHost {
     /** One copied item: the staging path plus what the provider reported. */
     private class Copy(val path: String, val name: String?, val mime: String?)
 
-    /** Copy [uri] to [dest], reading its display name and MIME type. Copy thread. */
-    private fun copyOne(ctx: Context, uri: Uri, dest: File): Copy {
+    /** What the provider reports about one item before it is copied. */
+    private class Meta(val name: String?, val mime: String?, val size: Long?)
+
+    /**
+     * Copies [uris] to [staging] in order, reporting progress (class doc,
+     * "Cancel and progress"). Null once [flight] is cancelled. Copy thread,
+     * no monitor held.
+     */
+    private fun copyAll(
+        ctx: Context,
+        requestId: Long,
+        uris: List<Uri>,
+        staging: List<File>,
+        flight: InFlight,
+    ): List<Copy>? {
+        val progress = Progress(requestId, uris.size)
+        progress.send()
         val resolver = ctx.contentResolver
-        val name = try {
-            resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getString(0) else null
+        val metas = uris.map { describe(ctx, it) }
+        val sizes = metas.map { it.size }
+        if (sizes.all { it != null && it > 0 }) progress.totalBytes = sizes.sumOf { it ?: 0L }
+        val copies = ArrayList<Copy>(uris.size)
+        for ((index, uri) in uris.withIndex()) {
+            if (flight.cancelled) return null
+            val input = resolver.openInputStream(uri) ?: throw IOException("no input stream")
+            val dest = staging[index]
+            val finished = input.use { source ->
+                FileOutputStream(dest).use { sink -> copyChunks(source, sink, flight, progress) }
+            }
+            if (!finished) return null
+            copies.add(Copy(dest.absolutePath, metas[index].name, metas[index].mime))
+            progress.itemDone()
+        }
+        return copies
+    }
+
+    /**
+     * Copies [source] to [sink] in [COPY_CHUNK_BYTES] chunks, checking the
+     * cancel flag before each. False when [flight] was cancelled.
+     */
+    private fun copyChunks(source: InputStream, sink: OutputStream, flight: InFlight, progress: Progress): Boolean {
+        val buffer = ByteArray(COPY_CHUNK_BYTES)
+        while (true) {
+            if (flight.cancelled) return false
+            val read = source.read(buffer)
+            if (read < 0) return true
+            sink.write(buffer, 0, read)
+            progress.copied(read.toLong())
+        }
+    }
+
+    /** The display name, MIME type and size (`OpenableColumns.SIZE`, null when unknown) of [uri]. */
+    private fun describe(ctx: Context, uri: Uri): Meta {
+        val resolver = ctx.contentResolver
+        var name: String? = null
+        var size: Long? = null
+        try {
+            val columns = arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
+            resolver.query(uri, columns, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    if (!cursor.isNull(0)) name = cursor.getString(0)
+                    if (!cursor.isNull(1)) size = cursor.getLong(1)
+                }
             }
         } catch (e: Exception) {
-            null
+            // Name and size stay unknown.
         }
         val mime = try {
             resolver.getType(uri)
         } catch (e: Exception) {
             null
         }
-        val input = resolver.openInputStream(uri) ?: throw IOException("no input stream")
-        input.use { source -> FileOutputStream(dest).use { sink -> source.copyTo(sink) } }
-        return Copy(dest.absolutePath, name, mime)
+        return Meta(name, mime, size)
+    }
+
+    /**
+     * Copy progress of one pick, owned by the copy thread. [totalBytes] is 0
+     * unless every item's size is known; the fraction then counts items.
+     */
+    private class Progress(val requestId: Long, val items: Int) {
+        var totalBytes: Long = 0L
+        private var done = 0
+        private var bytes = 0L
+        private var lastSent = 0L
+
+        fun copied(n: Long) {
+            bytes += n
+            if (SystemClock.elapsedRealtime() - lastSent >= PROGRESS_INTERVAL_MS) send()
+        }
+
+        fun itemDone() {
+            done += 1
+            send()
+        }
+
+        fun send() {
+            lastSent = SystemClock.elapsedRealtime()
+            val fraction = when {
+                done >= items -> 1.0
+                totalBytes > 0 -> (bytes.toDouble() / totalBytes).coerceIn(0.0, 1.0)
+                else -> done.toDouble() / items
+            }
+            notifyProgress(requestId, done, items, fraction)
+        }
     }
 
     /**
@@ -425,13 +584,44 @@ object FrustPhotoLibraryHost {
         return true
     }
 
-    /** Detach [requestId]'s slot from its Activity; false when it no longer holds the slot. */
+    /** Whether [requestId] still holds the slot. */
     @Synchronized
-    private fun detachInFlight(requestId: Long): Boolean {
+    private fun holdsInFlight(requestId: Long): Boolean = inFlight?.requestId == requestId
+
+    /** Detach [requestId]'s slot from its Activity; null when it no longer holds the slot. */
+    @Synchronized
+    private fun detachInFlight(requestId: Long): InFlight? {
+        val current = inFlight ?: return null
+        if (current.requestId != requestId) return null
+        current.activity = null
+        return current
+    }
+
+    /**
+     * Mark [requestId] cancelled. While its picker is still up the slot is
+     * freed and this returns true (the caller answers); once its copies run,
+     * the copy thread answers.
+     */
+    @Synchronized
+    private fun cancelInFlight(requestId: Long): Boolean {
         val current = inFlight ?: return false
         if (current.requestId != requestId) return false
-        current.activity = null
+        current.cancelled = true
+        if (current.activity == null) return false
+        inFlight = null
         return true
+    }
+
+    /**
+     * Free [flight]'s slot after its copies: null when it no longer holds the
+     * slot, otherwise whether it was cancelled (read under the same monitor
+     * [cancelInFlight] writes it under, so exactly one answer follows).
+     */
+    @Synchronized
+    private fun releaseCopied(flight: InFlight): Boolean? {
+        if (inFlight !== flight) return null
+        inFlight = null
+        return flight.cancelled
     }
 
     /** Free the slot if its picker launched from [activity]; the freed request id, or null. */

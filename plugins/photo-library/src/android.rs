@@ -13,12 +13,13 @@
 //! integer codes are this module's `const`s, pinned against the Kotlin
 //! constants by `tests/kotlin_contract.rs`.
 //!
-//! ## Rust → Kotlin (a static method, resolved through the application
+//! ## Rust → Kotlin (static methods, resolved through the application
 //! classloader — see [`load_host_class`])
 //!
 //! | Method | Signature (Java) | Returns |
 //! |---|---|---|
-//! | `pick` | `(long requestId, int filter, int limit, String destDir) -> int` | [`PENDING`] after posting the launch (the answer arrives through one of the two exports below with the same `requestId`); [`NO_ACTIVITY`] (→ [`PhotoError::NoPresenter`]); [`BUSY`]; [`NOT_INITIALIZED`] (→ [`PhotoError::PlatformNotInitialized`]); [`LAUNCH_FAILED`] |
+//! | `pick` | `(long requestId, int filter, int limit, String destDir) -> int` | [`PENDING`] after posting the launch (the answer arrives through `nativeOnPickResult` or `nativeOnPickError` below with the same `requestId`); [`NO_ACTIVITY`] (→ [`PhotoError::NoPresenter`]); [`BUSY`]; [`NOT_INITIALIZED`] (→ [`PhotoError::PlatformNotInitialized`]); [`LAUNCH_FAILED`] |
+//! | `cancel` | `(long requestId) -> void` | nothing; an unknown or already-answered id is ignored (see "Cancel and progress") |
 //!
 //! `filter` is [`FILTER_IMAGES`], [`FILTER_VIDEOS`] or
 //! [`FILTER_IMAGES_AND_VIDEOS`]; `limit` is [`PickOptions::limit`] (0 = the
@@ -33,9 +34,12 @@
 //!   arrays mean the user cancelled, or the launching Activity was destroyed
 //!   while the picker was up.
 //! - [`Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnPickError`]`(env, class, requestId: jlong, code: jint)`
-//!   — [`NO_ACTIVITY`], [`LAUNCH_FAILED`] or [`COPY_FAILED`].
+//!   — [`NO_ACTIVITY`], [`LAUNCH_FAILED`], [`COPY_FAILED`] or [`CANCELLED`]
+//!   (→ [`PhotoError::Cancelled`]).
+//! - [`Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnPickProgress`]`(env, class, requestId: jlong, done: jint, items: jint, fraction: jdouble)`
+//!   — copy progress, from the host's copy thread; never an answer.
 //!
-//! Both exports upgrade their [`jni::EnvUnowned`] via
+//! All three exports upgrade their [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind`, and
 //! resolve with [`LogErrorAndDefault`] — the crate's no-unwind-across-FFI
 //! guarantee (`docs/CODE_STANDARDS.md`'s Language Idioms), with no direct
@@ -78,8 +82,21 @@
 //!
 //! The picker is launched and answered on the main `Looper`; a caller parked
 //! there would wait on its own wake-up forever. So [`pick`] calls
-//! [`ensure_off_ui_thread`] before anything else and reports
+//! [`ensure_off_ui_thread`] before any other JNI work and reports
 //! [`PhotoError::UiThread`].
+//!
+//! # Cancel and progress
+//!
+//! A [`CancelToken`] already cancelled fails the pick before anything runs.
+//! Once the host answered [`PENDING`], the token's hook calls the host's
+//! `cancel` (the system picker has no dismissal API, so an open picker stays
+//! up and its result is discarded; running copies stop between 64 KiB chunks
+//! and delete their staging files) and then records a local cancel, so the
+//! wait ends at once without depending on the host's [`CANCELLED`] answer.
+//! The progress export only stores the latest value in the request's
+//! [`WAITS`] slot and wakes the waiter; the waiter forwards it through a
+//! [`ProgressThrottle`] after releasing the lock, and reports the final
+//! `{items, done: items, fraction: 1.0}` once the copies are renamed.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -90,12 +107,15 @@ use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JClass, JObject, JObjectArray, JString, JValue};
 use jni::refs::Global;
-use jni::sys::{jint, jlong};
+use jni::sys::{jdouble, jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
+use crate::cancel::ProgressThrottle;
 use crate::media_types::classify_path;
 use crate::pick_cache;
-use crate::{MediaFilter, MediaKind, PhotoError, PickOptions, PickedItem};
+use crate::{
+    CancelToken, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
+};
 
 /// The Kotlin host's fully-qualified class name, in the dotted form
 /// `ClassLoader.loadClass` expects. Looked up through the application
@@ -116,6 +136,8 @@ const NOT_INITIALIZED: jint = 3;
 const LAUNCH_FAILED: jint = 4;
 /// A chosen item could not be copied.
 const COPY_FAILED: jint = 5;
+/// The host honoured a `cancel` for the request.
+const CANCELLED: jint = 6;
 
 /// Filter code: still images only.
 const FILTER_IMAGES: jint = 0;
@@ -129,23 +151,31 @@ const FILTER_IMAGES_AND_VIDEOS: jint = 2;
 /// immediately (`Global`'s own `Drop` releases it).
 static HOST_CLASS: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 
-/// Outstanding picks by id: `None` while waiting, `Some(answer)` once an
-/// export answered. The waiter removes its own slot.
-static WAITS: LazyLock<Mutex<HashMap<u64, Option<Answer>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Outstanding picks by id. The waiter removes its own slot.
+static WAITS: LazyLock<Mutex<HashMap<u64, Slot>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Woken by the exports; waited on by [`pick`].
+/// Woken by the exports and the cancel hook; waited on by [`pick`].
 static ANSWERED: Condvar = Condvar::new();
 
 /// The next request id. Starts at 1 so a zeroed id is never live.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
-/// The host's answer to one pick.
+/// One outstanding pick: its answer once there is one, and the latest
+/// progress the waiter has not forwarded yet.
+#[derive(Default)]
+struct Slot {
+    answer: Option<Answer>,
+    progress: Option<PickProgress>,
+}
+
+/// The answer to one pick.
 enum Answer {
-    /// The staging copies (empty = cancelled).
+    /// The staging copies (empty = the user dismissed the picker).
     Picked(Vec<HostCopy>),
     /// A `nativeOnPickError` code.
     Failed(jint),
+    /// The pick's [`CancelToken`] fired.
+    Cancelled,
 }
 
 /// One staging copy as the host reported it.
@@ -158,12 +188,18 @@ struct HostCopy {
 /// The crate root's `pick` arm. Blocks while the picker is up; see the
 /// module doc.
 pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError> {
+    if is_cancelled(options) {
+        return Err(PhotoError::Cancelled);
+    }
     with_host(|env, _class| ensure_off_ui_thread(env))?;
 
     let _one_at_a_time = pick_cache::PickGuard::acquire()?;
 
     let dir = pick_cache::new_call_dir()?;
     let result = pick_into(options, &dir);
+    if let Some(token) = &options.cancel {
+        token.clear_hook();
+    }
     if !matches!(&result, Ok(items) if !items.is_empty()) {
         remove_call_dir(&dir);
     }
@@ -179,7 +215,7 @@ fn pick_into(options: &PickOptions, dir: &Path) -> Result<Vec<PickedItem>, Photo
     let limit = jint::try_from(options.limit).unwrap_or(jint::MAX);
 
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
-    lock(&WAITS).insert(request_id, None);
+    lock(&WAITS).insert(request_id, Slot::default());
 
     let code = with_host(|env, class| {
         run_jni(env, "FrustPhotoLibraryHost.pick", |env| {
@@ -212,10 +248,58 @@ fn pick_into(options: &PickOptions, dir: &Path) -> Result<Vec<PickedItem>, Photo
         return Err(error_for(code));
     }
 
-    match await_answer(request_id) {
-        Answer::Failed(code) => Err(error_for(code)),
-        Answer::Picked(copies) => finish_copies(dir, options, copies),
+    // Only after `PENDING`: a host `cancel` then always finds the request.
+    if let Some(token) = &options.cancel {
+        token.set_hook(move || cancel_request(request_id));
     }
+    let throttle = options.progress.clone().map(ProgressThrottle::new);
+    let answer = await_answer(request_id, throttle.as_ref());
+    // A cancel that raced the host's answer still wins.
+    if is_cancelled(options) {
+        return Err(PhotoError::Cancelled);
+    }
+    match answer {
+        Answer::Cancelled => Err(PhotoError::Cancelled),
+        Answer::Failed(code) => Err(error_for(code)),
+        Answer::Picked(copies) => {
+            let items = finish_copies(dir, options, copies)?;
+            if let (Some(throttle), false) = (&throttle, items.is_empty()) {
+                throttle.report(PickProgress {
+                    items: items.len(),
+                    done: items.len(),
+                    fraction: 1.0,
+                });
+            }
+            Ok(items)
+        }
+    }
+}
+
+fn is_cancelled(options: &PickOptions) -> bool {
+    options
+        .cancel
+        .as_ref()
+        .is_some_and(CancelToken::is_cancelled)
+}
+
+/// The cancel hook for `request_id`: tell the host, then end the wait
+/// locally. Runs on whichever thread called [`CancelToken::cancel`].
+fn cancel_request(request_id: u64) {
+    let sent = with_host(|env, class| {
+        run_jni(env, "FrustPhotoLibraryHost.cancel", |env| {
+            env.call_static_method(
+                class,
+                jni_str!("cancel"),
+                jni_sig!("(J)V"),
+                &[JValue::Long(request_id as jlong)],
+            )?
+            .v()
+        })
+    });
+    if let Err(err) = sent {
+        log::warn!("frust-photo-library: cancelling the pick on the host failed: {err}");
+    }
+    deliver(request_id, Answer::Cancelled);
 }
 
 /// The filter code for `filter`.
@@ -236,6 +320,7 @@ fn error_for(code: jint) -> PhotoError {
         NOT_INITIALIZED => PhotoError::PlatformNotInitialized,
         LAUNCH_FAILED => PhotoError::Platform("the photo picker could not be launched".to_string()),
         COPY_FAILED => PhotoError::Platform("a picked item could not be copied".to_string()),
+        CANCELLED => PhotoError::Cancelled,
         other => PhotoError::Platform(format!(
             "photo picker host returned an unknown code {other}"
         )),
@@ -308,30 +393,77 @@ fn remove_call_dir(dir: &Path) {
     }
 }
 
-/// Block until pick `request_id` is answered, removing its slot. No deadline
+/// Block until pick `request_id` is answered, forwarding its progress to
+/// `throttle` on the way, always outside the [`WAITS`] lock. No deadline
 /// (module doc, "Waiting for the answer").
-fn await_answer(request_id: u64) -> Answer {
-    let waits = lock(&WAITS);
-    let mut waits = ANSWERED
-        .wait_while(waits, |waits| matches!(waits.get(&request_id), Some(None)))
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    waits
-        .remove(&request_id)
-        .flatten()
-        .unwrap_or(Answer::Picked(Vec::new()))
+fn await_answer(request_id: u64, throttle: Option<&ProgressThrottle>) -> Answer {
+    loop {
+        let (progress, answer) = next_event(request_id);
+        let forward = !matches!(answer, Some(Answer::Cancelled | Answer::Failed(_)));
+        if let (Some(progress), Some(throttle), true) = (progress, throttle, forward) {
+            throttle.report(progress);
+        }
+        if let Some(answer) = answer {
+            return answer;
+        }
+    }
 }
 
-/// Record the host's answer for `request_id` and wake the waiters. The first
-/// answer wins; an id with no slot, or one already answered, is dropped.
+/// Wait for news on `request_id`: its pending progress, and its answer once
+/// there is one (the slot is then removed). The lock is released on return.
+fn next_event(request_id: u64) -> (Option<PickProgress>, Option<Answer>) {
+    let waits = lock(&WAITS);
+    let mut waits = ANSWERED
+        .wait_while(waits, |waits| {
+            matches!(
+                waits.get(&request_id),
+                Some(Slot {
+                    answer: None,
+                    progress: None
+                })
+            )
+        })
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(slot) = waits.get_mut(&request_id) else {
+        return (None, Some(Answer::Picked(Vec::new())));
+    };
+    let progress = slot.progress.take();
+    if slot.answer.is_none() {
+        return (progress, None);
+    }
+    let answer = waits.remove(&request_id).and_then(|slot| slot.answer);
+    (progress, answer)
+}
+
+/// Record the answer for `request_id` and wake the waiters. The first answer
+/// wins; an id with no slot, or one already answered, is dropped.
 fn deliver(request_id: u64, answer: Answer) {
     let mut waits = lock(&WAITS);
     match waits.get_mut(&request_id) {
-        Some(slot @ None) => {
+        Some(Slot {
+            answer: slot @ None,
+            ..
+        }) => {
             *slot = Some(answer);
             drop(waits);
             ANSWERED.notify_all();
         }
         _ => log::debug!("frust-photo-library: dropped a late answer for request {request_id}"),
+    }
+}
+
+/// Store the latest progress for an unanswered `request_id` and wake the
+/// waiter. Never runs the caller's callback: this is the JNI thread.
+fn record_progress(request_id: u64, progress: PickProgress) {
+    let mut waits = lock(&WAITS);
+    if let Some(Slot {
+        answer: None,
+        progress: latest,
+    }) = waits.get_mut(&request_id)
+    {
+        *latest = Some(progress);
+        drop(waits);
+        ANSWERED.notify_all();
     }
 }
 
@@ -601,6 +733,33 @@ pub extern "system" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeO
     env.with_env(|_env| {
         // The inverse of `pick`'s own `as jlong`.
         deliver(request_id as u64, Answer::Failed(code));
+        Ok::<(), jni::errors::Error>(())
+    })
+    .resolve::<LogErrorAndDefault>();
+}
+
+/// `Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnPickProgress` —
+/// copy progress for the [`pick`] that minted `request_id`. Stores it for the
+/// waiting thread; never blocks on, or calls, the caller's callback.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnPickProgress<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    request_id: jlong,
+    done: jint,
+    items: jint,
+    fraction: jdouble,
+) {
+    env.with_env(|_env| {
+        let progress = PickProgress {
+            items: usize::try_from(items).unwrap_or(0),
+            done: usize::try_from(done).unwrap_or(0),
+            fraction,
+        };
+        // The inverse of `pick`'s own `as jlong`.
+        record_progress(request_id as u64, progress);
         Ok::<(), jni::errors::Error>(())
     })
     .resolve::<LogErrorAndDefault>();
