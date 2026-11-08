@@ -199,7 +199,9 @@ impl PhotoLibrary {
     /// deleted asset can be served until [`clear_thumbnail_cache`](Self::clear_thumbnail_cache).
     /// The cache empties itself when [`manage_limited_selection`](Self::manage_limited_selection)
     /// succeeds and when a miss answers [`PhotoError::PermissionDenied`];
-    /// [`set_thumbnail_cache_budget(0)`](Self::set_thumbnail_cache_budget) also empties it.
+    /// [`set_thumbnail_cache_budget(0)`](Self::set_thumbnail_cache_budget) also empties it. A
+    /// selection changed any other way (such as a `frust-permissions` request on Android while
+    /// access is limited) needs an explicit clear.
     pub fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thumbnail, PhotoError> {
         #[cfg(feature = "library")]
         {
