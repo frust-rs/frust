@@ -17,7 +17,12 @@
 //!
 //! 1. The main-queue block sends [`Event::Failed`] when it cannot present (no
 //!    presenter, PhotosUI not loaded); otherwise it hands the sender to the
-//!    picker's delegate.
+//!    picker's delegate. The picker is a hosted scene that UIKit attaches only
+//!    once its out-of-process service connects, so the presentation is
+//!    confirmed by its completion block, not right after the call: if
+//!    [`PRESENT_GRACE`] passes without it, UIKit refused the presentation and
+//!    the call fails with [`PhotoError::NoPresenter`] (a picker attached after
+//!    that is dismissed at once).
 //! 2. The delegate's `picker:didFinishPicking:` (main thread) dismisses the
 //!    picker, sends [`Event::Finished`] with the result count and starts one
 //!    file load per result.
@@ -41,13 +46,17 @@
 #[path = "apple_picker.rs"]
 mod apple_picker;
 
+use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Duration;
 
-use dispatch2::DispatchQueue;
+use block2::RcBlock;
+use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::MainThreadMarker;
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyClass;
 use objc2_ui_kit::{
     UIApplication, UISceneActivationState, UIViewController, UIWindow, UIWindowScene,
@@ -55,6 +64,20 @@ use objc2_ui_kit::{
 
 use crate::pick_cache;
 use crate::{PhotoError, PickOptions, PickedItem};
+
+/// How long UIKit may take to attach the picker before the call gives up.
+const PRESENT_GRACE: Duration = Duration::from_secs(10);
+
+/// Where one picker's presentation stands (module doc, *Threading* step 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    /// Requested; UIKit has not attached it yet.
+    Pending,
+    /// The presentation's completion block ran.
+    Presented,
+    /// [`PRESENT_GRACE`] passed first and the call failed.
+    GaveUp,
+}
 
 /// One message from the main-queue presentation or an item handler to the
 /// waiting [`pick`] call.
@@ -120,15 +143,39 @@ fn present_on_main(
     }
     let presenter = presenter(mtm).ok_or(PhotoError::NoPresenter)?;
     let picker = apple_picker::Picker::new(mtm, &options, tx.clone(), dir);
-    presenter.presentViewController_animated_completion(&picker.controller, true, None);
+    let shown = Rc::new(Cell::new(Shown::Pending));
+    let on_shown = {
+        let shown = Rc::clone(&shown);
+        let controller = Weak::from_retained(&picker.controller);
+        RcBlock::new(move || {
+            if shown.get() == Shown::GaveUp {
+                // Attached after the call already failed: take it down again.
+                if let Some(controller) = controller.load() {
+                    controller.dismissViewControllerAnimated_completion(false, None);
+                }
+            } else {
+                shown.set(Shown::Presented);
+            }
+        })
+    };
+    presenter.presentViewController_animated_completion(&picker.controller, true, Some(&on_shown));
     // UIKit refuses a presentation (logging a warning, never calling back)
-    // when the presenter is not in a window or is mid-transition. It sets
-    // `presentingViewController` when it accepts one, so a missing value means
-    // no `didFinishPicking:` will ever arrive.
-    if picker.controller.presentingViewController().is_none() {
-        picker.abandon();
-        return Err(PhotoError::NoPresenter);
-    }
+    // when the presenter is not in a window or is mid-transition, so no
+    // `didFinishPicking:` would ever arrive: give up once the grace period
+    // passes without the completion block.
+    let watch = MainThreadBound::new((picker, shown, tx.clone()), mtm);
+    let when = DispatchTime::try_from(PRESENT_GRACE).unwrap_or(DispatchTime::NOW);
+    let _ = DispatchQueue::main().after(when, move || {
+        // SAFETY: the block is submitted to the main queue, which always runs
+        // on the process's main thread.
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        let (picker, shown, tx) = watch.get(mtm);
+        if shown.get() == Shown::Pending {
+            shown.set(Shown::GaveUp);
+            picker.abandon();
+            let _ = tx.send(Event::Failed(PhotoError::NoPresenter));
+        }
+    });
     Ok(())
 }
 
