@@ -34,6 +34,7 @@ mod menu;
 mod runtime;
 mod task;
 pub mod thread_policy;
+pub mod time;
 mod tracked;
 
 pub use app_lifecycle::{
@@ -49,6 +50,7 @@ pub use deep_link::{DeepLink, DeepLinks, deep_links, push_deep_link};
 pub use menu::{MenuEvent, MenuEvents, menu_events, push_menu_event};
 pub use runtime::{FrameWaker, ReactiveRuntime, spawn_blocking};
 pub use task::{AsyncValue, TaskError, UseTask, use_task};
+pub use time::{Timer, sleep, spawn_local_scoped};
 pub use tracked::TrackedScope;
 
 pub use reactive_graph::owner::{Owner, on_cleanup, provide_context, use_context};
