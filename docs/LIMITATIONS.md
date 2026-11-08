@@ -9256,6 +9256,8 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Observed**: a `CancelToken` cancelled while the system picker is still open makes `pick` return `PhotoError::Cancelled` at once, but the picker UI stays up until the user closes it; Android has no API to dismiss it. Whatever the user then picks is discarded.
 
+**Also**: right after a `Cancelled`, a new `pick` can briefly return `PhotoError::Busy` while the host copy thread stops (it checks between 64 KiB reads, and a read blocked on a slow provider delays that), and a re-pick made while the old system picker is still open opens a second one on top.
+
 **Applies to**: Android; apps that cancel while the picker is showing.
 
 **Workaround**: none; cancel after the picker has closed (during loading) removes the partial copies and needs no dismissal.
