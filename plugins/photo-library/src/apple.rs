@@ -64,11 +64,18 @@
 #[cfg(feature = "library")]
 #[path = "apple_library.rs"]
 mod apple_library;
+#[cfg(any(feature = "library", feature = "save"))]
+#[path = "apple_originals.rs"]
+mod apple_originals;
 #[path = "apple_picker.rs"]
 mod apple_picker;
 
 #[cfg(feature = "library")]
 pub(crate) use apple_library::{albums, assets, manage_limited_selection, thumbnail};
+#[cfg(feature = "library")]
+pub(crate) use apple_originals::export_original;
+#[cfg(feature = "save")]
+pub(crate) use apple_originals::save;
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -464,23 +471,6 @@ fn anchor_window(mtm: MainThreadMarker) -> Option<Retained<UIWindow>> {
         fallback = fallback.or(Some(window));
     }
     fallback
-}
-
-// Originals and saving: replaced by the platform implementations.
-#[cfg(feature = "library")]
-pub(crate) fn export_original(
-    _id: &crate::AssetId,
-    _options: &crate::ExportOptions,
-) -> Result<crate::ExportedOriginal, PhotoError> {
-    Err(PhotoError::Unsupported) // Replaced by the platform implementation.
-}
-
-#[cfg(feature = "save")]
-pub(crate) fn save(
-    _request: &crate::SaveRequest,
-    _kind: crate::MediaKind,
-) -> Result<crate::SavedAsset, PhotoError> {
-    Err(PhotoError::Unsupported) // Replaced by the platform implementation.
 }
 
 #[cfg(test)]
