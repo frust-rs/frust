@@ -34,10 +34,20 @@
 //!   the next press. When one `Move` crosses several slops at once, the one with
 //!   the largest travel-to-slop ratio wins — the one a straight move from the
 //!   `Down` would have crossed first (ties: vertical, horizontal, pan).
-//! - **Start point and deltas.** The start reports the position where the slop
-//!   was crossed, and the first update's delta is measured from there, so the
-//!   slop travel is never replayed. Each update carries that `Move`'s delta; the
-//!   axis recognizers zero the cross-axis component and also report the signed
+//! - **Start point and deltas.**
+//!   [`drag_start_behavior`](GestureDetectorView::drag_start_behavior) picks
+//!   where a drag begins. Under the default [`DragStartBehavior::Start`]
+//!   the start reports the position where the slop was crossed, and the first
+//!   update's delta is measured from there, so the slop travel is never
+//!   replayed. Under [`DragStartBehavior::Down`] the start reports the `Down`
+//!   position, and the crossing `Move` at once delivers one update whose delta
+//!   is the whole travel from the `Down` (the slop plus any overshoot), so
+//!   content following the finger lands where it would had it tracked from the
+//!   `Down`; later updates are the same under both. Either way the start still
+//!   waits for the slop — a pan-only detector waits the full 36 px, which stays
+//!   twice [`TOUCH_SLOP`] so the race below keeps its meaning. Each update
+//!   carries that `Move`'s delta; the axis recognizers zero the cross-axis
+//!   component and also report the signed
 //!   [`primary_delta`](DragUpdateDetails::primary_delta). Positions are local to
 //!   the detector.
 //! - **End and velocity.** An `Up` after the start fires `end` with the release
@@ -46,7 +56,13 @@
 //!   sample is stamped with the last paint's raw [`PaintCtx::input_time`] —
 //!   the scroll view's approach — never the animation-scaled
 //!   [`PaintCtx::frame_time`], so an animation time scale leaves the velocity
-//!   unchanged.
+//!   unchanged. The trackers see each `Move` once, whatever the start
+//!   behaviour, and already hold the slop travel's samples (they are fed from
+//!   the first `Move`, before any start): the update a
+//!   [`DragStartBehavior::Down`] drag replays on the crossing `Move` adds no
+//!   sample of its own, so its velocity spans the slop exactly as a
+//!   [`DragStartBehavior::Start`] drag's does and a release reports the same
+//!   velocity under both.
 //! - **Exclusivity.** Moving past [`TOUCH_SLOP`] disarms tap, long-press and
 //!   hold-progress exactly as before, even when no drag slop has been crossed
 //!   yet; a drag recognizer can still start later in the same press. A
@@ -281,14 +297,36 @@ fn outside(pos: Point, size: Size) -> bool {
     pos.x < 0.0 || pos.y < 0.0 || pos.x > size.width || pos.y > size.height
 }
 
+/// Where a started drag reports its start point, set with
+/// [`GestureDetectorView::drag_start_behavior`] (see the [module
+/// docs](self#drag-recognition)).
+///
+/// `#[non_exhaustive]` so behaviours can be added later.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DragStartBehavior {
+    /// The drag begins where the recognizer won: the start reports the `Move`
+    /// that crossed the slop, and the slop travel is never replayed. The
+    /// default.
+    #[default]
+    Start,
+    /// The drag begins at the `Down`: the start reports the `Down` position,
+    /// and the crossing `Move` delivers one update carrying the whole travel
+    /// from the `Down`, so content tracks the finger from the first contact.
+    /// The start still waits for the slop.
+    Down,
+}
+
 /// What a drag `start` callback receives: where the drag began.
 ///
 /// `#[non_exhaustive]` so fields can be added later; read the public fields.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct DragStartDetails {
-    /// The pointer position, local to the detector, at the `Move` that crossed
-    /// the recognizer's slop (not the `Down`).
+    /// The pointer position, local to the detector, where the drag began: the
+    /// `Move` that crossed the recognizer's slop under
+    /// [`DragStartBehavior::Start`] (the default), the `Down` under
+    /// [`DragStartBehavior::Down`].
     pub position: Point,
 }
 
@@ -301,7 +339,8 @@ pub struct DragUpdateDetails {
     /// The pointer position, local to the detector.
     pub position: Point,
     /// The movement since the previous update (or since the start point, for
-    /// the first update), in logical px. An axis drag zeroes the cross-axis
+    /// the first update — the `Down` under [`DragStartBehavior::Down`], so it
+    /// spans the slop), in logical px. An axis drag zeroes the cross-axis
     /// component.
     pub delta: Vec2,
     /// The signed movement along the drag's axis — `delta.y` for a vertical
@@ -557,6 +596,7 @@ pub struct GestureDetectorView<State: 'static> {
     vertical_drag: DragCallbacks<State>,
     horizontal_drag: DragCallbacks<State>,
     pan: DragCallbacks<State>,
+    drag_start_behavior: DragStartBehavior,
 }
 
 /// Wrap `child` in a gesture detector (no recognisers until one is attached,
@@ -577,6 +617,7 @@ pub fn GestureDetector<State: 'static, V: View<State>>(child: V) -> GestureDetec
         vertical_drag: DragCallbacks::new(),
         horizontal_drag: DragCallbacks::new(),
         pan: DragCallbacks::new(),
+        drag_start_behavior: DragStartBehavior::Start,
     }
 }
 
@@ -596,16 +637,19 @@ macro_rules! drag_builders {
         #[doc = concat!("Call `f` when a ", $label, " starts: once the press has travelled ")]
         #[doc = concat!($slop, " from the `Down`, before any other wired drag recognizer")]
         #[doc = "crossed its own slop. The details carry the local position where the slop"]
-        #[doc = "was crossed; a press that starts a drag never taps, long-presses or reports"]
-        #[doc = "hold progress afterwards."]
+        #[doc = "was crossed, or the `Down` under [`DragStartBehavior::Down`] (see"]
+        #[doc = "[`drag_start_behavior`](Self::drag_start_behavior)); a press that starts a"]
+        #[doc = "drag never taps, long-presses or reports hold progress afterwards."]
         pub fn $start<F: Fn(&mut State, DragStartDetails) + 'static>(mut self, f: F) -> Self {
             self.$field.start = Some(Rc::new(f));
             self
         }
 
         #[doc = concat!("Call `f` on every `Move` of a started ", $label, " with that move's")]
-        #[doc = "local position and delta. The first delta is measured from the start point,"]
-        #[doc = "so the slop travel is never replayed."]
+        #[doc = "local position and delta. The first delta is measured from the start point:"]
+        #[doc = "by default the slop travel is never replayed, while under"]
+        #[doc = "[`DragStartBehavior::Down`] the crossing `Move` itself delivers a first update"]
+        #[doc = "spanning the whole travel from the `Down`."]
         pub fn $update<F: Fn(&mut State, DragUpdateDetails) + 'static>(mut self, f: F) -> Self {
             self.$field.update = Some(Rc::new(f));
             self
@@ -758,6 +802,19 @@ impl<State: 'static> GestureDetectorView<State> {
         self.hold_threshold_ms = Some(ms);
         self
     }
+
+    /// Choose where every wired drag recognizer (pan, vertical, horizontal)
+    /// begins its drag; defaults to [`DragStartBehavior::Start`].
+    ///
+    /// [`DragStartBehavior::Down`] reports the start at the `Down` and replays
+    /// the slop travel in the first update, on the `Move` that crossed the
+    /// slop, so a surface that follows the finger does not jump by the slop.
+    /// The start still waits for the slop, and which recognizer wins is
+    /// unchanged. See the [module docs](self#drag-recognition).
+    pub fn drag_start_behavior(mut self, behavior: DragStartBehavior) -> Self {
+        self.drag_start_behavior = behavior;
+        self
+    }
 }
 
 /// The gesture recogniser's state machine. `Copy` so an event arm can inspect it
@@ -853,6 +910,9 @@ pub struct GestureDetectorWidget {
     /// A started drag a `Cancel` ended, whose `cancel` callback is owed to the
     /// next state-bearing pass (see the [module docs](self#drag-recognition)).
     owed_cancel: Option<DragAxis>,
+    /// Where a started drag reports its start (see
+    /// [`GestureDetectorView::drag_start_behavior`]).
+    drag_start_behavior: DragStartBehavior,
 }
 
 impl GestureDetectorWidget {
@@ -1022,6 +1082,7 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             velocity_y: VelocityTracker::new(),
             last_input_time: FrameTime::ZERO,
             owed_cancel: None,
+            drag_start_behavior: self.drag_start_behavior,
         }
     }
 
@@ -1047,6 +1108,7 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
         element.vertical_drag = self.vertical_drag.erase();
         element.horizontal_drag = self.horizontal_drag.erase();
         element.pan = self.pan.erase();
+        element.drag_start_behavior = self.drag_start_behavior;
         crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
     }
 
@@ -1278,19 +1340,38 @@ impl Widget for GestureDetectorWidget {
                     match self.state {
                         Recognizer::DragArmed { down_pos } => {
                             if let Some(axis) = self.drag_winner(p.position - down_pos) {
-                                // The start point is where the slop was crossed,
-                                // and the first update measures from here, so the
-                                // slop travel is never replayed.
+                                // Under `Start` the start point is where the slop
+                                // was crossed and the first update measures from
+                                // here, so the slop travel is never replayed.
+                                // Under `Down` the start is the `Down` and this
+                                // same `Move` replays the travel from it in one
+                                // update. The velocity trackers already hold this
+                                // `Move` (recorded above), so the replay adds no
+                                // sample. Later updates measure from here either way.
                                 self.state = Recognizer::Dragging {
                                     axis,
                                     last_pos: p.position,
                                 };
                                 self.child.event_child(ctx, event);
-                                if let Some(cb) = self.drag_callbacks(axis).start.as_mut() {
+                                let from_down = self.drag_start_behavior == DragStartBehavior::Down;
+                                let callbacks = self.drag_callbacks(axis);
+                                if let Some(cb) = callbacks.start.as_mut() {
                                     cb(
                                         ctx,
                                         DragStartDetails {
+                                            position: if from_down { down_pos } else { p.position },
+                                        },
+                                    );
+                                }
+                                if from_down && let Some(cb) = callbacks.update.as_mut() {
+                                    let (delta, primary_delta) =
+                                        axis.project(p.position - down_pos);
+                                    cb(
+                                        ctx,
+                                        DragUpdateDetails {
                                             position: p.position,
+                                            delta,
+                                            primary_delta,
                                         },
                                     );
                                 }
@@ -2617,6 +2698,155 @@ mod tests {
         root.event(&mut log, &ev(PointerPhase::Move, 75.0, 70.0));
         assert_eq!(log.starts.len(), 1);
         assert_eq!(log.starts[0].0, "h", "25 px across beats 20 px down");
+    }
+
+    fn pan_down_logic(_: &mut DragLog) -> DragView {
+        wire_pan(tap_detector()).drag_start_behavior(DragStartBehavior::Down)
+    }
+
+    fn vertical_beside_pan_logic(_: &mut DragLog) -> DragView {
+        wire_pan(wire_vertical(tap_detector()))
+    }
+
+    fn vertical_beside_pan_down_logic(_: &mut DragLog) -> DragView {
+        vertical_beside_pan_logic(&mut DragLog::default())
+            .drag_start_behavior(DragStartBehavior::Down)
+    }
+
+    /// Down at (50, 50), then moves to x = 60, 70 and 90 at y = 50; the last
+    /// crosses the 36 px pan slop.
+    fn scripted_pan_past_the_slop(root: &mut RenderRoot<DragLog, DragView>, log: &mut DragLog) {
+        root.event(log, &ev(PointerPhase::Down, 50.0, 50.0));
+        root.event(log, &ev(PointerPhase::Move, 60.0, 50.0));
+        root.event(log, &ev(PointerPhase::Move, 70.0, 50.0));
+        root.event(log, &ev(PointerPhase::Move, 90.0, 50.0));
+    }
+
+    #[test]
+    fn drag_start_behavior_defaults_to_start() {
+        assert_eq!(DragStartBehavior::default(), DragStartBehavior::Start);
+        let view = pan_logic(&mut DragLog::default());
+        assert_eq!(view.drag_start_behavior, DragStartBehavior::Start);
+    }
+
+    #[test]
+    fn a_down_start_pan_reports_the_down_and_replays_the_slop_travel() {
+        // The default: the start is the crossing move, which is no update.
+        let mut root = drag_root(pan_logic);
+        let mut log = DragLog::default();
+        scripted_pan_past_the_slop(&mut root, &mut log);
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.starts[0].1.position, Point::new(90.0, 50.0));
+        assert!(log.updates.is_empty(), "the crossing move is not an update");
+        root.event(&mut log, &ev(PointerPhase::Move, 100.0, 50.0));
+        assert_eq!(log.updates.len(), 1);
+        assert_eq!(log.updates[0].1.delta, Vec2::new(10.0, 0.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 100.0, 50.0));
+
+        // A rebuild switches the same detector to `Down`.
+        root.rebuild(&mut pan_down_logic, &mut log);
+        let mut log = DragLog::default();
+        scripted_pan_past_the_slop(&mut root, &mut log);
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.starts[0].0, "pan");
+        assert_eq!(
+            log.starts[0].1.position,
+            Point::new(50.0, 50.0),
+            "a down-start drag begins at the Down"
+        );
+        assert_eq!(log.updates.len(), 1, "the crossing move replays the travel");
+        let replay = log.updates[0].1;
+        assert_eq!(
+            replay.delta,
+            Vec2::new(40.0, 0.0),
+            "the slop and its overshoot"
+        );
+        assert_eq!(replay.position, Point::new(90.0, 50.0));
+        assert_eq!(replay.primary_delta, None, "a pan has no primary axis");
+        root.event(&mut log, &ev(PointerPhase::Move, 100.0, 50.0));
+        assert_eq!(log.updates.len(), 2);
+        assert_eq!(
+            log.updates[1].1.delta,
+            Vec2::new(10.0, 0.0),
+            "later moves are unchanged"
+        );
+        root.event(&mut log, &ev(PointerPhase::Up, 100.0, 50.0));
+        assert_eq!(log.ends.len(), 1);
+        assert_eq!(log.taps, 0);
+    }
+
+    #[test]
+    fn a_down_start_axis_drag_replays_only_its_axis_and_still_wins_beside_a_pan() {
+        // A near-straight downward move: past the vertical slop (20 > 18), well
+        // short of the pan slop, so the vertical drag wins under both behaviours.
+        let script = |root: &mut RenderRoot<DragLog, DragView>, log: &mut DragLog| {
+            root.event(log, &ev(PointerPhase::Down, 50.0, 20.0));
+            root.event(log, &ev(PointerPhase::Move, 52.0, 30.0));
+            root.event(log, &ev(PointerPhase::Move, 53.0, 40.0));
+        };
+
+        let mut root = drag_root(vertical_beside_pan_logic);
+        let mut log = DragLog::default();
+        script(&mut root, &mut log);
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.starts[0].0, "v", "the axis drag wins under Start");
+        assert_eq!(log.starts[0].1.position, Point::new(53.0, 40.0));
+        assert!(log.updates.is_empty());
+
+        let mut root = drag_root(vertical_beside_pan_down_logic);
+        let mut log = DragLog::default();
+        script(&mut root, &mut log);
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.starts[0].0, "v", "the axis drag wins under Down");
+        assert_eq!(log.starts[0].1.position, Point::new(50.0, 20.0));
+        assert_eq!(log.updates.len(), 1);
+        let (label, replay) = log.updates[0];
+        assert_eq!(label, "v");
+        assert_eq!(
+            replay.delta,
+            Vec2::new(0.0, 20.0),
+            "only the vertical component of the crossing travel"
+        );
+        assert_eq!(replay.primary_delta, Some(20.0));
+        assert_eq!(replay.position, Point::new(53.0, 40.0));
+        assert!(
+            log.updates.iter().all(|(l, _)| *l == "v"),
+            "the pan stays silent"
+        );
+    }
+
+    #[test]
+    fn a_down_start_drag_released_on_the_crossing_move_ends_with_the_start_velocity() {
+        // Down, then two moves 16 ms of raw clock apart (the second crosses the
+        // pan slop), then Up: under each behaviour.
+        let run = |logic: fn(&mut DragLog) -> DragView| {
+            let mut root = drag_root(logic);
+            let mut log = DragLog::default();
+            let mut sink = NullScene;
+            root.event(&mut log, &ev(PointerPhase::Down, 50.0, 50.0));
+            root.paint(&mut sink, ft(1_000.0));
+            root.paint(&mut sink, ft(1_016.0));
+            root.event(&mut log, &ev(PointerPhase::Move, 70.0, 50.0));
+            root.paint(&mut sink, ft(1_032.0));
+            root.event(&mut log, &ev(PointerPhase::Move, 90.0, 50.0));
+            root.event(&mut log, &ev(PointerPhase::Up, 90.0, 50.0));
+            log
+        };
+        let start = run(pan_logic);
+        let down = run(pan_down_logic);
+        assert_eq!(down.starts.len(), 1);
+        assert_eq!(down.updates.len(), 1, "start, one update, end");
+        assert_eq!(down.ends.len(), 1);
+        let velocity = down.ends[0].1.velocity;
+        assert!(
+            velocity.x.is_finite() && velocity.y.is_finite(),
+            "a finite release velocity, got {velocity:?}"
+        );
+        assert_eq!(start.ends.len(), 1);
+        assert_eq!(
+            velocity, start.ends[0].1.velocity,
+            "the replay adds no velocity sample"
+        );
     }
 
     #[test]
