@@ -18,3 +18,10 @@ pub(crate) fn share(text: &str) -> Result<ShareOutcome, ShareError> {
     })?;
     Ok(ShareOutcome::CopiedToClipboard)
 }
+
+/// Linux and Windows have no file share sheet and no clipboard fallback for
+/// files.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn share_files() -> Result<ShareOutcome, ShareError> {
+    Err(ShareError::Unsupported)
+}

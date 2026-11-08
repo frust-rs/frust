@@ -34,6 +34,19 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- The new `frust-photo-library` plugin crate: `PhotoLibrary::pick(&PickOptions)` opens the system photo
+  picker on Android and iOS (no permission and no Info.plist string needed) and a native file dialog on
+  Linux, macOS and Windows. Options: a media filter, a limit, `on_progress` loading reports
+  (`PickProgress`, throttled to 20 per second, ending at 1.0) and a `CancelToken`. Mobile picks are
+  copies in an app cache (`PickedItem::is_copy`), reclaimed with `PhotoLibrary::clear_pick_cache`;
+  `pick` blocks, refuses the UI thread on mobile and allows one pick at a time (`PhotoError::Busy`).
+  Cancelling returns `PhotoError::Cancelled` and removes the call's partial copies. The registry entry
+  `photo-library` adds the plugin's Gradle module and the `PhotosUI` link; the playground gains a Picker
+  panel.
+- `Share::files` and `Share::files_anchored` share one to 64 files: the Android chooser (through a
+  `FileProvider` in the plugin's own Gradle module), the iOS activity sheet and a macOS sharing picker.
+  Linux and Windows answer `ShareError::Unsupported`. On Android `Ok` means the share is enqueued: the
+  files are copied on a background thread and a failure is logged under tag `FrustShare`.
 - `frust::testing::Tester` (facade `test-support` feature): a state-generic headless driver. `pump` /
   `pump_and_settle` / `pump_until` on a manual clock under its own child reactive owner;
   `tap` / `press` / `long_press` / `drag` / `timed_drag`; `start_gesture` / `start_touch` with
@@ -353,6 +366,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- `frust-share` now carries an Android Gradle module (the `FileProvider` behind `Share::files`). An
+  existing app re-runs Add Plugin for `share` to include the module before sharing files on Android;
+  text and URL sharing are unchanged.
 - The Android logger's level follows the `debug.frust.log` system property (`adb shell setprop
   debug.frust.log debug`, cleared on reboot; off / error / warn / info / debug / trace, the
   `FRUST_LOG` vocabulary of the other shells) instead of being fixed at `Info`; unset, it stays

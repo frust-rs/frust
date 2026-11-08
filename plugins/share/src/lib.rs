@@ -1,7 +1,8 @@
-//! `frust-share`: a platform plugin that hands text or an http/https URL to
-//! the platform share sheet — Android `ACTION_SEND` chooser via plain JNI,
-//! iOS `UIActivityViewController` activity sheet, desktop clipboard copy as
-//! the fallback.
+//! `frust-share`: a platform plugin that hands text, an http/https URL or
+//! files to the platform share sheet — Android `ACTION_SEND` chooser via
+//! plain JNI, iOS `UIActivityViewController` activity sheet, macOS
+//! `NSSharingServicePicker` (files), desktop clipboard copy as the fallback
+//! for text and URLs. Files are `Unsupported` on Linux and Windows.
 //!
 //! # Charter: a platform plugin
 //!
@@ -20,7 +21,12 @@ mod android;
 mod apple;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod desktop;
+mod files;
+#[cfg(target_os = "macos")]
+mod macos;
 mod url;
+
+use std::path::{Path, PathBuf};
 
 /// Where an iOS popover should anchor, in logical points (ignored on other
 /// platforms; accepted everywhere so the signature is final).
@@ -59,6 +65,18 @@ pub enum ShareError {
     /// No view controller / activity is available to present from.
     #[error("share: no presenter available")]
     NoPresenter,
+
+    /// `Share::files` was given more than 64 files.
+    #[error("share: too many files")]
+    TooManyFiles,
+
+    /// A file path was relative, missing, not a regular file, or not UTF-8.
+    #[error("share: invalid file")]
+    InvalidFile,
+
+    /// This platform cannot share the payload (files on Linux, Windows, web).
+    #[error("share: unsupported on this platform")]
+    Unsupported,
 
     /// A backend failure (JNI exception class name, clipboard error kind, …).
     #[error("share error: {0}")]
@@ -104,6 +122,46 @@ impl Share {
         crate::url::validate(url)?;
         dispatch(url, PayloadKind::Url, subject, None)
     }
+
+    /// Share one or more files (at most 64) through the platform share UI.
+    ///
+    /// Each path must be absolute and name an existing regular file; paths
+    /// are canonicalised before dispatch.
+    ///
+    /// # Threading
+    /// Never blocks on file size on any platform, so it may be called from a
+    /// UI handler. On Android `Ok(ShareOutcome::Presented)` means the share
+    /// was enqueued: the files are copied on a background thread (a snapshot
+    /// taken then), and a later staging failure is logged and shows no
+    /// chooser. A chooser Android refuses to launch because the app went to
+    /// the background in the meantime does not appear either, and nothing is
+    /// logged.
+    ///
+    /// # Errors
+    /// [`ShareError::EmptyPayload`] for no paths, [`ShareError::TooManyFiles`]
+    /// above 64, [`ShareError::InvalidFile`] for a bad path,
+    /// [`ShareError::Unsupported`] where files cannot be shared.
+    pub fn files(paths: &[&Path], subject: Option<&str>) -> Result<ShareOutcome, ShareError> {
+        Self::files_anchored(paths, subject, None)
+    }
+
+    /// As [`Self::files`], with a popover `anchor` (iOS iPad and the macOS
+    /// picker; ignored elsewhere).
+    ///
+    /// # Threading
+    /// As [`Self::files`]: never blocks on file size; on Android `Presented`
+    /// means enqueued and a later staging failure is logged.
+    ///
+    /// # Errors
+    /// See [`Self::files`].
+    pub fn files_anchored(
+        paths: &[&Path],
+        subject: Option<&str>,
+        anchor: Option<&ShareAnchor>,
+    ) -> Result<ShareOutcome, ShareError> {
+        let paths = crate::files::validate(paths)?;
+        dispatch_files(paths, subject, anchor)
+    }
 }
 
 /// Which `Share` entry point a payload came from (iOS hands a URL over as an
@@ -142,7 +200,6 @@ fn popover_source(anchor: Option<&ShareAnchor>, bounds: kurbo::Rect) -> PopoverS
     }
 }
 
-#[allow(unused_variables)]
 fn dispatch(
     text: &str,
     kind: PayloadKind,
@@ -155,10 +212,12 @@ fn dispatch(
     }
     #[cfg(target_os = "android")]
     {
+        let _ = (kind, anchor);
         android::share(text, subject)
     }
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
+        let _ = (kind, subject, anchor);
         desktop::share(text)
     }
     #[cfg(not(any(
@@ -169,7 +228,46 @@ fn dispatch(
         target_os = "windows"
     )))]
     {
+        let _ = (text, kind, subject, anchor);
         Err(ShareError::Platform("unsupported platform".to_string()))
+    }
+}
+
+/// Route validated, canonical `paths` to the platform's file-share backend.
+fn dispatch_files(
+    paths: Vec<PathBuf>,
+    subject: Option<&str>,
+    anchor: Option<&ShareAnchor>,
+) -> Result<ShareOutcome, ShareError> {
+    #[cfg(target_os = "ios")]
+    {
+        apple::share_files(paths, subject, anchor)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = subject;
+        macos::share_files(paths, anchor)
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = anchor;
+        android::share_files(&paths, subject)
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        let _ = (paths, subject, anchor);
+        desktop::share_files()
+    }
+    #[cfg(not(any(
+        target_os = "ios",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )))]
+    {
+        let _ = (paths, subject, anchor);
+        Err(ShareError::Unsupported)
     }
 }
 
@@ -204,6 +302,9 @@ mod tests {
             ShareError::InvalidUrl,
             ShareError::PlatformNotInitialized,
             ShareError::NoPresenter,
+            ShareError::TooManyFiles,
+            ShareError::InvalidFile,
+            ShareError::Unsupported,
         ] {
             assert!(!e.to_string().contains(MARKER));
         }
@@ -230,6 +331,29 @@ mod tests {
             rect: kurbo::Rect::new(f64::NAN, 0.0, 1.0, 1.0),
         };
         assert_eq!(popover_source(Some(&bad), bounds), centred);
+    }
+
+    #[test]
+    fn files_refuses_bad_input_before_dispatch() {
+        assert!(matches!(
+            Share::files(&[], None),
+            Err(ShareError::EmptyPayload)
+        ));
+        assert!(matches!(
+            Share::files(&[Path::new("relative.bin")], None),
+            Err(ShareError::InvalidFile)
+        ));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn files_are_unsupported_on_linux_and_windows() {
+        let file =
+            std::env::temp_dir().join(format!("frust-share-unsupported-{}", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        let result = Share::files(&[file.as_path()], None);
+        std::fs::remove_file(&file).ok();
+        assert!(matches!(result, Err(ShareError::Unsupported)));
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
