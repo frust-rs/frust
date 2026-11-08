@@ -18,6 +18,34 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 | Linux, macOS, Windows | native file dialog (`frust-file-dialogs`), original files returned |
 | web | none: `PhotoError::Unsupported` |
 
+## Browse the library
+
+With the `library` cargo feature (`frust-photo-library = { version = "0.6", features = ["library"] }`, or the TUI's
+Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibrary::albums()`,
+`PhotoLibrary::assets(&AssetQuery)` (newest first, pages of at most 500) and
+`PhotoLibrary::thumbnail(&AssetId, &ThumbnailRequest)`, which returns straight-alpha RGBA8 ready for
+`ImageSource::from_rgba8`. The feature adds the Android media read permissions,
+`NSPhotoLibraryUsageDescription` and the `Photos` framework; request access with `frust-permissions`
+(the `photos` feature), browsing never prompts. Without the feature every call returns
+`PhotoError::FeatureDisabled`; desktop returns `Unsupported`.
+
+- Calls block and refuse the mobile UI thread (`PhotoError::UiThread`); run them in `spawn_blocking`.
+  Browsing takes no pick guard. `manage_limited_selection()` shows the system UI that changes the
+  selection while access is Limited, and returns `Busy` while a pick runs.
+- `Fill` returns exactly the requested box, centre-cropped; `Fit` stays inside it. iOS `Fit` never
+  upscales, Android `Fit` can upscale a small source. An iOS thumbnail waits at most 30 s, then returns
+  `PhotoError::Platform`.
+- Thumbnails are cached in memory (48 MiB; `set_thumbnail_cache_budget`, `clear_thumbnail_cache`). A hit
+  skips the access check. The cache clears when `manage_limited_selection` succeeds and when access is
+  denied; after any other selection change, or an edited or deleted asset, call `clear_thumbnail_cache`
+  (`photo-library-thumbnail-cache-staleness` in [LIMITATIONS.md](../../docs/LIMITATIONS.md)).
+- With `library` on iOS, picks carry `PickedItem::asset_id`, and a HEIC pick can be shown through
+  `thumbnail`.
+- iOS shows its own prompt while access is Limited; to silence it add the boolean key
+  `PHPhotoLibraryPreventAutomaticLimitedAccessAlert` to `Info.plist` by hand
+  (`photo-library-limited-alert-plist-manual`). Android pages cost a count and a sort per page
+  (`photo-library-android-paging-cost`).
+
 ## Add the dependency
 
 ```toml
@@ -73,7 +101,7 @@ impl Component for Gallery {
 
 | Platform | Result |
 |---|---|
-| iPhone 13 mini, iOS 27.2 | passed (pick, loading progress, cancel, swipe-down, share picked, clear cache) |
-| Pixel 5, Android 14 | passed; Xiaomi 12 (Android 17) passed the picker and share legs on an earlier build |
+| iPhone 13 mini, iOS 27.2 | passed (pick, loading progress, cancel, swipe-down, share picked, clear cache; browsing: albums, paging, thumbnails, Limited and Manage selection) |
+| Pixel 5, Android 14 | passed, browsing included; Xiaomi 12 (Android 17) passed the picker and share legs on an earlier build |
 | macOS | passed through the file dialog |
-| Android 10/11 fallback picker, Linux, Windows | not device-tested (the API 29/30 leg is owed) |
+| Android 10/11 fallback picker, Linux, Windows | not device-tested (the API 29/30 leg is owed; so are API 29 paging and a second API 31+ device for browsing) |
