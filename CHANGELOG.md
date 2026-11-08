@@ -55,6 +55,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `set_metrics` / `resize`. Built with `new`, `with_options` (`TesterOptions`) or `new_with`. There
   is no process-wide lock, so Tester tests run in parallel. The one-shot helpers `semantics_of`,
   `scene_of` and `scene_of_with` are unchanged. `frust::authoring` re-exports `TextWidget`.
+  `Tester::up_at` releases a gesture at a point it never moved to (the `Up` carries the point; no
+  travel reaches a velocity tracker), and `frust::testing` re-exports `InspectDetail` and
+  `TextInspect` next to `InspectNode`, so a test can honour clipping ancestors for any control.
 - `frust::paths::{data_dir, cache_dir, atomic_write}`: the platform data and cache directories and the
   write-to-temp-and-rename helper, re-exported from `frust-paths` so an app depending on the facade
   alone can place caches, sidecars and export staging; the module docs say what each platform backs up.
@@ -366,6 +369,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `frust-share` now carries an Android Gradle module (the `FileProvider` behind `Share::files`). An
   existing app re-runs Add Plugin for `share` to include the module before sharing files on Android;
   text and URL sharing are unchanged.
+- The Android logger's level follows the `debug.frust.log` system property (`adb shell setprop
+  debug.frust.log debug`, cleared on reboot; off / error / warn / info / debug / trace, the
+  `FRUST_LOG` vocabulary of the other shells) instead of being fixed at `Info`; unset, it stays
+  `Info` in every build. The chosen level is logged once at startup under the `frust` tag.
 - `frust::gpu::with_context` keeps its signature but answers the current device, which may change
   between calls: do not keep device or queue clones across frames, and rebuild device-owned
   resources when `device_generation()` changes.

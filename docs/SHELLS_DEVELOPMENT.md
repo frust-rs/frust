@@ -100,8 +100,8 @@ theme — `FrustActivity.onCreate` adds `FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS` itse
 [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s cross-cutting host-signal flow) — but it keeps
 logging one `frust`-tagged warning naming this section until the manifest theme actually moves.
 
-**Verify** (against a debug APK — `frust-insets` logs only under `cfg!(debug_assertions)`, at Info
-since the Android logger caps below that):
+**Verify** (against a debug APK — `frust-insets` logs only under `cfg!(debug_assertions)`, at Info,
+the Android logger's default; `adb shell setprop debug.frust.log <level>` moves it):
 
 ```bash
 adb logcat -s frust               # frust-insets view_padding ... t=<nonzero> ... b=<nonzero> ...
