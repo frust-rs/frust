@@ -85,7 +85,10 @@ pub struct PickedItem {
     pub path: PathBuf,
     /// Image or video.
     pub kind: MediaKind,
-    /// The original file name when the platform reports one.
+    /// The display name the provider reported, when it reports one.
+    ///
+    /// Untrusted and unsanitised: for display only, never a path component. The on-disk
+    /// [`path`](Self::path) uses a sanitised name.
     pub file_name: Option<String>,
     /// The MIME type when known.
     pub mime: Option<String>,
@@ -121,6 +124,9 @@ pub enum PhotoError {
     /// This platform has no picker.
     #[error("photo picking is not supported on this platform")]
     Unsupported,
+    /// Another pick is already in progress, or the pick cache is being cleared.
+    #[error("another photo pick is already in progress")]
+    Busy,
     /// A filesystem error while preparing the pick cache.
     #[error("filesystem error: {0:?}")]
     Io(std::io::ErrorKind),

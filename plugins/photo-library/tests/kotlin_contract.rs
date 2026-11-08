@@ -339,9 +339,10 @@ fn the_host_never_names_a_file_from_platform_text() {
         "the staging path is the only file the host names inside destDir"
     );
 
+    let cache = rust_code(&read("src/pick_cache.rs"));
+    let copy_name = function(&cache, "fn copy_name(");
+    assert!(copy_name.contains("sanitize_file_name("));
     let rust = rust_code(&read(RUST_ANDROID));
-    let copy_name = function(&rust, "fn copy_name(");
-    assert!(copy_name.contains("pick_cache::sanitize_file_name("));
     let finish = function(&rust, "fn finish_copies(");
     assert!(finish.contains("staging.parent() != Some(dir)"));
     assert!(finish.contains("fs::rename(&staging, &path)?;"));
@@ -379,12 +380,14 @@ fn one_pick_is_in_flight_at_a_time() {
     );
 
     let rust = rust_code(&read(RUST_ANDROID));
-    assert!(rust.contains("static PICK_LOCK: Mutex<()> = Mutex::new(());"));
+    assert!(
+        rust_code(&read("src/pick_cache.rs")).contains("static IN_FLIGHT: AtomicBool"),
+        "the crate-wide guard lives in the pick cache"
+    );
     let pick = function(&rust, "pub(crate) fn pick(");
     let guard = pick
-        .find("let _one_at_a_time = match PICK_LOCK.try_lock() {")
-        .expect("pick must try_lock PICK_LOCK in a named guard");
-    assert!(pick.contains("Err(TryLockError::WouldBlock) => return Err(busy()),"));
+        .find("let _one_at_a_time = pick_cache::PickGuard::acquire()?;")
+        .expect("pick must take the crate-wide PickGuard in a named guard");
     let ui = pick
         .find("ensure_off_ui_thread")
         .expect("pick checks the UI thread");
@@ -397,8 +400,8 @@ fn one_pick_is_in_flight_at_a_time() {
     );
     let deliver = function(&rust, "fn deliver(");
     assert!(
-        !deliver.contains("PICK_LOCK"),
-        "deliver must never take PICK_LOCK, or a held pick could not be answered"
+        !deliver.contains("PickGuard"),
+        "deliver must never take the PickGuard, or a held pick could not be answered"
     );
     assert!(
         deliver.contains("Some(slot @ None) =>"),
