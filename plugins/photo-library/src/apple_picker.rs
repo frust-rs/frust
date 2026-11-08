@@ -1,6 +1,14 @@
 //! The PHPicker pieces of the iOS arm: the hand-declared view controller, its
 //! delegate, and the eager copy of each picked file.
 //!
+//! # Answers
+//!
+//! The delegate answers the waiting call once, through [`Reply`]:
+//! `picker:didFinishPicking:` (the user chose or tapped Cancel),
+//! `presentationControllerDidDismiss:` (the user swiped the sheet down, which
+//! does not call the picker delegate), a refused presentation and a cancel all
+//! take the one sender, so the first wins.
+//!
 //! # Bindings
 //!
 //! `objc2-photos-ui` binds `PHPickerConfiguration`, `PHPickerFilter`,
@@ -33,21 +41,25 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use block2::RcBlock;
-use objc2::rc::{Allocated, Retained};
+use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, extern_class};
 use objc2::{extern_methods, msg_send};
-use objc2_foundation::{NSArray, NSError, NSInteger, NSItemProvider, NSString, NSURL};
+use objc2_foundation::{NSArray, NSError, NSInteger, NSItemProvider, NSProgress, NSString, NSURL};
 use objc2_photos_ui::{
     PHPickerConfiguration, PHPickerConfigurationAssetRepresentationMode, PHPickerFilter,
     PHPickerResult, PHPickerViewControllerDelegate,
 };
-use objc2_ui_kit::{UIResponder, UIViewController};
+use objc2_ui_kit::{
+    UIAdaptivePresentationControllerDelegate, UIPresentationController, UIResponder,
+    UIViewController,
+};
 
-use super::Event;
+use super::{Event, Shared};
 use crate::media_types;
 use crate::pick_cache::sanitize_file_name;
 use crate::{MediaFilter, MediaKind, PickOptions, PickedItem};
@@ -55,6 +67,8 @@ use crate::{MediaFilter, MediaKind, PickOptions, PickedItem};
 const IMAGE_TYPE: &str = "public.image";
 const MOVIE_TYPE: &str = "public.movie";
 const DIRECTORY_TYPE: &str = "public.directory";
+/// A load handler's outcome after the call was cancelled.
+const CANCELLED: &str = "the pick was cancelled";
 
 extern_class!(
     /// `PHPickerViewController` as the iOS SDK declares it.
@@ -92,15 +106,47 @@ impl PHPickerViewController {
     );
 }
 
+/// The waiting call's sender, handed out once (module doc's *Answers*).
+///
+/// A reply dropped unanswered (its picker released without any callback)
+/// sends `Finished(0)`, a dismissal, so the waiting call never depends on the
+/// channel disconnecting: the cancel hook holds a sender of its own.
+struct Reply(Cell<Option<Sender<Event>>>);
+
+impl Reply {
+    fn new(tx: Sender<Event>) -> Self {
+        Self(Cell::new(Some(tx)))
+    }
+
+    /// The sender, for the first caller only.
+    fn take(&self) -> Option<Sender<Event>> {
+        self.0.take()
+    }
+
+    /// Answer "dismissed with nothing chosen", unless something answered first.
+    fn dismissed(&self) {
+        if let Some(tx) = self.take() {
+            let _ = tx.send(Event::Finished(0));
+        }
+    }
+}
+
+impl Drop for Reply {
+    fn drop(&mut self) {
+        self.dismissed();
+    }
+}
+
 /// The delegate's state for one pick.
 struct DelegateIvars {
-    /// The waiting call. Taken on the first answer, so a second
-    /// `didFinishPicking:` (or one after [`Picker::abandon`]) reports nothing.
-    tx: Cell<Option<Sender<Event>>>,
+    /// The waiting call.
+    reply: Reply,
     /// This call's pick-cache directory.
     dir: PathBuf,
     /// Which kinds of item to load.
     filter: MediaFilter,
+    /// The call's kept loads and cancel flag.
+    shared: Arc<Shared>,
 }
 
 define_class!(
@@ -136,6 +182,21 @@ define_class!(
             }
         }
     }
+
+    // SAFETY: the one method is the protocol's optional
+    // `- (void)presentationControllerDidDismiss:(UIPresentationController *)`
+    // (`UIPresentationController.h`), with the header's argument and return
+    // types. UIKit calls it on the main thread after an interactive dismissal.
+    unsafe impl UIAdaptivePresentationControllerDelegate for FrustPhotoPickerDelegate {
+        #[unsafe(method(presentationControllerDidDismiss:))]
+        fn presentation_controller_did_dismiss(&self, _controller: &UIPresentationController) {
+            // Called by UIKit: never unwind into its frame.
+            let outcome = catch_unwind(AssertUnwindSafe(|| self.ivars().reply.dismissed()));
+            if outcome.is_err() {
+                log::error!("photo picker: panic while handling the dismissal");
+            }
+        }
+    }
 );
 
 impl FrustPhotoPickerDelegate {
@@ -144,11 +205,13 @@ impl FrustPhotoPickerDelegate {
         tx: Sender<Event>,
         dir: PathBuf,
         filter: MediaFilter,
+        shared: Arc<Shared>,
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(DelegateIvars {
-            tx: Cell::new(Some(tx)),
+            reply: Reply::new(tx),
             dir,
             filter,
+            shared,
         });
         // SAFETY: `NSObject`'s designated initializer, called on a freshly
         // allocated instance whose ivars are already set.
@@ -159,9 +222,13 @@ impl FrustPhotoPickerDelegate {
     fn finish(&self, picker: &PHPickerViewController, results: &NSArray<PHPickerResult>) {
         // The picker does not dismiss itself (`PHPicker.h`).
         picker.dismissViewControllerAnimated_completion(true, None);
-        let Some(tx) = self.ivars().tx.take() else {
+        let Some(tx) = self.ivars().reply.take() else {
             return;
         };
+        if self.ivars().shared.is_cancelled() {
+            // The cancel's main-queue step is still queued: start nothing.
+            return;
+        }
         let _ = tx.send(Event::Finished(results.count()));
         let ut_type = UtType::lookup();
         for (index, result) in results.iter().enumerate() {
@@ -186,6 +253,7 @@ impl FrustPhotoPickerDelegate {
                     dir: self.ivars().dir.clone(),
                     suggested_name: provider.suggestedName().map(|n| n.to_string()),
                     tx: tx.clone(),
+                    shared: Arc::clone(&self.ivars().shared),
                 },
             );
         }
@@ -207,15 +275,24 @@ impl Picker {
         options: &PickOptions,
         tx: Sender<Event>,
         dir: PathBuf,
+        shared: Arc<Shared>,
     ) -> Self {
         let configuration = configuration(options);
         let controller = PHPickerViewController::init_with_configuration(
             PHPickerViewController::alloc(mtm),
             &configuration,
         );
-        let delegate = FrustPhotoPickerDelegate::new(mtm, tx, dir, options.filter);
+        let delegate = FrustPhotoPickerDelegate::new(mtm, tx, dir, options.filter, shared);
         controller.set_delegate(Some(ProtocolObject::from_ref(&*delegate)));
         tie_lifetime(&controller, &delegate);
+        // Before presenting, this creates the sheet's presentation controller.
+        if let Some(presentation) = controller.presentationController() {
+            // SAFETY: `delegate` is a weak property (`UIPresentationController.h`).
+            // `tie_lifetime` keeps the delegate alive as long as the picker, and
+            // a presentation controller that outlives both reads a zeroed weak
+            // reference. Both objects are touched on the main thread only.
+            unsafe { presentation.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
+        }
         Self {
             controller,
             delegate,
@@ -224,7 +301,37 @@ impl Picker {
 
     /// Stop the delegate from reporting: the presentation was refused.
     pub(super) fn abandon(&self) {
-        drop(self.delegate.ivars().tx.take());
+        drop(self.delegate.ivars().reply.take());
+    }
+
+    /// Weak handles for a cancel, which must not keep the picker alive.
+    pub(super) fn downgrade(&self) -> WeakPicker {
+        WeakPicker {
+            controller: Weak::from_retained(&self.controller),
+            delegate: Weak::from_retained(&self.delegate),
+        }
+    }
+}
+
+/// A picker that a cancel can still reach while it lives.
+pub(super) struct WeakPicker {
+    controller: Weak<PHPickerViewController>,
+    delegate: Weak<FrustPhotoPickerDelegate>,
+}
+
+impl WeakPicker {
+    /// Abandon the delegate first, so a dismissed picker never delivers
+    /// `didFinishPicking:`, then dismiss the picker if it is still presented.
+    pub(super) fn cancel(&self) {
+        if let Some(delegate) = self.delegate.load() {
+            drop(delegate.ivars().reply.take());
+        }
+        if let Some(controller) = self.controller.load()
+            && controller.presentingViewController().is_some()
+            && !controller.isBeingDismissed()
+        {
+            controller.dismissViewControllerAnimated_completion(true, None);
+        }
     }
 }
 
@@ -375,10 +482,14 @@ struct LoadJob {
     dir: PathBuf,
     suggested_name: Option<String>,
     tx: Sender<Event>,
+    /// The call's cancel flag and kept loads.
+    shared: Arc<Shared>,
 }
 
-/// Start loading one file; the handler copies it and reports through the job.
+/// Start loading one file and keep its progress; the handler copies the file
+/// and reports through the job.
 fn load_copy(provider: &NSItemProvider, type_id: &NSString, job: LoadJob) {
+    let (index, shared) = (job.index, Arc::clone(&job.shared));
     let handler = RcBlock::new(move |url: *mut NSURL, error: *mut NSError| {
         // Runs on an item-provider queue: never unwind into its frame.
         let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -399,15 +510,19 @@ fn load_copy(provider: &NSItemProvider, type_id: &NSString, job: LoadJob) {
     // SAFETY: the signature matches `NSItemProvider.h`'s
     // `loadFileRepresentationForTypeIdentifier:completionHandler:` (an
     // `NSString`, a `void (^)(NSURL *, NSError *)` block; returns a non-null
-    // `NSProgress`, unused here). The block may run on any queue: it captures
-    // only `Send` data (a `Sender`, owned paths and strings).
-    let _progress: Option<Retained<AnyObject>> = unsafe {
+    // `NSProgress`, read as nullable). The block may run on any queue: it
+    // captures only `Send` data (a `Sender`, owned paths and strings, an
+    // `Arc<Shared>`).
+    let progress: Option<Retained<NSProgress>> = unsafe {
         msg_send![
             provider,
             loadFileRepresentationForTypeIdentifier: type_id,
             completionHandler: &*handler
         ]
     };
+    if let Some(progress) = progress {
+        shared.keep_load(index, progress);
+    }
 }
 
 /// A display-safe reason for a failed load: domain and code, never the
@@ -419,8 +534,13 @@ fn load_error(error: Option<&NSError>) -> String {
     }
 }
 
-/// Copy the temporary file at `url` into the job's cache directory.
+/// Copy the temporary file at `url` into the job's cache directory. A cancel
+/// before or during the copy leaves no file: the call may already have removed
+/// its directory, so a copy that lands afterwards deletes itself.
 fn copy_into_cache(url: &NSURL, job: &LoadJob) -> Result<PickedItem, String> {
+    if job.shared.is_cancelled() {
+        return Err(CANCELLED.to_owned());
+    }
     let source = url
         .path()
         .map(|p| PathBuf::from(p.to_string()))
@@ -443,6 +563,13 @@ fn copy_into_cache(url: &NSURL, job: &LoadJob) -> Result<PickedItem, String> {
         drop(dest);
         let _ = fs::remove_file(&path);
         return Err(format!("cannot copy the picked file: {:?}", e.kind()));
+    }
+    if job.shared.is_cancelled() {
+        drop(dest);
+        let _ = fs::remove_file(&path);
+        // Succeeds only once the directory is empty; best effort.
+        let _ = fs::remove_dir(&job.dir);
+        return Err(CANCELLED.to_owned());
     }
     let mime = media_types::lookup(&ext).map(|(_, mime)| mime.to_owned());
     Ok(PickedItem {
@@ -546,5 +673,49 @@ mod tests {
     #[test]
     fn load_errors_never_carry_a_path() {
         assert_eq!(load_error(None), "item provider returned no file");
+    }
+
+    /// Every `Event` the channel holds right now: `Some(n)` for `Finished(n)`,
+    /// `None` for anything else.
+    fn drain(rx: &std::sync::mpsc::Receiver<Event>) -> Vec<Option<usize>> {
+        rx.try_iter()
+            .map(|e| match e {
+                Event::Finished(n) => Some(n),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_dismissal_first_leaves_did_finish_picking_nothing() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reply = Reply::new(tx);
+        reply.dismissed();
+        assert!(reply.take().is_none());
+        drop(reply);
+        assert_eq!(drain(&rx), [Some(0)]);
+    }
+
+    #[test]
+    fn did_finish_picking_first_leaves_a_dismissal_nothing() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reply = Reply::new(tx);
+        let tx = reply.take().expect("the first answer gets the sender");
+        tx.send(Event::Finished(2)).unwrap();
+        reply.dismissed();
+        drop(reply);
+        assert_eq!(drain(&rx), [Some(2)]);
+    }
+
+    #[test]
+    fn an_unanswered_reply_reads_as_a_dismissal() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(Reply::new(tx));
+        assert_eq!(drain(&rx), [Some(0)]);
+        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        let reply = Reply::new(tx);
+        drop(reply.take());
+        drop(reply);
+        assert_eq!(drain(&rx), []);
     }
 }
