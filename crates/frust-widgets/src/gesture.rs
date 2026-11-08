@@ -126,6 +126,9 @@
 //!   application state, so the callback runs one frame late, from the next
 //!   `Housekeeping` broadcast or the next pointer event, whichever comes
 //!   first.
+//! - **Cancel by a second contact.** Another finger landing during the press
+//!   fires `on_tap_cancel` at once, when the detector hears it (see [Several
+//!   contacts](self#several-contacts)); the later `Up` fires no `on_tap_up`.
 //! - **Removal.** A detector torn down mid-press fires neither, so the
 //!   one-follow-up guarantee holds only while the detector stays mounted (see
 //!   LIMITATIONS `gesture-drag-no-cancel-on-removal`).
@@ -161,6 +164,29 @@
 //!   fresh first tap.
 //! - **Cancel.** A `Cancel` while the window is open ends it; the owed `on_tap`
 //!   runs from the next state-bearing pass, like an owed `on_tap_cancel`.
+//!
+//! # Several contacts
+//!
+//! A press belongs to the contact whose `Down` armed it. Another contact
+//! landing while that one is still down ends the press: `on_tap_cancel` fires
+//! at once for an active press, and a press not yet resolved is disarmed — no
+//! `on_tap`, `on_long_press` or `on_double_tap`, and `on_hold_progress` gets a
+//! final `0.0`. The first contact's `Up` then fires nothing, so two resting
+//! fingers or a near-still pinch never long-press. The second contact fires no
+//! `on_tap_down`: it is no press of its own. A drag recognizer stays armed, so
+//! the first contact may still start a drag; a drag already started runs on.
+//!
+//! The detector hears another contact only when a widget below it opted into
+//! the gesture's other contacts ([`EventCtx::capture_contacts`]), as
+//! [`crate::pinch::pinch_detector`] and [`crate::pan_zoom()`] do. The
+//! root walks each such contact down past the detector to that widget, across
+//! component boundaries too; the detector cancels its press as the walk
+//! passes, and the widget below still receives the contact unchanged, so it
+//! goes on scaling. A detector with no such widget below never hears a second
+//! contact: the root drops it and the press runs on (see LIMITATIONS
+//! `gesture-second-contact-needs-a-contact-captor`). The detector does not opt
+//! in itself, because the opt-in would make it the widget every other contact
+//! is delivered to, hiding them from a recogniser below it.
 //!
 //! # Long-press firing semantics
 //!
@@ -231,8 +257,9 @@
 //! that already carries a mutable `EventCtx` (an in-slop `Move`, matching
 //! `on_long_press`'s fire-on-move-arrival) — **or, when `on_long_press` is also
 //! wired, on the Housekeeping-triggered fire above, whichever reaches the widget
-//! first.** A drag past [`TOUCH_SLOP`] or an early release *before* the threshold
-//! — i.e. the `Move`/`Up` arm handling that transition, never
+//! first.** A drag past [`TOUCH_SLOP`], an early release or a second contact
+//! (see [Several contacts](self#several-contacts)) *before* the threshold
+//! — i.e. the arm handling that transition, never
 //! `PointerPhase::Cancel` (see the Cancel staleness gap below) — delivers a final
 //! `0.0`; reaching the threshold delivers a final `1.0`. An
 //! `on_hold_progress`-only detector (no `on_long_press` wired) has its final
@@ -275,6 +302,7 @@
 
 use std::rc::Rc;
 
+use frust_core::event::{OverlayEvent, OverlayEventKind, PointerId};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FrameTime,
     InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, SliverConstraints,
@@ -743,11 +771,12 @@ impl<State: 'static> GestureDetectorView<State> {
     }
 
     /// Call `f` when an active press ends without a release: the pointer
-    /// passed [`TOUCH_SLOP`] or left the detector's bounds (immediately), or
-    /// the press was cancelled by a steal or system cancel (one frame late,
-    /// from the next state-bearing pass). Stricter than
-    /// [`on_tap`](Self::on_tap): leaving the bounds within the slop cancels
-    /// the press but not a later tap. See the [module docs](self#press-state).
+    /// passed [`TOUCH_SLOP`] or left the detector's bounds, or another contact
+    /// landed (all immediately), or the press was cancelled by a steal or
+    /// system cancel (one frame late, from the next state-bearing pass).
+    /// Stricter than [`on_tap`](Self::on_tap): leaving the bounds within the
+    /// slop cancels the press but not a later tap. See the [module
+    /// docs](self#press-state).
     pub fn on_tap_cancel<F: Fn(&mut State) + 'static>(mut self, f: F) -> Self {
         self.on_tap_cancel = Some(Rc::new(f));
         self
@@ -881,6 +910,11 @@ pub struct GestureDetectorWidget {
     /// A `Cancel` ended an active press, whose `on_tap_cancel` is owed to the
     /// next state-bearing pass (see the [module docs](self#press-state)).
     owed_tap_cancel: bool,
+    /// The contact whose `Down` armed the press in flight
+    /// ([`EventCtx::pointer_id`]); `None` with no press in flight. Any other
+    /// contact reaching the detector while that press is pending cancels it
+    /// (see the [module docs](self#several-contacts)).
+    primary: Option<PointerId>,
     on_double_tap: Option<ErasedArgCallback<DoubleTapDetails>>,
     /// The double-tap window ended without a second tap (a paint observed it
     /// lapse, or a `Cancel` arrived), and the held `on_tap` is owed to the next
@@ -1034,6 +1068,7 @@ impl GestureDetectorWidget {
             _ => None,
         };
         self.state = Recognizer::Idle;
+        self.primary = None;
         self.second_tap = false;
         if self.press_active {
             self.fire_tap_cancel(ctx);
@@ -1043,6 +1078,50 @@ impl GestureDetectorWidget {
         {
             cb(ctx);
             ctx.request_redraw();
+        }
+    }
+
+    /// Whether `event` is another contact of the gesture walking past this
+    /// detector: the inert carrier the root hands every container above the
+    /// widget that opted into the other contacts (an `OutsideDown` overlay
+    /// broadcast), dispatched for a contact other than the one whose `Down`
+    /// armed the press in flight.
+    fn is_other_contact(&self, ctx: &EventCtx, event: &InputEvent) -> bool {
+        matches!(
+            event,
+            InputEvent::Overlay(OverlayEvent {
+                kind: OverlayEventKind::OutsideDown,
+                ..
+            })
+        ) && self
+            .primary
+            .is_some_and(|primary| primary != ctx.pointer_id())
+    }
+
+    /// End a pending press because another contact landed (see the [module
+    /// docs](self#several-contacts)): `on_tap_cancel` at once for an active
+    /// press, and tap, long-press, hold-progress and a second tap disarmed, so
+    /// the press's own `Up` fires nothing. A drag recognizer stays armed: the
+    /// first contact may still start one. Only from passes that carry real
+    /// application state.
+    fn cancel_press_for_other_contact(&mut self, ctx: &mut EventCtx) {
+        if self.press_active {
+            self.fire_tap_cancel(ctx);
+        }
+        if let Recognizer::Pressed { down_pos, .. } = self.state {
+            self.state = if self.drags_wired() {
+                Recognizer::DragArmed { down_pos }
+            } else {
+                Recognizer::Dragged
+            };
+            self.second_tap = false;
+            self.hold.cancel();
+            // The hold ends short of the threshold: a final `0.0`, as for a
+            // drag past the slop.
+            if let Some(cb) = self.on_hold_progress.as_mut() {
+                cb(ctx, 0.0);
+                ctx.request_redraw();
+            }
         }
     }
 }
@@ -1061,6 +1140,7 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             press_active: false,
             press_origin: Point::ZERO,
             owed_tap_cancel: false,
+            primary: None,
             on_double_tap: self.on_double_tap.as_ref().map(erase_callback_arg),
             owed_single_tap: false,
             second_tap: false,
@@ -1251,6 +1331,7 @@ impl Widget for GestureDetectorWidget {
                         elapsed: false,
                         progress: 0.0,
                     };
+                    self.primary = Some(ctx.pointer_id());
                     self.hold.cancel();
                     self.velocity_x.clear();
                     self.velocity_y.clear();
@@ -1458,6 +1539,7 @@ impl Widget for GestureDetectorWidget {
                     let second_tap = std::mem::take(&mut self.second_tap);
                     let inside = !outside(p.position, ctx.size());
                     self.state = Recognizer::Idle;
+                    self.primary = None;
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
                     if let Some(progress) = final_progress
@@ -1564,6 +1646,7 @@ impl Widget for GestureDetectorWidget {
                     }
                     self.second_tap = false;
                     self.state = Recognizer::Idle;
+                    self.primary = None;
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
                     return EventResult::Handled;
@@ -1578,6 +1661,12 @@ impl Widget for GestureDetectorWidget {
             self.flush_owed_single_tap(ctx);
             self.flush_owed_cancel(ctx);
             self.flush_owed_tap_cancel(ctx);
+            // Another contact of the gesture walking past to the widget below
+            // that opted into it (a nested pinch or pan/zoom): it cancels a
+            // pending press before the long-press check below can fire it.
+            if self.is_other_contact(ctx, event) {
+                self.cancel_press_for_other_contact(ctx);
+            }
             // `InputEvent::Housekeeping` today: the delivery vehicle for a
             // threshold-time long-press latched during an earlier paint (see
             // the module docs' "Long-press firing semantics") — the soonest
@@ -3821,5 +3910,294 @@ mod tests {
             }
             assert!(!open, "a down was left open: {:?}", log.events);
         }
+    }
+
+    // --- Several contacts ------------------------------------------------------
+
+    /// Contact `slot`'s primary-button `phase` at `(x, y)`, as a touch shell sends it.
+    fn touch(slot: u32, phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::PointerContact {
+            pointer_id: frust_core::event::PointerId::touch(slot),
+            event: frust_core::PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: frust_core::PointerButton::Primary,
+            },
+        }
+    }
+
+    /// Every press callback around a pinch detector that logs each scale phase.
+    fn nested_pinch_logic(_: &mut PressLog) -> PressView {
+        press_detector(crate::pinch::pinch_detector(Blank).on_scale(
+            |s: &mut PressLog, e: frust_core::event::ScaleEvent| {
+                s.events.push(format!("scale {:?}", e.phase))
+            },
+        ))
+    }
+
+    /// Every press callback around a pan/zoom view that logs each scale it reaches.
+    fn nested_pan_zoom_logic(_: &mut PressLog) -> PressView {
+        press_detector(
+            crate::pan_zoom::pan_zoom(Blank)
+                .on_transform(|s: &mut PressLog, t| s.events.push(format!("zoom {:.2}", t.scale))),
+        )
+    }
+
+    /// A 400 px square root over `logic`.
+    fn contact_root(logic: fn(&mut PressLog) -> PressView) -> RenderRoot<PressLog, PressView> {
+        let mut root = RenderRoot::new();
+        let mut log = PressLog::default();
+        root.rebuild(&mut { logic }, &mut log);
+        root.layout(Size::new(400.0, 400.0));
+        root
+    }
+
+    /// One shell frame over `logic`: rebuild (draining a deferred flush through
+    /// `Housekeeping`), then paint at `ms`.
+    fn contact_frame(
+        root: &mut RenderRoot<PressLog, PressView>,
+        logic: fn(&mut PressLog) -> PressView,
+        log: &mut PressLog,
+        ms: f64,
+    ) {
+        root.rebuild(&mut { logic }, log);
+        root.paint(&mut NullScene, ft(ms));
+    }
+
+    /// The press-state entries of `log`, without the nested recogniser's own.
+    fn press_events(log: &PressLog) -> Vec<&str> {
+        log.events
+            .iter()
+            .map(String::as_str)
+            .filter(|e| !e.starts_with("scale") && !e.starts_with("zoom"))
+            .collect()
+    }
+
+    #[test]
+    fn a_nested_pinch_keeps_its_second_finger_and_the_press_is_cancelled() {
+        use PointerPhase::{Down, Move, Up};
+        let logic = nested_pinch_logic;
+        let mut root = contact_root(logic);
+        let mut log = PressLog::default();
+        contact_frame(&mut root, logic, &mut log, 0.0);
+        root.event(&mut log, &touch(0, Down, 100.0, 100.0));
+        contact_frame(&mut root, logic, &mut log, 16.0);
+        root.event(&mut log, &touch(1, Down, 120.0, 100.0));
+        assert_eq!(press_events(&log), ["down 100 100", "cancel"]);
+        // The pinch below still owns the second finger: it scales as before.
+        contact_frame(&mut root, logic, &mut log, 32.0);
+        root.event(&mut log, &touch(1, Move, 160.0, 100.0));
+        contact_frame(&mut root, logic, &mut log, 48.0);
+        root.event(&mut log, &touch(1, Move, 220.0, 100.0));
+        root.event(&mut log, &touch(1, Up, 220.0, 100.0));
+        // Frames past the threshold never long-press the cancelled press.
+        for ms in [300.0, 600.0, 616.0] {
+            contact_frame(&mut root, logic, &mut log, ms);
+        }
+        root.event(&mut log, &touch(0, Up, 100.0, 100.0));
+        contact_frame(&mut root, logic, &mut log, 632.0);
+        assert_eq!(
+            log.events,
+            [
+                "down 100 100",
+                "cancel",
+                "scale Begin",
+                "scale Update",
+                "scale End"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_second_finger_before_the_threshold_on_a_nested_pan_zoom_cancels_the_press() {
+        use PointerPhase::{Down, Move, Up};
+        fn logic(_: &mut PressLog) -> PressView {
+            nested_pan_zoom_logic(&mut PressLog::default())
+                .on_hold_progress(|s: &mut PressLog, v| s.events.push(format!("progress {v:.1}")))
+        }
+        let mut root = contact_root(logic);
+        let mut log = PressLog::default();
+        contact_frame(&mut root, logic, &mut log, 0.0);
+        root.event(&mut log, &touch(0, Down, 100.0, 100.0));
+        for ms in [16.0, 200.0, 400.0] {
+            contact_frame(&mut root, logic, &mut log, ms);
+        }
+        root.event(&mut log, &touch(1, Down, 140.0, 100.0));
+        assert_eq!(
+            press_events(&log),
+            ["down 100 100", "cancel", "progress 0.0"],
+            "the second finger is no press of its own"
+        );
+        // The pan/zoom view below still zooms on the two fingers.
+        contact_frame(&mut root, logic, &mut log, 416.0);
+        root.event(&mut log, &touch(1, Move, 200.0, 100.0));
+        contact_frame(&mut root, logic, &mut log, 432.0);
+        root.event(&mut log, &touch(1, Move, 260.0, 100.0));
+        assert!(
+            log.events
+                .iter()
+                .any(|e| e.starts_with("zoom") && e != "zoom 1.00"),
+            "{:?}",
+            log.events
+        );
+        for ms in [500.0, 600.0, 616.0] {
+            contact_frame(&mut root, logic, &mut log, ms);
+        }
+        root.event(&mut log, &touch(1, Up, 260.0, 100.0));
+        root.event(&mut log, &touch(0, Up, 100.0, 100.0));
+        contact_frame(&mut root, logic, &mut log, 632.0);
+        assert_eq!(
+            press_events(&log),
+            ["down 100 100", "cancel", "progress 0.0"],
+            "no long press, and the first finger's release fires nothing"
+        );
+    }
+
+    #[test]
+    fn one_finger_held_on_a_nested_pinch_still_long_presses() {
+        use PointerPhase::{Down, Up};
+        let logic = nested_pinch_logic;
+        let mut root = contact_root(logic);
+        let mut log = PressLog::default();
+        contact_frame(&mut root, logic, &mut log, 0.0);
+        root.event(&mut log, &touch(0, Down, 100.0, 100.0));
+        for ms in [16.0, 300.0, 600.0, 616.0] {
+            contact_frame(&mut root, logic, &mut log, ms);
+        }
+        assert_eq!(log.events, ["down 100 100", "long"]);
+        root.event(&mut log, &touch(0, Up, 100.0, 100.0));
+        assert_eq!(log.events, ["down 100 100", "long", "up 100 100"]);
+    }
+
+    #[test]
+    fn a_second_finger_after_a_long_press_ends_the_press_with_a_cancel() {
+        use PointerPhase::{Down, Up};
+        let logic = nested_pinch_logic;
+        let mut root = contact_root(logic);
+        let mut log = PressLog::default();
+        contact_frame(&mut root, logic, &mut log, 0.0);
+        root.event(&mut log, &touch(0, Down, 100.0, 100.0));
+        for ms in [16.0, 600.0, 616.0] {
+            contact_frame(&mut root, logic, &mut log, ms);
+        }
+        root.event(&mut log, &touch(1, Down, 120.0, 100.0));
+        root.event(&mut log, &touch(1, Up, 120.0, 100.0));
+        root.event(&mut log, &touch(0, Up, 100.0, 100.0));
+        assert_eq!(
+            log.events,
+            ["down 100 100", "long", "cancel"],
+            "exactly one of up or cancel follows the down"
+        );
+    }
+
+    #[test]
+    fn the_first_finger_may_still_pan_after_a_second_finger_cancels_the_press() {
+        use PointerPhase::{Down, Move, Up};
+        fn logic(_: &mut PressLog) -> PressView {
+            nested_pinch_logic(&mut PressLog::default())
+                .on_pan_start(|s: &mut PressLog, _| s.events.push("pan start".into()))
+                .on_pan_end(|s: &mut PressLog, _| s.events.push("pan end".into()))
+        }
+        let mut root = contact_root(logic);
+        let mut log = PressLog::default();
+        contact_frame(&mut root, logic, &mut log, 0.0);
+        root.event(&mut log, &touch(0, Down, 100.0, 100.0));
+        root.event(&mut log, &touch(1, Down, 120.0, 100.0));
+        root.event(&mut log, &touch(1, Up, 120.0, 100.0));
+        root.event(&mut log, &touch(0, Move, 100.0, 160.0));
+        root.event(&mut log, &touch(0, Up, 100.0, 160.0));
+        assert_eq!(
+            press_events(&log),
+            ["down 100 100", "cancel", "pan start", "pan end"]
+        );
+    }
+
+    /// A component whose subtree is a pinch detector logging into `0`: its
+    /// opt-in into the other contacts sits behind a component boundary.
+    struct PinchComp(std::rc::Rc<std::cell::RefCell<Vec<String>>>);
+    impl frust_core::Component for PinchComp {
+        type State = ();
+        fn init(&self) {}
+        fn build(&self, _state: &mut ()) -> impl View<()> {
+            let log = self.0.clone();
+            crate::pinch::pinch_detector(Blank).on_scale(
+                move |_: &mut (), e: frust_core::event::ScaleEvent| {
+                    log.borrow_mut().push(format!("scale {:?}", e.phase))
+                },
+            )
+        }
+    }
+
+    #[test]
+    fn a_pinch_behind_a_component_boundary_still_cancels_the_press_and_scales() {
+        use PointerPhase::{Down, Move, Up};
+        let scales = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let comp_scales = scales.clone();
+        let mut logic = move |_: &mut PressLog| {
+            press_detector(frust_core::component(PinchComp(comp_scales.clone())))
+        };
+        let mut root = RenderRoot::new();
+        let mut log = PressLog::default();
+        root.rebuild(&mut logic, &mut log);
+        root.layout(Size::new(400.0, 400.0));
+        root.paint(&mut NullScene, ft(0.0));
+        root.event(&mut log, &touch(0, Down, 100.0, 100.0));
+        root.event(&mut log, &touch(1, Down, 120.0, 100.0));
+        root.paint(&mut NullScene, ft(16.0));
+        root.event(&mut log, &touch(1, Move, 160.0, 100.0));
+        root.paint(&mut NullScene, ft(32.0));
+        root.event(&mut log, &touch(1, Move, 220.0, 100.0));
+        root.event(&mut log, &touch(1, Up, 220.0, 100.0));
+        for ms in [600.0, 616.0] {
+            root.rebuild(&mut logic, &mut log);
+            root.paint(&mut NullScene, ft(ms));
+        }
+        root.rebuild(&mut logic, &mut log);
+        root.event(&mut log, &touch(0, Up, 100.0, 100.0));
+        assert_eq!(log.events, ["down 100 100", "cancel"]);
+        assert_eq!(
+            *scales.borrow(),
+            ["scale Begin", "scale Update", "scale End"]
+        );
+    }
+
+    #[test]
+    fn a_bare_detector_does_not_hear_a_second_finger() {
+        // Nothing below opts into the gesture's other contacts, so the root
+        // drops the second finger before any widget sees it: the press runs on.
+        use PointerPhase::{Down, Up};
+        let mut root = contact_root(press_logic);
+        let mut log = PressLog::default();
+        contact_frame(&mut root, press_logic, &mut log, 0.0);
+        root.event(&mut log, &touch(0, Down, 100.0, 100.0));
+        root.event(&mut log, &touch(1, Down, 120.0, 100.0));
+        for ms in [16.0, 600.0, 616.0] {
+            contact_frame(&mut root, press_logic, &mut log, ms);
+        }
+        root.event(&mut log, &touch(1, Up, 120.0, 100.0));
+        root.event(&mut log, &touch(0, Up, 100.0, 100.0));
+        assert_eq!(log.events, ["down 100 100", "long", "up 100 100"]);
+    }
+
+    #[test]
+    fn a_pan_only_detector_never_sees_a_second_finger() {
+        use PointerPhase::{Down, Move, Up};
+        let mut root = drag_root(|_| wire_pan(GestureDetector::<DragLog, _>(Blank)));
+        let mut log = DragLog::default();
+        root.event(&mut log, &touch(0, Down, 10.0, 10.0));
+        root.event(&mut log, &touch(1, Down, 60.0, 60.0));
+        root.event(&mut log, &touch(1, Move, 90.0, 90.0));
+        root.event(&mut log, &touch(0, Move, 10.0, 60.0));
+        root.event(&mut log, &touch(1, Up, 90.0, 90.0));
+        root.event(&mut log, &touch(0, Up, 10.0, 60.0));
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.starts[0].1.position, Point::new(10.0, 60.0));
+        assert!(
+            log.updates.is_empty(),
+            "only the first finger's moves count: {:?}",
+            log.updates.len()
+        );
+        assert_eq!(log.ends.len(), 1);
+        assert!(log.cancels.is_empty());
     }
 }
