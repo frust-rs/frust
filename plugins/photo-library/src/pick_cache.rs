@@ -127,7 +127,9 @@ pub(crate) fn copy_name(
     let ext = mime.and_then(extension_for_mime).unwrap_or("");
     let name = sanitize_file_name(display.unwrap_or(""), n, ext);
     let (stem, dot_ext) = match name.rfind('.') {
-        Some(i) if i > 0 && i + 1 < name.len() => (&name[..i], name[i..].to_owned()),
+        Some(i) if i > 0 && i + 1 < name.len() && name.len() - i - 1 <= MAX_EXT_BYTES => {
+            (&name[..i], name[i..].to_owned())
+        }
         _ if !ext.is_empty() => (name.as_str(), format!(".{ext}")),
         _ => (name.as_str(), String::new()),
     };
@@ -224,19 +226,13 @@ mod tests {
 
     #[test]
     fn guard_is_exclusive_and_blocks_clear() {
-        // The only test touching the process-wide guard.
+        // The only test in any test binary that touches the process-wide guard.
         let guard = PickGuard::acquire().unwrap();
         assert_eq!(PickGuard::acquire().err(), Some(PhotoError::Busy));
         assert_eq!(clear().err(), Some(PhotoError::Busy));
         drop(guard);
         let again = PickGuard::acquire().unwrap();
         drop(again);
-        let root = scratch("guarded-clear");
-        let call = new_call_dir_in(&root).unwrap();
-        let guard = PickGuard::acquire().unwrap();
-        assert!(call.is_dir(), "a held guard leaves the cache alone");
-        drop(guard);
-        clear_in(&root).unwrap();
     }
 
     fn name(display: Option<&str>, mime: Option<&str>, used: &mut HashSet<String>) -> String {
@@ -280,5 +276,15 @@ mod tests {
         let b = name(Some(&wide), Some("image/png"), &mut used);
         assert!(a.len() <= MAX_NAME_BYTES && b.len() <= MAX_NAME_BYTES);
         assert!(a != b && b.ends_with(".png"));
+    }
+
+    #[test]
+    fn a_long_trailing_segment_is_not_an_extension() {
+        let mut used = HashSet::new();
+        let raw = format!("a.{}", "x".repeat(200));
+        let first = name(Some(&raw), None, &mut used);
+        let second = name(Some(&raw), None, &mut used);
+        assert!(first.len() <= MAX_NAME_BYTES && second.len() <= MAX_NAME_BYTES);
+        assert!(first != second && second.ends_with("-2"));
     }
 }

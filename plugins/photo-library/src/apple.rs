@@ -297,15 +297,4 @@ mod tests {
         drop(tx);
         assert_eq!(names(&collect(&rx).unwrap()), ["b"]);
     }
-
-    #[test]
-    fn only_one_pick_at_a_time() {
-        let first = pick_cache::PickGuard::acquire().unwrap();
-        assert_eq!(
-            pick_cache::PickGuard::acquire().err(),
-            Some(PhotoError::Busy)
-        );
-        drop(first);
-        assert!(pick_cache::PickGuard::acquire().is_ok());
-    }
 }
