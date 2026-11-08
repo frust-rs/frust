@@ -886,6 +886,8 @@ const PERMISSIONS_MEDIA_LOCATION: &[Contribution] = &[
     Contribution::ManifestPermission {
         permission: "android.permission.ACCESS_MEDIA_LOCATION",
     },
+    // iOS reads media location from the Photos authorization status.
+    Contribution::IosFramework { name: "Photos" },
 ];
 
 const PERMISSIONS_FEATURES: &[FeatureSpec] = &[
@@ -2099,7 +2101,7 @@ mod tests {
             perms("media-location"),
             vec!["android.permission.ACCESS_MEDIA_LOCATION"]
         );
-        assert_eq!(feature("media-location").len(), 2);
+        assert_eq!(feature("media-location").len(), 3);
 
         // Every feature starts with the cargo feature of the same name
         // (photos-add shares `photos`).
@@ -2166,11 +2168,20 @@ mod tests {
                 .count()
         };
         assert_eq!(at_build(&first), 2, "{first:?}");
+        // `media-location` links Photos too; `photos` already applied it in
+        // this same run, so that one repeat is the only item already present.
+        let repeats: Vec<_> = first
+            .items
+            .iter()
+            .filter(|i| i.outcome == AddOutcome::AlreadyPresent)
+            .collect();
+        assert_eq!(repeats.len(), 1, "{first:?}");
+        assert!(repeats[0].description.contains("Photos"), "{first:?}");
         assert!(
-            first
-                .items
-                .iter()
-                .all(|i| matches!(i.outcome, AddOutcome::Applied | AddOutcome::AppliedAtBuild)),
+            first.items.iter().all(|i| matches!(
+                i.outcome,
+                AddOutcome::Applied | AddOutcome::AppliedAtBuild | AddOutcome::AlreadyPresent
+            )),
             "{first:?}"
         );
 
