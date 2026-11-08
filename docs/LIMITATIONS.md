@@ -9317,11 +9317,18 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 ### `time-no-firing-while-backgrounded` — a `frust::time::Timer` does not fire while the app is backgrounded (Android, iOS)
 
 **Observed**: Android removes its frame callback at `onPause` and pumps nothing at `onPause`/`onStop`; iOS
-pauses its display link at `willResignActive` and pumps once at `didEnterBackground`. A due `Timer` runs
-at the first tick after resume. `flush_on_background` runs the callback synchronously inside the
-foreground-exit callback: only synchronous work in it is guaranteed to complete before suspension, work
-it spawns is not, and no background-task assertion is provided. On desktop a window that lost focus keeps
-running, so a plain timer fires on time and `flush_on_background` also fires on focus loss.
+pauses its display link at `willResignActive` and pumps the local queue at `didEnterBackground` and on
+memory warnings; Android also pumps in its trim-memory callbacks. So there are no regular ticks while
+backgrounded: a due `Timer` normally runs at the first tick after resume but may run earlier in one of
+those pumps; do not rely on either. `flush_on_background` runs the callback synchronously at the first
+of the app going Resumed to Inactive or Inactive to Hidden (a timer armed while already Inactive runs at
+the Hidden edge: Android `onStop`, iOS `didEnterBackground`). It therefore also fires on focus loss with
+no foreground exit: losing window focus on desktop and web, the notification shade, a system dialog or
+the unfocused half of split-screen on Android, Control Center or a call on iOS. It is one-shot and is
+consumed, so do not flag a timer whose delay must be honoured while the app stays visible. Only
+synchronous work in the callback is guaranteed to complete before suspension, work it spawns is not,
+and no background-task assertion is provided. On desktop a window that lost focus keeps running, so a
+plain timer fires on time.
 
 **Applies to**: Android, iOS.
 

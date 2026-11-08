@@ -2227,17 +2227,21 @@ pub use frust_reactive::spawn_local_scoped;
 /// Main-thread timers under Dart's names: [`time::sleep`] is `Future.delayed`
 /// and [`time::Timer`] is `Timer`. Two differences from Dart: dropping a
 /// [`time::Timer`] cancels it (call [`time::Timer::detach`] to let it run on,
-/// as Dart's does), and an overdue timer does not run in the background.
+/// as Dart's does), and nothing ticks regularly while backgrounded.
 ///
 /// Durations are raw wall time, not the animation clock. A timer's callback
 /// runs on the UI thread under the owner that armed it, so context it reads
 /// is the arming component's. A reached deadline only makes the task ready;
 /// it runs at the next point the shell pumps the UI thread: the next
 /// event-loop turn on desktop, the next display tick on Android and iOS, and
-/// the browser's task queue on web. Nothing runs while an Android or iOS app
-/// is backgrounded, so an overdue timer fires on the first tick after resume,
-/// unless it was flagged [`time::Timer::flush_on_background`], which runs it
-/// synchronously inside the platform's foreground-exit callback.
+/// the browser's task queue on web. An Android or iOS app gets no regular
+/// ticks while backgrounded, so an overdue timer normally fires on the first
+/// tick after resume, but may run earlier in a shell's background pump (iOS
+/// `didEnterBackground` and memory warnings, Android trim-memory callbacks);
+/// do not rely on either. A timer flagged [`time::Timer::flush_on_background`]
+/// instead runs synchronously at the first of the app going inactive or
+/// hidden, which includes plain focus loss: it is one-shot, so do not flag a
+/// timer whose delay must be honoured while the app stays visible.
 ///
 /// ```no_run
 /// use frust::time::{Duration, Timer};
