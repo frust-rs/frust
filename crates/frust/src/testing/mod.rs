@@ -35,10 +35,12 @@
 pub mod find;
 pub mod gesture;
 mod tester;
+pub mod text;
 
 pub use find::{ActionTarget, Finder, Match};
 pub use gesture::{Gesture, Target};
 pub use tester::{PumpOutcome, Tester, TesterOptions};
+pub use text::TextRun;
 
 /// What [`Tester::inspect`] returns: one retained-tree node with its absolute bounds.
 pub use frust_core::InspectNode;
