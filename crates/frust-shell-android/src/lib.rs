@@ -86,6 +86,11 @@ mod adpf;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod lifecycle;
 
+// The logger level: the `debug.frust.log` property, else the build's default — the parser is
+// host-tested; the property read inside it is Android-only.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+mod log_level;
+
 #[cfg(target_os = "android")]
 mod app;
 #[cfg(target_os = "android")]

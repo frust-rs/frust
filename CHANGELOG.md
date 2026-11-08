@@ -353,6 +353,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- The Android logger's level follows the `debug.frust.log` system property (`adb shell setprop
+  debug.frust.log debug`, cleared on reboot; off / error / warn / info / debug / trace, the
+  `FRUST_LOG` vocabulary of the other shells) instead of being fixed at `Info`; unset, it stays
+  `Info` in every build. The chosen level is logged once at startup under the `frust` tag.
 - `frust::gpu::with_context` keeps its signature but answers the current device, which may change
   between calls: do not keep device or queue clones across frames, and rebuild device-owned
   resources when `device_generation()` changes.
