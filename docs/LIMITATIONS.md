@@ -8012,15 +8012,15 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `share-desktop-clipboard-fallback` — desktop has no share sheet, so `frust-share` copies to the clipboard
+### `share-desktop-clipboard-fallback` — desktop has no text share sheet, so `frust-share` copies text and URLs to the clipboard
 
-**Observed**: `Share::text`/`url` on macOS, Linux, and Windows copy the payload through `frust-clipboard` and return `ShareOutcome::CopiedToClipboard`; no sheet appears. The Android chooser and iOS activity sheet are unverified on device until the share device gate runs.
+**Observed**: `Share::text`/`url` on macOS, Linux, and Windows copy the payload through `frust-clipboard` and return `ShareOutcome::CopiedToClipboard`; no sheet appears. Files are separate: macOS opens an `NSSharingServicePicker`, Linux and Windows are `share-files-linux-windows-unsupported`.
 
-**Applies to**: macOS, Linux, and Windows; every `Share` call.
+**Applies to**: macOS, Linux, and Windows; `Share::text`, `text_anchored` and `url`.
 
 **Why accepted**: no desktop OS exposes a uniform share sheet worth a per-platform backend; a clipboard copy keeps the API usable in desktop previews, and the outcome variant tells the caller which path ran.
 
-**Trigger for removal**: a desktop share-sheet backend (e.g. the macOS `NSSharingServicePicker`) ships.
+**Trigger for removal**: a desktop text share-sheet backend (e.g. a macOS `NSSharingServicePicker` for text) ships.
 
 **Evidence**: `plugins/share/src/desktop.rs`; `plugins/share/README.md`.
 
@@ -9169,5 +9169,133 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Why accepted**: a clip exists only in the compiled scene unless its widget declares it through `inspect_detail`, and the viewports that lay content out past their box are the ones that do; a text input does not report a layout through `inspect_detail`. Both remaining gaps are outside the overflow class the API targets (a label cut or wider than its box).
 
 **Evidence**: `crates/frust/src/testing/text.rs` (module docs), `crates/frust-core/src/tree.rs` (`InspectDetail::Clip`).
+
+---
+
+### `share-files-linux-windows-unsupported` — `Share::files` has no backend on Linux and Windows
+
+**Observed**: `Share::files` and `files_anchored` return `ShareError::Unsupported` on Linux and Windows (and on web and other targets); only Android, iOS and macOS open a share UI for files. Argument validation (`EmptyPayload`, `TooManyFiles`, `InvalidFile`) still runs first.
+
+**Applies to**: Linux, Windows; every file share.
+
+**Workaround**: reveal the file or copy its path yourself; text and URLs still work through `share-desktop-clipboard-fallback`.
+
+**Why accepted**: neither OS has a share sheet worth a per-platform backend, and a file cannot be meaningfully "shared" to a clipboard the way text can.
+
+**Trigger for removal**: a Linux or Windows file-share backend ships.
+
+**Evidence**: (2026-11-08) `plugins/share/src/lib.rs`, `plugins/share/src/files.rs`; `plugins/share/README.md`.
+
+---
+
+### `share-android-files-async-staging` — on Android `Share::files` returns `Ok` when the share is enqueued, not when a chooser shows
+
+**Observed**: `Share::files` on Android validates the paths and returns `Ok(Presented)` without blocking on file size; a background thread then copies each file (a snapshot taken at that moment, never a link) into `cacheDir/frust-share/<uuid>/` and starts the chooser. A staging or launch failure is logged under tag `FrustShare` (error class only) and shows no chooser. A chooser Android refuses because the app moved to the background shows nothing and logs nothing. Staging copies persist up to 24 hours, until a later share prunes them, because a receiver may read the content URI late.
+
+**Applies to**: Android; every `Share::files` / `files_anchored` call.
+
+**Workaround**: none for the missing chooser; an app that needs a delivery signal cannot get one from the platform. Shares started while the app stays in the foreground are unaffected.
+
+**Why accepted**: staging a large file before returning would block the caller for as long as the copy takes, and a receiver needs the copy to outlive the call.
+
+**Trigger for removal**: an outcome callback for file shares, or a staging lifetime tied to receiver completion.
+
+**Evidence**: (2026-11-08) `plugins/share/platform/android/src/main/kotlin/dev/frust/share/FrustShareHost.kt` (`shareFiles`, `stageAndLaunch`, `prune`); device gates on Pixel 5 (Android 14) and Xiaomi 12 passed for the enqueue-and-chooser path.
+
+---
+
+### `photo-library-picks-are-copies` — mobile picks are app-owned copies that grow until cleared
+
+**Observed**: on Android and iOS every `PickedItem` is a copy in `<cache_dir>/frust-photo-library/picked` (`is_copy` is `true`), made eagerly during `pick`. The cache grows with every pick until `PhotoLibrary::clear_pick_cache()`, and a copy has no size bound because the user chose the file in the system picker. After a clear, earlier `PickedItem` paths are invalid. Desktop returns the user's original files (`is_copy` is `false`) and never copies.
+
+**Applies to**: Android and iOS; apps that pick many or large items.
+
+**Workaround**: call `clear_pick_cache()` when picks are no longer needed (it returns `Busy` during a pick).
+
+**Why accepted**: the system pickers hand out transient access, so a path the app can read after the picker closes needs a copy.
+
+**Trigger for removal**: a streaming or reference-based pick API that keeps no copy.
+
+**Evidence**: (2026-11-08) `plugins/photo-library/src/pick_cache.rs`; `plugins/photo-library/src/lib.rs` (`clear_pick_cache`); device gates on iPhone 13 mini (iOS 27.2) and Pixel 5 (Android 14).
+
+---
+
+### `photo-library-picker-no-asset-id-without-library` — picks carry no asset identifier
+
+**Observed**: `PickedItem::asset_id` is `None` on every platform. The iOS picker is created without a photo-library, which by design never returns asset identifiers; the Android Photo Picker and the desktop file dialog expose none either.
+
+**Applies to**: all platforms; apps that want to match a pick back to a library asset.
+
+**Workaround**: none in the crate.
+
+**Why accepted**: returning identifiers needs photo-library authorization on iOS, which this crate deliberately avoids so a pick needs no permission or usage string.
+
+**Trigger for removal**: an opt-in authorized pick path that returns asset identifiers.
+
+**Evidence**: (2026-11-08) `plugins/photo-library/src/apple.rs` (module docs, *No permission*).
+
+---
+
+### `photo-library-ios-export-wait` — on iOS `pick` returns only after the Photos service exports each original
+
+**Observed**: after the picker closes, `pick` waits until the Photos service has exported every chosen original: seconds for a fresh camera photo, as long as the download for an iCloud-only original. On iOS 27.2 a just-taken photo took about 3 s and an iCloud-only video more than 15 s; screenshots and local videos were instant.
+
+**Applies to**: iOS; picks of fresh or iCloud-only items.
+
+**Workaround**: pass `PickOptions::on_progress` to show loading and a `CancelToken` to let the user abort.
+
+**Why accepted**: the app needs a readable file, and the export is the only way the platform produces one.
+
+**Trigger for removal**: none planned; the wait is the platform's export time.
+
+**Evidence**: (2026-11-08) iPhone 13 mini (iOS 27.2) device gate; `plugins/photo-library/src/apple.rs`.
+
+---
+
+### `photo-library-android-cancel-cannot-dismiss-picker` — cancelling a pick does not close the Android system picker
+
+**Observed**: a `CancelToken` cancelled while the system picker is still open makes `pick` return `PhotoError::Cancelled` at once, but the picker UI stays up until the user closes it; Android has no API to dismiss it. Whatever the user then picks is discarded.
+
+**Applies to**: Android; apps that cancel while the picker is showing.
+
+**Workaround**: none; cancel after the picker has closed (during loading) removes the partial copies and needs no dismissal.
+
+**Why accepted**: `ActivityResultContracts.PickVisualMedia` offers no dismissal call.
+
+**Trigger for removal**: a platform dismissal API for the system picker.
+
+**Evidence**: (2026-11-08) `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/FrustPhotoLibraryHost.kt` (*Cancel and progress*); Pixel 5 (Android 14) device gate.
+
+---
+
+### `photo-library-heic-preview-needs-native-decode` — a picked HEIC original cannot be decoded by frust's image decoding
+
+**Observed**: picked bytes are the untranscoded original, so an iPhone HEIC photo arrives as HEIC. `frust::decode_image_async` decodes PNG and JPEG only and fails on HEIC (and on WebP and GIF), so the playground's preview shows a decode error for such a pick.
+
+**Applies to**: apps previewing picked photos, chiefly from iOS libraries.
+
+**Workaround**: send the file as is (share or upload), or convert it outside frust before decoding.
+
+**Why accepted**: a transcoding pick would change the bytes the user chose; native decoding is a separate capability.
+
+**Trigger for removal**: a native thumbnail or HEIC decode path ships.
+
+**Evidence**: (2026-11-08) `examples/playground/src/pages/photos.rs` (Picker panel text); iPhone 13 mini device gate.
+
+---
+
+### `photo-library-android-picker-fallback-untested` — the API 29/30 picker fallback has not been device-tested
+
+**Observed**: below the system picker's availability (API 33, or API 30 with R SDK extension 2) the host falls back to the Google Play services picker and then to `ACTION_OPEN_DOCUMENT`, which enforces no selection maximum (the result is truncated to the limit). No API 29 or 30 device or emulator leg has run; the Pixel 5 and Xiaomi 12 legs ran on newer Android.
+
+**Applies to**: Android 10 and 11 devices without the Play services picker.
+
+**Workaround**: none known; report a failure with the Android version.
+
+**Why accepted**: owed device leg, not a measured degrade.
+
+**Trigger for removal**: the API 29/30 emulator leg passes.
+
+**Evidence**: (2026-11-08) `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/FrustPhotoLibraryHost.kt` (picker selection, limit handling); leg owed.
 
 ---
