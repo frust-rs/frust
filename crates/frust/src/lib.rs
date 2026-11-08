@@ -2210,8 +2210,47 @@ pub fn spawn(fut: impl std::future::Future<Output = ()> + Send + 'static) {
 /// `any_spawner::Executor::spawn_local`; must be called on the UI thread —
 /// see `frust_reactive::ReactiveRuntime::pump_local`'s doc for the panic
 /// this triggers off-thread.
+///
+/// A continuation spawned here runs with no reactive owner. Use
+/// [`spawn_local_scoped`] when it reads context or must stop with its
+/// component.
 pub fn spawn_local(fut: impl std::future::Future<Output = ()> + 'static) {
     any_spawner::Executor::spawn_local(fut);
+}
+
+/// Spawns a `!Send` future on the UI thread under the calling owner: every
+/// poll re-enters that owner, and cleaning the owner up aborts the future.
+/// Use it, not [`spawn_local`], when the future reads context or must die
+/// with its component. Panics off the UI thread, like [`spawn_local`].
+pub use frust_reactive::spawn_local_scoped;
+
+/// Main-thread timers under Dart's names: [`time::sleep`] is `Future.delayed`
+/// and [`time::Timer`] is `Timer`. Two differences from Dart: dropping a
+/// [`time::Timer`] cancels it (call [`time::Timer::detach`] to let it run on,
+/// as Dart's does), and an overdue timer does not run in the background.
+///
+/// Durations are raw wall time, not the animation clock. A timer's callback
+/// runs on the UI thread under the owner that armed it, so context it reads
+/// is the arming component's. A reached deadline only makes the task ready;
+/// it runs at the next point the shell pumps the UI thread: the next
+/// event-loop turn on desktop, the next display tick on Android and iOS, and
+/// the browser's task queue on web. Nothing runs while an Android or iOS app
+/// is backgrounded, so an overdue timer fires on the first tick after resume,
+/// unless it was flagged [`time::Timer::flush_on_background`], which runs it
+/// synchronously inside the platform's foreground-exit callback.
+///
+/// ```no_run
+/// use frust::time::{Duration, Timer};
+///
+/// // Armed from a handler; keep the handle or the timer is cancelled.
+/// let timer = Timer::new(Duration::from_millis(300), || {
+///     // runs on the UI thread once the deadline has passed
+/// });
+/// # let _ = timer;
+/// ```
+pub mod time {
+    pub use frust_reactive::time::{Timer, sleep};
+    pub use std::time::Duration;
 }
 
 /// The heavy-work idiom: [`AsyncValue`] state,
@@ -4063,6 +4102,22 @@ mod page_view_reexport {
             .controller(controller)
             .on_page_changed(|_: &mut (), _page: usize| {});
         let _ = view;
+    }
+}
+
+/// Facade-level check that the main-thread timer names and the owner-scoped
+/// local spawn resolve through `frust` without an app naming `frust-reactive`.
+/// Nothing is armed here: `Timer::new` panics before `ReactiveRuntime::init`.
+#[cfg(test)]
+mod time_reexport {
+    #[test]
+    fn time_and_scoped_spawn_resolve_through_the_facade() {
+        // The closures are type-checked, never called: each generic item needs
+        // concrete arguments, and calling any of them here would panic off the UI thread.
+        let duration: crate::time::Duration = std::time::Duration::from_millis(300);
+        let _arm = || crate::time::Timer::new(duration, || {});
+        let _spawn = || crate::spawn_local_scoped(async {});
+        drop(crate::time::sleep(duration));
     }
 }
 
