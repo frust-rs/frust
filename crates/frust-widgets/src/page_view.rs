@@ -535,6 +535,11 @@ impl<State: 'static> View<State> for PageView<State> {
 }
 
 impl Widget for PageViewWidget {
+    /// Reports [`frust_core::InspectDetail::Clip`]: the page view (through its viewport) clips its content to its own box.
+    fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
+        self.viewport.inspect_detail()
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let main = self.viewport.axis().main_extent(bc.max());
         self.convert_page_commands(stride(finite_extent(main), self.fraction));
@@ -682,6 +687,11 @@ impl PageSliverWidget {
 }
 
 impl Widget for PageSliverWidget {
+    /// Reports [`frust_core::InspectDetail::Clip`]: the page run, while it is cut, clips its content to its own box.
+    fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
+        self.clip.then_some(frust_core::InspectDetail::Clip)
+    }
+
     /// Outside a viewport the run is laid out unscrolled, its pages a fraction
     /// of the incoming main-axis maximum.
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
@@ -815,6 +825,21 @@ mod tests {
             sizes.extend(page_sliver(sliver).pages.iter().map(ChildPod::size));
         });
         sizes
+    }
+
+    #[test]
+    fn page_view_reports_clip_only_when_its_pages_are_cut() {
+        use frust_core::InspectDetail;
+        let rig = Rig::new(&PageController::new(), ScrollAxis::Vertical, None);
+        let nodes = rig.root.inspect();
+        assert_eq!(nodes[0].detail, Some(InspectDetail::Clip));
+
+        let mut fit: RenderRoot<(), PageView<()>> = RenderRoot::new();
+        fit.rebuild(&mut |_: &mut ()| page_view((leaf(1.0, 1.0),)), &mut ());
+        fit.layout(WINDOW);
+        let nodes = fit.inspect();
+        // The page run fits its viewport, so its own pod reports no clip.
+        assert!(nodes.iter().skip(1).any(|n| n.detail.is_none()));
     }
 
     /// The rig's build closure.

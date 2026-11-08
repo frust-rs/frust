@@ -179,10 +179,12 @@ pub struct InspectNode {
 pub enum InspectDetail {
     /// The outcome of a text widget's last layout.
     Text(TextInspect),
+    /// The widget clips its descendants to its own bounds, so one outside them is hidden, not overflowing.
+    Clip,
 }
 
-/// One text widget's last layout, for [`InspectDetail::Text`]. Not `#[non_exhaustive]`, so a
-/// widget crate builds it as a struct literal; adding a field is a minor-version change.
+/// One text widget's last layout, for [`InspectDetail::Text`]. Not `#[non_exhaustive]`, so it is
+/// built as a struct literal; adding a field breaks literal construction.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextInspect {
     /// The text content laid out.
@@ -195,7 +197,7 @@ pub struct TextInspect {
     pub lines: usize,
     /// The maximum line count the widget was configured with, if any.
     pub max_lines: Option<usize>,
-    /// Whether the text needed more lines than `max_lines` allowed.
+    /// Whether there were more lines than `max_lines` allows, or the last allowed line is wider than `max_width`.
     pub did_exceed_max_lines: bool,
     /// Whether the last visible line was ellipsized.
     pub ellipsized: bool,
@@ -550,6 +552,25 @@ mod tests {
                 ..Default::default()
             }))
         }
+    }
+
+    /// A widget that reports [`InspectDetail::Clip`].
+    struct Clipper;
+    impl Widget for Clipper {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn inspect_detail(&self) -> Option<InspectDetail> {
+            Some(InspectDetail::Clip)
+        }
+    }
+
+    #[test]
+    fn inspect_reports_clip_detail() {
+        let mut tree = WidgetTree::new();
+        tree.insert_root(WidgetPod::new_typed(WidgetId(1), Clipper));
+        assert_eq!(tree.inspect()[0].detail, Some(InspectDetail::Clip));
     }
 
     fn expected_detail() -> Option<InspectDetail> {

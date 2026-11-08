@@ -2590,6 +2590,11 @@ impl<State: 'static> View<State> for ListView<State> {
 }
 
 impl Widget for ListViewWidget {
+    /// Reports [`frust_core::InspectDetail::Clip`]: the list viewport clips its content to its own box.
+    fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
+        Some(frust_core::InspectDetail::Clip)
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let vw = if bc.max().width.is_finite() {
             bc.max().width
@@ -2808,6 +2813,17 @@ mod tests {
     impl PaintScene for NullScene {
         fn fill_rect(&mut self, _o: Point, _s: Size, _c: peniko::Color) {}
         fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+
+    #[test]
+    fn list_view_reports_clip_detail() {
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        let mut logic = |_: &mut ()| list_view(1000, 50.0, |i| any::<(), _>(gen_stub(i)));
+        frame(&mut root, &mut logic, &mut (), Size::new(200.0, 200.0), 0.0);
+        assert_eq!(
+            root.inspect()[0].detail,
+            Some(frust_core::InspectDetail::Clip)
+        );
     }
 
     fn list_widget(root: &RenderRoot<(), ListView<()>>) -> &ListViewWidget {
