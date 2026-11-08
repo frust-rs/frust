@@ -45,6 +45,48 @@ T0-T1 tests should make visual failures diagnosable. A golden should not be the
 only proof that a button fires, a route pops, an IME state reconciles, or a
 surface-loss transition is legal.
 
+### Headless interaction tests
+
+`frust::testing::Tester<S, V>` (facade `test-support` feature) is a state-generic headless driver
+over a real `RenderRoot`: it owns the view state and a manual clock, so a test drives gestures and
+frames without a window or GPU. It is the T1 tool for "does this tap/drag/long-press do the right
+thing". Build one with `Tester::new(state, build, size)`, `with_options` (`TesterOptions`: theme,
+scale, insets, start time), or `new_with(size, &options, setup)`, whose `setup` closure runs inside
+the Tester's owner so signals and contexts it creates belong to that Tester.
+
+| Flutter | Tester |
+|---|---|
+| `pump(dt)` | `pump(dt)` |
+| `pumpAndSettle` | `pump_and_settle()` (two consecutive idle pumps, 600-frame cap) |
+| `tap` / `longPress` | `tap` / `long_press` |
+| `drag` / `timedDrag` | `drag` / `timed_drag` |
+| `startGesture` | `start_gesture` (mouse), `start_touch(slot, at)` (touch contact) |
+| `find.text` / `find.byType` / `find.bySemanticsLabel` | `find::text` / `find::by_type::<W>()` / `find::label(role, s)` |
+| `getSemantics` / `getRect` | `get_semantics` / `bounds` |
+
+- Time enters only through paint: `pump(dt)` advances the manual clock and paints one frame; nothing
+  else moves it. `pump_until(what, timeout, predicate)` is the only real-time wait, for
+  `spawn_blocking` or background work.
+- `tap` does not pump. Callbacks that fire on a frame (a long press, the callback owed by a
+  `Cancel`, any other Housekeeping-delivered fire) need a pump; such a fire costs two pumps to
+  settle.
+- `start_gesture` and `start_touch` return a `Gesture`; drive it with `move_by`, `move_to`, `up`,
+  `cancel` on the Tester. `drag` sends a 37 px lead-in move past the slop first, so the drag
+  updates add up to exactly `delta` while the pointer ends lead-in past `at + delta`; use
+  `start_gesture` + `move_to` to land on an exact point. `long_press` holds past the 500 ms
+  threshold plus one frame, then pumps once more before Up.
+- A touch in slot >= 1 reaches only a widget that captured and opted into the gesture's other
+  contacts (`pan_zoom`, pinch); use it for multi-touch tests.
+- `find::text` matches a label or a value; also `value`, `label_text`, `role`, `by_type_name`. A
+  `Finder` or a `NodeId` is accepted by `perform_action` (the root honours Click and Focus) and as a
+  gesture `Target`; `set_metrics` / `resize` support rotation tests; `scene`, `semantics`,
+  `inspect`, `send` expose the raw surfaces.
+- Ownership: each Tester owns a child `Owner` of the ambient owner (if the test set one) or of the
+  runtime root, and disposes its signals and contexts on drop. There is no process-wide lock, so
+  Tester tests run in parallel like any other; construct and pump a Tester on one thread.
+
+Run: `cargo test -p frust-ui --features test-support --lib`.
+
 ### Host-dependent tests
 
 A test that needs a host facility (macOS CoreText, a system emoji font; the `apple_raster` emoji tests run on iOS via the simulator runner and are ignored on macOS) checks its
@@ -102,7 +144,8 @@ The repository already contains substantial non-pixel coverage:
   `frust-widgets`, `frust-drive`, `frust-tui`, and `frust-core`.
 - `examples/huddle/tests/`: GPU-free screen, workflow, input, navigation,
   async, and architecture integration tests driven through `RenderRoot`.
-- `crates/frust/tests/`: facade-level interaction and text-input integration.
+- `crates/frust/tests/` and `crates/frust/src/testing/`: facade-level interaction and text-input
+  integration, plus the `frust::testing` `Tester` driver's own tests.
 - `crates/frust/tests/comment_density_budget.rs`: source-scan gate over `crates/frust-core`;
   comments stay at most 25 % of any region of 80+ lines, `///`/`//` runs at most 12 lines, `//!`
   runs at most 24, and per-file caps only tighten. Run
@@ -591,6 +634,9 @@ semantic tests:
 | Insets/theme | Safe areas, keyboard inset, light/dark, Material/Cupertino, accent variations |
 | External GPU pass | An app's own `ExternalPass` rendered through `frust::gpu::headless::HeadlessRenderer::render_with_passes`; the probe example is `examples/playground/tests/gpu_pass_headless.rs` (ignored, run from `examples/playground`). The playground's "GPU pass" section is the on-device gate vehicle (verified on a Pixel 4a, an iPhone 13 mini and a windowed macOS run) |
 | App screens | Stable Huddle home/feed/thread/search/profile/settings states and loading/empty/error variants |
+
+Interaction behavior (tap, drag, long press, multi-touch, settle) is covered by `Tester` tests,
+not goldens; see [Headless interaction tests](#headless-interaction-tests).
 
 Animations should use a small set of meaningful fixed timestamps: start,
 midpoint, threshold/crossover where relevant, and settled/end. Do not snapshot

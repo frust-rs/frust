@@ -97,7 +97,7 @@ default = ["complex-scripts"]
 # with `default-features = false`: unspaced Thai/Lao/Khmer/Myanmar text then overflows a line and
 # Chinese/Japanese word motion falls back to per-character stops.
 complex-scripts = ["frust-text/complex-scripts"]
-# Opt-in, dev-dependency use only: exposes `frust::testing::{semantics_of, scene_of, scene_of_with}`
+# Opt-in, dev-dependency use only: exposes `frust::testing::{Tester, semantics_of, scene_of, ..}`
 # and, through `frust-core/test-support`, `frust::authoring::PaintCtx::for_test`. Features are
 # additive, so never enable it on a normal dependency.
 test-support = ["frust-core/test-support"]

@@ -362,7 +362,12 @@ impl<State: 'static> PushOptions<State> {
     ///   part of its barrier tappable;
     /// - a press the page handles never dismisses;
     /// - every page input is suppressed while a transition is in flight, so a
-    ///   tap during the page's own enter or exit is ignored.
+    ///   tap during the page's own enter or exit is ignored;
+    /// - with [`Pop`](BackPolicy::Pop), the page leaves the stack as soon as
+    ///   its dismissal starts, so a second system back during its exit pops
+    ///   the page below and snaps the first exit to its end. This follows the
+    ///   navigator's rule that a new operation supersedes a running transition
+    ///   (see [`crate::nav::navigator`]).
     ///
     /// A non-dismissible barrier never dismisses and blocks nothing beyond
     /// what the page already receives.
