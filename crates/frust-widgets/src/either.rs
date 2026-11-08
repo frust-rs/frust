@@ -53,8 +53,9 @@
 //! the two marks never double-release.
 
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
-    PaintCtx, PaintScene, SemanticsCtx, SliverWidget, View, Widget, mark_focus_orphaned,
+    BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
+    InspectDetail, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, SliverWidget, View, Widget,
+    mark_focus_orphaned,
 };
 use kurbo::Size;
 
@@ -134,6 +135,14 @@ impl<L: Widget, R: Widget> Widget for EitherWidget<L, R> {
         match self {
             Self::Left(w) => w.type_name(),
             Self::Right(w) => w.type_name(),
+        }
+    }
+
+    /// The live arm's layout report, so a text inside an arm stays visible.
+    fn inspect_detail(&self) -> Option<InspectDetail> {
+        match self {
+            Self::Left(w) => w.inspect_detail(),
+            Self::Right(w) => w.inspect_detail(),
         }
     }
 
@@ -275,6 +284,11 @@ macro_rules! either_of {
             /// a tree element in its own right.
             fn type_name(&self) -> &'static str {
                 match self { $(Self::$V(w) => w.type_name(),)+ }
+            }
+
+            /// The live arm's layout report, forwarded as for [`EitherWidget`].
+            fn inspect_detail(&self) -> Option<InspectDetail> {
+                match self { $(Self::$V(w) => w.inspect_detail(),)+ }
             }
 
             /// The live arm's sliver face, forwarded as for [`EitherWidget`].

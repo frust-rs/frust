@@ -8,8 +8,8 @@
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View,
-    Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, InspectDetail, LayoutCtx, PaintCtx, PaintScene,
+    SemanticsCtx, TextInspect, View, Widget,
 };
 use frust_text::{
     DecorationKind, FontFamily, FontStyle, FontWeight, LineHeight, LocaleStamp, OverflowWrap,
@@ -467,6 +467,7 @@ impl<State: 'static> View<State> for TextView {
             overflow: self.overflow,
             layout: None,
             laid_out_max_width: None,
+            inspect: None,
             laid_out_style: None,
             laid_out_locale_stamp: LocaleStamp::default(),
         }
@@ -555,6 +556,8 @@ pub struct TextWidget {
     /// verified defect where `layout` re-shaped unconditionally
     /// every pass (see [`Widget::layout`]).
     laid_out_max_width: Option<f32>,
+    /// Layout report from the last real layout, served by `inspect_detail`.
+    inspect: Option<TextInspect>,
     /// The effective (themed-color- and themed-family-resolved) style the
     /// cached `layout` was shaped with. Compared alongside
     /// `laid_out_max_width` so a bare theme swap — which re-resolves the baked
@@ -662,6 +665,24 @@ pub(crate) fn paint_layout(layout: &TextLayout, origin: Point, scene: &mut dyn P
     fill(scene, DecorationKind::LineThrough);
 }
 
+/// Builds the inspect report for a freshly laid-out run.
+pub(crate) fn text_inspect(
+    text: &str,
+    layout: &TextLayout,
+    max_lines: Option<usize>,
+) -> TextInspect {
+    TextInspect {
+        text: text.to_owned(),
+        laid_out: layout.size(),
+        max_width: layout.max_width().map(f64::from),
+        lines: layout.line_count(),
+        max_lines,
+        did_exceed_max_lines: layout.did_exceed_max_lines(),
+        ellipsized: layout.is_ellipsized(),
+        overflows_width: layout.overflows_width(),
+    }
+}
+
 impl Widget for TextWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         // Wrap to the available width when it is bounded (it is, under the
@@ -705,6 +726,7 @@ impl Widget for TextWidget {
             self.overflow,
         );
         let size = bc.constrain(layout.size());
+        self.inspect = Some(text_inspect(&self.content, &layout, self.max_lines));
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
         self.laid_out_style = Some(style);
@@ -717,6 +739,10 @@ impl Widget for TextWidget {
             return;
         };
         paint_layout(layout, ctx.origin(), scene);
+    }
+
+    fn inspect_detail(&self) -> Option<InspectDetail> {
+        self.inspect.clone().map(InspectDetail::Text)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -1049,6 +1075,124 @@ mod tests {
         let stats = tcx.shape_cache_stats();
         assert_eq!(stats.shapes, 1, "the width change must not re-shape");
         assert_eq!(stats.line_breaks, 1, "the width change re-breaks once");
+    }
+
+    // --- inspect_detail layout report ---
+
+    /// Lays `view` out at `width` and returns every text-run report in the tree.
+    fn reports<V: View<()>>(
+        root: &mut frust_core::RenderRoot<(), V>,
+        width: f64,
+    ) -> Vec<TextInspect> {
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(width, 400.0), &mut tcx as &mut dyn Any);
+        root.inspect()
+            .into_iter()
+            .filter_map(|n| match n.detail {
+                Some(InspectDetail::Text(t)) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn report_of(mut view: impl FnMut() -> TextView, width: f64) -> TextInspect {
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        let mut root: frust_core::RenderRoot<(), TextView> = frust_core::RenderRoot::new();
+        root.rebuild(&mut |_: &mut ()| view(), &mut ());
+        reports(&mut root, width).remove(0)
+    }
+
+    const PROSE: &str = "alpha beta gamma delta epsilon zeta eta theta iota kappa";
+
+    #[test]
+    fn wrapped_text_reports_its_line_count() {
+        let r = report_of(|| text(PROSE), 120.0);
+        assert!(r.lines >= 2, "{r:?}");
+        assert_eq!(r.text, PROSE);
+        assert_eq!(r.max_lines, None);
+        assert!(!r.did_exceed_max_lines && !r.ellipsized && !r.overflows_width);
+    }
+
+    #[test]
+    fn ellipsized_single_line_reports_the_cut() {
+        let r = report_of(
+            || text(PROSE).max_lines(1).overflow(TextOverflow::Ellipsis),
+            120.0,
+        );
+        assert_eq!(r.lines, 1);
+        assert!(r.did_exceed_max_lines && r.ellipsized, "{r:?}");
+    }
+
+    #[test]
+    fn unbreakable_word_reports_width_overflow() {
+        let r = report_of(
+            || text("Supercalifragilisticexpialidocious").max_lines(1),
+            40.0,
+        );
+        assert!(r.overflows_width && r.did_exceed_max_lines, "{r:?}");
+        assert!(r.laid_out.width > r.max_width.expect("bounded"), "{r:?}");
+    }
+
+    #[test]
+    fn detail_survives_a_cache_hit_and_updates_on_a_new_width() {
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        let mut root: frust_core::RenderRoot<(), TextView> = frust_core::RenderRoot::new();
+        root.rebuild(&mut |_: &mut ()| text(PROSE), &mut ());
+        let first = reports(&mut root, 120.0).remove(0);
+        let again = reports(&mut root, 120.0).remove(0);
+        assert_eq!(first, again);
+        let wide = reports(&mut root, 2000.0).remove(0);
+        assert_eq!(wide.lines, 1);
+        assert_ne!(first.max_width, wide.max_width);
+    }
+
+    #[test]
+    fn button_label_reports_through_inspect_but_not_semantics() {
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        let mut root: frust_core::RenderRoot<(), crate::ButtonView<()>> =
+            frust_core::RenderRoot::new();
+        root.rebuild(
+            &mut |_: &mut ()| crate::button::<(), _>("Supercalifragilisticexpialidocious", |_| {}),
+            &mut (),
+        );
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(40.0, 100.0), &mut tcx as &mut dyn Any);
+        let nodes = root.inspect();
+        let label = nodes
+            .iter()
+            .find(|n| n.type_name.contains("TextWidget"))
+            .expect("label pod listed");
+        let parent = nodes
+            .iter()
+            .find(|n| Some(n.id) == label.parent)
+            .expect("parent");
+        assert!(parent.type_name.contains("Button"), "{}", parent.type_name);
+        assert!(matches!(&label.detail, Some(InspectDetail::Text(t)) if t.overflows_width));
+        let update = root.semantics();
+        assert!(
+            update
+                .nodes
+                .iter()
+                .all(|(_, n)| n.role() != frust_core::accesskit::Role::Label),
+            "the label stays out of semantics"
+        );
+    }
+
+    #[test]
+    fn text_inside_either_and_shortcuts_reports_detail() {
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        let mut root = frust_core::RenderRoot::new();
+        root.rebuild(
+            &mut |_: &mut ()| crate::either(true, || text(PROSE), || text("other")),
+            &mut (),
+        );
+        assert_eq!(reports(&mut root, 120.0).len(), 1);
+        let mut root = frust_core::RenderRoot::new();
+        root.rebuild(
+            &mut |_: &mut ()| crate::shortcuts::<(), _>(text(PROSE)),
+            &mut (),
+        );
+        assert_eq!(reports(&mut root, 120.0).len(), 1);
     }
 
     // --- Paragraph alignment, end-to-end through the widget ---
