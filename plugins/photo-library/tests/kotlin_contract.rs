@@ -871,6 +871,38 @@ fn browsing_checks_access_and_pages_by_sdk() {
 }
 
 #[test]
+fn sort_key_is_the_reported_timestamp_and_checks_are_strict() {
+    let browser = read(KOTLIN_BROWSER);
+    let rows = function(&browser, "private fun readRows(");
+    assert!(
+        rows.contains("date = if (taken > 0) taken else cursor.getLong(5) * 1000,"),
+        "the reported timestamp rule the sort key must mirror"
+    );
+    let sort = browser
+        .split("private const val SORT_ORDER =")
+        .nth(1)
+        .and_then(|rest| rest.split("private val ASSET_PROJECTION").next())
+        .expect("SORT_ORDER");
+    for part in [
+        "CASE WHEN ${MediaStore.MediaColumns.DATE_TAKEN} > 0 THEN ${MediaStore.MediaColumns.DATE_TAKEN} ",
+        "ELSE ${MediaStore.MediaColumns.DATE_ADDED} * 1000 END DESC, ${BaseColumns._ID} DESC",
+    ] {
+        assert!(sort.contains(part), "sort key part missing: {part}");
+    }
+
+    let rust = rust_code(&read(RUST_ANDROID_LIBRARY));
+    let albums = function(&rust, "fn albums_from(");
+    assert!(
+        albums.contains("let Some(id) = id else {") && albums.contains("mismatched_arrays()"),
+        "a null album id is a protocol violation, as for assets"
+    );
+    assert!(!albums.contains("filter_map"));
+    let thumbnail_from = function(&rust, "fn thumbnail_from(");
+    assert!(thumbnail_from.contains("checked_mul(4)"));
+    assert!(thumbnail_from.contains("stride.checked_mul(h as usize)"));
+}
+
+#[test]
 fn asked_flag_keys_and_permissions_match_frust_permissions() {
     let browser = read(KOTLIN_BROWSER);
     let permissions = read(KOTLIN_PERMISSIONS);

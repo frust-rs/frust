@@ -42,6 +42,15 @@ import kotlin.math.roundToInt
  *   `READ_MEDIA_VISUAL_USER_SELECTED` to the items the user selected
  *   (`hasUserSelectedAccess`, API 34), so partial access needs no special path
  *   here.
+ * - A computed `ORDER BY` ([SORT_ORDER]) is accepted. On `android11-release`
+ *   `MediaProvider.queryInternal` sets `SQLiteQueryBuilder.setStrictGrammar(true)`
+ *   for third-party callers, and `SQLiteQueryBuilder.enforceStrictGrammar`
+ *   tokenizes the sort order through `enforceStrictToken`, which admits column
+ *   names (`isTableOrColumn`) and the SQL keywords `CASE`, `WHEN`, `THEN`,
+ *   `ELSE`, `END` (`SQLiteTokenizer.isKeyword`) while rejecting only
+ *   `SELECT`/`FROM`/`WHERE`/`GROUP`/`HAVING`/`WINDOW`/`VALUES`/`ORDER`/`LIMIT`;
+ *   numeric literals and operators are not tokens it checks. On
+ *   `android10-release` the query builder sets no strict grammar at all.
  * - `MediaStore.MediaColumns.WIDTH`/`HEIGHT` are the stored pixels, before
  *   `ORIENTATION` is applied ([displaySize]).
  *
@@ -81,9 +90,15 @@ internal object MediaStoreBrowser {
     private const val MEDIA_TYPE_IMAGE = MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
     private const val MEDIA_TYPE_VIDEO = MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO
 
-    /** Newest first; the id keeps pages stable when two items share a timestamp. */
+    /**
+     * Newest first by the timestamp [readRows] reports: `DATE_TAKEN` when it is
+     * positive, otherwise `DATE_ADDED` in milliseconds. A plain
+     * `DATE_TAKEN DESC` would sort NULL and 0 last, away from the reported time.
+     * The id keeps pages stable when two items share a timestamp.
+     */
     private const val SORT_ORDER =
-        "${MediaStore.MediaColumns.DATE_TAKEN} DESC, ${MediaStore.MediaColumns.DATE_ADDED} DESC, ${BaseColumns._ID} DESC"
+        "CASE WHEN ${MediaStore.MediaColumns.DATE_TAKEN} > 0 THEN ${MediaStore.MediaColumns.DATE_TAKEN} " +
+            "ELSE ${MediaStore.MediaColumns.DATE_ADDED} * 1000 END DESC, ${BaseColumns._ID} DESC"
 
     private val ASSET_PROJECTION = arrayOf(
         BaseColumns._ID,
