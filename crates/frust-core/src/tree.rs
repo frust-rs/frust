@@ -168,6 +168,41 @@ pub struct InspectNode {
     pub children: Vec<WidgetId>,
     /// Distance from the root (roots are `0`).
     pub depth: usize,
+    /// What the widget reports about its last layout, from [`Widget::inspect_detail`]
+    /// at snapshot time; `None` unless the widget overrides that hook.
+    pub detail: Option<InspectDetail>,
+}
+
+/// A widget's read-only diagnostics on [`InspectNode::detail`]; variants may be added.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum InspectDetail {
+    /// The outcome of a text widget's last layout.
+    Text(TextInspect),
+    /// Clips its descendants to its own bounds: one outside them is hidden, not overflowing.
+    Clip,
+}
+
+/// One text widget's last layout, for [`InspectDetail::Text`]. Not `#[non_exhaustive]`, so it is
+/// built as a struct literal; adding a field breaks literal construction.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TextInspect {
+    /// The text content laid out.
+    pub text: String,
+    /// The size the text actually occupied (logical px).
+    pub laid_out: Size,
+    /// The width constraint the layout ran under, if bounded.
+    pub max_width: Option<f64>,
+    /// The number of lines laid out.
+    pub lines: usize,
+    /// The maximum line count the widget was configured with, if any.
+    pub max_lines: Option<usize>,
+    /// More lines than `max_lines` allows, or the last allowed line wider than `max_width`.
+    pub did_exceed_max_lines: bool,
+    /// Whether the last visible line was ellipsized.
+    pub ellipsized: bool,
+    /// Whether the laid-out content is wider than `max_width`.
+    pub overflows_width: bool,
 }
 
 /// The widget tree: a thin, typed wrapper over `tree_arena::TreeArena`.
@@ -355,6 +390,7 @@ impl WidgetTree {
             bounds: Rect::from_origin_size(origin, pod.size()),
             children: Vec::new(),
             depth,
+            detail: pod.widget().inspect_detail(),
         });
         let mut children = Vec::with_capacity(arena_children.len());
         for child_id in arena_children {
@@ -409,6 +445,7 @@ impl WidgetTree {
             bounds: Rect::from_origin_size(origin, child.size()),
             children: Vec::new(),
             depth,
+            detail: child.widget().inspect_detail(),
         });
         let mut grandchildren = Vec::new();
         Self::inspect_pods(child.widget(), id, origin, depth, &mut grandchildren, out);
@@ -498,6 +535,76 @@ mod tests {
                 visitor(child);
             }
         }
+    }
+
+    /// A leaf that reports a [`TextInspect`] through [`Widget::inspect_detail`].
+    struct Detailed;
+    impl Widget for Detailed {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn inspect_detail(&self) -> Option<InspectDetail> {
+            Some(InspectDetail::Text(TextInspect {
+                text: "hello".into(),
+                lines: 2,
+                ellipsized: true,
+                ..Default::default()
+            }))
+        }
+    }
+
+    /// A widget that reports [`InspectDetail::Clip`].
+    struct Clipper;
+    impl Widget for Clipper {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn inspect_detail(&self) -> Option<InspectDetail> {
+            Some(InspectDetail::Clip)
+        }
+    }
+
+    #[test]
+    fn inspect_reports_clip_detail() {
+        let mut tree = WidgetTree::new();
+        tree.insert_root(WidgetPod::new_typed(WidgetId(1), Clipper));
+        assert_eq!(tree.inspect()[0].detail, Some(InspectDetail::Clip));
+    }
+
+    fn expected_detail() -> Option<InspectDetail> {
+        Detailed.inspect_detail()
+    }
+
+    #[test]
+    fn inspect_reports_detail_for_arena_nodes_and_defaults_to_none() {
+        let mut tree = WidgetTree::new();
+        let root = tree.insert_root(pod(1));
+        tree.insert_child(root, WidgetPod::new_typed(WidgetId(2), Detailed))
+            .unwrap();
+        let nodes = tree.inspect();
+        assert_eq!(nodes[0].detail, None);
+        assert_eq!(nodes[1].detail, expected_detail());
+    }
+
+    #[test]
+    fn inspect_reports_detail_for_child_pods_through_a_box() {
+        // Boxed (erased) child pods: the Box<dyn Widget> impl must forward the hook.
+        let container = Container::new(vec![
+            (Point::ZERO, Size::new(5.0, 5.0), Box::new(Leaf)),
+            (
+                Point::ZERO,
+                Size::new(5.0, 5.0),
+                Box::new(Box::new(Detailed) as Box<dyn Widget>) as Box<dyn Widget>,
+            ),
+        ]);
+        let mut tree = WidgetTree::new();
+        tree.insert_root(WidgetPod::new_typed(WidgetId(1), container));
+        let nodes = tree.inspect();
+        assert_eq!(nodes[0].detail, None);
+        assert_eq!(nodes[1].detail, None);
+        assert_eq!(nodes[2].detail, expected_detail());
     }
 
     fn pod(id: u64) -> WidgetPod {

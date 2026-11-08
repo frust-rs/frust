@@ -15,8 +15,8 @@ use std::rc::Rc;
 use frust_core::event::PointerSource;
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, Chord, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ShortcutDecl, ShortcutId, ShortcutScope,
-    SliverWidget, View, Widget,
+    InspectDetail, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, ShortcutDecl, ShortcutId,
+    ShortcutScope, SliverWidget, View, Widget,
 };
 use kurbo::Size;
 
@@ -207,6 +207,11 @@ impl<W: Widget> Widget for ShortcutsWidget<W> {
     /// The child's name: the wrapper adds bindings, never a tree element of its own.
     fn type_name(&self) -> &'static str {
         self.child.type_name()
+    }
+
+    /// The child's layout report, so a wrapped text stays visible.
+    fn inspect_detail(&self) -> Option<InspectDetail> {
+        self.child.inspect_detail()
     }
 
     fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {

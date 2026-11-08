@@ -2571,6 +2571,11 @@ impl<State: 'static> View<State> for NavigatorView<State> {
 }
 
 impl<State: 'static> Widget for NavigatorWidget<State> {
+    /// Reports [`frust_core::InspectDetail::Clip`]: the navigator clips its content to its own box.
+    fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
+        Some(frust_core::InspectDetail::Clip)
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         // While a transition runs, both involved pages must be laid out (culling
         // is deferred to settle — Flutter opaque-route parity).
@@ -2929,5 +2934,25 @@ mod focus_traversal_tests {
         log.borrow_mut().clear();
         root.event(&mut (), &key(Key::Character("x".into())));
         assert_eq!(*log.borrow(), vec!["top"]);
+    }
+}
+
+#[cfg(test)]
+mod inspect_clip_tests {
+    use crate::test_support::leaf;
+    use crate::{NavigatorController, navigator};
+    use frust_core::{InspectDetail, RenderRoot};
+    use kurbo::Size;
+
+    #[test]
+    fn navigator_reports_clip_detail() {
+        let ctrl: NavigatorController<()> = NavigatorController::new();
+        let mut root = RenderRoot::new();
+        root.rebuild(
+            &mut |_: &mut ()| navigator(&ctrl, || leaf(10.0, 10.0)),
+            &mut (),
+        );
+        root.layout(Size::new(100.0, 100.0));
+        assert_eq!(root.inspect()[0].detail, Some(InspectDetail::Clip));
     }
 }

@@ -518,6 +518,11 @@ impl Widget for SliverGridWidget {
         }
     }
 
+    /// [`frust_core::InspectDetail::Clip`] while the grid clips tiles past its paint extent.
+    fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
+        self.clip.then_some(frust_core::InspectDetail::Clip)
+    }
+
     fn as_sliver(&mut self) -> Option<&mut dyn SliverWidget> {
         Some(self)
     }

@@ -42,7 +42,7 @@ use web_time::Instant;
 use peniko::Blob;
 
 use crate::convert::NotdefCounter;
-use crate::layout::{ELLIPSIS, Ellipsis, TextLayout};
+use crate::layout::{ELLIPSIS, Ellipsis, TextLayout, Truncation};
 use crate::oracle::cache::FontCacheStats;
 use crate::oracle::registry::{FamilySummary, RegistryMirror};
 use crate::oracle::{self, CacheLocation, Oracle, RenderCapabilities};
@@ -521,12 +521,17 @@ impl TextContext {
             return full.truncated(visible_lines, None);
         }
 
+        let truncation = Truncation {
+            exceeded_max_lines: has_extra_lines,
+            width_overflow: width_overflows,
+        };
         match overflow {
-            TextOverflow::Clip if !has_extra_lines => full,
-            TextOverflow::Clip => full.truncated(max_lines, None),
+            TextOverflow::Clip if !has_extra_lines => full.with_truncation(truncation),
+            TextOverflow::Clip => full.truncated(max_lines, None).with_truncation(truncation),
             TextOverflow::Ellipsis => {
                 let ellipsis = ellipsis(self, &full);
                 full.truncated(max_lines, Some(ellipsis))
+                    .with_truncation(truncation)
             }
         }
     }
@@ -2460,6 +2465,79 @@ mod tests {
             "the refilled glyphs continue the last line: {:?}",
             &kept[in_place.saturating_sub(1)..]
         );
+    }
+
+    // --- Truncation accessors ---
+
+    #[test]
+    fn truncation_accessors_without_max_lines() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = test_cx();
+        let s = style(16.0);
+        let word = cx.layout_bounded(&long_token(), &s, Some(80.0), None, TextOverflow::Ellipsis);
+        assert!(!word.did_exceed_max_lines() && !word.is_ellipsized());
+        assert!(word.overflows_width());
+        assert_eq!(word.max_width(), Some(80.0));
+        let wrapped = cx.layout_bounded(
+            "alpha beta gamma delta epsilon zeta eta theta",
+            &s,
+            Some(80.0),
+            None,
+            TextOverflow::Ellipsis,
+        );
+        assert!(wrapped.line_count() > 1);
+        assert!(!wrapped.overflows_width() && !wrapped.did_exceed_max_lines());
+    }
+
+    #[test]
+    fn truncation_accessors_on_line_cuts() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = test_cx();
+        let s = style(16.0);
+        let text = "one\ntwo\nthree";
+        let e = cx.layout_bounded(text, &s, Some(400.0), Some(1), TextOverflow::Ellipsis);
+        assert!(e.did_exceed_max_lines() && e.is_ellipsized());
+        assert_eq!(e.line_count(), 1);
+        assert!(!e.overflows_width());
+        let c = cx.layout_bounded(text, &s, Some(400.0), Some(1), TextOverflow::Clip);
+        assert!(c.did_exceed_max_lines() && !c.is_ellipsized());
+        assert_eq!(c.line_count(), 1);
+        let fits = cx.layout_bounded("one\ntwo", &s, Some(400.0), Some(5), TextOverflow::Ellipsis);
+        assert!(!fits.did_exceed_max_lines() && !fits.is_ellipsized());
+        assert_eq!(fits.line_count(), 2);
+        let nl = cx.layout_bounded("Hello\n", &s, Some(400.0), Some(1), TextOverflow::Ellipsis);
+        assert!(!nl.did_exceed_max_lines() && !nl.is_ellipsized());
+        assert_eq!(nl.line_count(), 1);
+    }
+
+    #[test]
+    fn a_clip_width_overrun_is_reported_and_leaves_the_layout_untouched() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = test_cx();
+        let s = style(16.0);
+        let token = long_token();
+        let full = cx.layout(&token, &s, Some(80.0));
+        let clipped = cx.layout_bounded(&token, &s, Some(80.0), Some(1), TextOverflow::Clip);
+        assert!(clipped.did_exceed_max_lines() && clipped.overflows_width());
+        assert!(!clipped.is_ellipsized());
+        assert_eq!(clipped.line_count(), 1);
+        assert_eq!(clipped.size(), full.size());
+        assert_eq!(
+            format!("{:?}", clipped.to_scene_runs(kurbo::Point::ORIGIN)),
+            format!("{:?}", full.to_scene_runs(kurbo::Point::ORIGIN))
+        );
+    }
+
+    #[test]
+    fn rich_bounded_reports_the_same_flags_as_the_plain_path() {
+        let _guard = crate::locale::test_support::DefaultLocale::set(None);
+        let mut cx = test_cx();
+        let s = style(16.0);
+        let spans = [TextSpan::new("one\ntwo\nthree", &s)];
+        let rich = cx.layout_rich_bounded(&spans, Some(400.0), Some(1), TextOverflow::Ellipsis);
+        assert!(rich.did_exceed_max_lines() && rich.is_ellipsized());
+        assert_eq!(rich.line_count(), 1);
+        assert!(!rich.overflows_width());
     }
 
     // --- Trailing-newline discount ---

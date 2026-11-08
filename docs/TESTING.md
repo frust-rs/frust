@@ -85,6 +85,19 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
   runtime root, and disposes its signals and contexts on drop. There is no process-wide lock, so
   Tester tests run in parallel like any other; construct and pump a Tester on one thread.
 
+- Text runs: `text_runs()` lists every text run in the retained tree as a `TextRun` (text, bounds,
+  parent bounds, line count, and the layout flags), including labels merged into a control that have
+  no semantics node. `text_overflows()` returns the runs that are cut off (`did_exceed_max_lines`
+  without `ellipsized`), wider than their box (`overflows_width`), or `outside_parent` (any ancestor,
+  0.5 px per edge). Ellipsized alone is not an overflow: the ellipsis is the intended fit.
+  `assert_no_text_overflow()` panics listing each offender with its size, parent size and flags.
+  A widget reporting `InspectDetail::Clip` (scroll, list and page views, viewports and their
+  slivers, pan/zoom, the navigator) bounds what is visible: a run it hides entirely is `hidden` and
+  never an overflow, so a tall scrolled screen passes; a run it hides in part is `clipped` and is
+  still judged on its own flags and on the containment of its visible part. A clip pushed by any
+  other widget is not consulted, and `TextInput` contents are not covered
+  (`testing-text-runs-engine-clips` in [LIMITATIONS.md](LIMITATIONS.md)).
+
 Run: `cargo test -p frust-ui --features test-support --lib`.
 
 ### Host-dependent tests

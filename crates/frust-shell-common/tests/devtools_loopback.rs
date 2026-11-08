@@ -84,6 +84,7 @@ fn node(id: u64, parent: Option<u64>, children: &[u64], depth: usize, size: f64)
         bounds: Rect::new(0.0, 0.0, size, size),
         children: children.iter().copied().map(WidgetId).collect(),
         depth,
+        detail: None,
     }
 }
 
