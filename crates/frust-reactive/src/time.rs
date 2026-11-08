@@ -170,7 +170,8 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
 /// A one-shot UI-thread timer, cancelled when this handle is dropped or the owner it was
 /// armed under is cleaned up. The callback runs at most once, under that owner, and a panic
 /// in it is logged rather than propagated in unwinding builds; with `panic = "abort"` (the
-/// release profile) a panicking callback aborts the process, including inside a flush. See the [module docs](self) for when it fires.
+/// release profile) a panicking callback aborts the process, including inside a flush. See
+/// the [module docs](self) for when it fires.
 #[must_use = "dropping a Timer cancels it; keep the handle, or call detach()"]
 pub struct Timer {
     inner: Rc<TimerInner>,
@@ -238,19 +239,19 @@ impl Timer {
 
     /// Also fires this timer at the first of the app going Resumed to Inactive
     /// ([`on_inactive`]) or Inactive to Hidden ([`on_hide`]). A timer armed while already
-    /// Inactive runs at the Hidden edge (Android `onStop`, iOS `didEnterBackground`). It also
-    /// fires on focus loss with no foreground exit (desktop and web window focus, the
-    /// Android notification shade or split-screen, iOS Control Center or a call); it is
-    /// one-shot and consumed, so do not flag a timer whose delay must be honoured while the
-    /// app stays visible.
+    /// Inactive, or by a callback in the Inactive flush, runs at the Hidden edge (Android
+    /// `onStop`, iOS `didEnterBackground`). It also fires on focus loss with no foreground
+    /// exit (desktop and web window focus, the Android notification shade or split-screen,
+    /// iOS Control Center or a call); it is one-shot and consumed, so do not flag a timer
+    /// whose delay must be honoured while the app stays visible.
     ///
     /// The callback runs synchronously on the UI thread inside iOS's
     /// `applicationWillResignActive` or Android's `Activity.onPause` (or, at the Hidden edge,
-    /// `onStop` / `didEnterBackground`), before control returns
-    /// to the OS, so work done **synchronously in the callback** completes before the
-    /// platform can suspend the process. Work it hands to `spawn_blocking`, `spawn_local` or
-    /// `spawn` is not covered: the process may be suspended first, and nothing pumps the
-    /// local queue after `onPause`. Keep it short, because the OS waits on these main-thread
+    /// `onStop` / `didEnterBackground`), before control returns to the OS, so work done
+    /// **synchronously in the callback** completes before the platform can suspend the
+    /// process. Work it hands to `spawn_blocking`, `spawn_local` or `spawn` is not covered:
+    /// the few background pumps a shell makes are not guaranteed to happen, and the process
+    /// may be suspended first. Keep it short, because the OS waits on these main-thread
     /// callbacks: a small SQLite transaction or an atomic file write is in budget, a network
     /// call is not.
     ///
@@ -311,9 +312,11 @@ fn register_flush(inner: &Rc<TimerInner>) {
     });
 }
 
-/// Empties the registry before firing, so a callback that arms a flagged timer leaves it
-/// for the next foreground exit. Runs at Inactive and at Hidden; a timer fires at most once,
-/// because the drain empties the registry and `fire_now` is a no-op after the first. [`TimerInner::run_callback`] isolates each panic.
+/// Empties the registry before firing. A flagged timer armed by a callback during the
+/// Inactive drain is consumed at the Hidden edge of the same exit; one armed during the
+/// Hidden drain waits for the next exit. Runs at Inactive and at Hidden; a timer fires at
+/// most once, because the drain empties the registry and `fire_now` is a no-op after the
+/// first. [`TimerInner::run_callback`] isolates each panic.
 fn drain_flush_registry() {
     let timers = FLUSH_REGISTRY.with_borrow_mut(std::mem::take);
     for timer in timers.iter().filter_map(Weak::upgrade) {
@@ -625,6 +628,41 @@ mod tests {
         assert!(timer.is_active());
         push_app_lifecycle(AppLifecycleState::Inactive);
         assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn a_timer_flagged_inside_a_flush_runs_at_the_hidden_edge_of_the_same_exit() {
+        let (_guard, _rt) = setup();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        let (a_count, bump_a) = counter();
+        let (b_count, bump_b) = counter();
+        let b_slot: Rc<RefCell<Option<Timer>>> = Rc::new(RefCell::new(None));
+        let arm_b = Rc::clone(&b_slot);
+        let _a = Timer::new(LONG, move || {
+            bump_a();
+            *arm_b.borrow_mut() = Some(Timer::new(LONG, bump_b).flush_on_background());
+        })
+        .flush_on_background();
+
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        assert_eq!(a_count.get(), 1);
+        assert_eq!(
+            b_count.get(),
+            0,
+            "B is armed by the Inactive flush, not run by it"
+        );
+        assert!(b_slot.borrow().as_ref().is_some_and(Timer::is_active));
+
+        push_app_lifecycle(AppLifecycleState::Hidden);
+        assert_eq!(
+            b_count.get(),
+            1,
+            "B runs at the Hidden edge of the same exit"
+        );
+
+        push_app_lifecycle(AppLifecycleState::Paused);
+        assert_eq!(a_count.get(), 1);
+        assert_eq!(b_count.get(), 1);
     }
 
     #[test]
