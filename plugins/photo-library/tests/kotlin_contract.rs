@@ -8,8 +8,8 @@
 //! - every Kotlin result/filter `const val` equals its `const NAME: jint`
 //!   twin in `src/android.rs`;
 //! - the JNI exports and the host class name match the Kotlin package and
-//!   object, and the Rust -> Kotlin `pick` call's JNI signature matches its
-//!   Kotlin declaration;
+//!   object, and the Rust -> Kotlin `pick` and `cancel` calls' JNI signatures
+//!   match their Kotlin declarations;
 //! - the module manifest declares no permission and declares the init
 //!   provider; the keep rules cover the host and the provider;
 //! - the picker contracts and their limit handling (`maxItems` of at least 2,
@@ -18,7 +18,10 @@
 //!   staging copies with the pick cache's sanitiser;
 //! - one pick is in flight at a time, on both sides, launched on the main
 //!   thread, and a destroyed Activity cancels its pick;
-//! - the Rust wait has no deadline.
+//! - the Rust wait has no deadline;
+//! - cancel: the hook calls the host and ends the wait locally, the copy loop
+//!   is chunked and checks the flag, `CANCELLED` maps to `Cancelled`;
+//! - progress is never forwarded under a lock on either side.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -33,6 +36,9 @@ const CONSUMER_RULES: &str = "platform/android/consumer-rules.pro";
 const GRADLE: &str = "platform/android/build.gradle.kts";
 const RUST_ANDROID: &str = "src/android.rs";
 
+/// How many leading [`SHARED_CODES`] are result codes (the rest are filters).
+const RESULT_CODES: usize = 7;
+
 /// Every code the two sides share, by name.
 const SHARED_CODES: &[&str] = &[
     "PENDING",
@@ -41,6 +47,7 @@ const SHARED_CODES: &[&str] = &[
     "NOT_INITIALIZED",
     "LAUNCH_FAILED",
     "COPY_FAILED",
+    "CANCELLED",
     "FILTER_IMAGES",
     "FILTER_VIDEOS",
     "FILTER_IMAGES_AND_VIDEOS",
@@ -148,10 +155,13 @@ fn kotlin_codes_equal_their_rust_twins() {
             .unwrap_or_else(|| panic!("src/android.rs has no `const {name}: jint`"));
         assert_eq!(k, r, "Kotlin `{name}` must equal src/android.rs's");
     }
-    let mut values: Vec<_> = SHARED_CODES[..6].iter().map(|n| rust[*n]).collect();
+    let mut values: Vec<_> = SHARED_CODES[..RESULT_CODES]
+        .iter()
+        .map(|n| rust[*n])
+        .collect();
     values.sort_unstable();
     values.dedup();
-    assert_eq!(values.len(), 6, "result codes must be distinct");
+    assert_eq!(values.len(), RESULT_CODES, "result codes must be distinct");
 }
 
 #[test]
@@ -182,9 +192,15 @@ fn jni_names_match_the_kotlin_package_and_object() {
             .contains("@JvmStatic\n    external fun nativeOnPickError(requestId: Long, code: Int)"),
         "Kotlin `nativeOnPickError` signature changed"
     );
+    assert!(
+        kotlin.contains(
+            "@JvmStatic\n    external fun nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)"
+        ),
+        "Kotlin `nativeOnPickProgress` signature changed"
+    );
 
     let prefix = format!("Java_{}_FrustPhotoLibraryHost_", package.replace('.', "_"));
-    let exports: [(&str, &[&str]); 2] = [
+    let exports: [(&str, &[&str]); 3] = [
         (
             "nativeOnPickResult",
             &[
@@ -195,6 +211,15 @@ fn jni_names_match_the_kotlin_package_and_object() {
             ],
         ),
         ("nativeOnPickError", &["request_id: jlong,", "code: jint,"]),
+        (
+            "nativeOnPickProgress",
+            &[
+                "request_id: jlong,",
+                "done: jint,",
+                "items: jint,",
+                "fraction: jdouble,",
+            ],
+        ),
     ];
     for (method, params) in exports {
         let symbol = format!("{prefix}{method}");
@@ -234,6 +259,19 @@ fn rust_pick_call_matches_the_kotlin_declaration() {
     assert!(
         window.contains("jni_sig!(\"(JIILjava/lang/String;)I\")"),
         "src/android.rs must call `pick` with `(JIILjava/lang/String;)I`"
+    );
+
+    assert!(
+        kotlin.contains("@JvmStatic\n    fun cancel(requestId: Long) {"),
+        "Kotlin host must declare `@JvmStatic fun cancel(requestId: Long)`"
+    );
+    let at = rust
+        .find("jni_str!(\"cancel\")")
+        .expect("src/android.rs never calls `cancel`");
+    let window = &rust[at..(at + 80).min(rust.len())];
+    assert!(
+        window.contains("jni_sig!(\"(J)V\")"),
+        "src/android.rs must call `cancel` with `(J)V`"
     );
 }
 
@@ -404,7 +442,7 @@ fn one_pick_is_in_flight_at_a_time() {
         "deliver must never take the PickGuard, or a held pick could not be answered"
     );
     assert!(
-        deliver.contains("Some(slot @ None) =>"),
+        deliver.contains("answer: slot @ None,") && deliver.contains("*slot = Some(answer);"),
         "the first answer for an id wins"
     );
 }
@@ -416,6 +454,151 @@ fn the_rust_wait_has_no_deadline() {
         !rust.contains("wait_timeout"),
         "a person may keep the picker open indefinitely; the host always answers"
     );
+    let next_event = function(&rust, "fn next_event(");
+    assert!(next_event.contains(".wait_while("));
+}
+
+#[test]
+fn cancel_ends_the_wait_and_stops_the_copies() {
+    let rust = rust_code(&read(RUST_ANDROID));
+    let pick = function(&rust, "pub(crate) fn pick(");
+    let early = pick
+        .find("if is_cancelled(options) {")
+        .expect("an already-cancelled token fails before anything runs");
+    let ui = pick.find("ensure_off_ui_thread").unwrap();
+    assert!(early < ui);
+    let run = pick.find("pick_into(options, &dir)").unwrap();
+    let clear = pick
+        .find("token.clear_hook();")
+        .expect("pick clears the token hook on every exit");
+    assert!(run < clear);
+
+    let pick_into = function(&rust, "fn pick_into(");
+    let pending = pick_into.find("if code != PENDING {").unwrap();
+    let hook = pick_into
+        .find("token.set_hook(move || cancel_request(request_id));")
+        .expect("pick installs the cancel hook");
+    assert!(
+        pending < hook,
+        "the hook is installed only once the host answered PENDING"
+    );
+    assert!(pick_into.contains("Answer::Cancelled => Err(PhotoError::Cancelled),"));
+
+    let hook = function(&rust, "fn cancel_request(");
+    let host = hook.find("jni_str!(\"cancel\")").unwrap();
+    let local = hook
+        .find("deliver(request_id, Answer::Cancelled);")
+        .expect("the hook ends the wait locally, without waiting for the host");
+    assert!(
+        host < local,
+        "the host flag is set before the local answer frees the call dir"
+    );
+    assert!(
+        function(&rust, "fn error_for(").contains("CANCELLED => PhotoError::Cancelled,"),
+        "the host's CANCELLED code maps to PhotoError::Cancelled"
+    );
+
+    let kotlin = read(KOTLIN_HOST);
+    assert!(kotlin.contains("const val COPY_CHUNK_BYTES = 64 * 1024"));
+    let chunks = function(&kotlin, "private fun copyChunks(");
+    assert!(chunks.contains("ByteArray(COPY_CHUNK_BYTES)"));
+    let check = chunks.find("if (flight.cancelled) return false").unwrap();
+    let read_at = chunks.find("source.read(buffer)").unwrap();
+    assert!(check < read_at, "the flag is checked before every chunk");
+    assert!(
+        !kotlin.contains(".copyTo("),
+        "an unchunked copy could not stop a large video promptly"
+    );
+    let copy_all = function(&kotlin, "private fun copyAll(");
+    assert!(
+        copy_all.contains("if (flight.cancelled) return null"),
+        "the flag is checked between items"
+    );
+    let on_picked = function(&kotlin, "private fun onPicked(");
+    assert!(on_picked.contains("val flight = detachInFlight(requestId) ?: return"));
+    let cancelled = on_picked
+        .find("true -> {")
+        .expect("a cancelled copy answers CANCELLED");
+    let tail = &on_picked[cancelled..];
+    let delete = tail.find("staging.forEach { it.delete() }").unwrap();
+    let answer = tail.find("notifyError(requestId, CANCELLED)").unwrap();
+    assert!(
+        delete < answer,
+        "staging files are deleted before CANCELLED is answered"
+    );
+    assert!(on_picked.contains("when (releaseCopied(flight)) {"));
+    let cancel = function(&kotlin, "fun cancel(requestId: Long) {");
+    assert!(cancel.contains("if (cancelInFlight(requestId)) notifyError(requestId, CANCELLED)"));
+    let mark = function(&kotlin, "private fun cancelInFlight(");
+    assert!(mark.contains("current.cancelled = true"));
+    let launch = function(&kotlin, "private fun launch(");
+    assert!(
+        launch.contains("if (!holdsInFlight(requestId)) return"),
+        "a pick cancelled before its launch ran opens no picker"
+    );
+}
+
+#[test]
+fn progress_is_never_forwarded_under_a_lock() {
+    let rust = rust_code(&read(RUST_ANDROID));
+    let export = function(
+        &rust,
+        "pub extern \"system\" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnPickProgress<",
+    );
+    assert!(export.contains("record_progress(request_id as u64, progress);"));
+    let record = function(&rust, "fn record_progress(");
+    assert!(record.contains("ANSWERED.notify_all();"));
+    for body in [export, record, function(&rust, "fn next_event(")] {
+        assert!(
+            !body.contains(".report(") && !body.contains("progress)("),
+            "the JNI thread and the locked wait never run the caller's callback"
+        );
+    }
     let await_answer = function(&rust, "fn await_answer(");
-    assert!(await_answer.contains(".wait_while("));
+    assert!(
+        await_answer.contains("next_event(request_id)") && await_answer.contains(".report("),
+        "the waiting thread forwards progress through the throttle"
+    );
+    assert!(
+        !await_answer.contains("lock("),
+        "progress is forwarded after the WAITS lock is released"
+    );
+    let pick_into = function(&rust, "fn pick_into(");
+    assert!(pick_into.contains("options.progress.clone().map(ProgressThrottle::new)"));
+    assert!(
+        pick_into.contains("done: items.len(),") && pick_into.contains("fraction: 1.0,"),
+        "the final report is {{items, done: items, fraction: 1.0}}"
+    );
+
+    let kotlin = read(KOTLIN_HOST);
+    let notify = function(&kotlin, "private fun notifyProgress(");
+    assert!(notify.contains("nativeOnPickProgress(requestId, done, items, fraction)"));
+    assert_eq!(
+        kotlin.matches("nativeOnPickProgress(requestId, ").count(),
+        1,
+        "progress reaches Rust only through notifyProgress"
+    );
+    for marker in [
+        "private fun notifyProgress(",
+        "private fun copyAll(",
+        "private fun copyChunks(",
+    ] {
+        let at = kotlin.find(marker).unwrap();
+        let before = kotlin[..at].trim_end();
+        assert!(
+            !before.ends_with("@Synchronized"),
+            "`{marker}` must not hold the host's monitor"
+        );
+    }
+    let send = function(&kotlin, "fun send() {");
+    assert!(
+        send.contains("done >= items -> 1.0"),
+        "the last item reports 1.0"
+    );
+    let copy_all = function(&kotlin, "private fun copyAll(");
+    let start = copy_all.find("progress.send()").unwrap();
+    let first_copy = copy_all.find("openInputStream").unwrap();
+    assert!(start < first_copy, "progress starts before the first copy");
+    assert!(copy_all.contains("progress.itemDone()"));
+    assert!(kotlin.contains("OpenableColumns.SIZE"));
 }
