@@ -219,6 +219,9 @@ dependencies {
     // frust-photo-library: the system photo-picker host (`FrustPhotoLibraryHost`)
     // + its process-start init provider. The picker needs no permission.
     implementation(project(":frust-photo-library"))
+    // frust-share: the file-share host (`FrustShareHost`) + its FileProvider
+    // subclass, serving copies under cacheDir/frust-share.
+    implementation(project(":frust-share"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each
