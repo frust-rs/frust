@@ -20,6 +20,9 @@
 //! |---|---|---|
 //! | `pick` | `(long requestId, int filter, int limit, String destDir) -> int` | [`PENDING`] after posting the launch (the answer arrives through `nativeOnPickResult` or `nativeOnPickError` below with the same `requestId`); [`NO_ACTIVITY`] (→ [`PhotoError::NoPresenter`]); [`BUSY`]; [`NOT_INITIALIZED`] (→ [`PhotoError::PlatformNotInitialized`]); [`LAUNCH_FAILED`] |
 //! | `cancel` | `(long requestId) -> void` | nothing; an unknown or already-answered id is ignored (see "Cancel and progress") |
+//! | `exportOriginal` | `(long requestId, String uri, String destPath) -> int` | [`PENDING`] after queuing the copy (answered through `nativeOnExportDone`); [`NOT_INITIALIZED`]; `NOT_FOUND` for an id that is not a `MediaStore` content URI |
+//! | `cancelExport` | `(long requestId) -> void` | nothing; an unknown or already-answered id is ignored |
+//! | `saveToLibrary` | `(long requestId, String sourcePath, boolean isVideo, String displayName, String album) -> int` | [`PENDING`] after queuing the save (answered through `nativeOnSaveDone`); [`NOT_INITIALIZED`] |
 //!
 //! `filter` is [`FILTER_IMAGES`], [`FILTER_VIDEOS`] or
 //! [`FILTER_IMAGES_AND_VIDEOS`]; `limit` is [`PickOptions::limit`] (0 = the
@@ -38,8 +41,14 @@
 //!   (→ [`PhotoError::Cancelled`]).
 //! - [`Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnPickProgress`]`(env, class, requestId: jlong, done: jint, items: jint, fraction: jdouble)`
 //!   — copy progress, from the host's copy thread; never an answer.
+//! - `Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnExportProgress(env, class, requestId: jlong, done: jlong, total: jlong)`
+//!   — bytes copied, once per chunk; absent when the size is unknown.
+//! - `Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnExportDone(env, class, requestId: jlong, code: jint, mime: String, name: String)`
+//!   — an export's answer, with the provider's MIME type and display name.
+//! - `Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnSaveDone(env, class, requestId: jlong, code: jint, uri: String)`
+//!   — a save's answer, with the new asset's URI.
 //!
-//! All three exports upgrade their [`jni::EnvUnowned`] via
+//! Every export upgrades its [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind`, and
 //! resolve with [`LogErrorAndDefault`] — the crate's no-unwind-across-FFI
 //! guarantee (`docs/CODE_STANDARDS.md`'s Language Idioms), with no direct
@@ -103,6 +112,12 @@
 //! With the `library` feature, `android_library` adds the `albums`, `assets`,
 //! `thumbnail` and `manageLimitedSelection` host calls and refuses the UI
 //! thread on each; see that module and the Kotlin host's contract table.
+//!
+//! # Originals and saves
+//!
+//! `android_originals` implements `export_original` (`library`) and `save`
+//! (`save`) with its own request map, so neither takes the pick guard or the
+//! host's single pick slot; see that module.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -778,19 +793,11 @@ mod android_library;
 #[cfg(feature = "library")]
 pub(crate) use android_library::{albums, assets, manage_limited_selection, thumbnail};
 
-// Originals and saving: replaced by the platform implementations.
+// Originals and saving: `export_original` and `save`.
+#[cfg(any(feature = "library", feature = "save"))]
+#[path = "android_originals.rs"]
+mod android_originals;
 #[cfg(feature = "library")]
-pub(crate) fn export_original(
-    _id: &crate::AssetId,
-    _options: &crate::ExportOptions,
-) -> Result<crate::ExportedOriginal, PhotoError> {
-    Err(PhotoError::Unsupported) // Replaced by the platform implementation.
-}
-
+pub(crate) use android_originals::export_original;
 #[cfg(feature = "save")]
-pub(crate) fn save(
-    _request: &crate::SaveRequest,
-    _kind: crate::MediaKind,
-) -> Result<crate::SavedAsset, PhotoError> {
-    Err(PhotoError::Unsupported) // Replaced by the platform implementation.
-}
+pub(crate) use android_originals::save;
