@@ -9301,3 +9301,25 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Evidence**: (2026-11-08) `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/FrustPhotoLibraryHost.kt` (picker selection, limit handling); leg owed.
 
 ---
+
+### `time-no-firing-while-backgrounded` — a `frust::time::Timer` does not fire while the app is backgrounded (Android, iOS)
+
+**Observed**: Android removes its frame callback at `onPause` and pumps nothing at `onPause`/`onStop`; iOS
+pauses its display link at `willResignActive` and pumps once at `didEnterBackground`. A due `Timer` runs
+at the first tick after resume. `flush_on_background` runs the callback synchronously inside the
+foreground-exit callback: only synchronous work in it is guaranteed to complete before suspension, work
+it spawns is not, and no background-task assertion is provided. On desktop a window that lost focus keeps
+running, so a plain timer fires on time and `flush_on_background` also fires on focus loss.
+
+**Applies to**: Android, iOS.
+
+**Why accepted**: the shells' wakers are no-ops by design because the display tick already pumps;
+background execution belongs to OS work managers.
+
+**Evidence**: (2026-11-09) device gate on a Pixel 5 and an iPhone 13 mini: a plain 10 s timer stayed
+silent in the background and fired on resume (16744 ms on the Pixel 5, 17557 ms on the iPhone); a flagged
+timer's marker file written at backgrounding survived killing the process about 2 s later on both. On
+desktop a plain timer fired on time (10001 ms measured). `examples/playground/src/pages/network.rs`
+(Timers block).
+
+---

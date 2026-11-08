@@ -34,6 +34,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `frust::time::{sleep, Timer, Duration}`: `sleep(duration)` is an awaitable wall-clock delay (a real
+  browser `setTimeout` on web) and `Timer::new(duration, callback)` runs a callback once, with `cancel`,
+  `is_active`, `fire_now` and `detach`. A `Timer` is cancelled when dropped and with its owner, and its
+  callback runs under the owner that armed it. It fires on the next desktop loop turn, or the next mobile
+  display tick while resumed, never while backgrounded; a due timer fires on the first tick after resume.
+  `flush_on_background` instead runs the callback synchronously inside the platform's foreground-exit
+  callback: only synchronous work in it is guaranteed to complete before suspension, work it spawns is
+  not, and no background-task assertion is provided. `frust::spawn_local_scoped` is `spawn_local` bound to
+  the calling owner. The playground Network page gains a Timers block.
 - The new `frust-photo-library` plugin crate: `PhotoLibrary::pick(&PickOptions)` opens the system photo
   picker on Android and iOS (no permission and no Info.plist string needed) and a native file dialog on
   Linux, macOS and Windows. Options: a media filter, a limit, `on_progress` loading reports
