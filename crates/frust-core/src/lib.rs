@@ -207,7 +207,7 @@ pub use shortcuts::{
 pub use sliver::{
     GrowthDirection, ScrollAxis, ScrollDirection, SliverConstraints, SliverGeometry, SliverWidget,
 };
-pub use tree::{InspectNode, WidgetPod, WidgetTree};
+pub use tree::{InspectDetail, InspectNode, TextInspect, WidgetPod, WidgetTree};
 pub use view::{AnyView, BuildCtx, ChangeFlags, View, ViewSeq, WidgetId, any, views};
 pub use widget::{
     ChildPod, CornerRadii, DashPattern, DiscardScene, HeroDirective, HeroFrames, LayoutCtx,

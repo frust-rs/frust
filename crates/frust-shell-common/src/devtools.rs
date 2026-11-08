@@ -1360,6 +1360,7 @@ mod tests {
             bounds: Rect::new(0.0, 0.0, 10.0, 20.0),
             children: children.iter().copied().map(WidgetId).collect(),
             depth,
+            detail: None,
         }
     }
 
