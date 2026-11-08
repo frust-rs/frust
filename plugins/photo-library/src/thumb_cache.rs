@@ -1,7 +1,7 @@
 //! A process-wide, byte-budgeted LRU of decoded thumbnails.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::library::{Thumbnail, ThumbnailMode, ThumbnailRequest};
 use crate::types::AssetId;
@@ -29,35 +29,44 @@ impl Key {
 }
 
 struct Entry {
-    thumb: Thumbnail,
+    /// Shared, so a hit leaves the lock holding only a reference to copy from.
+    thumb: Arc<Thumbnail>,
     used: u64,
 }
 
 /// The cache proper; a value so tests own an instance.
 pub(crate) struct Lru {
     map: HashMap<Key, Entry>,
+    /// Every key of `map`, by its entry's `used` tick: the first is the eviction victim.
+    order: BTreeMap<u64, Key>,
     bytes: usize,
     budget: usize,
     tick: u64,
+    /// Bumped by every [`clear`](Self::clear).
+    epoch: u64,
 }
 
 impl Lru {
     pub(crate) fn new(budget: usize) -> Self {
         Self {
             map: HashMap::new(),
+            order: BTreeMap::new(),
             bytes: 0,
             budget,
             tick: 0,
+            epoch: 0,
         }
     }
 
     /// A hit refreshes the entry's recency.
-    pub(crate) fn get(&mut self, key: &Key) -> Option<Thumbnail> {
-        self.tick += 1;
-        let tick = self.tick;
+    pub(crate) fn get(&mut self, key: &Key) -> Option<Arc<Thumbnail>> {
         let entry = self.map.get_mut(key)?;
-        entry.used = tick;
-        Some(entry.thumb.clone())
+        self.tick += 1;
+        if let Some(indexed) = self.order.remove(&entry.used) {
+            self.order.insert(self.tick, indexed);
+        }
+        entry.used = self.tick;
+        Some(Arc::clone(&entry.thumb))
     }
 
     /// Caches `thumb`, evicting least-recently-used entries until under budget. An entry
@@ -66,20 +75,38 @@ impl Lru {
         let size = thumb.rgba.len();
         if let Some(old) = self.map.remove(&key) {
             self.bytes -= old.thumb.rgba.len();
+            self.order.remove(&old.used);
         }
         if size > self.budget {
             return;
         }
         self.tick += 1;
         self.bytes += size;
+        self.order.insert(self.tick, key.clone());
         self.map.insert(
             key,
             Entry {
-                thumb,
+                thumb: Arc::new(thumb),
                 used: self.tick,
             },
         );
         self.evict();
+    }
+
+    /// [`insert`](Self::insert), unless the cache was cleared since `epoch` was read: pixels
+    /// loaded before a clear must not repopulate the cache after it.
+    fn insert_since(&mut self, epoch: u64, key: Key, thumb: Thumbnail) {
+        if epoch == self.epoch {
+            self.insert(key, thumb);
+        }
+    }
+
+    /// Drops every entry and invalidates in-flight loads. The budget is unchanged.
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+        self.bytes = 0;
+        self.epoch += 1;
     }
 
     pub(crate) fn set_budget(&mut self, budget: usize) {
@@ -99,12 +126,7 @@ impl Lru {
 
     fn evict(&mut self) {
         while self.bytes > self.budget {
-            let Some(oldest) = self
-                .map
-                .iter()
-                .min_by_key(|(_, e)| e.used)
-                .map(|(k, _)| k.clone())
-            else {
+            let Some((_, oldest)) = self.order.pop_first() else {
                 break;
             };
             if let Some(e) = self.map.remove(&oldest) {
@@ -120,16 +142,32 @@ fn lock() -> MutexGuard<'static, Option<Lru>> {
     CACHE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// A cached copy of the thumbnail, copied after the lock is released.
 pub(crate) fn get(key: &Key) -> Option<Thumbnail> {
-    lock()
+    let hit = lock()
         .get_or_insert_with(|| Lru::new(DEFAULT_BUDGET))
-        .get(key)
+        .get(key);
+    hit.map(|shared| Thumbnail::clone(&shared))
 }
 
-pub(crate) fn insert(key: Key, thumb: Thumbnail) {
+/// The value to pass to [`insert`] for a load starting now.
+pub(crate) fn epoch() -> u64 {
+    lock().get_or_insert_with(|| Lru::new(DEFAULT_BUDGET)).epoch
+}
+
+/// Caches a thumbnail whose load started at `epoch`; a load older than the last [`clear`] is
+/// dropped.
+pub(crate) fn insert(epoch: u64, key: Key, thumb: Thumbnail) {
     lock()
         .get_or_insert_with(|| Lru::new(DEFAULT_BUDGET))
-        .insert(key, thumb);
+        .insert_since(epoch, key, thumb);
+}
+
+/// Empties the cache and refuses the insert of any load already in flight.
+pub(crate) fn clear() {
+    lock()
+        .get_or_insert_with(|| Lru::new(DEFAULT_BUDGET))
+        .clear();
 }
 
 pub(crate) fn set_budget(budget: usize) {
@@ -186,6 +224,72 @@ mod tests {
         assert!(c.get(&key("a")).is_some());
         assert!(c.get(&key("c")).is_some());
         assert_eq!(c.bytes(), 80);
+    }
+
+    #[test]
+    fn hits_set_the_eviction_order() {
+        let mut c = Lru::new(120);
+        c.insert(key("a"), thumb(40));
+        c.insert(key("b"), thumb(40));
+        c.insert(key("c"), thumb(40));
+        // Recency, oldest first, is now b, c, a; then c, a, b.
+        assert!(c.get(&key("a")).is_some());
+        assert!(c.get(&key("b")).is_some());
+        c.insert(key("d"), thumb(40));
+        assert_eq!(c.len(), 3);
+        c.set_budget(80);
+        assert_eq!(c.len(), 2);
+        // `c` went to `d`, then `a` to the shrink: `b` and `d` are the newest two.
+        assert!(c.get(&key("c")).is_none());
+        assert!(c.get(&key("a")).is_none());
+        assert!(c.get(&key("b")).is_some());
+        assert!(c.get(&key("d")).is_some());
+        assert_eq!(c.order.len(), c.len());
+    }
+
+    #[test]
+    fn replacing_an_entry_refreshes_it_in_the_order() {
+        let mut c = Lru::new(80);
+        c.insert(key("a"), thumb(40));
+        c.insert(key("b"), thumb(40));
+        c.insert(key("a"), thumb(40));
+        assert_eq!(c.order.len(), 2);
+        c.insert(key("c"), thumb(40));
+        assert!(c.get(&key("b")).is_none());
+        assert!(c.get(&key("a")).is_some());
+    }
+
+    #[test]
+    fn a_hit_shares_the_cached_pixels() {
+        let mut c = Lru::new(100);
+        c.insert(key("a"), thumb(40));
+        let first = c.get(&key("a")).expect("cached");
+        let second = c.get(&key("a")).expect("cached");
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn clear_empties_and_keeps_the_budget() {
+        let mut c = Lru::new(100);
+        c.insert(key("a"), thumb(40));
+        c.clear();
+        assert_eq!((c.len(), c.bytes(), c.order.len()), (0, 0, 0));
+        assert!(c.get(&key("a")).is_none());
+        c.insert(key("b"), thumb(100));
+        assert_eq!(c.bytes(), 100);
+    }
+
+    #[test]
+    fn a_load_older_than_a_clear_is_not_cached() {
+        let mut c = Lru::new(100);
+        let before = c.epoch;
+        c.insert_since(before, key("a"), thumb(40));
+        assert!(c.get(&key("a")).is_some());
+        c.clear();
+        c.insert_since(before, key("b"), thumb(40));
+        assert!(c.get(&key("b")).is_none());
+        c.insert_since(c.epoch, key("c"), thumb(40));
+        assert!(c.get(&key("c")).is_some());
     }
 
     #[test]
