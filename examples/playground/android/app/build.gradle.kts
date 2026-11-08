@@ -212,6 +212,10 @@ dependencies {
     // + its process-start init provider — `src/pages/auth_session.rs`'s
     // "Auth" section.
     implementation(project(":frust-auth-session"))
+    // frust-permissions: the runtime-permission host (`FrustPermissionsHost`)
+    // + its process-start init provider. The module declares no permission;
+    // this app's manifest declares the ones it asks for.
+    implementation(project(":frust-permissions"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each

@@ -1,0 +1,69 @@
+[package]
+name = "frust-permissions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Unified runtime permission status, request and settings shortcut for Frust apps: photos, camera, microphone and media location on Android and Apple."
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+# Each permission is opt-in so an app never ships (or has to justify to a store) a capability it
+# does not use: a permission whose feature is off returns `FeatureDisabled` without touching the OS.
+[features]
+default = []
+photos = []
+camera = []
+microphone = []
+media-location = []
+
+[dependencies]
+thiserror = { workspace = true }
+log = { workspace = true }
+
+# `jni` for the plugin's own JNI export; `frust-plugin` (the only `frust-*` dependency a platform
+# plugin may have, docs/PLUGINS_CODE_STANDARDS.md) for `with_jni_env`. Android-only.
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { workspace = true }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.5" }
+
+# Apple arm: Objective-C runtime, Foundation strings/bundle/URL, AVCaptureDevice, and the blocks
+# and queues the permission prompts report on. Literals narrow the feature lists of the root rows.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSBundle",
+    "NSURL",
+    "NSDictionary",
+    "NSObject",
+] }
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+dispatch2 = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2",
+] }
+objc2-av-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "AVCaptureDevice",
+    "AVMediaFormat",
+    "block2",
+] }
+
+# iOS opens its Settings page through UIApplication.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-ui-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "UIApplication",
+    "UIResponder",
+] }
+
+# macOS opens System Settings through NSWorkspace.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace"] }

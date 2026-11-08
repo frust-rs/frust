@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This module declares NO permission. Each permission the app uses is declared
+  by the app itself (through the plugin's per-permission features), so an app
+  never ships, or has to justify to a store, a permission it does not use. A
+  permission the app forgot to declare is reported as a typed "not declared"
+  error by `FrustPermissionsHost`, never as a silent denial.
+
+  The provider below is how `FrustPermissionsHost` obtains an application
+  `Context`, and registers its Activity lifecycle callbacks, before any
+  Activity exists: the `plugins/connectivity` / `plugins/camera` init-provider
+  shape, a no-op `ContentProvider` whose `onCreate` runs at process start.
+  `${applicationId}` is substituted at manifest-merge time, so the authority is
+  unique per consuming app; `exported="false"` because it exposes no data and
+  nothing outside the app may reach it.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.permissions`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <provider
+            android:name="dev.frust.permissions.FrustPermissionsInitProvider"
+            android:authorities="${applicationId}.frustpermissionsinit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>

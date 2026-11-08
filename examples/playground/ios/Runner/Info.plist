@@ -82,5 +82,14 @@
 	     this is a real edit even though frust-camera itself is a plugin. -->
 	<key>NSCameraUsageDescription</key>
 	<string>This app uses the camera to show a live preview and capture photos on the Camera page.</string>
+	<!-- frust-permissions: a missing usage string is reported as
+	     MissingUsageDescription instead of crashing, but the Photos page needs
+	     all three to show the real prompts. -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app reads your photo library on the Photos page to demonstrate the permission prompt.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>This app asks to add photos to your library on the Photos page to demonstrate the add-only permission prompt.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>This app asks for the microphone on the Photos page to demonstrate the permission prompt.</string>
 </dict>
 </plist>

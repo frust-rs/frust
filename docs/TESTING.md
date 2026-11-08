@@ -217,6 +217,10 @@ The repository already contains substantial non-pixel coverage:
   exercises none of that layer — Linux/Windows/web hosts are the only ones that do — while every
   platform's `Cargo.toml`-target compile gate (`docs/DEVELOPMENT.md` § Test) still type-checks the
   real arm. See [NATIVE_WIDGETS_ARCHITECTURE.md](NATIVE_WIDGETS_ARCHITECTURE.md).
+- `plugins/permissions`: host tests for the feature gating, the frozen Android/iOS code contract
+  (`codes.rs`, pinned against the Kotlin host by `tests/kotlin_contract.rs`) and the Apple arm
+  (`cargo test -p frust-permissions --all-features`); the prompts themselves are manual device
+  gates ([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)'s Permissions manual test).
 - `benchmarks/`: deterministic scenario logic, harness parser tests, and the
   S1-S8 cross-framework device protocol.
 

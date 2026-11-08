@@ -40,6 +40,9 @@ frust-connectivity = { path = "../../plugins/connectivity" }
 # The Memory page: the device memory figures, re-read on a press and on every memory-pressure event.
 frust-device-info = { path = "../../plugins/device-info" }
 
+# The Photos page: runtime permission status, request and settings for photos, camera, microphone and media location.
+frust-permissions = { path = "../../plugins/permissions", features = ["photos", "camera", "microphone", "media-location"] }
+
 # Default features required: the `frust-api` hooks and the ICU4X `formatting` that `locales/*/main.ftl` uses.
 frust-i18n = { path = "../../plugins/i18n" }
 

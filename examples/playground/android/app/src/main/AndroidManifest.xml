@@ -1,6 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- frust-permissions: photo and video library access (Android 13+ granular
+         media permissions, partial access, and the pre-13 storage fallback). -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- frust-permissions: video library access. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- frust-permissions: partial (user-selected) media access on Android 14+. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <!-- frust-permissions: photo library read access before Android 13. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <!-- frust-permissions: microphone permission requests. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- frust-permissions: read the location stored inside photos. -->
+    <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"

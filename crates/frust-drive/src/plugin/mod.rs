@@ -154,7 +154,9 @@ pub enum Contribution {
     /// the permission cannot outlive the plugin. Reach for this variant only
     /// when the permission genuinely belongs to the *app* rather than to the
     /// plugin's module — e.g. one whose presence depends on app-level policy
-    /// the merger cannot supply. No plugin uses it today.
+    /// the merger cannot supply. `haptics` uses it for `VIBRATE`, and the
+    /// `permissions` plugin's features use it for the app-level policy case:
+    /// each permission is declared only when the app opts in.
     ManifestPermission { permission: &'static str },
     /// A `<key>/<string>` pair (with an explanatory XML comment) inserted into
     /// `Info.plist` before the root `</dict>`.
