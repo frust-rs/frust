@@ -27,10 +27,13 @@
 //! happens on the waiting thread, leaving the main queue free.
 //!
 //! `requestImageForAsset:...` is bound for macOS only (`NSImage`), so it is sent
-//! by hand with `UIImage`. The image is drawn into an 8-bit sRGB RGBA
-//! premultiplied bitmap at its delivered size (the header promises "as asked or
-//! better", so the delivered size may exceed the box), upright for its
-//! `imageOrientation`, then converted to straight alpha.
+//! by hand with `UIImage`. The header promises "as asked or better", so the
+//! delivered size may exceed the box and only the drawing step can honour the
+//! request. [`draw_plan`] sizes the output from it: `Fill` is exactly the box,
+//! centre-cropped from the upright image; `Fit` keeps the aspect and never
+//! exceeds the box or upscales. The image is drawn into an 8-bit sRGB RGBA
+//! premultiplied bitmap of that size, upright for its `imageOrientation`, then
+//! converted to straight alpha.
 //!
 //! # Limited selection
 //!
@@ -65,7 +68,7 @@ use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{ClassType, MainThreadMarker, msg_send, sel};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapInfo, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
-    CGImageByteOrderInfo, kCGColorSpaceSRGB,
+    CGImageByteOrderInfo, CGInterpolationQuality, kCGColorSpaceSRGB,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSPredicate, NSSortDescriptor, NSString};
 use objc2_photos::{
@@ -314,7 +317,7 @@ pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thum
                 .ok_or(PhotoError::NotFound)?
         };
         let image = request_image(&asset, request)?;
-        rgba_of(&image)
+        rgba_of(&image, request)
     })
 }
 
@@ -451,13 +454,13 @@ fn delivered(
     Some(Err(PhotoError::Platform(reason)))
 }
 
-fn rgba_of(image: &UIImage) -> Result<Thumbnail, PhotoError> {
+fn rgba_of(image: &UIImage, request: &ThumbnailRequest) -> Result<Thumbnail, PhotoError> {
     // SAFETY: read-only getters of a `UIImage`; UIKit documents image objects as
     // immutable and safe from any thread, and the binding marks it `Send + Sync`.
     let (bitmap, orientation) = unsafe { (image.CGImage(), image.imageOrientation()) };
     let bitmap =
         bitmap.ok_or_else(|| PhotoError::Platform("the thumbnail has no bitmap".to_owned()))?;
-    draw_upright(&bitmap, orientation)
+    draw_upright(&bitmap, orientation, request)
 }
 
 /// The upright size of a raw `width` x `height` bitmap under `orientation`.
@@ -520,24 +523,83 @@ fn orientation_steps(orientation: UIImageOrientation, width: f64, height: f64) -
     steps
 }
 
-/// Draw `bitmap` upright into a fresh sRGB RGBA context and return the pixels.
+/// The output bitmap of a thumbnail and how to draw into it.
+#[derive(Clone, Debug, PartialEq)]
+struct DrawPlan {
+    width: u32,
+    height: u32,
+    /// The context transforms, in order; the raw bitmap is drawn at the origin.
+    steps: Vec<Step>,
+}
+
+/// How a raw `raw_width` x `raw_height` bitmap under `orientation` becomes the
+/// thumbnail `request` asks for, or `None` for an empty bitmap.
+///
+/// `Fill` outputs exactly the box, the upright image scaled to cover it (a small
+/// source scales up) and centred, so the overflow is cropped equally on both
+/// sides. `Fit` outputs the upright image scaled to fit, never above its own
+/// size. The output comes from the clamped request, which bounds the allocation.
+fn draw_plan(
+    raw_width: usize,
+    raw_height: usize,
+    orientation: UIImageOrientation,
+    request: &ThumbnailRequest,
+) -> Option<DrawPlan> {
+    let (upright_width, upright_height) = upright_size(raw_width, raw_height, orientation);
+    if upright_width == 0 || upright_height == 0 {
+        return None;
+    }
+    let request = request.clamped();
+    let (source_w, source_h) = (upright_width as f64, upright_height as f64);
+    let (box_w, box_h) = (f64::from(request.width), f64::from(request.height));
+    let (width, height, drawn_w, drawn_h) = match request.mode {
+        ThumbnailMode::Fill => {
+            let scale = (box_w / source_w).max(box_h / source_h);
+            // `max`: a rounding error must not leave the box uncovered.
+            let (drawn_w, drawn_h) = ((source_w * scale).max(box_w), (source_h * scale).max(box_h));
+            (request.width, request.height, drawn_w, drawn_h)
+        }
+        ThumbnailMode::Fit => {
+            let scale = (box_w / source_w).min(box_h / source_h).min(1.0);
+            let width = ((source_w * scale).round() as u32).clamp(1, request.width);
+            let height = ((source_h * scale).round() as u32).clamp(1, request.height);
+            (width, height, f64::from(width), f64::from(height))
+        }
+    };
+    // The context applies the last step first: orient, then scale, then centre.
+    let mut steps = vec![
+        Step::Translate(
+            (f64::from(width) - drawn_w) / 2.0,
+            (f64::from(height) - drawn_h) / 2.0,
+        ),
+        Step::Scale(drawn_w / source_w, drawn_h / source_h),
+    ];
+    steps.extend(orientation_steps(orientation, source_w, source_h));
+    Some(DrawPlan {
+        width,
+        height,
+        steps,
+    })
+}
+
+/// Draw `bitmap` upright into a fresh sRGB RGBA context sized by [`draw_plan`]
+/// and return the pixels.
 fn draw_upright(
     bitmap: &CGImage,
     orientation: UIImageOrientation,
+    request: &ThumbnailRequest,
 ) -> Result<Thumbnail, PhotoError> {
     let (raw_width, raw_height) = (CGImage::width(Some(bitmap)), CGImage::height(Some(bitmap)));
-    let (width, height) = upright_size(raw_width, raw_height, orientation);
-    let too_big = || PhotoError::Platform("the thumbnail is too large".to_owned());
-    let stride = width.checked_mul(4).ok_or_else(too_big)?;
-    let len = stride.checked_mul(height).ok_or_else(too_big)?;
-    let (pixel_width, pixel_height) = (
-        u32::try_from(width).map_err(|_| too_big())?,
-        u32::try_from(height).map_err(|_| too_big())?,
-    );
-    if len == 0 {
-        return Err(PhotoError::Platform("the thumbnail is empty".to_owned()));
-    }
-    let mut rgba = vec![0u8; len];
+    let DrawPlan {
+        width: pixel_width,
+        height: pixel_height,
+        steps,
+    } = draw_plan(raw_width, raw_height, orientation, request)
+        .ok_or_else(|| PhotoError::Platform("the thumbnail is empty".to_owned()))?;
+    // Both edges are at most `MAX_THUMBNAIL_EDGE`, so none of this can overflow.
+    let (width, height) = (pixel_width as usize, pixel_height as usize);
+    let stride = width * 4;
+    let mut rgba = vec![0u8; stride * height];
     // SAFETY: reading CoreGraphics' constant color-space name.
     let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
         .ok_or_else(|| PhotoError::Platform("no sRGB color space".to_owned()))?;
@@ -565,13 +627,15 @@ fn draw_upright(
     rect.origin.y = 0.0;
     rect.size.width = raw_width as f64;
     rect.size.height = raw_height as f64;
-    for step in orientation_steps(orientation, width as f64, height as f64) {
+    for step in steps {
         match step {
             Step::Translate(x, y) => CGContext::translate_ctm(Some(&context), x, y),
             Step::Rotate(angle) => CGContext::rotate_ctm(Some(&context), angle),
             Step::Scale(x, y) => CGContext::scale_ctm(Some(&context), x, y),
         }
     }
+    // Photos often delivers more pixels than the box, so this usually downscales.
+    CGContext::set_interpolation_quality(Some(&context), CGInterpolationQuality::High);
     CGContext::draw_image(Some(&context), rect, Some(bitmap));
     drop(context);
     pixels::unpremultiply_rgba8_in_place(&mut rgba);
@@ -881,6 +945,155 @@ mod tests {
         ] {
             lands_on_the_target_corners(orientation);
         }
+    }
+
+    fn fill(width: u32, height: u32) -> ThumbnailRequest {
+        ThumbnailRequest::new(width, height, ThumbnailMode::Fill)
+    }
+
+    fn fit(width: u32, height: u32) -> ThumbnailRequest {
+        ThumbnailRequest::new(width, height, ThumbnailMode::Fit)
+    }
+
+    fn plan(
+        (w, h): (usize, usize),
+        orientation: UIImageOrientation,
+        request: ThumbnailRequest,
+    ) -> DrawPlan {
+        draw_plan(w, h, orientation, &request).expect("a non-empty source")
+    }
+
+    fn size(plan: &DrawPlan) -> (u32, u32) {
+        (plan.width, plan.height)
+    }
+
+    /// Where the raw bitmap's corners land: min and max x, then min and max y.
+    fn drawn_bounds(plan: &DrawPlan, (w, h): (f64, f64)) -> (f64, f64, f64, f64) {
+        let corners =
+            [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)].map(|(x, y)| apply(&plan.steps, x, y));
+        let fold = |pick: fn(&(f64, f64)) -> f64, start: f64, f: fn(f64, f64) -> f64| {
+            corners.iter().map(pick).fold(start, f)
+        };
+        (
+            fold(|c| c.0, f64::MAX, f64::min),
+            fold(|c| c.0, f64::MIN, f64::max),
+            fold(|c| c.1, f64::MAX, f64::min),
+            fold(|c| c.1, f64::MIN, f64::max),
+        )
+    }
+
+    fn assert_bounds(actual: (f64, f64, f64, f64), expected: (f64, f64, f64, f64)) {
+        near((actual.0, actual.1), (expected.0, expected.1));
+        near((actual.2, actual.3), (expected.2, expected.3));
+    }
+
+    #[test]
+    fn fill_crops_a_landscape_source_to_the_exact_box() {
+        // 4032x3024 scales to 304x228; the 76 spare pixels go 38 to each side.
+        let p = plan((4032, 3024), UIImageOrientation::Up, fill(228, 228));
+        assert_eq!(size(&p), (228, 228));
+        assert_bounds(
+            drawn_bounds(&p, (4032.0, 3024.0)),
+            (-38.0, 266.0, 0.0, 228.0),
+        );
+    }
+
+    #[test]
+    fn fill_crops_a_portrait_source_to_the_exact_box() {
+        let p = plan((3024, 4032), UIImageOrientation::Up, fill(228, 228));
+        assert_eq!(size(&p), (228, 228));
+        assert_bounds(
+            drawn_bounds(&p, (3024.0, 4032.0)),
+            (0.0, 228.0, -38.0, 266.0),
+        );
+    }
+
+    #[test]
+    fn fill_scales_a_square_source_without_cropping() {
+        let p = plan((1000, 1000), UIImageOrientation::Up, fill(228, 228));
+        assert_eq!(size(&p), (228, 228));
+        assert_bounds(drawn_bounds(&p, (1000.0, 1000.0)), (0.0, 228.0, 0.0, 228.0));
+    }
+
+    #[test]
+    fn fill_honours_a_non_square_box() {
+        // A 2:1 source in a 1:2 box scales by height and crops the width.
+        let p = plan((200, 100), UIImageOrientation::Up, fill(50, 100));
+        assert_eq!(size(&p), (50, 100));
+        assert_bounds(drawn_bounds(&p, (200.0, 100.0)), (-75.0, 125.0, 0.0, 100.0));
+    }
+
+    #[test]
+    fn fill_scales_a_small_source_up_to_the_box() {
+        let p = plan((40, 20), UIImageOrientation::Up, fill(100, 100));
+        assert_eq!(size(&p), (100, 100));
+        assert_bounds(drawn_bounds(&p, (40.0, 20.0)), (-50.0, 150.0, 0.0, 100.0));
+    }
+
+    #[test]
+    fn fit_keeps_a_landscape_source_inside_the_box() {
+        let p = plan((4032, 3024), UIImageOrientation::Up, fit(228, 228));
+        assert_eq!(size(&p), (228, 171));
+        assert_bounds(drawn_bounds(&p, (4032.0, 3024.0)), (0.0, 228.0, 0.0, 171.0));
+    }
+
+    #[test]
+    fn fit_keeps_a_portrait_source_inside_the_box() {
+        let p = plan((3024, 4032), UIImageOrientation::Up, fit(228, 228));
+        assert_eq!(size(&p), (171, 228));
+        assert_bounds(drawn_bounds(&p, (3024.0, 4032.0)), (0.0, 171.0, 0.0, 228.0));
+    }
+
+    #[test]
+    fn fit_never_upscales_a_small_source() {
+        let p = plan((40, 20), UIImageOrientation::Up, fit(100, 100));
+        assert_eq!(size(&p), (40, 20));
+        assert_bounds(drawn_bounds(&p, (40.0, 20.0)), (0.0, 40.0, 0.0, 20.0));
+    }
+
+    #[test]
+    fn fit_gives_an_extreme_panorama_at_least_one_row() {
+        let p = plan((10_000, 1), UIImageOrientation::Up, fit(228, 228));
+        assert_eq!(size(&p), (228, 1));
+    }
+
+    #[test]
+    fn a_quarter_turn_is_measured_upright() {
+        // The raw 4032x3024 bitmap is a 3024x4032 portrait once upright.
+        for orientation in [
+            UIImageOrientation::Left,
+            UIImageOrientation::Right,
+            UIImageOrientation::LeftMirrored,
+            UIImageOrientation::RightMirrored,
+        ] {
+            let p = plan((4032, 3024), orientation, fit(228, 228));
+            assert_eq!(size(&p), (171, 228), "{orientation:?}");
+            assert_bounds(drawn_bounds(&p, (4032.0, 3024.0)), (0.0, 171.0, 0.0, 228.0));
+
+            let p = plan((4032, 3024), orientation, fill(228, 228));
+            assert_eq!(size(&p), (228, 228), "{orientation:?}");
+            assert_bounds(
+                drawn_bounds(&p, (4032.0, 3024.0)),
+                (0.0, 228.0, -38.0, 266.0),
+            );
+        }
+    }
+
+    #[test]
+    fn the_output_never_exceeds_the_largest_edge() {
+        let raw = ThumbnailRequest {
+            width: 99_999,
+            height: 99_999,
+            mode: ThumbnailMode::Fill,
+        };
+        let p = draw_plan(4032, 3024, UIImageOrientation::Up, &raw).expect("non-empty");
+        assert_eq!(size(&p), (2048, 2048));
+    }
+
+    #[test]
+    fn an_empty_bitmap_has_no_plan() {
+        assert_eq!(draw_plan(0, 10, UIImageOrientation::Up, &fill(8, 8)), None);
+        assert_eq!(draw_plan(10, 0, UIImageOrientation::Left, &fit(8, 8)), None);
     }
 
     #[test]

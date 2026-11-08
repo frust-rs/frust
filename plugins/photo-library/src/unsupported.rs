@@ -6,7 +6,7 @@ pub(crate) fn pick(_options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError
     Err(PhotoError::Unsupported)
 }
 
-// Library browsing stubs: the platform implementation replaces each body.
+// Library browsing: these targets have no photo library to browse.
 #[cfg(feature = "library")]
 pub(crate) fn albums() -> Result<Vec<crate::Album>, PhotoError> {
     Err(PhotoError::Unsupported)

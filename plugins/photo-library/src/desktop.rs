@@ -100,7 +100,7 @@ fn map_err(e: FileDialogError) -> PhotoError {
     }
 }
 
-// Library browsing stubs: the platform implementation replaces each body.
+// Library browsing: desktop has no photo library to browse.
 #[cfg(feature = "library")]
 pub(crate) fn albums() -> Result<Vec<crate::Album>, PhotoError> {
     Err(PhotoError::Unsupported)
