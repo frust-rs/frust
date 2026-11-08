@@ -208,6 +208,21 @@
 //! high value forward — `demo_charge_ring` in `examples/glyph-catalog`'s
 //! `pages/interactions.rs` is a worked instance. Do not add a Cancel-arm callback
 //! to close this gap; it would violate that convention.
+//!
+//! # Detectors inside moving frames
+//!
+//! Pointer positions reach a child through its [`ChildPod`](frust_core::ChildPod)
+//! transform: the pod maps each event into the child's local space by the
+//! inverse of its current transform. If a drag moves a layer by changing that
+//! transform or offset, a detector inside the layer receives positions in the
+//! moving frame, and its per-event deltas shrink toward zero as the layer
+//! tracks the finger. A drag-follow detector therefore belongs outside the
+//! layer the drag translates; the detector moves the child, not itself.
+//!
+//! This holds for a pod transform or offset. A transform pushed only during
+//! paint (`PaintScene::push_transform`) changes what is drawn, not what hit
+//! routing sees. A pod transform set during paint takes effect for routing
+//! only from the next frame.
 
 use std::rc::Rc;
 
