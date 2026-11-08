@@ -18,21 +18,35 @@
 //! [`spawn_blocking`] and is the only writer of the log signal, so `build`
 //! stays read-only. The loop ends when the listeners (the senders) drop with
 //! the page state.
+//!
+//! # Timers
+//!
+//! A Timers block arms [`Timer`]s and a scoped sleep; every firing emits one
+//! row (with the elapsed time since arming) through the same sink, so timer
+//! firings interleave with lifecycle rows. The flagged timers fire inside the
+//! foreground-exit callback; the marker variant writes a file synchronously
+//! there, and the page reports the marker found at launch.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use frust::paths::{atomic_write, data_dir};
+use frust::time::{Duration, Timer, sleep};
 use frust::{
     AppExitResponse, AppLifecycleListener, ButtonStyle, Component, EdgeInsets, Get, Padding,
     RwSignal, Set, SizedBox, Theme, Update, View, app_lifecycle, button, checkbox, column,
-    component, spawn_blocking, spawn_local, text, use_context,
+    component, spawn_blocking, spawn_local, spawn_local_scoped, text, use_context,
 };
 use frust_connectivity::{Connectivity, ConnectivityEvent, ListenerHandle, NetworkPath};
 
 /// Most rows the log keeps; the oldest fall off the end.
 const LOG_CAP: usize = 50;
+
+/// File name of the marker the flagged-write timer leaves in the data dir.
+const MARKER_NAME: &str = "timer-marker.txt";
 
 /// The grep prefix every row carries in the platform log.
 const LOG_PREFIX: &str = "frust-gate network:";
@@ -66,6 +80,9 @@ struct NetworkPageState {
     current: RwSignal<Option<NetworkPath>>,
     block_exit: Arc<AtomicBool>,
     block_exit_sig: RwSignal<bool>,
+    sink: RowSink,
+    timers: Vec<Timer>,
+    armed_at: Option<Instant>,
     _lifecycle: AppLifecycleListener,
     _connectivity: ListenerHandle,
 }
@@ -82,6 +99,7 @@ impl Component for NetworkPage {
         let block_exit = Arc::new(AtomicBool::new(false));
         let log = RwSignal::new(Vec::new());
 
+        sink.emit(&Self::marker_row());
         let lifecycle = Self::lifecycle(&sink, &block_exit);
         // Registered before the first `Connectivity::current()` read, so the
         // monitor's `initial: true` report reaches this listener.
@@ -94,6 +112,9 @@ impl Component for NetworkPage {
             current,
             block_exit,
             block_exit_sig: RwSignal::new(false),
+            sink,
+            timers: Vec::new(),
+            armed_at: None,
             _lifecycle: lifecycle,
             _connectivity: connectivity,
         }
@@ -132,6 +153,9 @@ impl Component for NetworkPage {
                 .child(SizedBox(None, Some(8.0)))
                 .child(Self::block_exit_toggle(state, blocked))
                 .child(Self::clear_button(state))
+                .child(SizedBox(None, Some(8.0)))
+                .child(text("Timers").size(13.0).color(accent))
+                .child(Self::timer_buttons(state))
                 .child(SizedBox(None, Some(8.0)))
                 .child(rows),
         )
@@ -235,6 +259,104 @@ impl NetworkPage {
                 sig.set(requested);
             },
         )
+    }
+
+    fn marker_path() -> Option<PathBuf> {
+        data_dir().map(|dir| dir.join(MARKER_NAME))
+    }
+
+    /// The launch row describing the marker a previous run may have left.
+    fn marker_row() -> String {
+        match Self::marker_path().and_then(|path| std::fs::read_to_string(path).ok()) {
+            Some(stamp) => format!("marker present: {}", stamp.trim()),
+            None => "marker absent".to_string(),
+        }
+    }
+
+    /// A button that arms a timer and stores its handle on the page state.
+    fn arm_button(
+        label: &'static str,
+        make: impl Fn(&RowSink, Instant) -> Timer + 'static,
+    ) -> impl View<NetworkPageState> {
+        button(label, move |state: &mut NetworkPageState| {
+            let armed = Instant::now();
+            state.armed_at = Some(armed);
+            state.timers.push(make(&state.sink, armed));
+        })
+        .small()
+    }
+
+    fn timer_buttons(_state: &NetworkPageState) -> impl View<NetworkPageState> {
+        let fired = |sink: &RowSink, label: &'static str, armed: Instant| {
+            let sink = sink.clone();
+            move || sink.emit(&format!("{label} after {} ms", armed.elapsed().as_millis()))
+        };
+        let plain_2 = Self::arm_button("Arm 2 s", move |sink, armed| {
+            Timer::new(
+                Duration::from_secs(2),
+                fired(sink, "timer 2 s fired", armed),
+            )
+        });
+        let flagged_10 = Self::arm_button("Arm 10 s (flush on background)", move |sink, armed| {
+            Timer::new(
+                Duration::from_secs(10),
+                fired(sink, "timer 10 s flagged fired", armed),
+            )
+            .flush_on_background()
+        });
+        let plain_10 = Self::arm_button("Arm 10 s (plain)", move |sink, armed| {
+            Timer::new(
+                Duration::from_secs(10),
+                fired(sink, "timer 10 s plain fired", armed),
+            )
+        });
+        let marker_10 = Self::arm_button("Arm 10 s (flush + marker write)", |sink, armed| {
+            let sink = sink.clone();
+            Timer::new(Duration::from_secs(10), move || {
+                let ms = armed.elapsed().as_millis();
+                let stamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |d| d.as_millis());
+                let written = match Self::marker_path() {
+                    Some(path) => atomic_write(&path, stamp.to_string().as_bytes()).is_ok(),
+                    None => false,
+                };
+                sink.emit(&format!(
+                    "timer 10 s marker fired after {ms} ms (stamp {stamp}, written: {written})"
+                ));
+            })
+            .flush_on_background()
+        });
+        let sleeper = button(
+            "Sleep 2 s (spawn_local_scoped)",
+            |state: &mut NetworkPageState| {
+                let armed = Instant::now();
+                state.armed_at = Some(armed);
+                let sink = state.sink.clone();
+                spawn_local_scoped(async move {
+                    sleep(Duration::from_secs(2)).await;
+                    sink.emit(&format!(
+                        "sleep 2 s done after {} ms",
+                        armed.elapsed().as_millis()
+                    ));
+                });
+            },
+        )
+        .small();
+        let cancel = button("Cancel all", |state: &mut NetworkPageState| {
+            state.timers.clear();
+            state.armed_at = None;
+            state.sink.emit("timers cancelled");
+        })
+        .style(ButtonStyle::Secondary)
+        .small();
+        column()
+            .child(plain_2)
+            .child(flagged_10)
+            .child(plain_10)
+            .child(marker_10)
+            .child(sleeper)
+            .child(cancel)
     }
 
     fn clear_button(state: &NetworkPageState) -> impl View<NetworkPageState> {
