@@ -16,6 +16,10 @@ default = []
 # Library browsing (albums, paged assets, thumbnails). A code gate only: with it off every
 # browsing call returns `PhotoError::FeatureDisabled`.
 library = []
+# Saving files into the photo library, and exporting an asset's original file. A code gate only:
+# with it off `PhotoLibrary::save` returns `PhotoError::FeatureDisabled`. `export_original`
+# needs `library` instead.
+save = []
 
 [dependencies]
 thiserror = { workspace = true }
@@ -47,6 +51,8 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSItemProvider",
     "NSFileManager",
     "NSProgress",
+    # `mainBundle` and `objectForInfoDictionaryKey:` for the usage-description precheck.
+    "NSBundle",
 ] }
 # Presenter walk (same set as plugins/share); `block2` for `presentViewController:animated:completion:`.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
@@ -83,6 +89,8 @@ objc2-photos = { version = "0.3", default-features = false, features = [
     "PHAssetResource",
     "PHAssetResourceManager",
     "PHAssetCreationRequest",
+    "PHAssetChangeRequest",
+    "PHAssetCollectionChangeRequest",
 ] }
 # Thumbnail rendering: a bitmap context draws the CGImage into straight-alpha RGBA8.
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
