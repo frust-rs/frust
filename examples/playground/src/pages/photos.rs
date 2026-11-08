@@ -43,8 +43,9 @@
 //! its own component with a task keyed by the asset id, requesting a thumbnail at
 //! [`THUMB_SCALE`] times the cell size. Browsing is read-only and never takes the pick guard,
 //! so it works while a pick is open; Manage selection presents system UI and does take it.
-//! When a picked item carries an asset id (iOS), the Picker preview uses the same thumbnail
-//! path instead of decoding the copied file, which is how a HEIC pick previews.
+//! When a picked item carries an asset id (iOS), the Picker preview tries the native thumbnail
+//! first and decodes the copied file only when that fails. A HEIC pick therefore previews when
+//! the library grants access, and otherwise shows the file's decode error.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -389,8 +390,9 @@ impl PickerOutcome {
 /// Where the Picker preview comes from.
 #[derive(Debug, Clone)]
 enum PreviewSource {
-    /// The item has a library asset id: use the native thumbnail path.
-    Asset(AssetId),
+    /// The item has a library asset id: try the native thumbnail first, and fall back to
+    /// decoding the picked file at `path` when it fails.
+    Asset { id: AssetId, path: PathBuf },
     /// No asset id (Android, desktop): decode the picked file.
     File(PathBuf),
 }
@@ -398,9 +400,33 @@ enum PreviewSource {
 /// The preview source for a picked image: its asset id when it has one.
 fn preview_source(item: &PickedItem) -> PreviewSource {
     match &item.asset_id {
-        Some(id) => PreviewSource::Asset(id.clone()),
+        Some(id) => PreviewSource::Asset {
+            id: id.clone(),
+            path: item.path.clone(),
+        },
         None => PreviewSource::File(item.path.clone()),
     }
+}
+
+/// Whether an asset-backed preview must decode the picked file instead. Any thumbnail failure
+/// does (denied access, a missing asset, a format the thumbnailer cannot read): the file decode
+/// is the baseline outcome and the thumbnail only adds capability, so it never removes that
+/// outcome.
+fn falls_back_to_file(thumbnail: &Result<ImageSource, String>) -> bool {
+    thumbnail.is_err()
+}
+
+/// The preview decoded from the picked file: read off the UI thread, then decoded off it too.
+async fn file_preview(path: PathBuf) -> Result<Result<ImageSource, String>, JoinFailure> {
+    let bytes = spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|err| JoinFailure(err.to_string()))?;
+    Ok(match bytes {
+        Ok(bytes) => decode_image_async(bytes)
+            .await
+            .map_err(|err| format!("preview decode error: {err}")),
+        Err(err) => Err(format!("preview read error: {err}")),
+    })
 }
 
 /// The preview's thumbnail box edge in pixels: the 160 point box at [`THUMB_SCALE`].
@@ -511,26 +537,20 @@ impl Component for PickerPanel {
                     return Ok::<Option<PickerOutcome>, JoinFailure>(None);
                 };
                 match first_image {
-                    Some(PreviewSource::Asset(id)) => {
+                    Some(PreviewSource::Asset { id, path }) => {
                         let thumb = spawn_blocking(move || {
                             load_thumbnail(&id, PREVIEW_EDGE_PX, ThumbnailMode::Fit)
                         })
                         .await
                         .map_err(|err| JoinFailure(err.to_string()))?;
-                        outcome.preview =
-                            Some(thumb.map_err(|err| format!("preview thumbnail error: {err}")));
+                        outcome.preview = Some(if falls_back_to_file(&thumb) {
+                            file_preview(path).await?
+                        } else {
+                            thumb
+                        });
                     }
                     Some(PreviewSource::File(path)) => {
-                        // Read off the UI thread, then decode off it too.
-                        let bytes = spawn_blocking(move || std::fs::read(path))
-                            .await
-                            .map_err(|err| JoinFailure(err.to_string()))?;
-                        outcome.preview = Some(match bytes {
-                            Ok(bytes) => decode_image_async(bytes)
-                                .await
-                                .map_err(|err| format!("preview decode error: {err}")),
-                            Err(err) => Err(format!("preview read error: {err}")),
-                        });
+                        outcome.preview = Some(file_preview(path).await?);
                     }
                     None => {}
                 }
@@ -626,9 +646,9 @@ impl Component for PickerPanel {
                 text(
                     "Pick runs the system photo picker off the UI thread. The first \
                      image is previewed (PNG and JPEG decode; HEIC, WebP and GIF show \
-                     a decode error, except an item with a library asset id, which \
-                     previews through the native thumbnail). Share picked sends the files; Clear cache \
-                     removes the copies made on mobile.",
+                     a decode error, unless an item with a library asset id previews \
+                     through the native thumbnail first). Share picked sends the files; \
+                     Clear cache removes the copies made on mobile.",
                 )
                 .size(11.0)
                 .color(muted),
@@ -868,6 +888,9 @@ enum PageUpdate {
 struct BrowseStep {
     access: Option<(String, bool)>,
     albums: Option<Vec<Album>>,
+    /// The album a replacing page was loaded for. Set only with that page, so a failed album
+    /// switch never moves the selection away from the listing it still shows.
+    album: Option<Option<AlbumId>>,
     page: Option<PageUpdate>,
     /// Empty on success, else the failure as `error: ...` text.
     message: String,
@@ -875,9 +898,28 @@ struct BrowseStep {
 
 /// Loads one page into `step`, or records the failure.
 fn load_page(album: &Option<AlbumId>, offset: u64, append: bool, step: &mut BrowseStep) {
-    match PhotoLibrary::assets(&browse_query(album, offset)) {
+    record_page(
+        album,
+        append,
+        PhotoLibrary::assets(&browse_query(album, offset)),
+        step,
+    );
+}
+
+/// Records one page result into `step`. A replacing page commits `album` as the selection with
+/// the listing; an appended page keeps the listing's album; a failure changes neither.
+fn record_page(
+    album: &Option<AlbumId>,
+    append: bool,
+    result: Result<AssetPage, PhotoError>,
+    step: &mut BrowseStep,
+) {
+    match result {
         Ok(page) if append => step.page = Some(PageUpdate::Append(page)),
-        Ok(page) => step.page = Some(PageUpdate::Replace(page)),
+        Ok(page) => {
+            step.page = Some(PageUpdate::Replace(page));
+            step.album = Some(album.clone());
+        }
         Err(err) => step.message = format!("error: {err}"),
     }
 }
@@ -917,6 +959,7 @@ struct BrowseSignals {
     access: RwSignal<String>,
     limited: RwSignal<bool>,
     albums: RwSignal<Vec<Album>>,
+    album: RwSignal<Option<AlbumId>>,
     listing: RwSignal<Listing>,
     message: RwSignal<String>,
 }
@@ -933,6 +976,9 @@ impl BrowseSignals {
         }
         if let Some(albums) = step.albums {
             self.albums.set(albums);
+        }
+        if let Some(album) = step.album {
+            self.album.set(album);
         }
         match step.page {
             Some(PageUpdate::Replace(page)) => self.listing.set(Listing {
@@ -1025,12 +1071,14 @@ impl Component for BrowsePanel {
         let access = RwSignal::new(UNREAD_ACCESS.to_string());
         let limited = RwSignal::new(false);
         let albums = RwSignal::new(Vec::new());
+        let album = RwSignal::new(None);
         let listing = RwSignal::new(Listing::default());
         let message = RwSignal::new(String::new());
         let signals = BrowseSignals {
             access,
             limited,
             albums,
+            album,
             listing,
             message,
         };
@@ -1052,7 +1100,7 @@ impl Component for BrowsePanel {
             access,
             limited,
             albums,
-            album: RwSignal::new(None),
+            album,
             listing,
             message,
             action,
@@ -1208,9 +1256,8 @@ fn album_button(
     selected: bool,
     busy: bool,
 ) -> impl View<BrowsePanelState> {
-    let (action, work, album) = (state.action.clone(), state.work.clone(), state.album);
+    let (action, work) = (state.action.clone(), state.work.clone());
     button(label.to_string(), move |_state: &mut BrowsePanelState| {
-        album.set(target.clone());
         queue(&action, &work, BrowseAction::Select(target.clone()));
     })
     .style(selector_style(selected))
@@ -1359,6 +1406,51 @@ mod tests {
     #[test]
     fn no_browse_action_resolves_to_nothing() {
         assert!(run_browse(None).is_none());
+    }
+
+    #[test]
+    fn any_thumbnail_failure_falls_back_to_the_file() {
+        let denied: Result<ImageSource, String> = Err("photo access denied".into());
+        let missing: Result<ImageSource, String> = Err("asset not found".into());
+        let thumb = Ok(ImageSource::from_rgba8(vec![0; 4], 1, 1));
+        assert!(falls_back_to_file(&denied));
+        assert!(falls_back_to_file(&missing));
+        assert!(!falls_back_to_file(&thumb));
+    }
+
+    #[test]
+    fn failed_album_switch_commits_no_album() {
+        let target = Some(AlbumId::from_raw("x"));
+        let mut failed = BrowseStep::default();
+        record_page(&target, false, Err(PhotoError::Busy), &mut failed);
+        assert!(failed.album.is_none());
+        assert!(failed.page.is_none());
+        assert!(failed.message.starts_with("error: "));
+    }
+
+    #[test]
+    fn loaded_album_switch_commits_its_album_with_the_listing() {
+        let target = Some(AlbumId::from_raw("x"));
+        let page = AssetPage {
+            items: Vec::new(),
+            total: 0,
+        };
+        let mut step = BrowseStep::default();
+        record_page(&target, false, Ok(page), &mut step);
+        assert_eq!(step.album, Some(target));
+        assert!(matches!(step.page, Some(PageUpdate::Replace(_))));
+    }
+
+    #[test]
+    fn appended_page_keeps_the_listing_album() {
+        let page = AssetPage {
+            items: Vec::new(),
+            total: 0,
+        };
+        let mut step = BrowseStep::default();
+        record_page(&None, true, Ok(page), &mut step);
+        assert!(step.album.is_none());
+        assert!(matches!(step.page, Some(PageUpdate::Append(_))));
     }
 
     #[test]
