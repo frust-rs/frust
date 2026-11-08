@@ -9159,3 +9159,15 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Denied and Blocked need a resumed Activity*, `currentCode`); gate k2-pm-07 (Pixel 5: Blocked read with the app resumed). The no-Activity read is derived from the code and has not been run on a device.
 
 ---
+
+### `testing-text-runs-engine-clips` — `Tester::text_runs` sees only clips a widget declares, and no text inputs
+
+**Observed**: `text_runs` and `assert_no_text_overflow` read clips only from widgets that report `InspectDetail::Clip` (scroll, list and page views, viewports and their slivers, pan/zoom, the navigator). A clip pushed by any other widget (a design-system plugin widget, a rounded clip, a custom widget) is not consulted: a run it hides while inside its ancestors' boxes is not reported, and a run it legitimately keeps outside its own box reads as `outside_parent`. A `hidden` run (scrolled fully out of view) is not checked at all, so whether an over-wide or cut run is caught depends on the scroll position. Under `PanZoomWidget` the visibility judgement assumes an identity transform: inspect bounds ignore pan and zoom. `TextInput` runs are not reported at all.
+
+**Applies to**: `frust::testing::Tester` text-run diagnostics, all hosts.
+
+**Why accepted**: a clip exists only in the compiled scene unless its widget declares it through `inspect_detail`, and the viewports that lay content out past their box are the ones that do; a text input does not report a layout through `inspect_detail`. Both remaining gaps are outside the overflow class the API targets (a label cut or wider than its box).
+
+**Evidence**: `crates/frust/src/testing/text.rs` (module docs), `crates/frust-core/src/tree.rs` (`InspectDetail::Clip`).
+
+---

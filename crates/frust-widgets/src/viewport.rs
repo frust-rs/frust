@@ -1003,6 +1003,11 @@ impl<State: 'static> View<State> for CustomScrollView<State> {
 }
 
 impl Widget for ViewportWidget {
+    /// Reports [`frust_core::InspectDetail::Clip`]: the viewport clips its content to its own box.
+    fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
+        Some(frust_core::InspectDetail::Clip)
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let max = bc.max();
         self.cross_extent = finite_extent(self.axis.cross_extent(max));
@@ -1129,6 +1134,16 @@ mod tests {
         (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
             .downcast_ref::<ViewportWidget>()
             .expect("root is a ViewportWidget")
+    }
+
+    #[test]
+    fn custom_scroll_view_reports_clip_detail() {
+        let mut logic = |_: &mut ()| custom_scroll_view((leaf(100.0, 100.0), leaf(100.0, 50.0)));
+        let root = mount(&mut logic);
+        assert_eq!(
+            root.inspect()[0].detail,
+            Some(frust_core::InspectDetail::Clip)
+        );
     }
 
     fn mount(

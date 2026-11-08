@@ -26,6 +26,7 @@ use crate::layout::BoxConstraints;
 use crate::semantics::SemanticsCtx;
 use crate::shortcuts::ShortcutId;
 use crate::sliver::{SliverConstraints, SliverGeometry, SliverWidget};
+use crate::tree::InspectDetail;
 
 /// The renderer-agnostic paint target a widget draws into; `SceneBuilder`
 /// implements it, and defaulted methods keep recorder test scenes valid.
@@ -1365,6 +1366,14 @@ pub trait Widget: Any {
     /// tooling; defaults to none and must not mutate pass state.
     fn visit_children(&self, _visitor: &mut dyn FnMut(&ChildPod)) {}
 
+    /// Structured facts about this widget's last layout, for read-only tooling
+    /// like [`Widget::visit_children`]; defaults to `None`. Called only by the
+    /// inspector and must not mutate pass state. A transparent wrapper forwards
+    /// it to its single child; a widget clipping its children reports `Clip`.
+    fn inspect_detail(&self) -> Option<InspectDetail> {
+        None
+    }
+
     /// Whether keyboard traversal (Tab / Shift+Tab at the root) may stop on this widget's pod.
     fn is_focusable(&self) -> bool {
         false
@@ -1442,6 +1451,11 @@ impl Widget for Box<dyn Widget> {
     /// Report the boxed widget's name, through any number of box layers.
     fn type_name(&self) -> &'static str {
         (**self).type_name()
+    }
+
+    /// Forward the boxed widget's inspect detail, so erasure never hides it.
+    fn inspect_detail(&self) -> Option<InspectDetail> {
+        (**self).inspect_detail()
     }
 }
 

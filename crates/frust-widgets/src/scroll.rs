@@ -1121,6 +1121,11 @@ impl<State: 'static> View<State> for ScrollView<State> {
 }
 
 impl Widget for ScrollWidget {
+    /// [`frust_core::InspectDetail::Clip`]: the scroll viewport clips its content to its box.
+    fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
+        Some(frust_core::InspectDetail::Clip)
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let vw = if bc.max().width.is_finite() {
             bc.max().width
@@ -1666,6 +1671,17 @@ mod tests {
     impl PaintScene for NullScene {
         fn fill_rect(&mut self, _o: Point, _s: Size, _c: peniko::Color) {}
         fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+
+    #[test]
+    fn scroll_view_reports_clip_detail() {
+        let mut root: frust_core::RenderRoot<(), ScrollView<()>> = frust_core::RenderRoot::new();
+        root.rebuild(&mut |_: &mut ()| scroll_view(leaf(200.0, 1000.0)), &mut ());
+        root.layout(Size::new(200.0, 100.0));
+        assert_eq!(
+            root.inspect()[0].detail,
+            Some(frust_core::InspectDetail::Clip)
+        );
     }
 
     fn scroll_widget(root: &frust_core::RenderRoot<(), ScrollView<()>>) -> &ScrollWidget {
