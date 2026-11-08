@@ -383,6 +383,16 @@ fn text_range(shaped: &Shaped, line: &BrokenLine, cut: Option<u32>) -> Range<usi
     }
 }
 
+/// What `max_lines` capping decided for a layout (see
+/// [`TextLayout::did_exceed_max_lines`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Truncation {
+    /// More lines existed than `max_lines` allowed.
+    pub(crate) exceeded_max_lines: bool,
+    /// The last allowed line was wider than `max_width`.
+    pub(crate) width_overflow: bool,
+}
+
 /// A finished text layout: positioned glyph runs plus a cached measured size.
 ///
 /// Produced by [`crate::TextContext::layout`]. It borrows nothing from the
@@ -396,6 +406,7 @@ pub struct TextLayout {
     lines: Arc<LineTable>,
     ellipsis: Option<Ellipsis>,
     size: Size,
+    truncation: Truncation,
     /// Memoized origin-independent glyph runs, built lazily on the first
     /// [`to_scene_runs`](Self::to_scene_runs) call and reused across every
     /// later call while this layout is retained. The only
@@ -446,8 +457,15 @@ impl TextLayout {
             lines,
             ellipsis,
             size,
+            truncation: Truncation::default(),
             base_runs,
         }
+    }
+
+    /// This layout stamped with the `max_lines` decision `truncation`.
+    pub(crate) fn with_truncation(mut self, truncation: Truncation) -> Self {
+        self.truncation = truncation;
+        self
     }
 
     /// This layout capped at `max_lines` lines, the last one ending the
@@ -522,10 +540,38 @@ impl TextLayout {
     }
 
     /// The number of lines in this layout — at least `1` (an empty text is
-    /// one empty line). `pub(crate)` — the `max_lines`/overflow walk in
-    /// [`crate::context`] is the sole caller.
-    pub(crate) fn line_count(&self) -> usize {
+    /// one empty line). After a `max_lines` cut it counts only the lines kept.
+    pub fn line_count(&self) -> usize {
         self.lines.lines.len()
+    }
+
+    /// The width this layout was broken at, or `None` when it was laid out
+    /// unbounded.
+    pub fn max_width(&self) -> Option<f32> {
+        self.max_width
+    }
+
+    /// Whether a `max_lines` limit cut this layout: more lines existed than
+    /// the limit allowed, or the last allowed line was wider than
+    /// [`max_width`](Self::max_width) — the same condition under which
+    /// [`TextOverflow`](crate::TextOverflow) applies. `false` when no
+    /// `max_lines` was given.
+    pub fn did_exceed_max_lines(&self) -> bool {
+        self.truncation.exceeded_max_lines || self.truncation.width_overflow
+    }
+
+    /// Whether the layout ends in an ellipsis marking a cut.
+    pub fn is_ellipsized(&self) -> bool {
+        self.ellipsis.is_some()
+    }
+
+    /// Whether the longest line is wider than [`max_width`](Self::max_width).
+    /// This happens with a clipped line, a word wider than the box under
+    /// `OverflowWrap::Normal`, and when a bare ellipsis is itself wider.
+    /// `false` when the layout is unbounded.
+    pub fn overflows_width(&self) -> bool {
+        self.max_width
+            .is_some_and(|w| self.size.width > f64::from(w))
     }
 
     /// The source text range and rendered (trailing-whitespace-excluded)
