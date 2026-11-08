@@ -37,10 +37,10 @@
 
 mod types;
 
-// Consumed by the mobile arms as they land; desktop uses only part of them.
-#[allow(dead_code)]
+// Desktop uses only part of these; mobile targets keep the dead-code lint.
+#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
 mod media_types;
-#[allow(dead_code)]
+#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
 mod pick_cache;
 
 pub use types::{AssetId, MediaFilter, MediaKind, PhotoError, PickOptions, PickedItem};
@@ -112,6 +112,10 @@ impl PhotoLibrary {
     }
 
     /// Deletes every file copied by earlier mobile picks. A missing cache is success.
+    ///
+    /// Returns [`PhotoError::Busy`] while a mobile pick is in flight (and a pick cannot start
+    /// while the clear runs). Paths from earlier picks' [`PickedItem`]s become invalid after a
+    /// clear; the caller owns that.
     pub fn clear_pick_cache() -> Result<(), PhotoError> {
         pick_cache::clear()
     }

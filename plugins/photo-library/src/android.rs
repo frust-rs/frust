@@ -8,7 +8,7 @@
 //! **`FrustPhotoLibraryHost.kt` and this module build to this table — changing
 //! it means updating both files together.** `dev.frust` is the embedding
 //! module's exclusive package, so the host takes the `dev.frust.photolibrary`
-//! subpackage (`docs/CODE_STANDARDS.md`'s Plugin Conventions); its package is
+//! subpackage (`docs/PLUGINS_CODE_STANDARDS.md`'s Plugin Conventions); its package is
 //! baked into the JNI symbols below, so it may never move once shipped. The
 //! integer codes are this module's `const`s, pinned against the Kotlin
 //! constants by `tests/kotlin_contract.rs`.
@@ -67,10 +67,10 @@
 //!
 //! # One pick at a time
 //!
-//! [`pick`] takes the process-wide [`PICK_LOCK`] with `try_lock` just after
-//! the UI-thread check and holds it until it returns. A second pick while one
-//! is in flight is refused at once with [`PhotoError::Platform`] naming the
-//! busy picker ([`busy`]) rather than queued behind a picker that may stay up
+//! [`pick`] takes the crate-wide [`pick_cache::PickGuard`] just after the
+//! UI-thread check and holds it until it returns. A second pick while one is
+//! in flight, or while `clear_pick_cache` runs, is refused at once with
+//! [`PhotoError::Busy`] rather than queued behind a picker that may stay up
 //! indefinitely. The Kotlin host keeps the same rule on its side and answers
 //! [`BUSY`].
 //!
@@ -85,7 +85,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock, TryLockError};
+use std::sync::{Condvar, LazyLock, Mutex, MutexGuard, OnceLock};
 
 use jni::errors::LogErrorAndDefault;
 use jni::objects::{JClass, JObject, JObjectArray, JString, JValue};
@@ -93,7 +93,7 @@ use jni::refs::Global;
 use jni::sys::{jint, jlong};
 use jni::{Env, EnvUnowned, jni_sig, jni_str};
 
-use crate::media_types::{classify_path, extensions_for, lookup};
+use crate::media_types::classify_path;
 use crate::pick_cache;
 use crate::{MediaFilter, MediaKind, PhotoError, PickOptions, PickedItem};
 
@@ -137,11 +137,6 @@ static WAITS: LazyLock<Mutex<HashMap<u64, Option<Answer>>>> =
 /// Woken by the exports; waited on by [`pick`].
 static ANSWERED: Condvar = Condvar::new();
 
-/// Held by [`pick`] for the whole pick; a second concurrent pick fails its
-/// `try_lock` (module doc, "One pick at a time"). Never taken by
-/// [`deliver`], so the answer that ends a held pick can always arrive.
-static PICK_LOCK: Mutex<()> = Mutex::new(());
-
 /// The next request id. Starts at 1 so a zeroed id is never live.
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -165,11 +160,7 @@ struct HostCopy {
 pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError> {
     with_host(|env, _class| ensure_off_ui_thread(env))?;
 
-    let _one_at_a_time = match PICK_LOCK.try_lock() {
-        Ok(guard) => guard,
-        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return Err(busy()),
-    };
+    let _one_at_a_time = pick_cache::PickGuard::acquire()?;
 
     let dir = pick_cache::new_call_dir()?;
     let result = pick_into(options, &dir);
@@ -232,7 +223,7 @@ fn filter_code(filter: MediaFilter) -> jint {
     match filter {
         MediaFilter::Images => FILTER_IMAGES,
         MediaFilter::Videos => FILTER_VIDEOS,
-        _ => FILTER_IMAGES_AND_VIDEOS,
+        MediaFilter::ImagesAndVideos => FILTER_IMAGES_AND_VIDEOS,
     }
 }
 
@@ -241,7 +232,7 @@ fn filter_code(filter: MediaFilter) -> jint {
 fn error_for(code: jint) -> PhotoError {
     match code {
         NO_ACTIVITY => PhotoError::NoPresenter,
-        BUSY => busy(),
+        BUSY => PhotoError::Busy,
         NOT_INITIALIZED => PhotoError::PlatformNotInitialized,
         LAUNCH_FAILED => PhotoError::Platform("the photo picker could not be launched".to_string()),
         COPY_FAILED => PhotoError::Platform("a picked item could not be copied".to_string()),
@@ -249,11 +240,6 @@ fn error_for(code: jint) -> PhotoError {
             "photo picker host returned an unknown code {other}"
         )),
     }
-}
-
-/// The refusal for a second pick while one is in flight.
-fn busy() -> PhotoError {
-    PhotoError::Platform("another photo pick is already in progress".to_string())
 }
 
 /// Rename each staging copy to its sanitised, de-duplicated name in `dir`
@@ -274,7 +260,7 @@ fn finish_copies(
         }
         let mime = copy.mime.filter(|m| !m.is_empty());
         let file_name = copy.name.filter(|n| !n.is_empty());
-        let name = copy_name(file_name.as_deref(), mime.as_deref(), n, &mut used);
+        let name = pick_cache::copy_name(file_name.as_deref(), mime.as_deref(), n, &mut used);
         let path = dir.join(&name);
         fs::rename(&staging, &path)?;
         let kind = kind_for(mime.as_deref(), &path, options.filter);
@@ -289,40 +275,6 @@ fn finish_copies(
         });
     }
     Ok(items)
-}
-
-/// The final file name of item `n`: the sanitised display name, given the
-/// MIME type's extension when it has none, made unique within `used`.
-fn copy_name(
-    display: Option<&str>,
-    mime: Option<&str>,
-    n: usize,
-    used: &mut HashSet<String>,
-) -> String {
-    let ext = mime.and_then(extension_for_mime).unwrap_or("");
-    let mut name = pick_cache::sanitize_file_name(display.unwrap_or(""), n, ext);
-    if !ext.is_empty() && Path::new(&name).extension().is_none() {
-        name = format!("{name}.{ext}");
-    }
-    let (stem, dot_ext) = match name.rfind('.') {
-        Some(i) if i > 0 => (name[..i].to_string(), name[i..].to_string()),
-        _ => (name.clone(), String::new()),
-    };
-    let mut candidate = name;
-    let mut suffix = 2;
-    while !used.insert(candidate.clone()) {
-        candidate = format!("{stem}-{suffix}{dot_ext}");
-        suffix += 1;
-    }
-    candidate
-}
-
-/// The first extension the media-type table maps to `mime`.
-fn extension_for_mime(mime: &str) -> Option<&'static str> {
-    let mime = mime.to_ascii_lowercase();
-    extensions_for(MediaFilter::ImagesAndVideos)
-        .into_iter()
-        .find(|ext| lookup(ext).is_some_and(|(_, m)| m == mime))
 }
 
 /// Image or video: from the MIME type, then the file extension, then the
@@ -342,7 +294,7 @@ fn kind_for(mime: Option<&str>, path: &Path, filter: MediaFilter) -> MediaKind {
     }
     match filter {
         MediaFilter::Videos => MediaKind::Video,
-        _ => MediaKind::Image,
+        MediaFilter::Images | MediaFilter::ImagesAndVideos => MediaKind::Image,
     }
 }
 

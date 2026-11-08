@@ -48,18 +48,31 @@ pub(crate) fn lookup(ext: &str) -> Option<(MediaKind, &'static str)> {
 }
 
 /// [`lookup`] by the extension of `path`.
+#[cfg_attr(target_os = "ios", allow(dead_code))] // Android and desktop only.
 pub(crate) fn classify_path(path: &Path) -> Option<(MediaKind, &'static str)> {
     lookup(path.extension()?.to_str()?)
 }
 
+/// The first extension the table maps to `mime` (case-insensitive).
+#[cfg_attr(target_os = "ios", allow(dead_code))] // Android only.
+pub(crate) fn extension_for_mime(mime: &str) -> Option<&'static str> {
+    let mime = mime.to_ascii_lowercase();
+    IMAGES
+        .iter()
+        .chain(VIDEOS)
+        .find(|(_, m)| *m == mime)
+        .map(|(e, _)| *e)
+}
+
 /// The extensions a picker should offer for `filter`.
+#[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))] // Desktop only.
 pub(crate) fn extensions_for(filter: MediaFilter) -> Vec<&'static str> {
     let images = IMAGES.iter().map(|(e, _)| *e);
     let videos = VIDEOS.iter().map(|(e, _)| *e);
     match filter {
         MediaFilter::Images => images.collect(),
         MediaFilter::Videos => videos.collect(),
-        _ => images.chain(videos).collect(),
+        MediaFilter::ImagesAndVideos => images.chain(videos).collect(),
     }
 }
 
@@ -103,6 +116,13 @@ mod tests {
         assert!(videos.contains(&"mp4") && !videos.contains(&"png"));
         assert_eq!(both.len(), images.len() + videos.len());
         assert!(images.iter().chain(&videos).all(|e| lookup(e).is_some()));
+    }
+
+    #[test]
+    fn mime_maps_back_to_an_extension() {
+        assert_eq!(extension_for_mime("image/jpeg"), Some("jpg"));
+        assert_eq!(extension_for_mime("VIDEO/MP4"), Some("mp4"));
+        assert_eq!(extension_for_mime("text/plain"), None);
     }
 
     #[test]

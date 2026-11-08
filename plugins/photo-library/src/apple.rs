@@ -28,7 +28,8 @@
 //! The delegate is owned by the picker itself, so a picker that goes away
 //! without answering drops the last sender and the waiting call returns an
 //! empty `Vec`, the same as a cancel. One pick runs at a time; a second
-//! concurrent call fails with [`PhotoError::Platform`].
+//! concurrent call, or one made while `clear_pick_cache` runs, fails with
+//! [`PhotoError::Busy`].
 //!
 //! # Results
 //!
@@ -42,7 +43,6 @@ mod apple_picker;
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use dispatch2::DispatchQueue;
@@ -67,32 +67,11 @@ pub(super) enum Event {
     Item(usize, Result<PickedItem, String>),
 }
 
-/// Set while a pick is showing (module doc's *Threading*).
-static IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-/// Clears [`IN_FLIGHT`] on every exit path of [`pick`].
-struct InFlight;
-
-impl InFlight {
-    fn acquire() -> Result<Self, PhotoError> {
-        IN_FLIGHT
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| InFlight)
-            .map_err(|_| PhotoError::Platform("a photo pick is already in progress".to_owned()))
-    }
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        IN_FLIGHT.store(false, Ordering::Release);
-    }
-}
-
 pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError> {
     if MainThreadMarker::new().is_some() {
         return Err(PhotoError::UiThread);
     }
-    let _in_flight = InFlight::acquire()?;
+    let _in_flight = pick_cache::PickGuard::acquire()?;
     let dir = pick_cache::new_call_dir()?;
     let (tx, rx) = mpsc::channel();
     let options = *options;
@@ -321,9 +300,12 @@ mod tests {
 
     #[test]
     fn only_one_pick_at_a_time() {
-        let first = InFlight::acquire().unwrap();
-        assert!(matches!(InFlight::acquire(), Err(PhotoError::Platform(_))));
+        let first = pick_cache::PickGuard::acquire().unwrap();
+        assert_eq!(
+            pick_cache::PickGuard::acquire().err(),
+            Some(PhotoError::Busy)
+        );
         drop(first);
-        assert!(InFlight::acquire().is_ok());
+        assert!(pick_cache::PickGuard::acquire().is_ok());
     }
 }
