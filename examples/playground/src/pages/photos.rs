@@ -27,11 +27,12 @@
 //! until the first progress report, then `Loading {done} of {items} ({pct}%)`;
 //! Pick and Clear cache are disabled and a **Cancel** button calls the pick's
 //! own [`CancelToken`] (a fresh one per press). The progress callback runs on a
-//! background thread, so it only writes a shared cell; the task future on the UI
-//! thread polls that cell and copies changes into a signal. **Share picked** passes the picked files to
-//! `Share::files_anchored` with a fixed anchor rectangle, and **Clear cache**
-//! calls `PhotoLibrary::clear_pick_cache`. Only the PNG and JPEG decoders are
-//! compiled in, so a HEIC, WebP or GIF preview shows a decode error.
+//! background thread, so it only writes a shared cell; the task future polls
+//! that cell and copies changes into a signal. **Share picked** passes the
+//! picked files to `Share::files_anchored` with a fixed anchor rectangle, and
+//! **Clear cache** calls `PhotoLibrary::clear_pick_cache`. Only the PNG and JPEG
+//! decoders are compiled in, so a HEIC, WebP or GIF preview shows a decode
+//! error.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -423,7 +424,7 @@ struct PickerPanelState {
     /// Written by the progress callback on a background thread; read only by
     /// the task future and the Pick handler.
     progress_cell: Arc<Mutex<Option<PickProgress>>>,
-    /// The latest progress, copied from the cell on the UI thread.
+    /// The latest progress, copied from the cell by the task future.
     progress: RwSignal<Option<PickProgress>>,
     /// The running pick's token; Cancel takes it, each Pick press replaces it.
     token: Arc<Mutex<Option<CancelToken>>>,
@@ -445,10 +446,14 @@ impl Component for PickerPanel {
             let poll_cell = poll_cell.clone();
             async move {
                 let mut handle = spawn_blocking(move || run_picker_action(requested));
-                // Poll the cell the callback thread writes; signal writes stay here.
+                // Poll the cell the callback thread writes. The panel can unmount while
+                // this runs, so stop copying once the signal is gone.
                 while !handle.is_finished() {
                     let latest = *poll_cell.lock().expect("progress cell poisoned");
-                    if latest != progress.get_untracked() {
+                    let Some(current) = progress.try_get_untracked() else {
+                        break;
+                    };
+                    if latest != current {
                         progress.set(latest);
                     }
                     let _ = spawn_blocking(move || std::thread::sleep(PROGRESS_POLL)).await;
@@ -646,7 +651,11 @@ fn cancel_button(state: &PickerPanelState, busy: bool) -> impl View<PickerPanelS
 fn clear_button(state: &PickerPanelState, busy: bool) -> impl View<PickerPanelState> {
     let action = state.action.clone();
     let outcome = state.outcome.clone();
+    let (progress_cell, progress) = (state.progress_cell.clone(), state.progress);
     button("Clear cache", move |_state: &mut PickerPanelState| {
+        // The status line must not show the last pick's progress during the clear.
+        *progress_cell.lock().expect("progress cell poisoned") = None;
+        progress.set(None);
         *action.lock().expect("action cell poisoned") = Some(PickerAction::ClearCache);
         outcome.restart();
     })
