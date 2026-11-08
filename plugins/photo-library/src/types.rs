@@ -173,6 +173,9 @@ pub enum PhotoError {
     /// The pick was cancelled through its [`CancelToken`].
     #[error("the pick was cancelled")]
     Cancelled,
+    /// The asset or album no longer exists (a stale identifier).
+    #[error("asset not found")]
+    NotFound,
     /// Another pick is already in progress, or the pick cache is being cleared. On Android this
     /// can briefly follow [`Cancelled`](Self::Cancelled) while the host's copy thread stops.
     #[error("another photo pick is already in progress")]

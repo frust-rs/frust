@@ -234,7 +234,15 @@ The sections, in order:
     **Share picked** (`Share::files_anchored` with a fixed anchor rectangle) and
     **Clear cache**. While a pick runs the Picker panel shows loading progress
     ("Loading N of M (P%)") with a **Cancel** button; Pick and Clear cache are
-    disabled until it ends. Deep link: `frustplay://section/photos`.
+    disabled until it ends. A **Browse** panel below it lists the library through
+    the plugin's `library` feature: an access line (the Photos read/write status,
+    read on **Refresh**), a **Manage selection** banner while access is Limited, an
+    album selector, and a keyed lazy list of rows of four thumbnails (each
+    requested off the UI thread at 3x the cell size) loaded in pages of 60 by an
+    explicit **Load more** button, with the loaded and total counts shown. When a
+    picked item carries a library asset id (iOS) the Picker preview uses the same
+    native thumbnail path, so a HEIC pick previews. Deep link:
+    `frustplay://section/photos`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -330,6 +338,15 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Picker panel Clear cache | Android device | OWED |
 | Photos: Picker panel Cancel while an iCloud item downloads | iPhone | OWED |
 | Photos: Picker panel Cancel during a large video copy | Android device | OWED |
+| Photos: Browse panel Refresh (access line, albums, first page of thumbnails) | iPhone | OWED |
+| Photos: Browse panel Refresh (access line, albums, first page of thumbnails) | Android device | OWED |
+| Photos: Browse panel Load more (next page, counts update) | iPhone | OWED |
+| Photos: Browse panel Load more (next page, counts update) | Android device | OWED |
+| Photos: Browse panel album selector | iPhone | OWED |
+| Photos: Browse panel album selector | Android device | OWED |
+| Photos: Browse panel Manage selection (limited access) | iPhone | OWED |
+| Photos: Browse panel Manage selection (limited access) | Android device | OWED |
+| Photos: Picker preview of a HEIC pick through the native thumbnail | iPhone | OWED |
 
 ### Drag gate notes
 

@@ -91,5 +91,11 @@
 	<string>This app asks to add photos to your library on the Photos page to demonstrate the add-only permission prompt.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app asks for the microphone on the Photos page to demonstrate the permission prompt.</string>
+	<!-- frust-photo-library: with limited photo access iOS shows its own "select more
+	     photos" alert on launch; this key turns that alert off so the Browse panel's
+	     Manage selection button is the only way to reopen the selection. A manual
+	     app-side key, not something the plugin can add. -->
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
 </dict>
 </plist>

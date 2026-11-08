@@ -13,6 +13,9 @@ readme = "README.md"
 
 [features]
 default = []
+# Library browsing (albums, paged assets, thumbnails). A code gate only: with it off every
+# browsing call returns `PhotoError::FeatureDisabled`.
+library = []
 
 [dependencies]
 thiserror = { workspace = true }
@@ -59,6 +62,9 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIWindow",
     "UIViewController",
     "UIPresentationController",
+    # `UIImage::CGImage` is gated on the `objc2-core-graphics` feature, not on `UIImage`.
+    "UIImage",
+    "objc2-core-graphics",
 ] }
 # PhotosUI binds the PHPicker configuration, filter and result types; the iOS view controller
 # (`PHPickerViewController`) is macOS-only in these bindings and is declared by hand in `apple.rs`.
@@ -77,6 +83,14 @@ objc2-photos = { version = "0.3", default-features = false, features = [
     "PHAssetResource",
     "PHAssetResourceManager",
     "PHAssetCreationRequest",
+] }
+# Thumbnail rendering: a bitmap context draws the CGImage into straight-alpha RGBA8.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGContext",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGImage",
 ] }
 block2 = { version = "0.6", default-features = false, features = ["std"] }
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }
