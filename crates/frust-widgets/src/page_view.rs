@@ -535,7 +535,7 @@ impl<State: 'static> View<State> for PageView<State> {
 }
 
 impl Widget for PageViewWidget {
-    /// Reports [`frust_core::InspectDetail::Clip`]: the page view (through its viewport) clips its content to its own box.
+    /// [`frust_core::InspectDetail::Clip`] from the inner viewport, which clips its content.
     fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
         self.viewport.inspect_detail()
     }
@@ -687,7 +687,7 @@ impl PageSliverWidget {
 }
 
 impl Widget for PageSliverWidget {
-    /// Reports [`frust_core::InspectDetail::Clip`]: the page run, while it is cut, clips its content to its own box.
+    /// [`frust_core::InspectDetail::Clip`] while the page run is cut and clips its content.
     fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
         self.clip.then_some(frust_core::InspectDetail::Clip)
     }

@@ -179,7 +179,7 @@ pub struct InspectNode {
 pub enum InspectDetail {
     /// The outcome of a text widget's last layout.
     Text(TextInspect),
-    /// The widget clips its descendants to its own bounds, so one outside them is hidden, not overflowing.
+    /// Clips its descendants to its own bounds: one outside them is hidden, not overflowing.
     Clip,
 }
 
@@ -197,7 +197,7 @@ pub struct TextInspect {
     pub lines: usize,
     /// The maximum line count the widget was configured with, if any.
     pub max_lines: Option<usize>,
-    /// Whether there were more lines than `max_lines` allows, or the last allowed line is wider than `max_width`.
+    /// More lines than `max_lines` allows, or the last allowed line wider than `max_width`.
     pub did_exceed_max_lines: bool,
     /// Whether the last visible line was ellipsized.
     pub ellipsized: bool,

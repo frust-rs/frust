@@ -2590,7 +2590,7 @@ impl<State: 'static> View<State> for ListView<State> {
 }
 
 impl Widget for ListViewWidget {
-    /// Reports [`frust_core::InspectDetail::Clip`]: the list viewport clips its content to its own box.
+    /// [`frust_core::InspectDetail::Clip`]: the list viewport clips its content to its box.
     fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
         Some(frust_core::InspectDetail::Clip)
     }

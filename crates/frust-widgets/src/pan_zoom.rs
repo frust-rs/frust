@@ -820,7 +820,7 @@ impl PanZoomWidget {
 }
 
 impl Widget for PanZoomWidget {
-    /// Reports [`frust_core::InspectDetail::Clip`]: the pan/zoom viewport clips its content to its own box.
+    /// [`frust_core::InspectDetail::Clip`]: the pan/zoom viewport clips its content to its box.
     fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
         Some(frust_core::InspectDetail::Clip)
     }
