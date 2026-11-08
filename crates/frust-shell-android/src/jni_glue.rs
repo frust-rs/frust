@@ -1043,14 +1043,37 @@ pub(crate) fn pump_reactive_runtime() {
 
 /// Initialise `android_logger` exactly once per process, so `log::*` from any
 /// crate in the graph reaches logcat under the `frust` tag.
+///
+/// The level is `Info` unless the `debug.frust.log` system property names another (`adb shell
+/// setprop debug.frust.log debug`) — see [`crate::log_level`]. The chosen level is logged once
+/// at `Info` (`Warn` when the property holds something that is not a level) so a logcat reader
+/// can tell why a `log::debug!` line did or did not show.
 fn init_logger_once() {
     static LOGGER: Once = Once::new();
     LOGGER.call_once(|| {
+        use crate::log_level::{DEFAULT_LEVEL, LEVEL_PROPERTY, parse_level, property_value};
+        let property = property_value();
+        let level = property
+            .as_deref()
+            .and_then(parse_level)
+            .unwrap_or(DEFAULT_LEVEL);
         android_logger::init_once(
             android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Info)
+                .with_max_level(level)
                 .with_tag("frust"),
         );
+        match property.as_deref() {
+            Some(value) if parse_level(value).is_some() => {
+                log::info!("frust-shell-android: log level {level} from {LEVEL_PROPERTY}={value}")
+            }
+            Some(value) => log::warn!(
+                "frust-shell-android: log level {level}; {LEVEL_PROPERTY}={value:?} is not a level \
+                 (off, error, warn, info, debug, trace)"
+            ),
+            None => log::info!(
+                "frust-shell-android: log level {level} (set {LEVEL_PROPERTY} to change it)"
+            ),
+        }
     });
 }
 
