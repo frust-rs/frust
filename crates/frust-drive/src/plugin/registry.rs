@@ -68,7 +68,8 @@
 //! strings, framework links and macOS entitlements each permission needs) is
 //! described at `PERMISSIONS`. The newest entry, `photo-library`
 //! (dependency, the plugin's own Android library module and the `PhotosUI`
-//! framework link; no permission or plist key), is described at
+//! framework link; no permission or plist key in its base, and one optional
+//! `library` feature for album and asset browsing), is described at
 //! `PHOTO_LIBRARY`.
 
 use super::{Contribution, FeatureSpec, PluginSpec};
@@ -954,11 +955,58 @@ const PERMISSIONS: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `photo-library`'s `library` feature contributions: the browsing half
+/// (albums, paged assets, thumbnails). The permission, usage-string and
+/// framework values are the same ones [`PERMISSIONS_PHOTOS`] writes, so a
+/// project that adds both `permissions` with its `photos` feature and
+/// `photo-library` with `library` gets one copy of each line: the applier
+/// reports the repeats as an already-present item. The
+/// `photo_library_library_feature_repeats_only_the_permissions_photos_values`
+/// test pins that correspondence. The app still adds `permissions` with its
+/// `photos` feature to request access at run time.
+const PHOTO_LIBRARY_LIBRARY: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-photo-library",
+        feature: "library",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_IMAGES",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VIDEO",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_EXTERNAL_STORAGE",
+    },
+    Contribution::PlistEntry {
+        key: "NSPhotoLibraryUsageDescription",
+        value: "Choose photos from your library.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Photo library usage description, required by Apple in the \
+                  app's own Info.plist. Edit the text to match your app.",
+    },
+    Contribution::IosFramework { name: "Photos" },
+];
+
+/// `photo-library`'s single optional feature.
+const PHOTO_LIBRARY_FEATURES: &[FeatureSpec] = &[FeatureSpec {
+    id: "library",
+    summary: "Album and asset browsing with byte-budgeted thumbnails: enables \
+              the Cargo feature and adds the Android media read permissions, \
+              NSPhotoLibraryUsageDescription and the Photos framework. Add \
+              `permissions` with its `photos` feature to request access.",
+    contributions: PHOTO_LIBRARY_LIBRARY,
+}];
+
 /// `photo-library`'s base: the Cargo dependency, the plugin's own Android
 /// library module (the Photo Picker host) and the `PhotosUI` framework for
 /// `PHPickerViewController`. No permission and no plist entry: the system
 /// pickers run out of process and need no photo-library access or usage
-/// string. No optional features yet.
+/// string. Its one optional feature, `library`, is described at
+/// [`PHOTO_LIBRARY_FEATURES`].
 const PHOTO_LIBRARY: PluginSpec = PluginSpec {
     id: "photo-library",
     summary: "Pick photos and videos with the system picker (Android, iOS; file dialog on desktop)",
@@ -973,7 +1021,7 @@ const PHOTO_LIBRARY: PluginSpec = PluginSpec {
         },
         Contribution::IosFramework { name: "PhotosUI" },
     ],
-    optional_features: &[],
+    optional_features: PHOTO_LIBRARY_FEATURES,
     requires_sibling: None,
 };
 
@@ -1471,13 +1519,14 @@ mod tests {
     }
 
     /// The `photo-library` entry's base contributions: Cargo dependency,
-    /// Android library module, `PhotosUI` framework; no permission, plist
-    /// entry or optional feature.
+    /// Android library module, `PhotosUI` framework; no permission or plist
+    /// entry in the base. Its one optional feature is `library`.
     #[test]
     fn photo_library_base_contributions_match_the_final_accounting() {
         let spec = find_plugin("photo-library").unwrap();
         assert_eq!(spec.crate_dir, "photo-library");
-        assert!(spec.optional_features.is_empty());
+        let ids: Vec<&str> = spec.optional_features.iter().map(|f| f.id).collect();
+        assert_eq!(ids, vec!["library"]);
         assert_eq!(spec.requires_sibling, None);
         assert_eq!(spec.base.len(), 3);
         assert!(matches!(
@@ -1552,6 +1601,175 @@ mod tests {
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "photo-library", &[]).unwrap();
         assert_eq!(second.items.len(), 3);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `library` feature's accounting: the Cargo feature on the
+    /// `frust-photo-library` dependency, the four Android media read
+    /// permissions, the usage string and the Photos framework link, in that
+    /// order, and no Gradle module or Swift package of its own.
+    #[test]
+    fn photo_library_library_feature_contributions_match_the_final_accounting() {
+        let spec = find_plugin("photo-library").unwrap();
+        let feature = spec
+            .optional_features
+            .iter()
+            .find(|f| f.id == "library")
+            .unwrap();
+        let c = feature.contributions;
+        assert_eq!(c.len(), 7, "{c:?}");
+        assert!(matches!(
+            c[0],
+            Contribution::CargoFeature {
+                name: "frust-photo-library",
+                feature: "library",
+            }
+        ));
+        assert!(matches!(
+            c[1],
+            Contribution::ManifestPermission {
+                permission: "android.permission.READ_MEDIA_IMAGES",
+            }
+        ));
+        assert!(matches!(
+            c[2],
+            Contribution::ManifestPermission {
+                permission: "android.permission.READ_MEDIA_VIDEO",
+            }
+        ));
+        assert!(matches!(
+            c[3],
+            Contribution::ManifestPermission {
+                permission: "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+            }
+        ));
+        assert!(matches!(
+            c[4],
+            Contribution::ManifestPermission {
+                permission: "android.permission.READ_EXTERNAL_STORAGE",
+            }
+        ));
+        assert!(matches!(
+            c[5],
+            Contribution::PlistEntry {
+                key: "NSPhotoLibraryUsageDescription",
+                ..
+            }
+        ));
+        assert!(matches!(
+            c[6],
+            Contribution::IosFramework { name: "Photos" }
+        ));
+    }
+
+    /// Every `library` contribution except its Cargo feature is one that
+    /// `permissions`' `photos` feature also makes, byte for byte (compared by
+    /// `Debug` output), so applying both in one project repeats no line.
+    #[test]
+    fn photo_library_library_feature_repeats_only_the_permissions_photos_values() {
+        let library = find_plugin("photo-library")
+            .unwrap()
+            .optional_features
+            .iter()
+            .find(|f| f.id == "library")
+            .unwrap()
+            .contributions;
+        let photos = find_plugin("permissions")
+            .unwrap()
+            .optional_features
+            .iter()
+            .find(|f| f.id == "photos")
+            .unwrap()
+            .contributions;
+        let mut repeats = 0;
+        for c in library {
+            if matches!(c, Contribution::CargoFeature { .. }) {
+                continue;
+            }
+            repeats += 1;
+            let shown = format!("{c:?}");
+            assert!(
+                photos.iter().any(|p| format!("{p:?}") == shown),
+                "{shown} is not one of permissions' photos contributions"
+            );
+        }
+        assert_eq!(repeats, 6);
+    }
+
+    /// `photo-library` with `library` and `permissions` with `photos` in one
+    /// project: the four Android permissions, the usage string and the Photos
+    /// link each land once, the six repeats report `AlreadyPresent`, and a
+    /// second apply leaves a byte-identical tree.
+    #[test]
+    fn photo_library_library_and_permissions_photos_compose_without_duplicates() {
+        let root = scaffold_project("photo-library-library-compose");
+        add_plugin(&root, "permissions", &["photos"]).unwrap();
+
+        let first = add_plugin(&root, "photo-library", &["library"]).unwrap();
+        assert_eq!(first.items.len(), 3 + 7, "{first:?}");
+        let repeats = first
+            .items
+            .iter()
+            .filter(|i| i.outcome == AddOutcome::AlreadyPresent)
+            .count();
+        assert_eq!(repeats, 6, "{first:?}");
+
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        for p in [
+            "READ_MEDIA_IMAGES",
+            "READ_MEDIA_VIDEO",
+            "READ_MEDIA_VISUAL_USER_SELECTED",
+            "READ_EXTERNAL_STORAGE",
+        ] {
+            assert_eq!(
+                manifest
+                    .matches(&format!("android.permission.{p}\""))
+                    .count(),
+                1,
+                "{p}: {manifest}"
+            );
+        }
+
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert_eq!(
+            plist.matches("NSPhotoLibraryUsageDescription").count(),
+            1,
+            "{plist}"
+        );
+
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("\"photos\""), "{cargo}");
+        assert!(cargo.contains("\"library\""), "{cargo}");
+
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        let lists = pbxproj.matches("OTHER_LDFLAGS = (").count();
+        assert!(lists >= 2, "{pbxproj}");
+        assert_eq!(
+            pbxproj
+                .matches("\"-framework\",\n\t\t\t\t\tPhotos,\n")
+                .count(),
+            lists,
+            "{pbxproj}"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "photo-library", &["library"]).unwrap();
         assert!(
             second
                 .items
