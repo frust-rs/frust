@@ -6,11 +6,12 @@
 //! `on_long_press` closure (a press held past [`LONG_PRESS_MS`] without moving
 //! past the slop). Moving past the slop disarms both (it became a drag). The
 //! wrapper is transparent — every event is still forwarded to the child, so
-//! interactive descendants keep working. It recognises **tap + long-press**
-//! and, when a drag callback is attached, **vertical, horizontal and pan
-//! drags** (see [Drag recognition](self#drag-recognition)); double-tap is
-//! deferred, and lacking an input-kind flag on events the slop is
-//! [`TOUCH_SLOP`] uniformly.
+//! interactive descendants keep working. It recognises **tap + long-press**,
+//! a **double tap** when [`on_double_tap`](GestureDetectorView::on_double_tap)
+//! is attached (see [Double tap](self#double-tap)) and, when a drag callback is
+//! attached, **vertical, horizontal and pan drags** (see [Drag
+//! recognition](self#drag-recognition)); lacking an input-kind flag on events
+//! the slop is [`TOUCH_SLOP`] uniformly.
 //! Two-finger pinch lives in [`crate::pinch`] ([`crate::pinch::pinch_detector`]).
 //!
 //! # Drag recognition
@@ -112,6 +113,38 @@
 //! - **Removal.** A detector torn down mid-press fires neither, so the
 //!   one-follow-up guarantee holds only while the detector stays mounted (see
 //!   LIMITATIONS `gesture-drag-no-cancel-on-removal`).
+//!
+//! # Double tap
+//!
+//! [`on_double_tap`](GestureDetectorView::on_double_tap) fires when a second
+//! primary press lands within [`DOUBLE_TAP_MS`] (300 ms, inclusive) of the
+//! first tap's release and within [`DOUBLE_TAP_SLOP`] (100 px) of where it was
+//! released, and itself resolves as a tap. Within each press the ordinary
+//! [`TOUCH_SLOP`] still applies. The window is measured on the raw
+//! [`PaintCtx::input_time`], like the long-press: the first tap is dated by the
+//! last paint before its `Up`, the second press by the last paint before its
+//! `Down`, so an animation time scale never stretches it. While the window is
+//! open the detector requests a frame on every paint, so the clock keeps
+//! advancing on a dirty-driven shell with no input.
+//!
+//! - **Delayed single tap.** With `on_double_tap` wired, a tap's `on_tap` waits
+//!   for the window: a second tap replaces it with `on_double_tap`, and
+//!   otherwise it fires once the window lapses — from the `Housekeeping` pass
+//!   after the paint that observes the lapse (up to [`DOUBLE_TAP_MS`] plus a
+//!   frame late), or at once when a press lands outside the window or the
+//!   slop, before that press's `on_tap_down`. A detector without
+//!   `on_double_tap` fires `on_tap` at the `Up`, as before.
+//! - **Press state.** Both presses keep the press-state contract:
+//!   `on_tap_down` fires for each `Down`, `on_tap_up` for each `Up`, and the
+//!   second tap orders `on_tap_up` before `on_double_tap`.
+//! - **A failed second press.** A second press that moves past [`TOUCH_SLOP`],
+//!   leaves the bounds, resolves as a long-press or is cancelled ends as any
+//!   press does (`on_tap_cancel`, or the long-press) and fires no
+//!   `on_double_tap`. The first tap's `on_tap` is dropped, as Flutter drops
+//!   it; a press that left the bounds and is released inside them counts as a
+//!   fresh first tap.
+//! - **Cancel.** A `Cancel` while the window is open ends it; the owed `on_tap`
+//!   runs from the next state-bearing pass, like an owed `on_tap_cancel`.
 //!
 //! # Long-press firing semantics
 //!
@@ -309,6 +342,23 @@ pub struct TapUpDetails {
     pub local_position: Point,
 }
 
+/// What an `on_double_tap` callback receives: where the second tap was
+/// released.
+///
+/// `#[non_exhaustive]` so fields can be added later; read the public fields.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct DoubleTapDetails {
+    /// The pointer position, local to the detector, at the second tap's `Up`.
+    pub local_position: Point,
+}
+
+/// Milliseconds from `earlier` to `now` on the paint clock, `0.0` if `now` is
+/// not later.
+fn elapsed_ms(now: FrameTime, earlier: FrameTime) -> f64 {
+    now.saturating_sub(earlier).as_secs_f64() * 1000.0
+}
+
 /// Which drag recognizer a press is tracking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DragAxis {
@@ -409,10 +459,20 @@ pub(crate) const LONG_PRESS_MS: f64 = 500.0;
 /// timeout — so the one published value stands for both platforms, paired with
 /// the same [`frust_core::TOUCH_SLOP`] the long-press uses.
 ///
-/// Consumed by [`crate::textinput`]'s select-the-word-on-double-tap; the
-/// detector in this module still recognises tap + long-press only (double-tap
-/// is deferred there — see the [module docs](self)).
+/// Consumed by this module's [`GestureDetectorView::on_double_tap`] (see the
+/// [module docs](self#double-tap)), [`crate::textinput`]'s
+/// select-the-word-on-double-tap and [`crate::window_drag_region`]'s
+/// title-bar double-click, so every double-tap in the framework shares one window.
 pub(crate) const DOUBLE_TAP_MS: f64 = 300.0;
+
+/// How far, in logical px, the second press of a double tap may land from
+/// where the first tap was released.
+///
+/// Android's `ViewConfiguration` publishes `DOUBLE_TAP_SLOP = 100` dp, and
+/// Flutter's `kDoubleTapSlop` is the same 100 logical pixels; within each
+/// press the ordinary [`frust_core::TOUCH_SLOP`] still applies (Flutter's
+/// `kDoubleTapTouchSlop` equals its `kTouchSlop`).
+pub(crate) const DOUBLE_TAP_SLOP: f64 = 100.0;
 
 /// The paint-clock hold timer behind a stationary long-press: the press epoch,
 /// the threshold it is measured against, and the two reads every hold consumer
@@ -491,6 +551,7 @@ pub struct GestureDetectorView<State: 'static> {
     on_tap_down: Option<TypedArgCallback<State, TapDownDetails>>,
     on_tap_up: Option<TypedArgCallback<State, TapUpDetails>>,
     on_tap_cancel: Option<GestureCallback<State>>,
+    on_double_tap: Option<TypedArgCallback<State, DoubleTapDetails>>,
     on_hold_progress: Option<TypedArgCallback<State, f64>>,
     hold_threshold_ms: Option<u64>,
     vertical_drag: DragCallbacks<State>,
@@ -510,6 +571,7 @@ pub fn GestureDetector<State: 'static, V: View<State>>(child: V) -> GestureDetec
         on_tap_down: None,
         on_tap_up: None,
         on_tap_cancel: None,
+        on_double_tap: None,
         on_hold_progress: None,
         hold_threshold_ms: None,
         vertical_drag: DragCallbacks::new(),
@@ -647,6 +709,20 @@ impl<State: 'static> GestureDetectorView<State> {
         self
     }
 
+    /// Call `f` when a second tap lands within [`DOUBLE_TAP_MS`] and
+    /// [`DOUBLE_TAP_SLOP`] of the first, with the second tap's release
+    /// position. Fires after that tap's [`on_tap_up`](Self::on_tap_up), and
+    /// neither tap fires [`on_tap`](Self::on_tap).
+    ///
+    /// Wiring this delays every single [`on_tap`](Self::on_tap) until the
+    /// double-tap window lapses (up to [`DOUBLE_TAP_MS`] plus a frame), since
+    /// only then is a tap known not to be the first of two. See the [module
+    /// docs](self#double-tap).
+    pub fn on_double_tap<F: Fn(&mut State, DoubleTapDetails) + 'static>(mut self, f: F) -> Self {
+        self.on_double_tap = Some(Rc::new(f));
+        self
+    }
+
     /// Observe press-hold progress (`0.0..=1.0` against
     /// [`hold_threshold_ms`](Self::hold_threshold_ms), default [`LONG_PRESS_MS`])
     /// while the child is held — the primitive a charge-up ring or similar hold
@@ -721,6 +797,14 @@ enum Recognizer {
     /// arrival that won the race instead; we hold capture until `Up`/`Cancel`
     /// but fire nothing further.
     Fired,
+    /// A tap was released while `on_double_tap` is wired, and its `on_tap` is
+    /// held for the double-tap window. No press is in flight. `first_up_at` is
+    /// the raw paint clock dating the release (the last paint before the
+    /// `Up`), `at` the release position the next press is measured against.
+    /// Paint ends the window once it lapses, owing the held `on_tap`; a press
+    /// inside the window and the slop becomes the second tap, any other ends
+    /// the window (see the [module docs](self#double-tap)).
+    DoubleTapPending { first_up_at: FrameTime, at: Point },
 }
 
 /// The retained widget for a [`GestureDetectorView`].
@@ -740,6 +824,15 @@ pub struct GestureDetectorWidget {
     /// A `Cancel` ended an active press, whose `on_tap_cancel` is owed to the
     /// next state-bearing pass (see the [module docs](self#press-state)).
     owed_tap_cancel: bool,
+    on_double_tap: Option<ErasedArgCallback<DoubleTapDetails>>,
+    /// The double-tap window ended without a second tap (a paint observed it
+    /// lapse, or a `Cancel` arrived), and the held `on_tap` is owed to the next
+    /// state-bearing pass (see the [module docs](self#double-tap)).
+    owed_single_tap: bool,
+    /// The press in flight landed inside an open double-tap window: resolving
+    /// as a tap, it fires `on_double_tap` instead of `on_tap`. Cleared when the
+    /// press ends or leaves the bounds.
+    second_tap: bool,
     on_hold_progress: Option<ErasedArgCallback<f64>>,
     /// The press timer, firing at the resolved hold threshold —
     /// [`GestureDetectorView::hold_threshold_ms`] if set, else
@@ -753,10 +846,9 @@ pub struct GestureDetectorWidget {
     /// `Down` and fed on every `Move` while a drag recognizer is wired.
     velocity_x: VelocityTracker,
     velocity_y: VelocityTracker,
-    /// The most recent paint's raw clock ([`PaintCtx::input_time`]), the
-    /// event-pass timestamp for the velocity samples (the event pass carries
-    /// no clock). Stashed only while a drag recognizer is wired and a press is
-    /// in flight.
+    /// The most recent paint's raw clock ([`PaintCtx::input_time`]), stashed
+    /// on every paint: the event-pass timestamp for the velocity samples and
+    /// for the double-tap window (the event pass carries no clock).
     last_input_time: FrameTime,
     /// A started drag a `Cancel` ended, whose `cancel` callback is owed to the
     /// next state-bearing pass (see the [module docs](self#drag-recognition)).
@@ -831,6 +923,25 @@ impl GestureDetectorWidget {
         }
     }
 
+    /// Fire the `on_tap` a closed double-tap window held. Only from passes
+    /// that carry real application state.
+    fn fire_single_tap(&mut self, ctx: &mut EventCtx) {
+        if let Some(cb) = self.on_tap.as_mut() {
+            cb(ctx);
+            ctx.request_redraw();
+        }
+    }
+
+    /// Run an owed held `on_tap` (see the `owed_single_tap` field). Called only
+    /// from passes that carry real application state — never from the
+    /// `Cancel` arm. Always the oldest debt: a later press's `Down` pays it
+    /// before anything of its own.
+    fn flush_owed_single_tap(&mut self, ctx: &mut EventCtx) {
+        if std::mem::take(&mut self.owed_single_tap) {
+            self.fire_single_tap(ctx);
+        }
+    }
+
     /// Run an owed `on_tap_cancel`. Called only from passes that carry real
     /// application state — never from the `Cancel` arm.
     fn flush_owed_tap_cancel(&mut self, ctx: &mut EventCtx) {
@@ -863,6 +974,7 @@ impl GestureDetectorWidget {
             _ => None,
         };
         self.state = Recognizer::Idle;
+        self.second_tap = false;
         if self.press_active {
             self.fire_tap_cancel(ctx);
         }
@@ -889,6 +1001,9 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
             press_active: false,
             press_origin: Point::ZERO,
             owed_tap_cancel: false,
+            on_double_tap: self.on_double_tap.as_ref().map(erase_callback_arg),
+            owed_single_tap: false,
+            second_tap: false,
             on_long_press: self.on_long_press.as_ref().map(erase_callback),
             on_hold_progress: self.on_hold_progress.as_ref().map(erase_callback_arg),
             // `.max(1)` guards against a 0ms override: `f64::clamp` passes
@@ -921,6 +1036,7 @@ impl<State: 'static> View<State> for GestureDetectorView<State> {
         element.on_tap_down = self.on_tap_down.as_ref().map(erase_callback_arg);
         element.on_tap_up = self.on_tap_up.as_ref().map(erase_callback_arg);
         element.on_tap_cancel = self.on_tap_cancel.as_ref().map(erase_callback);
+        element.on_double_tap = self.on_double_tap.as_ref().map(erase_callback_arg);
         element.on_hold_progress = self.on_hold_progress.as_ref().map(erase_callback_arg);
         // Same NaN guard as `build` above — see `hold_threshold_ms`'s doc comment.
         element.hold.set_threshold_ms(
@@ -993,11 +1109,25 @@ impl Widget for GestureDetectorWidget {
                 }
             }
         }
-        // Stash the raw clock for the drag velocity samples: the event pass has
-        // none, and the animation-scaled `frame_time` would stretch the
-        // velocity under a time scale.
-        if self.tracks_velocity() {
-            self.last_input_time = ctx.input_time();
+        // Stash the raw clock on every paint: the event pass has none, and it
+        // dates the drag velocity samples and the double-tap window. The
+        // animation-scaled `frame_time` would stretch both under a time scale.
+        let now = ctx.input_time();
+        self.last_input_time = now;
+        // The double-tap window, on the same raw clock. While it is open, ask
+        // for a frame on every paint whatever else is wired, so the clock keeps
+        // advancing on a dirty-driven shell with no input. The paint that sees
+        // it lapse cannot fire the held `on_tap` (no `EventCtx` here): it owes
+        // it, latches the deferred-callback flush the long-press uses, and
+        // requests one more frame so the next rebuild's `Housekeeping`
+        // broadcast pays it.
+        if let Recognizer::DoubleTapPending { first_up_at, .. } = self.state {
+            if elapsed_ms(now, first_up_at) > DOUBLE_TAP_MS {
+                self.state = Recognizer::Idle;
+                self.owed_single_tap = true;
+                frust_core::mark_pending_result_flush();
+            }
+            ctx.request_frame();
         }
         self.child.paint_child(ctx, scene);
     }
@@ -1007,6 +1137,7 @@ impl Widget for GestureDetectorWidget {
             // A `Cancel` that ended a started drag owes its `cancel` callback;
             // any other pointer phase carries real state, so pay it first.
             if p.phase != PointerPhase::Cancel {
+                self.flush_owed_single_tap(ctx);
                 self.flush_owed_cancel(ctx);
                 self.flush_owed_tap_cancel(ctx);
             }
@@ -1018,6 +1149,22 @@ impl Widget for GestureDetectorWidget {
                     // child, whose own context handling (if any) owns it.
                     if !presses(p) {
                         return self.child.event_child(ctx, event);
+                    }
+                    // An open double-tap window: a press inside it and the
+                    // slop (measured from the first release, on the last
+                    // paint's clock) is the second tap; any other press ends
+                    // the window, and the held `on_tap` fires before this
+                    // press's own `on_tap_down`.
+                    self.second_tap = false;
+                    if let Recognizer::DoubleTapPending { first_up_at, at } = self.state {
+                        if self.on_double_tap.is_some()
+                            && (p.position - at).hypot() <= DOUBLE_TAP_SLOP
+                            && elapsed_ms(self.last_input_time, first_up_at) <= DOUBLE_TAP_MS
+                        {
+                            self.second_tap = true;
+                        } else {
+                            self.fire_single_tap(ctx);
+                        }
                     }
                     // A press that never saw its `Up`/`Cancel` ends before the
                     // next one starts.
@@ -1065,6 +1212,11 @@ impl Widget for GestureDetectorWidget {
                             || (p.position - self.press_origin).hypot() > TOUCH_SLOP)
                     {
                         self.fire_tap_cancel(ctx);
+                    }
+                    // A second tap that leaves the bounds is an ordinary press
+                    // from here on (past the slop it is no tap at all).
+                    if self.second_tap && outside(p.position, ctx.size()) {
+                        self.second_tap = false;
                     }
                     // Feed the release-velocity trackers on every `Move` of a
                     // press a drag recognizer takes part in.
@@ -1183,13 +1335,25 @@ impl Widget for GestureDetectorWidget {
                     // drops the pointer capture on any release, so the primary's
                     // `Up` never reaches this detector. An idle detector passes it on.
                     if !presses(p) {
-                        if matches!(self.state, Recognizer::Idle) {
+                        // No press is in flight in an open double-tap window
+                        // either, and the window stays open.
+                        if matches!(
+                            self.state,
+                            Recognizer::Idle | Recognizer::DoubleTapPending { .. }
+                        ) {
                             return self.child.event_child(ctx, event);
                         }
                         self.end_press_on_secondary_release(ctx);
                         let result = self.child.event_child(ctx, event);
                         self.child.set_active(false);
                         return result;
+                    }
+                    // A stray primary `Up` with no press in flight fires nothing
+                    // and leaves an open double-tap window open.
+                    if matches!(self.state, Recognizer::DoubleTapPending { .. }) {
+                        self.child.event_child(ctx, event);
+                        self.child.set_active(false);
+                        return EventResult::Handled;
                     }
                     // Resolve at most one recogniser: a held-past-threshold press
                     // releases as a long-press, otherwise a within-slop press is
@@ -1210,6 +1374,8 @@ impl Widget for GestureDetectorWidget {
                         Recognizer::Dragging { axis, .. } => Some(axis),
                         _ => None,
                     };
+                    let second_tap = std::mem::take(&mut self.second_tap);
+                    let inside = !outside(p.position, ctx.size());
                     self.state = Recognizer::Idle;
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
@@ -1244,10 +1410,32 @@ impl Widget for GestureDetectorWidget {
                     // tap-only detector must still fire the tap on an in-bounds
                     // release (the paint timer never marks `elapsed` for it, but
                     // stay robust to a handler unwired mid-gesture).
-                    if !long_pressed
-                        && (fire_tap || fire_long)
-                        && let Some(cb) = self.on_tap.as_mut()
-                    {
+                    //
+                    // With `on_double_tap` wired, a tap released inside the
+                    // bounds is either the second of a double tap (which fires
+                    // instead of `on_tap`) or the first of one, whose `on_tap`
+                    // is held for the window. A release outside the bounds
+                    // cannot start one and taps at once.
+                    let taps = !long_pressed && (fire_tap || fire_long);
+                    let double_wired = self.on_double_tap.is_some();
+                    if taps && inside && double_wired && second_tap {
+                        if let Some(cb) = self.on_double_tap.as_mut() {
+                            cb(
+                                ctx,
+                                DoubleTapDetails {
+                                    local_position: p.position,
+                                },
+                            );
+                            ctx.request_redraw();
+                        }
+                    } else if taps && inside && double_wired && !second_tap {
+                        self.state = Recognizer::DoubleTapPending {
+                            first_up_at: self.last_input_time,
+                            at: p.position,
+                        };
+                        // Prompt a paint so the window's frame keepalive starts.
+                        ctx.request_redraw();
+                    } else if taps && let Some(cb) = self.on_tap.as_mut() {
                         cb(ctx);
                         ctx.request_redraw();
                     }
@@ -1286,6 +1474,14 @@ impl Widget for GestureDetectorWidget {
                         frust_core::mark_pending_result_flush();
                         ctx.request_redraw();
                     }
+                    // A `Cancel` with a double-tap window open ends the window:
+                    // the held `on_tap` is owed like the `on_tap_cancel` above.
+                    if matches!(self.state, Recognizer::DoubleTapPending { .. }) {
+                        self.owed_single_tap = true;
+                        frust_core::mark_pending_result_flush();
+                        ctx.request_redraw();
+                    }
+                    self.second_tap = false;
                     self.state = Recognizer::Idle;
                     self.child.event_child(ctx, event);
                     self.child.set_active(false);
@@ -1296,6 +1492,9 @@ impl Widget for GestureDetectorWidget {
         if event.is_broadcast() {
             // An owed drag `cancel` (see the Cancel arm) rides the first
             // broadcast after it: the Housekeeping pass carries real state.
+            // A held `on_tap` whose double-tap window lapsed (see paint) or
+            // was cancelled rides it too, first: it is always the oldest debt.
+            self.flush_owed_single_tap(ctx);
             self.flush_owed_cancel(ctx);
             self.flush_owed_tap_cancel(ctx);
             // `InputEvent::Housekeeping` today: the delivery vehicle for a
@@ -2987,6 +3186,407 @@ mod tests {
                 } else if e == "cancel" || e.starts_with("up") {
                     assert!(open, "up/cancel without a down: {:?}", log.events);
                     open = false;
+                }
+            }
+            assert!(!open, "a down was left open: {:?}", log.events);
+        }
+    }
+
+    // --- Double tap ------------------------------------------------------------
+
+    fn double_logic(_: &mut PressLog) -> PressView {
+        press_detector(Blank).on_double_tap(|s: &mut PressLog, d| {
+            s.events.push(format!(
+                "double {} {}",
+                d.local_position.x as i32, d.local_position.y as i32
+            ))
+        })
+    }
+
+    /// A 300 px square detector wired with every press callback and
+    /// `on_double_tap`, so a press can land well outside the double-tap slop.
+    fn double_root() -> RenderRoot<PressLog, PressView> {
+        let mut root = RenderRoot::new();
+        let mut log = PressLog::default();
+        root.rebuild(&mut { double_logic }, &mut log);
+        root.layout(Size::new(300.0, 300.0));
+        root
+    }
+
+    fn double_widget() -> GestureDetectorWidget {
+        let view = double_logic(&mut PressLog::default());
+        let mut counter = 0u64;
+        View::<PressLog>::build(&view, &mut BuildCtx::new(&mut counter))
+    }
+
+    /// A still press and release at `(x, y)` through the root.
+    fn tap_at(root: &mut RenderRoot<PressLog, PressView>, log: &mut PressLog, x: f64, y: f64) {
+        root.event(log, &ev(PointerPhase::Down, x, y));
+        root.event(log, &ev(PointerPhase::Up, x, y));
+    }
+
+    /// One frame as a shell drives it: rebuild (draining any deferred-callback
+    /// flush through `Housekeeping`), then paint at `ms`.
+    fn frame(root: &mut RenderRoot<PressLog, PressView>, log: &mut PressLog, ms: f64) -> bool {
+        root.rebuild(&mut { double_logic }, log);
+        root.paint(&mut NullScene, ft(ms)).needs_frame
+    }
+
+    #[test]
+    fn without_on_double_tap_a_tap_still_fires_at_the_up_with_no_window() {
+        let mut root = press_root();
+        let mut log = PressLog::default();
+        let mut sink = NullScene;
+        root.paint(&mut sink, ft(0.0));
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.paint(&mut sink, ft(16.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+        assert!(
+            !root.paint(&mut sink, ft(32.0)).needs_frame,
+            "no double-tap window keeps a plain detector painting"
+        );
+        root.rebuild(&mut { press_logic }, &mut log);
+        root.paint(&mut sink, ft(400.0));
+        root.rebuild(&mut { press_logic }, &mut log);
+        assert_eq!(
+            log.events.len(),
+            3,
+            "nothing fires after the window would lapse"
+        );
+    }
+
+    #[test]
+    fn a_second_tap_inside_the_window_fires_double_tap_and_never_tap() {
+        let mut root = double_root();
+        let mut log = PressLog::default();
+        frame(&mut root, &mut log, 0.0);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 10 10"],
+            "the first tap's on_tap is held for the window"
+        );
+        frame(&mut root, &mut log, 100.0);
+        tap_at(&mut root, &mut log, 14.0, 12.0);
+        assert_eq!(
+            log.events,
+            vec![
+                "down 10 10",
+                "up 10 10",
+                "down 14 12",
+                "up 14 12",
+                "double 14 12"
+            ],
+            "both presses keep the press-state contract; up precedes double"
+        );
+        for ms in [200.0, 500.0, 900.0] {
+            frame(&mut root, &mut log, ms);
+        }
+        assert_eq!(log.events.len(), 5, "no tap follows a double tap");
+    }
+
+    #[test]
+    fn a_second_tap_at_exactly_the_window_still_counts() {
+        let mut root = double_root();
+        let mut log = PressLog::default();
+        frame(&mut root, &mut log, 0.0);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        frame(&mut root, &mut log, DOUBLE_TAP_MS);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        assert_eq!(log.events.last().map(String::as_str), Some("double 10 10"));
+        assert!(!log.events.iter().any(|e| e == "tap"), "{:?}", log.events);
+    }
+
+    #[test]
+    fn a_lone_tap_fires_its_held_tap_once_after_the_window_lapses() {
+        let mut root = double_root();
+        let mut log = PressLog::default();
+        frame(&mut root, &mut log, 0.0);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        frame(&mut root, &mut log, 100.0);
+        frame(&mut root, &mut log, 300.0);
+        frame(&mut root, &mut log, 300.0);
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 10 10"],
+            "300 ms is inside"
+        );
+        // The paint at 301 ms sees the lapse; the next frame's Housekeeping
+        // pass pays the held tap.
+        frame(&mut root, &mut log, 301.0);
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 10 10"],
+            "paint only owes it"
+        );
+        frame(&mut root, &mut log, 317.0);
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+        for ms in [333.0, 600.0, 1000.0] {
+            frame(&mut root, &mut log, ms);
+        }
+        assert_eq!(log.events.len(), 3, "the held tap fires exactly once");
+    }
+
+    #[test]
+    fn a_press_outside_the_double_tap_slop_fires_the_held_tap_before_its_down() {
+        let mut root = double_root();
+        let mut log = PressLog::default();
+        frame(&mut root, &mut log, 0.0);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        frame(&mut root, &mut log, 100.0);
+        // 150 px away: past the 100 px double-tap slop.
+        root.event(&mut log, &ev(PointerPhase::Down, 160.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 10 10", "tap", "down 160 10"],
+            "the owed tap fires before the new press's down"
+        );
+        root.event(&mut log, &ev(PointerPhase::Up, 160.0, 10.0));
+        assert_eq!(
+            log.events.len(),
+            5,
+            "the new tap opens its own window: {:?}",
+            log.events
+        );
+    }
+
+    #[test]
+    fn a_press_after_the_window_lapsed_pays_the_held_tap_first() {
+        // The lapse is observed by a paint, but the press arrives before any
+        // rebuild ran the Housekeeping pass that would have paid it.
+        let mut root = double_root();
+        let mut log = PressLog::default();
+        frame(&mut root, &mut log, 0.0);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        root.paint(&mut NullScene, ft(400.0));
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 10 10", "tap", "down 10 10"]
+        );
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert!(!log.events.iter().any(|e| e.starts_with("double")));
+    }
+
+    #[test]
+    fn a_second_press_past_the_touch_slop_cancels_and_fires_neither() {
+        let mut root = double_root();
+        let mut log = PressLog::default();
+        frame(&mut root, &mut log, 0.0);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        frame(&mut root, &mut log, 100.0);
+        root.event(&mut log, &ev(PointerPhase::Down, 12.0, 12.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 12.0, 40.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 12.0, 40.0));
+        for ms in [150.0, 500.0, 900.0] {
+            frame(&mut root, &mut log, ms);
+        }
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 10 10", "down 12 12", "cancel"],
+            "no double tap, and the first tap is dropped"
+        );
+    }
+
+    #[test]
+    fn a_second_press_that_long_presses_drops_both_taps() {
+        let mut root = double_root();
+        let mut log = PressLog::default();
+        frame(&mut root, &mut log, 0.0);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        frame(&mut root, &mut log, 100.0);
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        frame(&mut root, &mut log, 150.0);
+        frame(&mut root, &mut log, 700.0);
+        frame(&mut root, &mut log, 716.0);
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        for ms in [800.0, 1200.0] {
+            frame(&mut root, &mut log, ms);
+        }
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 10 10", "down 10 10", "long", "up 10 10"]
+        );
+    }
+
+    #[test]
+    fn the_double_tap_window_requests_frames_until_it_lapses() {
+        let mut root = double_root();
+        let mut log = PressLog::default();
+        frame(&mut root, &mut log, 0.0);
+        tap_at(&mut root, &mut log, 10.0, 10.0);
+        let mut outcomes = Vec::new();
+        for ms in [16.0, 150.0, 300.0, 301.0] {
+            outcomes.push(frame(&mut root, &mut log, ms));
+        }
+        assert_eq!(
+            outcomes,
+            vec![true; 4],
+            "an open window, and the paint that sees it lapse, request frames"
+        );
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10"]);
+        // The Housekeeping pass that pays the held tap owes one frame of its
+        // own; after it the detector is at rest.
+        frame(&mut root, &mut log, 317.0);
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+        assert!(
+            !frame(&mut root, &mut log, 333.0),
+            "after the deferred fire nothing keeps painting"
+        );
+    }
+
+    #[test]
+    fn the_double_tap_window_runs_on_raw_input_time_under_an_animation_time_scale() {
+        // At quarter speed 301 ms of raw time is ~75 ms of animation time: a
+        // window read off the animation clock would still be open.
+        frust_core::anim::with_thread_animation_time_scale(0.25, || {
+            let mut root = double_root();
+            let mut log = PressLog::default();
+            frame(&mut root, &mut log, 1000.0);
+            tap_at(&mut root, &mut log, 10.0, 10.0);
+            frame(&mut root, &mut log, 1300.0);
+            frame(&mut root, &mut log, 1300.0);
+            assert_eq!(log.events.len(), 2, "300 ms of raw time is inside");
+            frame(&mut root, &mut log, 1301.0);
+            frame(&mut root, &mut log, 1317.0);
+            assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+        });
+    }
+
+    #[test]
+    fn a_cancel_while_the_window_is_open_owes_the_held_tap_to_housekeeping() {
+        let mut w = double_widget();
+        let mut log = PressLog::default();
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        let _ = frust_core::take_pending_result_flush();
+        let mut unit = ();
+        let mut ctx = EventCtx::new(&mut unit, Point::ZERO, Size::new(100.0, 100.0));
+        w.event(&mut ctx, &ev(PointerPhase::Cancel, 10.0, 10.0));
+        assert!(
+            frust_core::take_pending_result_flush(),
+            "the owed tap latches the deferred-callback flush"
+        );
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10"]);
+        send(&mut w, &mut log, &InputEvent::Housekeeping);
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10", "tap"]);
+        // The window is closed: the next press is a fresh first tap.
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        send(&mut w, &mut log, &InputEvent::Housekeeping);
+        assert_eq!(log.events.len(), 5, "{:?}", log.events);
+    }
+
+    #[test]
+    fn a_stray_up_while_the_window_is_open_fires_nothing_and_keeps_it_open() {
+        let mut w = double_widget();
+        let mut log = PressLog::default();
+        let secondary = frust_core::PointerButton::Secondary;
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        send(
+            &mut w,
+            &mut log,
+            &ev_button(PointerPhase::Up, 10.0, 10.0, secondary),
+        );
+        assert_eq!(log.events, vec!["down 10 10", "up 10 10"]);
+        send(&mut w, &mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        send(&mut w, &mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec![
+                "down 10 10",
+                "up 10 10",
+                "down 10 10",
+                "up 10 10",
+                "double 10 10"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_release_outside_the_bounds_taps_at_once_with_double_tap_wired() {
+        let mut w = double_widget();
+        let mut log = PressLog::default();
+        let small = Size::new(20.0, 20.0);
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Down, 10.0, 10.0));
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Up, 21.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 21 10", "tap"],
+            "an out-of-bounds release cannot start a double tap"
+        );
+    }
+
+    #[test]
+    fn a_second_press_that_leaves_the_bounds_is_no_second_tap() {
+        let mut w = double_widget();
+        let mut log = PressLog::default();
+        let small = Size::new(20.0, 20.0);
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Down, 10.0, 10.0));
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Up, 10.0, 10.0));
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Down, 10.0, 10.0));
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Move, 21.0, 10.0));
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Up, 12.0, 10.0));
+        assert_eq!(
+            log.events,
+            vec!["down 10 10", "up 10 10", "down 10 10", "cancel"],
+            "the press cancels and fires no double tap; the first tap is dropped"
+        );
+        // Released back inside, it is a fresh first tap whose window is open.
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Down, 10.0, 10.0));
+        send_sized(&mut w, &mut log, small, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(log.events.last().map(String::as_str), Some("double 10 10"));
+    }
+
+    #[test]
+    fn with_double_tap_wired_every_tap_down_is_followed_by_exactly_one_up_or_cancel() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..100 {
+            let mut root = double_root();
+            let mut log = PressLog::default();
+            let mut ms = 0.0;
+            for _ in 0..40 {
+                let event = match next() % 8 {
+                    0 => ev(PointerPhase::Down, 50.0, 50.0),
+                    1 => ev(PointerPhase::Down, 250.0, 50.0),
+                    2 => ev(PointerPhase::Move, 52.0, 52.0),
+                    3 => ev(PointerPhase::Up, 50.0, 50.0),
+                    4 => ev(PointerPhase::Cancel, 50.0, 50.0),
+                    5 => ev(PointerPhase::Move, 50.0, 120.0),
+                    _ => {
+                        ms += (next() % 200) as f64;
+                        frame(&mut root, &mut log, ms);
+                        continue;
+                    }
+                };
+                root.event(&mut log, &event);
+            }
+            root.event(&mut log, &ev(PointerPhase::Cancel, 50.0, 50.0));
+            frame(&mut root, &mut log, ms + 1000.0);
+            frame(&mut root, &mut log, ms + 1016.0);
+            let mut open = false;
+            for (i, e) in log.events.iter().enumerate() {
+                if e.starts_with("down") {
+                    assert!(!open, "down while open: {:?}", log.events);
+                    open = true;
+                } else if e == "cancel" || e.starts_with("up") {
+                    assert!(open, "up/cancel without a down: {:?}", log.events);
+                    open = false;
+                } else if e.starts_with("double") {
+                    assert!(
+                        i > 0 && log.events[i - 1].starts_with("up"),
+                        "a double tap follows its up: {:?}",
+                        log.events
+                    );
                 }
             }
             assert!(!open, "a down was left open: {:?}", log.events);
