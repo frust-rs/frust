@@ -35,7 +35,7 @@ absolute http/https URLs.
 | iOS | `UIActivityViewController` from the key window's top view controller, on the main queue | `Presented` |
 | macOS | text/URL: clipboard copy via `frust-clipboard`; files: `NSSharingServicePicker` | `CopiedToClipboard` / `Presented` |
 | Linux / Windows | text/URL: clipboard copy via `frust-clipboard`; files: `ShareError::Unsupported` | `CopiedToClipboard` / - |
-| Android (files) | `ShareError::Unsupported` for now | - |
+| Android (files) | `ACTION_SEND` / `ACTION_SEND_MULTIPLE` chooser over `content://` URIs from the plugin's `FileProvider`; copies staged on a background thread | `Presented` (enqueued) |
 | Other | `ShareError::Platform("unsupported platform")` (text/URL), `Unsupported` (files) | - |
 
 ## Files
@@ -50,6 +50,17 @@ key window's content view: with a `ShareAnchor` (top-left logical points) at
 that rect, otherwise a zero-size rect at the view's centre; the `subject` is
 ignored. Linux and Windows have no file share UI and return
 `ShareError::Unsupported`.
+
+On Android `Ok(Presented)` means the share is enqueued, and the call never blocks on file size: a
+background thread copies each file (a snapshot taken then, never a link) into
+`cacheDir/frust-share/<uuid>/` and then starts the chooser. A staging or launch failure is logged under
+tag `FrustShare` and shows no chooser; a chooser Android refuses because the app went to the background
+is silent. Copies are pruned by a later share after 24 hours. The plugin's Gradle module must be in
+the app (re-run the TUI's Add Plugin for `share` on an existing project); see
+`share-android-files-async-staging` in [LIMITATIONS.md](../../docs/LIMITATIONS.md).
+
+File sharing is device-tested on a Pixel 5 (Android 14), a Xiaomi 12 (Android 17), an iPhone 13 mini
+(iOS 27.2) and macOS.
 
 ## iOS
 

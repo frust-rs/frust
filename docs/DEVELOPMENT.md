@@ -336,7 +336,7 @@ cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ign
 cargo check --target aarch64-linux-android \
   -p frust-ui -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
   -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player \
-  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions
+  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions -p frust-photo-library
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
 # --all-targets also compiles cfg(test), which the plain checks above skip:
@@ -347,7 +347,7 @@ cargo check --all-targets --target aarch64-linux-android -p frust-shell-android 
 cargo check --target aarch64-apple-ios-sim \
   -p frust-ui -p frust-shared-preferences -p frust-secure-storage -p frust-camera -p frust-network-image \
   -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player \
-  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions
+  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions -p frust-photo-library
 cargo check --target aarch64-apple-ios -p frust-secure-storage -p frust-share
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 
@@ -503,7 +503,7 @@ mismatch fails in one of two ways, depending on direction** (both verified empir
 
 | Platform | Floor | Declared in |
 |----------|-------|-------------|
-| Android | **`minSdk = 29`** (Android 10) · `compileSdk = 36` | 17 Gradle files: `crates/frust-shell-android/platform/android/frust-embedding`, `plugins/{auth-session,camera,connectivity,iap,native-widgets,permissions,secure-storage,video-player}/platform/android`, `crates/frust-drive/templates/app/android.tmpl/app`, and the 7 example/benchmark apps |
+| Android | **`minSdk = 29`** (Android 10) · `compileSdk = 36` | 19 Gradle files: `crates/frust-shell-android/platform/android/frust-embedding`, `plugins/{auth-session,camera,connectivity,iap,native-widgets,permissions,photo-library,secure-storage,share,video-player}/platform/android`, `crates/frust-drive/templates/app/android.tmpl/app`, and the 7 example/benchmark apps |
 | iOS | **15.0** | `crates/frust-shell-ios/platform/ios/FrustEmbedding/Package.swift` (`.iOS(.v15)`) and each app's `IPHONEOS_DEPLOYMENT_TARGET` |
 | macOS | **11.0** (`LSMinimumSystemVersion`, `[macos] minimum-system-version` overridable per app) | Three separate literals, none referencing another: `crates/frust-drive/src/manifest.rs`'s private `DEFAULT_MACOS_MINIMUM_SYSTEM_VERSION` (the manifest-parsed default, read back at build time); `crates/frust-drive/src/scaffold/context.rs`'s own `pub` const of the same name (the scaffold-time default that fills `{{ macos_minimum_system_version }}` in `crates/frust-drive/templates/app/macos.tmpl/Info.plist.tmpl`); and a hard-coded `<string>11.0</string>` test literal in `crates/frust-drive/src/scaffold/mod.rs`. This trio needs the same lockstep discipline as the Android table below but none of the three sites carries the in-file lockstep comment yet — treat that as open follow-up work |
 | Windows | **10**, de facto — winit itself supports 7+ and only tests 10 regularly | Not an in-repo literal. The floor comes from the Win10-era API `frust-shell-windows` actually drives: winit's `Window::set_theme` (native titlebar light/dark theming) reaches DWM immersive dark-mode support, which requires Windows 10 1809+ |

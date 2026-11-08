@@ -305,9 +305,9 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes); a plugin's
   native module location is written through `platform_wiring` (`frust.plugin.<module>.dir`,
   `ios/<Package>`). The
-  registry holds twenty-six top-level entries, including the four design-system plugins (`glyph`/
+  registry holds twenty-seven top-level entries, including the four design-system plugins (`glyph`/
   `material`/`cupertino`/`shadcn` — `beui` is still absent by design) — the TUI's Add Plugin dialog
-  lists all twenty-six. The newest is `permissions` (the plugin's own Gradle module plus five optional features — `photos`, `photos-add`, `camera`, `microphone`, `media-location` — each carrying its app-side `ManifestPermission`s, Info.plist usage strings, framework links and, for camera/microphone, macOS entitlements; an entry the app already has, such as the `camera` plugin's `NSCameraUsageDescription`, is left alone), then `device-info` (a Cargo-dependency-only entry), then `material-i18n` and `connectivity`, then `share` (OS-capability entries), `qr` and `file-dialogs`
+  lists all twenty-seven. The newest is `photo-library` (the plugin's own Gradle module for the Photo Picker host and the `PhotosUI` framework link; no permission and no plist entry, since the system pickers need neither), then `permissions` (the plugin's own Gradle module plus five optional features — `photos`, `photos-add`, `camera`, `microphone`, `media-location` — each carrying its app-side `ManifestPermission`s, Info.plist usage strings, framework links and, for camera/microphone, macOS entitlements; an entry the app already has, such as the `camera` plugin's `NSCameraUsageDescription`, is left alone), then `device-info` (a Cargo-dependency-only entry), then `material-i18n` and `connectivity`, then `share` (the Cargo dependency plus its own Gradle module, which carries the `FileProvider` behind `Share::files`; OS-capability entries), `qr` and `file-dialogs`
   (both `CargoDep`-only, like the design systems); `network-image` is likewise `CargoDep`-only with an optional
   `webp` feature; `oauth-native` is likewise a pure-Rust, `CargoDep`-only OAuth 2.0
   native-app helper sitting beside `auth-session` (PKCE S256, `state`, authorization URL, and
