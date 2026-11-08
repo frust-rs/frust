@@ -332,6 +332,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `Theme::with_text_scale`, `Theme::text_scale`, `Theme::authored_type_scale`, `TextScale::clamped`
   and `scale_style`; default-sized `Text` and `TextInput` follow it, explicit sizes do not.
 - Material `zh-Hans` strings, and `frust_i18n::Locale::likely_script`.
+- `TextLayout::{line_count, max_width, did_exceed_max_lines, is_ellipsized, overflows_width}`:
+  read-only accessors for how a laid-out block fit its limits.
+- `Widget::inspect_detail`, the `#[non_exhaustive]` `InspectDetail` enum, `TextInspect` and the new
+  `InspectNode.detail` field: a widget can attach typed detail to its inspect node. The text and
+  rich-text widgets report their last layout through it (text, line count, ellipsis, overflow), and
+  `EitherWidget`, `EitherOf3Widget`…`EitherOf8Widget` and `ShortcutsWidget` forward it from their
+  child. A hand-written `InspectNode` struct literal now needs `detail: None`.
+- `frust::testing::Tester::{text_runs, text_overflows, assert_no_text_overflow}` and `TextRun`:
+  list every text run with its geometry and flags, and fail a test when one is cut or sticks out.
 
 ### Changed
 

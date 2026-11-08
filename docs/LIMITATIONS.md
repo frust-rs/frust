@@ -9159,3 +9159,15 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Denied and Blocked need a resumed Activity*, `currentCode`); gate k2-pm-07 (Pixel 5: Blocked read with the app resumed). The no-Activity read is derived from the code and has not been run on a device.
 
 ---
+
+### `testing-text-runs-engine-clips` — `Tester::text_runs` does not see engine clips or text inputs
+
+**Observed**: `text_runs` and `assert_no_text_overflow` judge containment from pod geometry only. A run hidden by a `PushClip` (a scroll viewport, say) while still inside its ancestors' boxes is not reported. `TextInput` runs are not reported at all.
+
+**Applies to**: `frust::testing::Tester` text-run diagnostics, all hosts.
+
+**Why accepted**: clips exist only in the compiled scene, not the retained tree the diagnostics read; a text input does not report a layout through `inspect_detail`. Both are outside the overflow class the API targets (a label cut or wider than its box).
+
+**Evidence**: `crates/frust/src/testing/text.rs` (module docs).
+
+---
