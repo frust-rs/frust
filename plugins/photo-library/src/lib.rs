@@ -50,6 +50,7 @@
 //! ```
 
 mod cancel;
+mod library;
 mod types;
 
 // Desktop uses only part of these; mobile targets keep the dead-code lint.
@@ -57,8 +58,17 @@ mod types;
 mod media_types;
 #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
 mod pick_cache;
+// Host-tested helpers the mobile browsing arms call once they replace the stubs.
+#[allow(dead_code)]
+mod pixels;
+#[cfg_attr(not(feature = "library"), allow(dead_code))]
+mod thumb_cache;
 
 pub use cancel::CancelToken;
+pub use library::{
+    Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE,
+    Thumbnail, ThumbnailMode, ThumbnailRequest,
+};
 pub use types::{
     AssetId, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
 };
@@ -149,4 +159,88 @@ impl PhotoLibrary {
     pub fn clear_pick_cache() -> Result<(), PhotoError> {
         pick_cache::clear()
     }
+
+    /// Lists the albums the app can see. Blocks; needs the `library` feature and photo access.
+    ///
+    /// Browsing is read-only and never takes the pick guard, so it runs while a pick is open.
+    /// [`PhotoError::UiThread`] on a mobile UI thread, [`PhotoError::PermissionDenied`] when
+    /// access is not usable.
+    pub fn albums() -> Result<Vec<Album>, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            platform::albums()
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            Err(library_disabled())
+        }
+    }
+
+    /// One page of assets, newest first. Blocks; see [`albums`](Self::albums) for the rules.
+    pub fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            platform::assets(query)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = query;
+            Err(library_disabled())
+        }
+    }
+
+    /// A thumbnail as straight-alpha RGBA8, from the in-memory cache when present. Blocks on a
+    /// miss; [`PhotoError::NotFound`] for a stale `id`. The request is clamped to `1..=2048`.
+    pub fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thumbnail, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            let request = request.clamped();
+            let key = thumb_cache::Key::new(id, &request);
+            if let Some(hit) = thumb_cache::get(&key) {
+                return Ok(hit);
+            }
+            let thumb = platform::thumbnail(id, &request)?;
+            thumb_cache::insert(key, thumb.clone());
+            Ok(thumb)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = (id, request);
+            Err(library_disabled())
+        }
+    }
+
+    /// Lets the user change which photos the app may see when access is limited. Blocks until
+    /// the system UI closes. Unlike browsing it presents UI, so it takes the pick guard
+    /// ([`PhotoError::Busy`] while a pick runs).
+    pub fn manage_limited_selection() -> Result<(), PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            platform::manage_limited_selection()
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            Err(library_disabled())
+        }
+    }
+
+    /// Sets the thumbnail cache budget in bytes (default 48 MiB), evicting least-recently-used
+    /// entries at once to fit. Non-blocking.
+    pub fn set_thumbnail_cache_budget(bytes: usize) -> Result<(), PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            thumb_cache::set_budget(bytes);
+            Ok(())
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = bytes;
+            Err(library_disabled())
+        }
+    }
+}
+
+#[cfg(not(feature = "library"))]
+fn library_disabled() -> PhotoError {
+    PhotoError::FeatureDisabled { feature: "library" }
 }
