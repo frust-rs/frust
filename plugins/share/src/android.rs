@@ -155,7 +155,10 @@ const SHARE_FILES_SIG: &str = "(Landroid/content/Context;[Ljava/lang/String;Ljav
 /// Shown when the host class is absent (an app scaffolded before the module).
 const NOT_WIRED: &str = "frust-share Android module not wired; re-run Add Plugin";
 
-/// Host return codes (`FrustShareHost.ERR_*`); 0 is success.
+/// Synchronous host return codes (`FrustShareHost.ERR_*`); 0 means the share
+/// was validated and enqueued. Staging and chooser-launch failures happen later
+/// on the host's background thread, are logged under tag `FrustShare` and show
+/// no chooser.
 fn host_error(code: i32) -> ShareError {
     let what = match code {
         1 => "invalid file list",
@@ -166,8 +169,11 @@ fn host_error(code: i32) -> ShareError {
     ShareError::Platform(format!("Android file share failed: {what} (code {code})"))
 }
 
-/// Share `paths` through `FrustShareHost`, which copies them into the cache,
-/// grants read access via the module's `FileProvider` and starts the chooser.
+/// Share `paths` through `FrustShareHost`, which validates them and returns at
+/// once; a background thread then stages them in the cache (hard link, else
+/// copy), grants read access via the module's `FileProvider` and starts the
+/// chooser. `Presented` therefore means enqueued: a later staging or launch
+/// failure is logged under tag `FrustShare` and shows no chooser.
 /// Exceptions map to the class name only; a missing host class means the
 /// Gradle module is not wired into the app.
 pub(crate) fn share_files(
