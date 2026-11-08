@@ -2,10 +2,16 @@
 
 use frust_file_dialogs::{FileDialog, FileDialogError, FileFilter};
 
+use crate::cancel::ProgressThrottle;
 use crate::media_types::{classify_path, extensions_for};
-use crate::{MediaFilter, MediaKind, PhotoError, PickOptions, PickedItem};
+use crate::{
+    CancelToken, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
+};
 
 pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError> {
+    if is_cancelled(options) {
+        return Err(PhotoError::Cancelled);
+    }
     let mut dialog = FileDialog::new().title(match options.filter {
         MediaFilter::Images => "Choose photos",
         MediaFilter::Videos => "Choose videos",
@@ -36,8 +42,12 @@ pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError>
     } else {
         options.limit as usize
     };
+    // A cancel during the dialog wins over its result.
+    if is_cancelled(options) {
+        return Err(PhotoError::Cancelled);
+    }
     let filter = options.filter;
-    Ok(paths
+    let items: Vec<PickedItem> = paths
         .into_iter()
         .take(limit)
         .map(|path| {
@@ -55,7 +65,23 @@ pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError>
                 is_copy: false,
             }
         })
-        .collect())
+        .collect();
+    // Desktop returns the originals, so nothing loads: one completed report.
+    if let (Some(cb), false) = (&options.progress, items.is_empty()) {
+        ProgressThrottle::new(cb.clone()).report(PickProgress {
+            items: items.len(),
+            done: items.len(),
+            fraction: 1.0,
+        });
+    }
+    Ok(items)
+}
+
+fn is_cancelled(options: &PickOptions) -> bool {
+    options
+        .cancel
+        .as_ref()
+        .is_some_and(CancelToken::is_cancelled)
 }
 
 /// The kind of a file whose extension is unknown: a single-kind filter can only return that
@@ -77,6 +103,16 @@ fn map_err(e: FileDialogError) -> PhotoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_token_skips_the_dialog() {
+        let t = CancelToken::new();
+        t.cancel();
+        let o = PickOptions::new().cancel(t);
+        assert!(is_cancelled(&o));
+        assert!(matches!(pick(&o), Err(PhotoError::Cancelled)));
+        assert!(!is_cancelled(&PickOptions::new()));
+    }
 
     #[test]
     fn unknown_extensions_follow_the_filter() {
