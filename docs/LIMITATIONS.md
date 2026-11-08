@@ -9124,9 +9124,9 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ### `permissions-read-external-storage-no-maxsdk` — the registry declares `READ_EXTERNAL_STORAGE` without `maxSdkVersion`
 
-**Observed**: the `photos` registry feature writes `android.permission.READ_EXTERNAL_STORAGE` into the app manifest with no `maxSdkVersion` attribute, because `Contribution::ManifestPermission` carries only the permission name. Android 13+ ignores it for media (the `READ_MEDIA_*` permissions apply), and the plugin requests it only on API 29-32. A store scan of the manifest may still list the broad storage permission. The API 30 path (`READ_EXTERNAL_STORAGE` as the only photo permission) has not been run on a device.
+**Observed**: the `photos` registry feature (and `photo-library`'s `library` feature, which adds the same `READ_MEDIA_*` set) writes `android.permission.READ_EXTERNAL_STORAGE` into the app manifest with no `maxSdkVersion` attribute, because `Contribution::ManifestPermission` carries only the permission name. Android 13+ ignores it for media (the `READ_MEDIA_*` permissions apply), and the plugin requests it only on API 29-32. A store scan of the manifest may still list the broad storage permission. The API 30 path (`READ_EXTERNAL_STORAGE` as the only photo permission) has not been run on a device.
 
-**Applies to**: Android apps that add the `photos` registry feature (`frust-drive`'s `permissions` plugin entry).
+**Applies to**: Android apps that add the `photos` registry feature (`frust-drive`'s `permissions` plugin entry) or `photo-library`'s `library` feature.
 
 **Workaround**: edit the added manifest line to `android:maxSdkVersion="32"`.
 
@@ -9134,7 +9134,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Trigger for removal**: `ManifestPermission` gains a `maxSdkVersion` field and the registry sets it, and the API 30 emulator leg passes.
 
-**Evidence**: (2026-11-08) `crates/frust-drive/src/plugin/registry.rs` (`PERMISSIONS_PHOTOS`); `plugins/permissions/src/codes.rs` (the photos permission lists); gate k2-pm-07 (step 7, the API 30 emulator leg, OWED).
+**Evidence**: (2026-11-08) `crates/frust-drive/src/plugin/registry.rs` (`PERMISSIONS_PHOTOS`, `PHOTO_LIBRARY_LIBRARY`); `plugins/permissions/src/codes.rs` (the photos permission lists); gate k2-pm-07 (step 7, the API 30 emulator leg, OWED).
 
 ---
 
@@ -9234,17 +9234,17 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ### `photo-library-picker-no-asset-id-without-library` — picks carry no asset identifier
 
-**Observed**: `PickedItem::asset_id` is `None` on every platform. The iOS picker is created without a photo-library, which by design never returns asset identifiers; the Android Photo Picker and the desktop file dialog expose none either.
+**Observed**: `PickedItem::asset_id` is `None` on every platform except iOS built with the `library` feature. Without it the iOS picker is created without a photo library, which by design never returns asset identifiers; the Android Photo Picker and the desktop file dialog expose none either.
 
-**Applies to**: all platforms; apps that want to match a pick back to a library asset.
+**Applies to**: Android, desktop, and iOS without the `library` feature; apps that want to match a pick back to a library asset.
 
-**Workaround**: none in the crate.
+**Workaround**: on iOS enable `library` (picks then carry the identifier; resolving it through browsing needs Photos access). None elsewhere.
 
 **Why accepted**: returning identifiers needs photo-library authorization on iOS, which this crate deliberately avoids so a pick needs no permission or usage string.
 
-**Trigger for removal**: an opt-in authorized pick path that returns asset identifiers.
+**Trigger for removal**: Android returns a library asset identifier for a pick.
 
-**Evidence**: (2026-11-08) `plugins/photo-library/src/apple.rs` (module docs, *No permission*).
+**Evidence**: (2026-11-08) `plugins/photo-library/src/apple.rs` (module docs, *No permission*); `plugins/photo-library/src/apple_picker.rs` (`initWithPhotoLibrary:` under `library`).
 
 ---
 
@@ -9284,17 +9284,81 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ### `photo-library-heic-preview-needs-native-decode` — a picked HEIC original cannot be decoded by frust's image decoding
 
-**Observed**: picked bytes are the untranscoded original, so an iPhone HEIC photo arrives as HEIC. `frust::decode_image_async` decodes PNG and JPEG only and fails on HEIC (and on WebP and GIF), so the playground's preview shows a decode error for such a pick.
+**Observed**: picked bytes are the untranscoded original, so an iPhone HEIC photo arrives as HEIC. `frust::decode_image_async` decodes PNG and JPEG only and fails on HEIC (and on WebP and GIF). With the `library` feature, native thumbnails show HEIC on both platforms (the Browse grid) and, on iOS, a pick that carries an asset id previews through one; what still fails is `decode_image_async` on a picked HEIC with no asset id (Android) or no Photos access (iOS).
 
-**Applies to**: apps previewing picked photos, chiefly from iOS libraries.
+**Applies to**: apps decoding a picked file themselves, chiefly HEIC from iOS libraries.
 
-**Workaround**: send the file as is (share or upload), or convert it outside frust before decoding.
+**Workaround**: send the file as is (share or upload), preview through `PhotoLibrary::thumbnail`, or convert it outside frust before decoding.
 
-**Why accepted**: a transcoding pick would change the bytes the user chose; native decoding is a separate capability.
+**Why accepted**: a transcoding pick would change the bytes the user chose; native thumbnails cover display, not file decoding.
 
-**Trigger for removal**: a native thumbnail or HEIC decode path ships.
+**Trigger for removal**: a HEIC decode path for picked files ships.
 
-**Evidence**: (2026-11-08) `examples/playground/src/pages/photos.rs` (Picker panel text); iPhone 13 mini device gate.
+**Evidence**: (2026-11-08) `examples/playground/src/pages/photos.rs` (Picker panel text); iPhone 13 mini and Pixel 5 device gates.
+
+---
+
+### `photo-library-macos-desktop-folder-only` — desktop has no photo library to browse
+
+**Observed**: with the `library` feature, `albums`, `assets`, `thumbnail` and `manage_limited_selection` answer `PhotoError::Unsupported` on macOS, Linux and Windows (and web); only `pick` works there, through the native file dialog. macOS Photos is not read, even though the machine has a Photos library.
+
+**Applies to**: macOS, Linux and Windows; apps that want an in-app grid of the user's photos.
+
+**Workaround**: use `pick` (the file dialog) on desktop, or list a folder yourself.
+
+**Why accepted**: browsing is a mobile feature of this release; a PhotoKit arm for macOS is separate work.
+
+**Trigger for removal**: a macOS browsing arm ships.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/src/desktop.rs` and `unsupported.rs` (the `library` arms).
+
+---
+
+### `photo-library-limited-alert-plist-manual` — the iOS Limited-access alert key must be added by hand
+
+**Observed**: iOS shows its own prompt to select more photos while access is Limited. Apps that run their own **Manage selection** UI turn it off with the boolean Info.plist key `PHPhotoLibraryPreventAutomaticLimitedAccessAlert`, but the registry's `PlistEntry` can only write a string value, so the `library` feature does not add it.
+
+**Applies to**: iOS apps with the `library` feature that handle Limited access themselves.
+
+**Workaround**: add `<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key><true/>` to the app's `Info.plist`.
+
+**Why accepted**: the contribution model has no boolean iOS plist entry, and the system prompt is a safe default.
+
+**Trigger for removal**: a boolean `PlistEntry` variant exists and the registry sets it.
+
+**Evidence**: (2026-11-09) `crates/frust-drive/src/plugin/registry.rs` (`PHOTO_LIBRARY_LIBRARY`); `plugins/photo-library/src/apple_library.rs` (*Limited selection*).
+
+---
+
+### `photo-library-android-paging-cost` — each Android asset page counts and sorts the whole match
+
+**Observed**: every `assets` page runs a `MediaStore` query that counts all matching rows and sorts them by a computed key (`DATE_TAKEN` when positive, else `DATE_ADDED`), and `albums` scans every row. API 29 pages by moving a cursor rather than by a query offset. The cost grows with library size and has not been measured on very large libraries.
+
+**Applies to**: Android; libraries with tens of thousands of items.
+
+**Workaround**: request larger pages less often, and load albums once.
+
+**Why accepted**: acceptable for a first release on the devices tried; the sort key keeps the order identical to the reported timestamp.
+
+**Trigger for removal**: a measurement on a very large library, and an indexed or cached path if it is slow.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreBrowser.kt` (`SORT_ORDER`, the paged query); Pixel 5 (Android 14) device gate. API 29 paging leg owed.
+
+---
+
+### `photo-library-thumbnail-cache-staleness` — cached thumbnails can outlive access or the asset
+
+**Observed**: `PhotoLibrary::thumbnail` serves a cache hit (48 MiB by default) before any platform call, so it skips the access check. The cache empties itself on `manage_limited_selection` success and on a miss answering `PermissionDenied`. A selection changed any other way (a `frust-permissions` request on Android while access is Limited), or an edited or deleted asset, is not noticed until `clear_thumbnail_cache` or eviction.
+
+**Applies to**: apps showing thumbnails after the user changed photo access or edited photos outside the app.
+
+**Workaround**: call `PhotoLibrary::clear_thumbnail_cache()` after your own permission request or on app resume, or set the budget to 0.
+
+**Why accepted**: a hit costs no platform call, which keeps a scrolling grid cheap; there is no change notification wired.
+
+**Trigger for removal**: a library change observer that clears the cache.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/src/lib.rs` (`thumbnail`, `cached_thumbnail`); `plugins/photo-library/src/thumb_cache.rs`.
 
 ---
 
