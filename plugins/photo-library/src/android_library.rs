@@ -88,25 +88,24 @@ fn albums_from(
     if titles.len() != ids.len() || counts.len() != ids.len() {
         return Err(mismatched_arrays());
     }
-    let albums = ids
-        .into_iter()
-        .zip(titles)
-        .zip(counts)
-        .filter_map(|((id, title), count)| {
-            let id = id?;
-            let kind = if id == ALL_MEDIA_ALBUM_ID {
-                AlbumKind::AllMedia
-            } else {
-                AlbumKind::Folder
-            };
-            Some(Album {
-                id: AlbumId::from_raw(id),
-                title: title.unwrap_or_default(),
-                kind,
-                count: u64::try_from(count).ok(),
-            })
-        })
-        .collect();
+    let mut albums = Vec::with_capacity(ids.len());
+    for ((id, title), count) in ids.into_iter().zip(titles).zip(counts) {
+        // A null id breaks the same contract `assets_from` enforces.
+        let Some(id) = id else {
+            return Err(mismatched_arrays());
+        };
+        let kind = if id == ALL_MEDIA_ALBUM_ID {
+            AlbumKind::AllMedia
+        } else {
+            AlbumKind::Folder
+        };
+        albums.push(Album {
+            id: AlbumId::from_raw(id),
+            title: title.unwrap_or_default(),
+            kind,
+            count: u64::try_from(count).ok(),
+        });
+    }
     Ok(albums)
 }
 
@@ -270,8 +269,9 @@ fn thumbnail_from(
     let w = u32::try_from(width).map_err(|_| invalid())?;
     let h = u32::try_from(height).map_err(|_| invalid())?;
     let stride = usize::try_from(row_bytes).map_err(|_| invalid())?;
-    let row = w as usize * 4;
-    if stride < row || pixels.len() != stride * h as usize {
+    let row = (w as usize).checked_mul(4).ok_or_else(invalid)?;
+    let expected = stride.checked_mul(h as usize).ok_or_else(invalid)?;
+    if stride < row || pixels.len() != expected {
         return Err(invalid());
     }
     let mut rgba = if stride == row {
