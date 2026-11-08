@@ -281,8 +281,8 @@ mod tests {
 
     use frust_core::event::PointerId;
     use frust_core::{
-        BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, InputEvent, LayoutCtx,
-        PaintCtx, PaintScene, PointerPhase, View, Widget,
+        BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, FrameTime, InputEvent,
+        LayoutCtx, PaintCtx, PaintScene, PointerPhase, View, Widget,
     };
     use kurbo::{Point, Size, Vec2};
 
@@ -290,8 +290,8 @@ mod tests {
     use crate::authoring::Role;
     use crate::testing::{Tester, find};
     use crate::{
-        DragEndDetails, DragStartDetails, DragUpdateDetails, GestureDetectorView,
-        NavigatorController, PanZoomTransform, TapDownDetails, TapUpDetails,
+        DoubleTapDetails, DragEndDetails, DragStartBehavior, DragStartDetails, DragUpdateDetails,
+        GestureDetectorView, NavigatorController, PanZoomTransform, TapDownDetails, TapUpDetails,
     };
 
     const SIZE: Size = Size::new(200.0, 200.0);
@@ -301,6 +301,7 @@ mod tests {
         log: Vec<&'static str>,
         deltas: Vec<Vec2>,
         up_at: Option<Point>,
+        start: Option<Point>,
     }
 
     fn pad<S: 'static>(side: f64) -> impl View<S> {
@@ -404,6 +405,98 @@ mod tests {
         assert_eq!(tester.state().log, ["down", "up", "tap"]);
     }
 
+    /// The gesture detector's double-tap window (`frust_widgets::gesture`'s `DOUBLE_TAP_MS`,
+    /// crate-private there), inclusive, on the raw input clock.
+    const DOUBLE_TAP_MS: u64 = 300;
+
+    fn double_tap_detector(log: &mut Log) -> GestureDetectorView<Log> {
+        tap_detector(log).on_double_tap(|s: &mut Log, _: DoubleTapDetails| s.log.push("double"))
+    }
+
+    #[test]
+    fn double_tap_within_the_window_fires_double_tap_and_no_tap() {
+        let mut tester = Tester::new(Log::default(), double_tap_detector, SIZE);
+        tester.tap((50.0, 50.0));
+        tester.pump(Duration::from_millis(100));
+        tester.tap((60.0, 55.0));
+        assert_eq!(tester.state().log, ["down", "up", "down", "up", "double"]);
+        tester.pump_and_settle();
+        assert_eq!(
+            tester.state().log,
+            ["down", "up", "down", "up", "double"],
+            "the window closing owes no tap"
+        );
+    }
+
+    #[test]
+    fn a_lone_tap_on_a_double_tap_detector_fires_tap_after_the_window() {
+        let mut tester = Tester::new(Log::default(), double_tap_detector, SIZE);
+        let released = tester.frame_time();
+        tester.tap((50.0, 50.0));
+        assert_eq!(tester.state().log, ["down", "up"], "the tap is held");
+        let window = Duration::from_millis(DOUBLE_TAP_MS);
+        loop {
+            assert!(
+                tester.pump(FRAME).needs_frame,
+                "the open window keeps frames"
+            );
+            let elapsed = tester.frame_time().saturating_sub(released);
+            if elapsed > window {
+                break;
+            }
+            assert!(
+                !tester.state().log.contains(&"tap"),
+                "no tap {elapsed:?} after the release"
+            );
+        }
+        // The paint that observes the lapse owes the tap to the next Housekeeping pass.
+        for _ in 0..2 {
+            if tester.state().log.contains(&"tap") {
+                break;
+            }
+            tester.pump(FRAME);
+        }
+        assert_eq!(tester.state().log, ["down", "up", "tap"]);
+        tester.pump_and_settle();
+        assert_eq!(tester.state().log, ["down", "up", "tap"], "exactly once");
+    }
+
+    #[test]
+    fn two_taps_apart_in_space_are_two_taps() {
+        let mut tester = Tester::new(Log::default(), double_tap_detector, SIZE);
+        tester.tap((50.0, 50.0));
+        tester.pump(Duration::from_millis(100));
+        // 170 px from the first release, past the 100 px double-tap slop.
+        tester.tap((170.0, 170.0));
+        assert_eq!(
+            tester.state().log,
+            ["down", "up", "tap", "down", "up"],
+            "the second Down pays the first tap before its own down"
+        );
+        tester.pump_and_settle();
+        assert_eq!(
+            tester.state().log,
+            ["down", "up", "tap", "down", "up", "tap"],
+            "the second tap fires after its own window"
+        );
+    }
+
+    #[test]
+    fn a_tap_only_detector_is_unchanged() {
+        let mut tester = Tester::new(Log::default(), tap_detector, SIZE);
+        tester.tap((50.0, 50.0));
+        assert_eq!(
+            tester.state().log,
+            ["down", "up", "tap"],
+            "on_tap at the Up"
+        );
+        assert!(
+            !tester.pump(Duration::ZERO).needs_frame,
+            "no double-tap window keeps frames"
+        );
+        assert_eq!(tester.state().log, ["down", "up", "tap"]);
+    }
+
     fn drag_detector(_: &mut Log) -> GestureDetectorView<Log> {
         crate::GestureDetector(pad(200.0))
             .on_vertical_drag_start(|s: &mut Log, _: DragStartDetails| s.log.push("start"))
@@ -440,6 +533,53 @@ mod tests {
         tester.timed_drag((100.0, 20.0), delta, Duration::from_millis(320));
         assert_drag(tester.state(), 20, delta);
         assert!(tester.frame_time().saturating_sub(start) >= Duration::from_millis(320));
+    }
+
+    /// The start point and update deltas of a pan scripted Down (50, 50), Moves to (70, 50),
+    /// (95, 50) (past the 36 px pan slop) and (105, 50), then Up, with `behavior` set, or left
+    /// at the default when `None`.
+    fn scripted_pan(behavior: Option<DragStartBehavior>) -> (Option<Point>, Vec<Vec2>) {
+        let mut tester = Tester::new(
+            Log::default(),
+            move |_: &mut Log| {
+                let detector = crate::GestureDetector(pad(200.0))
+                    .on_pan_start(|s: &mut Log, d: DragStartDetails| s.start = Some(d.position))
+                    .on_pan_update(|s: &mut Log, d: DragUpdateDetails| s.deltas.push(d.delta));
+                match behavior {
+                    Some(behavior) => detector.drag_start_behavior(behavior),
+                    None => detector,
+                }
+            },
+            SIZE,
+        );
+        let mut press = tester.press((50.0, 50.0));
+        for x in [70.0, 95.0, 105.0] {
+            tester.pump(FRAME);
+            tester.move_to(&mut press, (x, 50.0));
+        }
+        tester.pump(FRAME);
+        tester.up(press);
+        let log = tester.state();
+        (log.start, log.deltas.clone())
+    }
+
+    #[test]
+    fn drag_start_behavior_down_replays_the_slop_in_the_first_update() {
+        assert_eq!(
+            scripted_pan(Some(DragStartBehavior::Down)),
+            (
+                Some(Point::new(50.0, 50.0)),
+                vec![Vec2::new(45.0, 0.0), Vec2::new(10.0, 0.0)]
+            ),
+            "the start at the Down, the first update spanning the slop"
+        );
+        let crossed = (Some(Point::new(95.0, 50.0)), vec![Vec2::new(10.0, 0.0)]);
+        assert_eq!(
+            scripted_pan(None),
+            crossed,
+            "the default starts where the slop was crossed"
+        );
+        assert_eq!(scripted_pan(Some(DragStartBehavior::Start)), crossed);
     }
 
     struct Zoom {
@@ -531,6 +671,77 @@ mod tests {
                 (PointerId::MOUSE, PointerPhase::Up),
             ]
         );
+    }
+
+    /// A long-press detector over a pan/zoom view, which opts into the gesture's other contacts.
+    fn held_over_pan_zoom(_: &mut Log) -> GestureDetectorView<Log> {
+        crate::GestureDetector(crate::pan_zoom(pad(400.0)))
+            .on_long_press(|s: &mut Log| s.log.push("long"))
+            .on_tap_cancel(|s: &mut Log| s.log.push("cancel"))
+    }
+
+    /// Pump 16 ms frames until the clock has passed `ms` since `start`.
+    fn pump_past<S: 'static, V: View<S>>(tester: &mut Tester<S, V>, start: FrameTime, ms: u64) {
+        while tester.frame_time().saturating_sub(start) < Duration::from_millis(ms) {
+            tester.pump(FRAME);
+        }
+    }
+
+    #[test]
+    fn two_resting_fingers_never_long_press() {
+        let mut tester = Tester::new(Log::default(), held_over_pan_zoom, Size::new(400.0, 400.0));
+        let start = tester.frame_time();
+        let a = tester.start_touch(0, (180.0, 200.0));
+        let b = tester.start_touch(1, (220.0, 200.0));
+        assert_eq!(
+            tester.state().log,
+            ["cancel"],
+            "the second finger ends the press"
+        );
+        pump_past(&mut tester, start, 600);
+        tester.up(b);
+        tester.up(a);
+        tester.pump(FRAME);
+        assert_eq!(
+            tester.state().log,
+            ["cancel"],
+            "no long press, and cancel exactly once"
+        );
+    }
+
+    #[test]
+    fn one_finger_hold_still_long_presses() {
+        let mut tester = Tester::new(Log::default(), held_over_pan_zoom, Size::new(400.0, 400.0));
+        let start = tester.frame_time();
+        let a = tester.start_touch(0, (180.0, 200.0));
+        pump_past(&mut tester, start, 600);
+        assert_eq!(tester.state().log, ["long"]);
+        tester.up(a);
+        tester.pump(FRAME);
+        assert_eq!(tester.state().log, ["long"], "the release cancels nothing");
+    }
+
+    #[test]
+    fn a_bare_detector_never_hears_a_second_finger_so_the_press_runs_on() {
+        // Nothing below the detector opts into the gesture's other contacts, so the root drops
+        // the second finger: no callback for it, no cancel, and the first finger long-presses.
+        let mut tester = Tester::new(Log::default(), tap_detector, SIZE);
+        let start = tester.frame_time();
+        let a = tester.start_touch(0, (50.0, 50.0));
+        let mut b = tester.start_touch(1, (90.0, 50.0));
+        assert_eq!(
+            tester.state().log,
+            ["down"],
+            "the second Down reaches nothing"
+        );
+        tester.pump(FRAME);
+        let moved = tester.move_to(&mut b, (100.0, 50.0));
+        assert!(!moved.handled, "slot 1 reaches no widget");
+        pump_past(&mut tester, start, 600);
+        tester.up(b);
+        assert_eq!(tester.state().log, ["down", "long"]);
+        tester.up(a);
+        assert_eq!(tester.state().log, ["down", "long", "up"]);
     }
 
     #[test]
