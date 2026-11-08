@@ -5,8 +5,11 @@
 //! `PHPickerConfiguration`'s plain `init` uses the system photo library, and
 //! the picker runs out of process, so no photo-library authorization and no
 //! Info.plist usage string are needed (`PHPicker.h`). The same header says this
-//! configuration never returns asset identifiers, so every
-//! [`PickedItem::asset_id`] is `None`.
+//! configuration never returns asset identifiers, so [`PickedItem::asset_id`]
+//! is `None`. With the `library` feature the configuration is built on the
+//! shared photo library instead (`initWithPhotoLibrary:`) and an item carries
+//! the identifier the picker reports. Picking still needs no authorization;
+//! resolving that identifier through browsing does.
 //!
 //! # Threading
 //!
@@ -58,8 +61,14 @@
 //! [`PhotoError::Platform`]. A cancelled or failed call removes its cache
 //! directory.
 
+#[cfg(feature = "library")]
+#[path = "apple_library.rs"]
+mod apple_library;
 #[path = "apple_picker.rs"]
 mod apple_picker;
+
+#[cfg(feature = "library")]
+pub(crate) use apple_library::{albums, assets, manage_limited_selection, thumbnail};
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};

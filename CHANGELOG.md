@@ -66,7 +66,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `pick` blocks, refuses the UI thread on mobile and allows one pick at a time (`PhotoError::Busy`).
   Cancelling returns `PhotoError::Cancelled` and removes the call's partial copies. The registry entry
   `photo-library` adds the plugin's Gradle module and the `PhotosUI` link; the playground gains a Picker
-  panel.
+  panel. The optional `library` feature (also a registry feature, adding the Android media read
+  permissions, `NSPhotoLibraryUsageDescription` and the `Photos` link) adds library browsing on Android
+  and iOS: `PhotoLibrary::albums`, `assets` (newest-first pages with an `AssetQuery`) and `thumbnail`
+  (straight-alpha RGBA8 for a requested box, `Fill` or `Fit`, behind a byte-budgeted in-memory cache;
+  `set_thumbnail_cache_budget`, `clear_thumbnail_cache`), plus `manage_limited_selection` for Limited
+  access. Browsing is read-only and never takes the pick guard; iOS picks carry `asset_id` under the
+  feature, and the playground gains a Browse panel.
 - `Share::files` and `Share::files_anchored` share one to 64 files: the Android chooser (through a
   `FileProvider` in the plugin's own Gradle module), the iOS activity sheet and a macOS sharing picker.
   Linux and Windows answer `ShareError::Unsupported`. On Android `Ok` means the share is enqueued: the

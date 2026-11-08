@@ -18,6 +18,13 @@
 //! just the two methods this arm sends, and the delegate method is registered
 //! by selector.
 //!
+//! `initWithPhotoLibrary:` is sent by hand too (`library` feature only); the
+//! binding sits behind an `objc2-photos-ui` feature this crate does not enable.
+//! The picker then reports each
+//! item's `assetIdentifier`, which `PHPicker.h` declares nullable, so it stays
+//! optional. Under limited access an identifier may not resolve through browsing
+//! (a lookup answers `NotFound`).
+//!
 //! # Eager copies
 //!
 //! `loadFileRepresentationForTypeIdentifier:completionHandler:` writes a
@@ -45,6 +52,8 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use block2::RcBlock;
+#[cfg(feature = "library")]
+use objc2::AnyThread;
 use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, extern_class};
@@ -62,7 +71,7 @@ use objc2_ui_kit::{
 use super::{Event, Shared};
 use crate::media_types;
 use crate::pick_cache::sanitize_file_name;
-use crate::{MediaFilter, MediaKind, PickOptions, PickedItem};
+use crate::{AssetId, MediaFilter, MediaKind, PickOptions, PickedItem};
 
 const IMAGE_TYPE: &str = "public.image";
 const MOVIE_TYPE: &str = "public.movie";
@@ -244,12 +253,20 @@ impl FrustPhotoPickerDelegate {
                 ));
                 continue;
             };
+            let asset_id = if cfg!(feature = "library") {
+                // SAFETY: `assetIdentifier` is a read-only, nullable property
+                // getter of a live `PHPickerResult` (`PHPicker.h`).
+                unsafe { result.assetIdentifier() }.map(|id| AssetId::from_raw(id.to_string()))
+            } else {
+                None
+            };
             load_copy(
                 &provider,
                 &type_id,
                 LoadJob {
                     index,
                     kind,
+                    asset_id,
                     dir: self.ivars().dir.clone(),
                     suggested_name: provider.suggestedName().map(|n| n.to_string()),
                     tx: tx.clone(),
@@ -335,14 +352,34 @@ impl WeakPicker {
     }
 }
 
-/// `PHPickerConfiguration()` (system library, no authorization), with the
-/// call's limit and filter and the current representation (no transcoding).
+/// The empty configuration: the shared library with the `library` feature (so
+/// results carry asset identifiers), the plain system library without it.
+fn base_configuration() -> Retained<PHPickerConfiguration> {
+    #[cfg(feature = "library")]
+    if AnyClass::get(c"PHPhotoLibrary").is_some() {
+        // SAFETY: `sharedPhotoLibrary` is a non-null class getter of the class
+        // just checked. `initWithPhotoLibrary:` matches `PHPicker.h`: it takes a
+        // non-null library, consumes the fresh `alloc` and returns a non-null
+        // configuration (the `init` family gives ownership to the `Retained`).
+        return unsafe {
+            let library = objc2_photos::PHPhotoLibrary::sharedPhotoLibrary();
+            msg_send![PHPickerConfiguration::alloc(), initWithPhotoLibrary: &*library]
+        };
+    }
+    // SAFETY: the plain `new` class message, documented to use the system
+    // library.
+    unsafe { PHPickerConfiguration::new() }
+}
+
+/// The base configuration with the call's limit and filter and the current
+/// representation (no transcoding).
 fn configuration(options: &PickOptions) -> Retained<PHPickerConfiguration> {
     let limit = NSInteger::try_from(options.limit).unwrap_or(0);
-    // SAFETY: plain `PHPickerConfiguration` class and instance messages with
-    // the header's types: `new`, the `selectionLimit` setter (`0` = system
-    // maximum), the `preferredAssetRepresentationMode` setter with a declared
-    // enum value, the class filter getters, `anyFilterMatchingSubfilters:` with
+    let configuration = base_configuration();
+    // SAFETY: plain `PHPickerConfiguration` instance messages with the header's
+    // types: the `selectionLimit` setter (`0` = system maximum), the
+    // `preferredAssetRepresentationMode` setter with a declared enum value, the
+    // class filter getters, `anyFilterMatchingSubfilters:` with
     // an `NSArray<PHPickerFilter *>`, and the copying `filter` setter.
     unsafe {
         let filter = match options.filter {
@@ -355,7 +392,6 @@ fn configuration(options: &PickOptions) -> Retained<PHPickerConfiguration> {
                 ]))
             }
         };
-        let configuration = PHPickerConfiguration::new();
         configuration.setSelectionLimit(limit);
         configuration.setFilter(Some(&filter));
         configuration.setPreferredAssetRepresentationMode(
@@ -479,6 +515,8 @@ fn choose_type(
 struct LoadJob {
     index: usize,
     kind: MediaKind,
+    /// The asset's library identifier, when the picker reported one.
+    asset_id: Option<AssetId>,
     dir: PathBuf,
     suggested_name: Option<String>,
     tx: Sender<Event>,
@@ -577,7 +615,7 @@ fn copy_into_cache(url: &NSURL, job: &LoadJob) -> Result<PickedItem, String> {
         kind: job.kind,
         file_name: (!file_name.is_empty()).then_some(file_name),
         mime,
-        asset_id: None,
+        asset_id: job.asset_id.clone(),
         is_copy: true,
     })
 }

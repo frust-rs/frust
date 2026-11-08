@@ -97,6 +97,12 @@
 //! [`WAITS`] slot and wakes the waiter; the waiter forwards it through a
 //! [`ProgressThrottle`] after releasing the lock, and reports the final
 //! `{items, done: items, fraction: 1.0}` once the copies are renamed.
+//!
+//! # Library browsing
+//!
+//! With the `library` feature, `android_library` adds the `albums`, `assets`,
+//! `thumbnail` and `manageLimitedSelection` host calls and refuses the UI
+//! thread on each; see that module and the Kotlin host's contract table.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -764,3 +770,10 @@ pub extern "system" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeO
     })
     .resolve::<LogErrorAndDefault>();
 }
+
+// Library browsing: `albums`, `assets`, `thumbnail`, `manage_limited_selection`.
+#[cfg(feature = "library")]
+#[path = "android_library.rs"]
+mod android_library;
+#[cfg(feature = "library")]
+pub(crate) use android_library::{albums, assets, manage_limited_selection, thumbnail};

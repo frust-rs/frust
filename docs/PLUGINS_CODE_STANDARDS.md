@@ -102,6 +102,9 @@ is additional or different for a plugin.
 - **Content a plugin picks or shares is staged in a plugin-named cache subdirectory** (`frust-photo-library` picks, `frust-share/<uuid>/`
   copies), never linked to the original. A plugin's `FileProvider` is a subclass with its own authority that exposes only that
   staging directory, so it never collides with an app-declared provider.
+- **A key one plugin's native host shares with another is named in both Kotlin sources and pinned by a source-scan test.** `frust-photo-library`'s
+  `MediaStoreBrowser` writes `frust-permissions`' asked-flag `SharedPreferences` file and key prefix; each literal is annotated with its
+  twin and `plugins/photo-library/tests/kotlin_contract.rs` fails if either side changes. Neither crate depends on the other.
 - **`frust-material`'s ported/vendored modules carry a 2–4 line attribution header**: upstream
   file or package, version/revision, license, and any porting decisions, e.g.
   `// Ported from material_3_expressive v1.0.8 (MIT, © 2026 Paa Developments)`. Binding for every

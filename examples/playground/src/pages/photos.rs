@@ -33,7 +33,21 @@
 //! **Clear cache** calls `PhotoLibrary::clear_pick_cache`. Only the PNG and JPEG
 //! decoders are compiled in, so a HEIC, WebP or GIF preview shows a decode
 //! error.
+//!
+//! A Browse panel below the Picker lists the library through the same plugin's `library`
+//! feature: an access line (the Photos read/write status, read on **Refresh**), a
+//! **Manage selection** banner while access is Limited, an album selector, and a keyed lazy
+//! `ListView` of rows of four thumbnails. Assets load in pages of [`PAGE_SIZE`], the next page
+//! only when **Load more** is pressed, with the loaded and total counts shown. Every
+//! plugin call runs in [`frust::spawn_blocking`] behind a [`use_task`]; each thumbnail cell is
+//! its own component with a task keyed by the asset id, requesting a thumbnail at
+//! [`THUMB_SCALE`] times the cell size. Browsing is read-only and never takes the pick guard,
+//! so it works while a pick is open; Manage selection presents system UI and does take it.
+//! When a picked item carries an asset id (iOS), the Picker preview tries the native thumbnail
+//! first and decodes the copied file only when that fails. A HEIC pick therefore previews when
+//! the library grants access, and otherwise shows the file's decode error.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -41,16 +55,18 @@ use std::time::Duration;
 
 use frust::authoring::Rect;
 use frust::{
-    AsyncValue, ButtonStyle, Component, EdgeInsets, Get, GetUntracked, Image, ImageFit,
-    ImageSource, Padding, RwSignal, Set, SizedBox, Theme, UseTask, View, button, column, component,
-    decode_image_async, row, spawn_blocking, text, use_context, use_task,
+    AsyncValue, ButtonStyle, ChildKey, Component, EdgeInsets, Get, GetUntracked, Image, ImageFit,
+    ImageSource, ListView, Padding, RwSignal, ScrollbarStyle, Set, SizedBox, Theme, UseTask, View,
+    button, colored_box, column, component, decode_image_async, either, row, spawn_blocking, text,
+    use_context, use_task,
 };
 use frust_permissions::{
     Permission, PermissionError, PermissionStatus, PhotoAccess, open_settings, request, status,
 };
 use frust_photo_library::{
-    CancelToken, MediaFilter, MediaKind, PhotoError, PhotoLibrary, PickOptions, PickProgress,
-    PickedItem,
+    Album, AlbumId, Asset, AssetId, AssetPage, AssetQuery, CancelToken, MediaFilter, MediaKind,
+    PhotoError, PhotoLibrary, PickOptions, PickProgress, PickedItem, ThumbnailMode,
+    ThumbnailRequest,
 };
 
 use frust_share::{Share, ShareAnchor};
@@ -124,7 +140,9 @@ impl Component for PhotosPage {
                 .child(SizedBox(None, Some(12.0)))
                 .child(component(PermissionsPanel))
                 .child(SizedBox(None, Some(16.0)))
-                .child(component(PickerPanel)),
+                .child(component(PickerPanel))
+                .child(SizedBox(None, Some(16.0)))
+                .child(component(BrowsePanel)),
         )
     }
 }
@@ -369,9 +387,63 @@ impl PickerOutcome {
     }
 }
 
+/// Where the Picker preview comes from.
+#[derive(Debug, Clone)]
+enum PreviewSource {
+    /// The item has a library asset id: try the native thumbnail first, and fall back to
+    /// decoding the picked file at `path` when it fails.
+    Asset { id: AssetId, path: PathBuf },
+    /// No asset id (Android, desktop): decode the picked file.
+    File(PathBuf),
+}
+
+/// The preview source for a picked image: its asset id when it has one.
+fn preview_source(item: &PickedItem) -> PreviewSource {
+    match &item.asset_id {
+        Some(id) => PreviewSource::Asset {
+            id: id.clone(),
+            path: item.path.clone(),
+        },
+        None => PreviewSource::File(item.path.clone()),
+    }
+}
+
+/// Whether an asset-backed preview must decode the picked file instead. Any thumbnail failure
+/// does (denied access, a missing asset, a format the thumbnailer cannot read): the file decode
+/// is the baseline outcome and the thumbnail only adds capability, so it never removes that
+/// outcome.
+fn falls_back_to_file(thumbnail: &Result<ImageSource, String>) -> bool {
+    thumbnail.is_err()
+}
+
+/// The preview decoded from the picked file: read off the UI thread, then decoded off it too.
+async fn file_preview(path: PathBuf) -> Result<Result<ImageSource, String>, JoinFailure> {
+    let bytes = spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|err| JoinFailure(err.to_string()))?;
+    Ok(match bytes {
+        Ok(bytes) => decode_image_async(bytes)
+            .await
+            .map_err(|err| format!("preview decode error: {err}")),
+        Err(err) => Err(format!("preview read error: {err}")),
+    })
+}
+
+/// The preview's thumbnail box edge in pixels: the 160 point box at [`THUMB_SCALE`].
+const PREVIEW_EDGE_PX: u32 = 160 * THUMB_SCALE;
+
+/// A native thumbnail as an image source (call inside `spawn_blocking`).
+fn load_thumbnail(id: &AssetId, edge_px: u32, mode: ThumbnailMode) -> Result<ImageSource, String> {
+    PhotoLibrary::thumbnail(id, &ThumbnailRequest::new(edge_px, edge_px, mode))
+        .map(|thumb| ImageSource::from_rgba8(thumb.rgba, thumb.width, thumb.height))
+        .map_err(|err| err.to_string())
+}
+
 /// Runs one action (call inside `spawn_blocking`): the blocking pick or cache
 /// clear, then each item's size. `None` is the mount-time fetch: nothing asked.
-fn run_picker_action(action: Option<PickerAction>) -> Option<(PickerOutcome, Option<PathBuf>)> {
+fn run_picker_action(
+    action: Option<PickerAction>,
+) -> Option<(PickerOutcome, Option<PreviewSource>)> {
     match action? {
         PickerAction::ClearCache => Some((
             PickerOutcome::message(match PhotoLibrary::clear_pick_cache() {
@@ -397,7 +469,7 @@ fn run_picker_action(action: Option<PickerAction>) -> Option<(PickerOutcome, Opt
                 let first_image = items
                     .iter()
                     .find(|item| item.kind == MediaKind::Image)
-                    .map(|item| item.path.clone());
+                    .map(preview_source);
                 let outcome = PickerOutcome {
                     message: format!("Picked {} item(s).", items.len()),
                     rows,
@@ -464,17 +536,23 @@ impl Component for PickerPanel {
                 let Some((mut outcome, first_image)) = step else {
                     return Ok::<Option<PickerOutcome>, JoinFailure>(None);
                 };
-                if let Some(path) = first_image {
-                    // Read off the UI thread, then decode off it too.
-                    let bytes = spawn_blocking(move || std::fs::read(path))
+                match first_image {
+                    Some(PreviewSource::Asset { id, path }) => {
+                        let thumb = spawn_blocking(move || {
+                            load_thumbnail(&id, PREVIEW_EDGE_PX, ThumbnailMode::Fit)
+                        })
                         .await
                         .map_err(|err| JoinFailure(err.to_string()))?;
-                    outcome.preview = Some(match bytes {
-                        Ok(bytes) => decode_image_async(bytes)
-                            .await
-                            .map_err(|err| format!("preview decode error: {err}")),
-                        Err(err) => Err(format!("preview read error: {err}")),
-                    });
+                        outcome.preview = Some(if falls_back_to_file(&thumb) {
+                            file_preview(path).await?
+                        } else {
+                            thumb
+                        });
+                    }
+                    Some(PreviewSource::File(path)) => {
+                        outcome.preview = Some(file_preview(path).await?);
+                    }
+                    None => {}
                 }
                 Ok(Some(outcome))
             }
@@ -568,8 +646,9 @@ impl Component for PickerPanel {
                 text(
                     "Pick runs the system photo picker off the UI thread. The first \
                      image is previewed (PNG and JPEG decode; HEIC, WebP and GIF show \
-                     a decode error). Share picked sends the files; Clear cache \
-                     removes the copies made on mobile.",
+                     a decode error, unless an item with a library asset id previews \
+                     through the native thumbnail first). Share picked sends the files; \
+                     Clear cache removes the copies made on mobile.",
                 )
                 .size(11.0)
                 .color(muted),
@@ -680,6 +759,530 @@ fn share_button(state: &PickerPanelState, paths: Vec<PathBuf>) -> impl View<Pick
     .small()
 }
 
+/// Assets per page; the next page loads only from the Load more button.
+const PAGE_SIZE: u32 = 60;
+
+/// Thumbnail cells per list row.
+const COLUMNS: usize = 4;
+
+/// A thumbnail cell's edge in logical points.
+const CELL: f64 = 76.0;
+
+/// The gap between cells and between rows, in logical points.
+const GAP: f64 = 4.0;
+
+/// One list row's height: a cell plus the gap below it.
+const ROW_EXTENT: f64 = CELL + GAP;
+
+/// Thumbnails are requested at this multiple of the cell size, for dense screens.
+const THUMB_SCALE: u32 = 3;
+
+/// The thumbnail request edge for a cell, in pixels.
+const CELL_EDGE_PX: u32 = CELL as u32 * THUMB_SCALE;
+
+/// The bounded height the thumbnail list gets inside the page's scrolling column.
+const LIST_VIEWPORT_H: f64 = 340.0;
+
+/// Album buttons shown before the selector truncates.
+const MAX_ALBUM_BUTTONS: usize = 12;
+
+/// The asset ids loaded so far for the selected album, and the library's total for it.
+#[derive(Clone, Default)]
+struct Listing {
+    ids: Arc<Vec<AssetId>>,
+    total: u64,
+}
+
+/// List rows needed for `count` assets.
+fn row_count(count: usize) -> usize {
+    count.div_ceil(COLUMNS)
+}
+
+/// The asset ids of list row `row`.
+fn row_ids(ids: &[AssetId], row: usize) -> &[AssetId] {
+    let start = (row * COLUMNS).min(ids.len());
+    let end = (start + COLUMNS).min(ids.len());
+    &ids[start..end]
+}
+
+/// A row's identity: the ids of its assets, so a row keeps its thumbnail tasks across a Load
+/// more and gets fresh ones when an album switch puts other assets in the same slot.
+fn row_key(ids: &[AssetId], row: usize) -> ChildKey {
+    let names: Vec<&str> = row_ids(ids, row).iter().map(AssetId::as_str).collect();
+    ChildKey::new(names)
+}
+
+/// `existing` followed by the `page` ids it does not already hold.
+fn merge_page(existing: &[AssetId], page: Vec<AssetId>) -> Vec<AssetId> {
+    let mut seen: HashSet<AssetId> = existing.iter().cloned().collect();
+    let mut merged = existing.to_vec();
+    merged.extend(page.into_iter().filter(|id| seen.insert(id.clone())));
+    merged
+}
+
+/// The ids of a page's assets.
+fn page_ids(items: Vec<Asset>) -> Vec<AssetId> {
+    items.into_iter().map(|asset| asset.id).collect()
+}
+
+/// Whether another page can exist: fewer assets loaded than the total.
+fn has_more(loaded: usize, total: u64) -> bool {
+    (loaded as u64) < total
+}
+
+/// The count line under the list.
+fn count_line(loaded: usize, total: u64) -> String {
+    format!("Showing {loaded} of {total} assets")
+}
+
+/// The query for the page starting at `offset`.
+fn browse_query(album: &Option<AlbumId>, offset: u64) -> AssetQuery {
+    let query = AssetQuery::new().limit(PAGE_SIZE).offset(offset);
+    match album {
+        Some(id) => query.album(id.clone()),
+        None => query,
+    }
+}
+
+/// The access line: the Photos read/write status as text.
+fn access_line(result: Result<PermissionStatus, PermissionError>) -> String {
+    format!("Photo access: {}", describe(result))
+}
+
+/// Reads the Photos read/write status: its access line and whether it is Limited.
+fn read_access() -> (String, bool) {
+    let result = status(Permission::Photos(PhotoAccess::ReadWrite));
+    let limited = matches!(result, Ok(PermissionStatus::Limited));
+    (access_line(result), limited)
+}
+
+/// An album button label: its title and, when reported, its count.
+fn album_label(album: &Album) -> String {
+    match album.count {
+        Some(count) => format!("{} ({count})", album.title),
+        None => album.title.clone(),
+    }
+}
+
+/// What a Browse button asks the background step to do.
+#[derive(Debug, Clone)]
+enum BrowseAction {
+    /// Re-list the albums and the first page of the selected album.
+    Refresh(Option<AlbumId>),
+    /// The first page of another album.
+    Select(Option<AlbumId>),
+    /// The page after the `offset` assets already loaded.
+    More(Option<AlbumId>, u64),
+    /// Present the limited-selection UI, then re-read access and re-list.
+    Manage(Option<AlbumId>),
+}
+
+/// How a loaded page combines with the current listing.
+enum PageUpdate {
+    Replace(AssetPage),
+    Append(AssetPage),
+}
+
+/// What one background step learned; each part is `None` when the step did not touch it.
+#[derive(Default)]
+struct BrowseStep {
+    access: Option<(String, bool)>,
+    albums: Option<Vec<Album>>,
+    /// The album a replacing page was loaded for. Set only with that page, so a failed album
+    /// switch never moves the selection away from the listing it still shows.
+    album: Option<Option<AlbumId>>,
+    page: Option<PageUpdate>,
+    /// Empty on success, else the failure as `error: ...` text.
+    message: String,
+}
+
+/// Loads one page into `step`, or records the failure.
+fn load_page(album: &Option<AlbumId>, offset: u64, append: bool, step: &mut BrowseStep) {
+    record_page(
+        album,
+        append,
+        PhotoLibrary::assets(&browse_query(album, offset)),
+        step,
+    );
+}
+
+/// Records one page result into `step`. A replacing page commits `album` as the selection with
+/// the listing; an appended page keeps the listing's album; a failure changes neither.
+fn record_page(
+    album: &Option<AlbumId>,
+    append: bool,
+    result: Result<AssetPage, PhotoError>,
+    step: &mut BrowseStep,
+) {
+    match result {
+        Ok(page) if append => step.page = Some(PageUpdate::Append(page)),
+        Ok(page) => {
+            step.page = Some(PageUpdate::Replace(page));
+            step.album = Some(album.clone());
+        }
+        Err(err) => step.message = format!("error: {err}"),
+    }
+}
+
+/// Albums, then the first page, into `step` (stops at the first failure).
+fn load_albums_and_first_page(album: &Option<AlbumId>, step: &mut BrowseStep) {
+    match PhotoLibrary::albums() {
+        Ok(albums) => {
+            step.albums = Some(albums);
+            load_page(album, 0, false, step);
+        }
+        Err(err) => step.message = format!("error: {err}"),
+    }
+}
+
+/// Runs one action (call inside `spawn_blocking`). `None` is the mount-time fetch.
+fn run_browse(action: Option<BrowseAction>) -> Option<BrowseStep> {
+    let mut step = BrowseStep::default();
+    match action? {
+        BrowseAction::Refresh(album) => load_albums_and_first_page(&album, &mut step),
+        BrowseAction::Select(album) => load_page(&album, 0, false, &mut step),
+        BrowseAction::More(album, offset) => load_page(&album, offset, true, &mut step),
+        BrowseAction::Manage(album) => match PhotoLibrary::manage_limited_selection() {
+            Ok(()) => {
+                step.access = Some(read_access());
+                load_albums_and_first_page(&album, &mut step);
+            }
+            Err(err) => step.message = format!("error: {err}"),
+        },
+    }
+    Some(step)
+}
+
+/// The panel's signals, copied into the task future.
+#[derive(Clone, Copy)]
+struct BrowseSignals {
+    access: RwSignal<String>,
+    limited: RwSignal<bool>,
+    albums: RwSignal<Vec<Album>>,
+    album: RwSignal<Option<AlbumId>>,
+    listing: RwSignal<Listing>,
+    message: RwSignal<String>,
+}
+
+impl BrowseSignals {
+    /// Copies a finished step into the signals (UI thread). Skipped once the panel is gone.
+    fn apply(&self, step: BrowseStep) {
+        if self.message.try_get_untracked().is_none() {
+            return;
+        }
+        if let Some((line, limited)) = step.access {
+            self.access.set(line);
+            self.limited.set(limited);
+        }
+        if let Some(albums) = step.albums {
+            self.albums.set(albums);
+        }
+        if let Some(album) = step.album {
+            self.album.set(album);
+        }
+        match step.page {
+            Some(PageUpdate::Replace(page)) => self.listing.set(Listing {
+                ids: Arc::new(page_ids(page.items)),
+                total: page.total,
+            }),
+            Some(PageUpdate::Append(page)) => {
+                let current = self.listing.get_untracked();
+                self.listing.set(Listing {
+                    ids: Arc::new(merge_page(&current.ids, page_ids(page.items))),
+                    total: page.total,
+                });
+            }
+            None => {}
+        }
+        self.message.set(step.message);
+    }
+}
+
+/// One thumbnail cell. Its task is keyed by the asset id: the cell is built for one asset and
+/// requests that asset's thumbnail once, off the UI thread.
+struct ThumbCell {
+    id: AssetId,
+}
+
+impl Component for ThumbCell {
+    type State = UseTask<Result<ImageSource, String>>;
+
+    fn init(&self) -> Self::State {
+        let id = self.id.clone();
+        use_task(move || {
+            let id = id.clone();
+            async move {
+                spawn_blocking(move || load_thumbnail(&id, CELL_EDGE_PX, ThumbnailMode::Fill))
+                    .await
+                    .map_err(|err| JoinFailure(err.to_string()))
+            }
+        })
+    }
+
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+        let scheme = theme.scheme();
+        let value = state.signal().get();
+        let (source, failed) = match value {
+            AsyncValue::Ready(Ok(source)) => (Some(source), false),
+            AsyncValue::Ready(Err(_)) | AsyncValue::Error(_) => (None, true),
+            _ => (None, false),
+        };
+        let (empty, error_fill) = (scheme.surface_container_highest, scheme.error_container);
+        SizedBox(Some(CELL), Some(CELL)).child(either(
+            source.is_some(),
+            move || Image(source.expect("checked above")).fit(ImageFit::Cover),
+            move || {
+                either(
+                    failed,
+                    move || colored_box().fill(error_fill).radius(4.0),
+                    move || colored_box().fill(empty).radius(4.0),
+                )
+            },
+        ))
+    }
+}
+
+struct BrowsePanel;
+
+struct BrowsePanelState {
+    /// The access line, written by Refresh and after Manage selection.
+    access: RwSignal<String>,
+    /// Whether access is Limited, which shows the Manage selection banner.
+    limited: RwSignal<bool>,
+    /// The albums from the last Refresh.
+    albums: RwSignal<Vec<Album>>,
+    /// The selected album; `None` is the whole library.
+    album: RwSignal<Option<AlbumId>>,
+    /// The loaded assets and the total.
+    listing: RwSignal<Listing>,
+    /// The last failure, empty when none.
+    message: RwSignal<String>,
+    /// The pending action; `None` resolves to nothing.
+    action: Arc<Mutex<Option<BrowseAction>>>,
+    /// The running step; a press restarts it.
+    work: UseTask<()>,
+}
+
+impl Component for BrowsePanel {
+    type State = BrowsePanelState;
+
+    fn init(&self) -> BrowsePanelState {
+        let access = RwSignal::new(UNREAD_ACCESS.to_string());
+        let limited = RwSignal::new(false);
+        let albums = RwSignal::new(Vec::new());
+        let album = RwSignal::new(None);
+        let listing = RwSignal::new(Listing::default());
+        let message = RwSignal::new(String::new());
+        let signals = BrowseSignals {
+            access,
+            limited,
+            albums,
+            album,
+            listing,
+            message,
+        };
+        let action = Arc::new(Mutex::new(None));
+        let cell = action.clone();
+        let work = use_task(move || {
+            let requested = cell.lock().expect("action cell poisoned").take();
+            async move {
+                let step = spawn_blocking(move || run_browse(requested))
+                    .await
+                    .map_err(|err| JoinFailure(err.to_string()))?;
+                if let Some(step) = step {
+                    signals.apply(step);
+                }
+                Ok::<(), JoinFailure>(())
+            }
+        });
+        BrowsePanelState {
+            access,
+            limited,
+            albums,
+            album,
+            listing,
+            message,
+            action,
+            work,
+        }
+    }
+
+    fn build(&self, state: &mut BrowsePanelState) -> impl View<BrowsePanelState> {
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+        let accent = theme.scheme().primary;
+        let muted = theme.scheme().on_surface_variant;
+
+        let busy = matches!(state.work.signal().get(), AsyncValue::Loading(_));
+        let access = state.access.get();
+        let limited = state.limited.get();
+        let albums = state.albums.get();
+        let selected = state.album.get();
+        let listing = state.listing.get();
+        let message = state.message.get();
+
+        let mut selector = column();
+        selector = selector.child(album_button(state, "All", None, selected.is_none(), busy));
+        for album in albums.iter().take(MAX_ALBUM_BUTTONS) {
+            let is_selected = selected.as_ref() == Some(&album.id);
+            selector = selector.child(album_button(
+                state,
+                &album_label(album),
+                Some(album.id.clone()),
+                is_selected,
+                busy,
+            ));
+        }
+        if albums.len() > MAX_ALBUM_BUTTONS {
+            selector = selector.child(
+                text(format!("+{} more albums", albums.len() - MAX_ALBUM_BUTTONS))
+                    .size(11.0)
+                    .color(muted),
+            );
+        }
+
+        let ids = listing.ids.clone();
+        let key_ids = ids.clone();
+        let list = ListView::builder_keyed(
+            row_count(ids.len()),
+            ROW_EXTENT,
+            move |index| row_key(&key_ids, index),
+            move |index| thumb_row(row_ids(&ids, index).to_vec()),
+        )
+        .scrollbar(ScrollbarStyle::default());
+
+        let mut panel = column()
+            .child(text("Browse").size(13.0).color(accent))
+            .child(
+                text(
+                    "Lists the photo library through frust-photo-library: Refresh reads \
+                     the access status and the albums, then the first page of 60 assets \
+                     as thumbnails. Load more fetches the next page. With limited access \
+                     Manage selection reopens the system selection.",
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(text(access).size(12.0))
+            .child(SizedBox(None, Some(4.0)));
+        if limited {
+            panel = panel
+                .child(
+                    text("Limited access: only the photos you selected are visible.")
+                        .size(11.0)
+                        .color(muted),
+                )
+                .child(manage_button(state, busy))
+                .child(SizedBox(None, Some(4.0)));
+        }
+        panel
+            .child(refresh_browse_button(state, busy))
+            .child(SizedBox(None, Some(8.0)))
+            .child(selector)
+            .child(SizedBox(None, Some(8.0)))
+            .child(SizedBox(None, Some(LIST_VIEWPORT_H)).child(list))
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                row()
+                    .child(
+                        text(if busy {
+                            "Loading\u{2026}".to_string()
+                        } else {
+                            count_line(listing.ids.len(), listing.total)
+                        })
+                        .size(12.0)
+                        .color(muted),
+                    )
+                    .child(SizedBox(Some(12.0), None))
+                    .child(more_button(
+                        state,
+                        busy || !has_more(listing.ids.len(), listing.total),
+                        listing.ids.len() as u64,
+                    )),
+            )
+            .child(text(message).size(11.0).color(muted))
+    }
+}
+
+/// Shown for the access line before the first Refresh.
+const UNREAD_ACCESS: &str = "Photo access: not read yet";
+
+/// One list row: up to [`COLUMNS`] thumbnail cells with a gap between them.
+fn thumb_row(ids: Vec<AssetId>) -> impl View<BrowsePanelState> {
+    let mut cells = row();
+    for (index, id) in ids.iter().enumerate() {
+        if index > 0 {
+            cells = cells.child(SizedBox(Some(GAP), None));
+        }
+        cells = cells.child(component(ThumbCell { id: id.clone() }));
+    }
+    SizedBox(None, Some(ROW_EXTENT)).child(cells)
+}
+
+/// Queues `action` and restarts the task.
+fn queue(action: &Arc<Mutex<Option<BrowseAction>>>, work: &UseTask<()>, next: BrowseAction) {
+    *action.lock().expect("action cell poisoned") = Some(next);
+    work.restart();
+}
+
+fn refresh_browse_button(state: &BrowsePanelState, busy: bool) -> impl View<BrowsePanelState> {
+    let (action, work) = (state.action.clone(), state.work.clone());
+    let (access, limited, album) = (state.access, state.limited, state.album);
+    button("Refresh", move |_state: &mut BrowsePanelState| {
+        let (line, is_limited) = read_access();
+        access.set(line);
+        limited.set(is_limited);
+        queue(&action, &work, BrowseAction::Refresh(album.get_untracked()));
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(busy)
+    .small()
+}
+
+fn manage_button(state: &BrowsePanelState, busy: bool) -> impl View<BrowsePanelState> {
+    let (action, work, album) = (state.action.clone(), state.work.clone(), state.album);
+    button("Manage selection", move |_state: &mut BrowsePanelState| {
+        queue(&action, &work, BrowseAction::Manage(album.get_untracked()));
+    })
+    .disabled(busy)
+    .small()
+}
+
+fn album_button(
+    state: &BrowsePanelState,
+    label: &str,
+    target: Option<AlbumId>,
+    selected: bool,
+    busy: bool,
+) -> impl View<BrowsePanelState> {
+    let (action, work) = (state.action.clone(), state.work.clone());
+    button(label.to_string(), move |_state: &mut BrowsePanelState| {
+        queue(&action, &work, BrowseAction::Select(target.clone()));
+    })
+    .style(selector_style(selected))
+    .disabled(busy)
+    .small()
+}
+
+fn more_button(
+    state: &BrowsePanelState,
+    disabled: bool,
+    loaded: u64,
+) -> impl View<BrowsePanelState> {
+    let (action, work, album) = (state.action.clone(), state.work.clone(), state.album);
+    button("Load more", move |_state: &mut BrowsePanelState| {
+        queue(
+            &action,
+            &work,
+            BrowseAction::More(album.get_untracked(), loaded),
+        );
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(disabled)
+    .small()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,6 +1334,123 @@ mod tests {
     fn cancelled_pick_reads_cancelled() {
         assert_eq!(pick_error_text(&PhotoError::Cancelled), "Cancelled");
         assert!(pick_error_text(&PhotoError::Busy).starts_with("error: "));
+    }
+
+    fn ids(names: &[&str]) -> Vec<AssetId> {
+        names.iter().map(|n| AssetId::from_raw(*n)).collect()
+    }
+
+    #[test]
+    fn rows_chunk_four_cells() {
+        let all = ids(&["a", "b", "c", "d", "e", "f"]);
+        assert_eq!(row_count(0), 0);
+        assert_eq!(row_count(4), 1);
+        assert_eq!(row_count(6), 2);
+        assert_eq!(row_ids(&all, 0), ids(&["a", "b", "c", "d"]).as_slice());
+        assert_eq!(row_ids(&all, 1), ids(&["e", "f"]).as_slice());
+        assert!(row_ids(&all, 2).is_empty());
+    }
+
+    #[test]
+    fn row_keys_follow_row_content() {
+        let all = ids(&["a", "b", "c", "d", "e"]);
+        let grown = ids(&["a", "b", "c", "d", "e", "f"]);
+        assert!(row_key(&all, 0) == row_key(&grown, 0));
+        assert!(row_key(&all, 1) != row_key(&grown, 1));
+        let other = ids(&["x", "b", "c", "d"]);
+        assert!(row_key(&all, 0) != row_key(&other, 0));
+    }
+
+    #[test]
+    fn merge_appends_without_duplicates() {
+        let merged = merge_page(&ids(&["a", "b"]), ids(&["b", "c", "c", "d"]));
+        assert_eq!(merged, ids(&["a", "b", "c", "d"]));
+    }
+
+    #[test]
+    fn more_pages_while_fewer_than_total() {
+        assert!(has_more(60, 130));
+        assert!(!has_more(130, 130));
+        assert!(!has_more(0, 0));
+        assert_eq!(count_line(60, 130), "Showing 60 of 130 assets");
+    }
+
+    #[test]
+    fn query_pages_by_page_size_and_album() {
+        let q = browse_query(&None, 60);
+        assert_eq!(
+            (q.offset, q.limit, q.album.is_none()),
+            (60, PAGE_SIZE, true)
+        );
+        let q = browse_query(&Some(AlbumId::from_raw("x")), 0);
+        assert_eq!(q.album, Some(AlbumId::from_raw("x")));
+    }
+
+    #[test]
+    fn access_line_reads_the_status() {
+        assert_eq!(
+            access_line(Ok(PermissionStatus::Limited)),
+            "Photo access: Limited"
+        );
+        assert!(
+            access_line(Err(PermissionError::Unsupported)).starts_with("Photo access: error: ")
+        );
+    }
+
+    #[test]
+    fn thumbnails_are_requested_at_three_times_the_cell() {
+        assert_eq!(CELL_EDGE_PX, 228);
+        assert_eq!(PREVIEW_EDGE_PX, 480);
+    }
+
+    #[test]
+    fn no_browse_action_resolves_to_nothing() {
+        assert!(run_browse(None).is_none());
+    }
+
+    #[test]
+    fn any_thumbnail_failure_falls_back_to_the_file() {
+        let denied: Result<ImageSource, String> = Err("photo access denied".into());
+        let missing: Result<ImageSource, String> = Err("asset not found".into());
+        let thumb = Ok(ImageSource::from_rgba8(vec![0; 4], 1, 1));
+        assert!(falls_back_to_file(&denied));
+        assert!(falls_back_to_file(&missing));
+        assert!(!falls_back_to_file(&thumb));
+    }
+
+    #[test]
+    fn failed_album_switch_commits_no_album() {
+        let target = Some(AlbumId::from_raw("x"));
+        let mut failed = BrowseStep::default();
+        record_page(&target, false, Err(PhotoError::Busy), &mut failed);
+        assert!(failed.album.is_none());
+        assert!(failed.page.is_none());
+        assert!(failed.message.starts_with("error: "));
+    }
+
+    #[test]
+    fn loaded_album_switch_commits_its_album_with_the_listing() {
+        let target = Some(AlbumId::from_raw("x"));
+        let page = AssetPage {
+            items: Vec::new(),
+            total: 0,
+        };
+        let mut step = BrowseStep::default();
+        record_page(&target, false, Ok(page), &mut step);
+        assert_eq!(step.album, Some(target));
+        assert!(matches!(step.page, Some(PageUpdate::Replace(_))));
+    }
+
+    #[test]
+    fn appended_page_keeps_the_listing_album() {
+        let page = AssetPage {
+            items: Vec::new(),
+            total: 0,
+        };
+        let mut step = BrowseStep::default();
+        record_page(&None, true, Ok(page), &mut step);
+        assert!(step.album.is_none());
+        assert!(matches!(step.page, Some(PageUpdate::Append(_))));
     }
 
     #[test]
