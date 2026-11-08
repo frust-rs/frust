@@ -25,7 +25,11 @@
 //! - library browsing: the JNI calls and result objects match their Kotlin
 //!   declarations, every blocking call refuses the UI thread, browsing never
 //!   takes the pick slot, paging and the access check keep their shape, and
-//!   the asked-flag keys and permission table match `frust-permissions`.
+//!   the asked-flag keys and permission table match `frust-permissions`;
+//! - originals and saves: the host calls, exports and codes match, neither
+//!   touches pick state or a pick's executor, the export copies in cancellable
+//!   chunks and deletes its partial file, the location-preserving open falls
+//!   back rather than failing, and the writer publishes or deletes every row.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -44,9 +48,12 @@ const KOTLIN_BROWSER: &str =
 const RUST_ANDROID_LIBRARY: &str = "src/android_library.rs";
 const KOTLIN_PERMISSIONS: &str =
     "../permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt";
+const KOTLIN_WRITER: &str =
+    "platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreWriter.kt";
+const RUST_ANDROID_ORIGINALS: &str = "src/android_originals.rs";
 
 /// How many leading [`SHARED_CODES`] are result codes (the rest are filters and kinds).
-const RESULT_CODES: usize = 12;
+const RESULT_CODES: usize = 14;
 
 /// Every code the two sides share, by name.
 const SHARED_CODES: &[&str] = &[
@@ -62,6 +69,8 @@ const SHARED_CODES: &[&str] = &[
     "NOT_FOUND",
     "QUERY_FAILED",
     "NOT_LIMITED",
+    "EXPORT_FAILED",
+    "SAVE_FAILED",
     "FILTER_IMAGES",
     "FILTER_VIDEOS",
     "FILTER_IMAGES_AND_VIDEOS",
@@ -163,6 +172,15 @@ fn kotlin_codes_equal_their_rust_twins() {
     let kotlin = kotlin_int_consts(&read(KOTLIN_HOST));
     let mut rust = rust_jint_consts(&read(RUST_ANDROID));
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_LIBRARY)));
+    rust.extend(rust_jint_consts(&read(RUST_ANDROID_ORIGINALS)));
+    // The originals module repeats some codes; `extend` would mask a drift.
+    for (name, value) in rust_jint_consts(&read(RUST_ANDROID_ORIGINALS)) {
+        assert_eq!(
+            kotlin.get(&name),
+            Some(&value),
+            "src/android_originals.rs's `{name}` must equal the Kotlin host's"
+        );
+    }
     for name in SHARED_CODES {
         let k = kotlin
             .get(*name)
@@ -935,4 +953,457 @@ fn asked_flag_keys_and_permissions_match_frust_permissions() {
             "the media permission table must match frust-permissions' `{theirs_decl}`"
         );
     }
+}
+
+#[test]
+fn originals_jni_calls_match_the_kotlin_declarations() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_ORIGINALS);
+    for (decl, name, sig) in [
+        (
+            "@JvmStatic\n    fun exportOriginal(requestId: Long, uri: String, destPath: String): Int",
+            "exportOriginal",
+            "(JLjava/lang/String;Ljava/lang/String;)I",
+        ),
+        (
+            "@JvmStatic\n    fun cancelExport(requestId: Long) {",
+            "cancelExport",
+            "(J)V",
+        ),
+        (
+            "@JvmStatic\n    fun saveToLibrary(requestId: Long, sourcePath: String, isVideo: Boolean, displayName: String, album: String?): Int",
+            "saveToLibrary",
+            "(JLjava/lang/String;ZLjava/lang/String;Ljava/lang/String;)I",
+        ),
+    ] {
+        assert!(kotlin.contains(decl), "Kotlin host must declare `{decl}`");
+        let at = rust
+            .find(&format!("jni_str!(\"{name}\")"))
+            .unwrap_or_else(|| panic!("src/android_originals.rs never calls `{name}`"));
+        let window = &rust[at..(at + 200).min(rust.len())];
+        assert!(
+            window.contains(&format!("jni_sig!(\"{sig}\")")),
+            "src/android_originals.rs must call `{name}` with `{sig}`"
+        );
+    }
+    assert!(
+        read(RUST_ANDROID).contains("#[path = \"android_originals.rs\"]\nmod android_originals;"),
+        "src/android.rs declares the originals arm"
+    );
+}
+
+#[test]
+fn originals_exports_match_their_kotlin_externals() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_ORIGINALS);
+    let prefix = "Java_dev_frust_photolibrary_FrustPhotoLibraryHost_";
+    let exports: [(&str, &str, &[&str]); 3] = [
+        (
+            "nativeOnExportProgress",
+            "(requestId: Long, done: Long, total: Long)",
+            &["request_id: jlong,", "done: jlong,", "total: jlong,"],
+        ),
+        (
+            "nativeOnExportDone",
+            "(requestId: Long, code: Int, mime: String?, name: String?)",
+            &[
+                "request_id: jlong,",
+                "code: jint,",
+                "mime: JString<'local>,",
+                "name: JString<'local>,",
+            ],
+        ),
+        (
+            "nativeOnSaveDone",
+            "(requestId: Long, code: Int, uri: String?)",
+            &["request_id: jlong,", "code: jint,", "uri: JString<'local>,"],
+        ),
+    ];
+    for (method, kotlin_params, params) in exports {
+        assert!(
+            kotlin.contains(&format!(
+                "@JvmStatic\n    external fun {method}{kotlin_params}"
+            )),
+            "Kotlin `{method}` signature changed"
+        );
+        let symbol = format!("{prefix}{method}");
+        let decl = format!("pub extern \"system\" fn {symbol}<");
+        assert!(
+            rust.contains(&decl),
+            "src/android_originals.rs must export `{symbol}`"
+        );
+        let export = function(&rust, &decl);
+        for param in params {
+            assert!(
+                export.contains(param),
+                "`{symbol}` must take `{param}` to match the Kotlin declaration"
+            );
+        }
+        assert!(
+            export.contains(".resolve::<LogErrorAndDefault>()"),
+            "`{symbol}` must never unwind into the JVM"
+        );
+    }
+    let rust_table = read(RUST_ANDROID);
+    for member in [
+        "exportOriginal",
+        "cancelExport",
+        "saveToLibrary",
+        "nativeOnExportProgress",
+        "nativeOnExportDone",
+        "nativeOnSaveDone",
+    ] {
+        assert!(
+            rust_table.contains(member),
+            "src/android.rs's contract table must list `{member}`"
+        );
+        assert!(
+            kotlin.contains(&format!("`{member}(")),
+            "the Kotlin host's contract table must list `{member}`"
+        );
+    }
+}
+
+#[test]
+fn originals_refuse_the_ui_thread_and_never_touch_pick_state() {
+    let rust = rust_code(&read(RUST_ANDROID_ORIGINALS));
+    assert!(
+        !rust.contains("PickGuard"),
+        "an export or save never takes the pick guard"
+    );
+    assert!(
+        !rust.contains("super::WAITS") && !rust.contains("super::await_answer"),
+        "export and save wait on their own request map"
+    );
+    for name in ["pub(crate) fn export_original(", "pub(crate) fn save("] {
+        let body = function(&rust, name);
+        let ui = body
+            .find("ensure_off_ui_thread(env)")
+            .unwrap_or_else(|| panic!("`{name}` must refuse the UI thread"));
+        assert!(
+            ui < body.find("request_id").expect("the call uses a request id"),
+            "`{name}` checks the UI thread before minting a request"
+        );
+    }
+    let kotlin = read(KOTLIN_HOST);
+    let export = function(&kotlin, "fun exportOriginal(");
+    assert!(export.contains("exports[requestId] = flight"));
+    assert!(
+        export.contains("exportExecutor.execute {"),
+        "exports run on their own executor, never the pick's copy executor"
+    );
+    for pick_state in ["claimInFlight", "inFlight", "copyExecutor"] {
+        assert!(
+            !export.contains(pick_state),
+            "exportOriginal must not use `{pick_state}`"
+        );
+    }
+    assert!(
+        kotlin.contains("Thread(runnable, \"frust-photo-library-export\")"),
+        "the export executor is its own thread"
+    );
+    let save = function(&kotlin, "fun saveToLibrary(");
+    assert!(!save.contains("InFlight") && !save.contains("copyExecutor"));
+    let writer = read(KOTLIN_WRITER);
+    assert!(
+        !writer.contains("claimInFlight") && !writer.contains("copyExecutor"),
+        "the writer never touches pick state"
+    );
+    assert!(writer.contains("Thread(runnable, \"frust-photo-library-save\")"));
+}
+
+#[test]
+fn export_copies_in_cancellable_chunks_and_removes_partials() {
+    let kotlin = read(KOTLIN_HOST);
+    assert!(kotlin.contains("const val EXPORT_CHUNK_BYTES = 1024 * 1024"));
+    let copy = function(&kotlin, "private fun copyOriginal(");
+    let before_open = copy
+        .find("if (flight.cancelled.get()) return CANCELLED")
+        .unwrap();
+    assert!(
+        before_open < copy.find("openOriginal(ctx, uri)").unwrap(),
+        "a cancelled export opens nothing"
+    );
+    let open_fails = copy
+        .find("catch (e: FileNotFoundException)")
+        .expect("a stale id answers NOT_FOUND from the open alone");
+    let dest = copy.find("FileOutputStream(dest)").unwrap();
+    assert!(
+        open_fails < dest,
+        "a missing destination is not mistaken for a stale asset"
+    );
+    assert!(copy.contains("ByteArray(EXPORT_CHUNK_BYTES)"));
+    let body = &copy[dest..];
+    let check = body
+        .find("if (flight.cancelled.get()) return CANCELLED")
+        .expect("the flag is checked in the loop");
+    let read_at = body.find("source.read(buffer)").unwrap();
+    assert!(check < read_at, "the flag is checked before every chunk");
+
+    let run = function(&kotlin, "private fun runExport(");
+    assert!(run.contains("if (!flight.started.compareAndSet(false, true)) return"));
+    let delete = run
+        .find("if (code != OK) dest.delete()")
+        .expect("a cancelled or failed export deletes its partial file");
+    let answer = run.find("notifyExportDone(").unwrap();
+    assert!(
+        delete < answer,
+        "the partial file is gone before the answer"
+    );
+    assert!(run.contains("catch (e: SecurityException)"));
+    assert!(run.contains("catch (e: Throwable)"));
+
+    let cancel = function(&kotlin, "fun cancelExport(requestId: Long) {");
+    assert!(cancel.contains("flight.cancelled.set(true)"));
+    assert!(
+        cancel.contains("if (flight.started.compareAndSet(false, true)) {")
+            && cancel.contains("notifyExportDone(requestId, CANCELLED, null, null)"),
+        "a cancel that wins the race against a queued export answers it"
+    );
+}
+
+#[test]
+fn export_names_are_sanitised_in_rust_and_never_replace_a_file() {
+    let rust = rust_code(&read(RUST_ANDROID_ORIGINALS));
+    assert!(rust.contains("const STAGING_PREFIX: &str = \".export-\";"));
+    let finish = function(&rust, "fn finish_export(");
+    let claimed = finish.find("claim_final_path(").unwrap();
+    let rename = finish.find("fs::rename(staging, &path)").unwrap();
+    assert!(claimed < rename);
+    let claim = function(&rust, "fn claim_final_path(");
+    assert!(claim.contains("pick_cache::copy_name("));
+    assert!(
+        claim.contains("create_new(true)"),
+        "the name is reserved atomically, never replacing an earlier export"
+    );
+    assert!(claim.contains("io::ErrorKind::AlreadyExists => continue"));
+
+    let kotlin = read(KOTLIN_HOST);
+    assert!(
+        !kotlin.contains("File(destPath, "),
+        "the host writes only the path Rust chose"
+    );
+    let export = function(&rust, "pub(crate) fn export_original(");
+    assert!(export.contains("token.clear_hook();"));
+    assert!(
+        export.contains("remove_file(&staging)"),
+        "any failure removes the staging file"
+    );
+    assert!(
+        function(&rust, "fn ensure_pending(").contains("remove(&request_id)"),
+        "a refused request drops its slot"
+    );
+}
+
+#[test]
+fn cancel_reaches_the_host_and_export_progress_stays_off_the_lock() {
+    let rust = rust_code(&read(RUST_ANDROID_ORIGINALS));
+    assert!(
+        !rust.contains("wait_timeout"),
+        "the host answers every PENDING request exactly once, so the wait has no deadline"
+    );
+    let run = function(&rust, "fn run_export(");
+    let pending = run.find("ensure_pending(request_id, code)?").unwrap();
+    let hook = run
+        .find("token.set_hook(move || cancel_export(request_id));")
+        .expect("the export installs its cancel hook");
+    assert!(
+        pending < hook,
+        "the hook is installed only once the host answered PENDING"
+    );
+    let raced = run.find("if originals::is_cancelled(options) {").unwrap();
+    let finish = run.find("finish_export(id, staging, answer)").unwrap();
+    assert!(raced < finish, "a cancel that raced the answer still wins");
+    assert!(run.contains("options.progress.clone().map(originals::throttled)"));
+    assert!(
+        run.contains("originals::report_fraction(throttle, 0.0);")
+            && run.contains("originals::report_fraction(throttle, 1.0);"),
+        "the first and final deliveries are explicit"
+    );
+    let hook = function(&rust, "fn cancel_export(");
+    assert!(hook.contains("jni_str!(\"cancelExport\")"));
+
+    let export = function(
+        &rust,
+        "pub extern \"system\" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnExportProgress<",
+    );
+    assert!(export.contains("record_progress(request_id as u64, (done, total));"));
+    let record = function(&rust, "fn record_progress(");
+    assert!(record.contains("ANSWERED.notify_all();"));
+    let event = function(&rust, "fn next_event(");
+    for body in [export, record, event] {
+        assert!(
+            !body.contains(".report(") && !body.contains("report_fraction"),
+            "the JNI thread and the locked wait never run the caller's callback"
+        );
+    }
+    let await_answer = function(&rust, "fn await_answer(");
+    assert!(await_answer.contains("next_event(request_id)"));
+    assert!(await_answer.contains("forward_progress(throttle, progress);"));
+    assert!(!await_answer.contains("lock("));
+    let forward = function(&rust, "fn forward_progress(");
+    assert!(
+        forward.contains("min(MAX_COPY_FRACTION)"),
+        "1.0 is reserved for the final delivery on success"
+    );
+    assert!(
+        forward.contains("if total > 0 {"),
+        "an unknown total reports nothing mid-copy"
+    );
+
+    let kotlin = read(KOTLIN_HOST);
+    assert_eq!(
+        kotlin
+            .matches("nativeOnExportDone(requestId, code, mime, name)")
+            .count(),
+        1,
+        "the export's answer reaches Rust only through notifyExportDone"
+    );
+    let copy = function(&kotlin, "private fun copyOriginal(");
+    assert!(
+        copy.contains("if (total != null) notifyExportProgress(requestId, done, total)"),
+        "progress is per chunk and only when the size is known"
+    );
+    for marker in [
+        "private fun runExport(",
+        "private fun copyOriginal(",
+        "private fun notifyExportDone(",
+        "private fun notifyExportProgress(",
+    ] {
+        let at = kotlin.find(marker).unwrap();
+        assert!(
+            !kotlin[..at].trim_end().ends_with("@Synchronized"),
+            "`{marker}` must not hold the host's monitor across a native call"
+        );
+    }
+}
+
+#[test]
+fn the_original_open_prefers_unredacted_bytes_and_never_fails_over_location() {
+    let kotlin = read(KOTLIN_HOST);
+    let open = function(&kotlin, "private fun openOriginal(");
+    let gate = open
+        .find("ctx.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION)")
+        .expect("setRequireOriginal only with the grant");
+    let require = open
+        .find("MediaStore.setRequireOriginal(uri)")
+        .expect("setRequireOriginal is used");
+    assert!(gate < require);
+    assert!(
+        open.contains("catch (e: UnsupportedOperationException)"),
+        "a refused original must not fail the export"
+    );
+    assert!(
+        open.contains("?: throw IOException(\"no input stream\")"),
+        "the plain URI remains the fallback"
+    );
+    assert_eq!(
+        open.matches("${e.javaClass.name}").count(),
+        open.matches("catch (").count(),
+        "every fallback log names the exception class only"
+    );
+    assert!(
+        !open.contains(", e)"),
+        "the exception message can carry a path"
+    );
+    let manifest = read(MANIFEST);
+    assert!(!manifest.contains("ACCESS_MEDIA_LOCATION"));
+    let rust = rust_code(&read(RUST_ANDROID_ORIGINALS));
+    assert!(function(&rust, "fn host_error(").contains("NOT_FOUND => PhotoError::NotFound,"));
+}
+
+#[test]
+fn the_writer_publishes_or_deletes_every_row() {
+    let writer = read(KOTLIN_WRITER);
+    let insert = function(&writer, "private fun insertRow(");
+    let pending = insert
+        .find("put(MediaStore.MediaColumns.IS_PENDING, 1)")
+        .expect("rows start pending");
+    let insert_at = insert
+        .find("resolver.insert(collection(isVideo), values)")
+        .unwrap();
+    assert!(pending < insert_at);
+    let write = insert.find("writeRow(resolver, row, source)").unwrap();
+    let publish = insert
+        .find("put(MediaStore.MediaColumns.IS_PENDING, 0)")
+        .unwrap();
+    assert!(write < publish, "the row publishes after the bytes land");
+    assert!(
+        insert.contains("catch (e: Throwable) {") && insert.contains("deleteRow(resolver, row)"),
+        "any failure deletes the row"
+    );
+    assert!(insert.contains(
+        "ContentUris.withAppendedId(typedExternalUri(isVideo), ContentUris.parseId(row))"
+    ));
+    assert!(
+        writer.contains("MediaStore.VOLUME_EXTERNAL_PRIMARY"),
+        "the writable primary volume, from minSdk 29"
+    );
+    assert!(
+        writer.contains("MediaStore.Images.Media.EXTERNAL_CONTENT_URI"),
+        "save returns the typed `external` id browsing reports"
+    );
+    let write_row = function(&writer, "private fun writeRow(");
+    let close = write_row.find("output.use {").unwrap();
+    assert!(close < write_row.find("FileInputStream(source)").unwrap());
+    let path = function(&writer, "private fun relativePath(");
+    assert!(path.contains("Environment.DIRECTORY_MOVIES"));
+    assert!(path.contains("Environment.DIRECTORY_PICTURES"));
+    let folder = function(&writer, "internal fun folderName(");
+    assert!(
+        folder.contains("in \"/\\\\:*?"),
+        "a folder is a single segment"
+    );
+    let save = function(&writer, "fun save(");
+    assert!(save.contains("sweepStalePending(ctx)"));
+    assert!(
+        save.contains("FrustPhotoLibraryHost.notifySaveDone(requestId, code, uri)"),
+        "every save answers once"
+    );
+    assert!(save.contains("catch (e: Throwable)"));
+}
+
+#[test]
+fn the_stale_pending_sweep_is_guarded_and_best_effort() {
+    let writer = read(KOTLIN_WRITER);
+    let sweep = function(&writer, "private fun sweepStalePending(");
+    let once = sweep
+        .find("if (!swept.compareAndSet(false, true)) return")
+        .expect("the sweep runs at most once per process");
+    let guard = sweep
+        .find("if (Build.VERSION.SDK_INT < 30) return")
+        .expect("the sweep needs API 30's pending query arguments");
+    let delete = sweep.find("resolver.delete(").unwrap();
+    assert!(once < guard && guard < delete);
+    assert!(sweep.contains("MediaStore.MediaColumns.IS_PENDING"));
+    assert!(sweep.contains("MediaStore.MediaColumns.OWNER_PACKAGE_NAME"));
+    assert!(sweep.contains("arrayOf(ctx.packageName, cutoff.toString())"));
+    assert!(sweep.contains("MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE"));
+    assert!(sweep.contains("catch (e: Exception)"), "best effort");
+    assert_eq!(
+        kotlin_int_consts_long(&writer).get("STALE_PENDING_SECONDS"),
+        Some(&3600),
+        "an hour is older than any live save"
+    );
+}
+
+/// `const val NAME = <a> * <b>` Long products of a Kotlin file, by name.
+fn kotlin_int_consts_long(contents: &str) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    for line in contents.lines() {
+        let Some(rest) = line.trim().strip_prefix("const val ") else {
+            continue;
+        };
+        let Some((name, value)) = rest.split_once('=') else {
+            continue;
+        };
+        let parts: Option<Vec<i64>> = value
+            .split('*')
+            .map(|part| part.trim().trim_end_matches('L').parse().ok())
+            .collect();
+        if let Some(parts) = parts {
+            out.insert(name.trim().to_string(), parts.iter().product());
+        }
+    }
+    out
 }
