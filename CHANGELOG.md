@@ -43,6 +43,20 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   callback: only synchronous work in it is guaranteed to complete before suspension, work it spawns is
   not, and no background-task assertion is provided. `frust::spawn_local_scoped` is `spawn_local` bound to
   the calling owner. The playground Network page gains a Timers block.
+- `GestureDetector::on_double_tap` and `DoubleTapDetails { local_position }`: two taps within 300 ms and
+  100 px of each other (each tap within the 18 px slop), timed on the raw input clock and kept alive by
+  requested frames. With `on_double_tap` wired, the single `on_tap` waits out the window and is delivered
+  afterwards; a second press that fails (slop, long press, cancel) drops the first tap. Detectors
+  without `on_double_tap` are unchanged.
+- `GestureDetector::drag_start_behavior(DragStartBehavior::{Start, Down})` for pan and the axis drags.
+  `Start` (the default, the existing behaviour) reports the start where the slop was crossed, and the
+  first update is the next move's delta. `Down` reports the start at the press point, and the crossing
+  move carries one update with the whole travel from the press (an axis drag only its axis); no extra
+  velocity sample.
+- A second pointer contact landing while a `GestureDetector` press is pending fires `on_tap_cancel`, with
+  no long press, tap or double tap (the first finger may still start a drag), whenever a
+  contact-capturing widget (`pinch_detector`, `pan_zoom`) sits below the detector. A bare detector never
+  hears the second finger; see the `gesture-second-contact-needs-a-contact-captor` limitation.
 - The new `frust-photo-library` plugin crate: `PhotoLibrary::pick(&PickOptions)` opens the system photo
   picker on Android and iOS (no permission and no Info.plist string needed) and a native file dialog on
   Linux, macOS and Windows. Options: a media filter, a limit, `on_progress` loading reports

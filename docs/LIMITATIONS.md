@@ -9000,6 +9000,18 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Evidence**: `crates/frust-widgets/src/gesture.rs` (module docs, *Drag recognition* / Cancel).
 
+---
+
+### `gesture-second-contact-needs-a-contact-captor` — a bare `GestureDetector` never hears a second finger
+
+**Observed**: a `GestureDetector` with no contact-capturing widget below it (`pinch_detector`, `pan_zoom`) does not see a second pointer contact, so two resting fingers on it can still long-press. The cancel-on-second-contact rule (`on_tap_cancel`, no long press, tap or double tap) applies only when such a widget is below the detector.
+
+**Applies to**: every platform; the `frust-widgets` `GestureDetector`.
+
+**Why accepted**: the root drops non-claimant contacts unless a widget opts in. The detector cannot safely opt in itself, because an outer opt-in makes it the widget every other contact is delivered to, hiding them from a recogniser below it. `ComponentWidget` forwards `capture_pointer` but not `capture_contacts`, so a hidden recogniser below a component boundary cannot be detected.
+
+**Evidence**: `crates/frust-widgets/src/gesture.rs` tests `a_bare_detector_does_not_hear_a_second_finger`, `a_nested_pinch_keeps_its_second_finger_and_the_press_is_cancelled` and `a_pinch_behind_a_component_boundary_still_cancels_the_press_and_scales`; facade Tester test `a_bare_detector_never_hears_a_second_finger_so_the_press_runs_on` (`crates/frust/src/testing/gesture.rs`). A possible lift, not planned: mirror `contacts_requested` outward in `frust-core` `component.rs` the way `capture_pointer` is.
+
 ### `memory-pressure-not-reported-on-windows-linux-web` — no memory-pressure event on Windows, Linux or web
 
 **Observed**: `on_memory_pressure` never fires on Windows, Linux or web, since those shells have no source. iOS, Android and macOS report it. The render caches are trimmed only on iOS and Android Critical, and the app is never told about a low-memory condition on the other hosts.
