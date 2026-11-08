@@ -9314,7 +9314,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ---
 
-### `time-no-firing-while-backgrounded` — a `frust::time::Timer` does not fire while the app is backgrounded (Android, iOS)
+### `time-no-firing-while-backgrounded` — a `frust::time::Timer` gets no regular ticks while the app is backgrounded (Android, iOS)
 
 **Observed**: Android removes its frame callback at `onPause` and pumps nothing at `onPause`/`onStop`; iOS
 pauses its display link at `willResignActive` and pumps the local queue at `didEnterBackground` and on
