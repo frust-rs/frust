@@ -9160,14 +9160,14 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ---
 
-### `testing-text-runs-engine-clips` — `Tester::text_runs` does not see engine clips or text inputs
+### `testing-text-runs-engine-clips` — `Tester::text_runs` sees only clips a widget declares, and no text inputs
 
-**Observed**: `text_runs` and `assert_no_text_overflow` judge containment from pod geometry only. A run hidden by a `PushClip` (a scroll viewport, say) while still inside its ancestors' boxes is not reported. `TextInput` runs are not reported at all.
+**Observed**: `text_runs` and `assert_no_text_overflow` read clips only from widgets that report `InspectDetail::Clip` (scroll, list and page views, viewports, pan/zoom, the navigator). A clip pushed by any other widget (a design-system plugin widget, a rounded clip, a custom widget) is not consulted: a run it hides while inside its ancestors' boxes is not reported, and a run it legitimately keeps outside its own box reads as `outside_parent`. `TextInput` runs are not reported at all.
 
 **Applies to**: `frust::testing::Tester` text-run diagnostics, all hosts.
 
-**Why accepted**: clips exist only in the compiled scene, not the retained tree the diagnostics read; a text input does not report a layout through `inspect_detail`. Both are outside the overflow class the API targets (a label cut or wider than its box).
+**Why accepted**: a clip exists only in the compiled scene unless its widget declares it through `inspect_detail`, and the viewports that lay content out past their box are the ones that do; a text input does not report a layout through `inspect_detail`. Both remaining gaps are outside the overflow class the API targets (a label cut or wider than its box).
 
-**Evidence**: `crates/frust/src/testing/text.rs` (module docs).
+**Evidence**: `crates/frust/src/testing/text.rs` (module docs), `crates/frust-core/src/tree.rs` (`InspectDetail::Clip`).
 
 ---

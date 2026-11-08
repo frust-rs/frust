@@ -91,9 +91,11 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
   without `ellipsized`), wider than their box (`overflows_width`), or `outside_parent` (any ancestor,
   0.5 px per edge). Ellipsized alone is not an overflow: the ellipsis is the intended fit.
   `assert_no_text_overflow()` panics listing each offender with its size, parent size and flags.
-  Containment comes from pod geometry, never engine clips, so a run hidden by a `PushClip` inside its
-  ancestors' boxes is not reported (`testing-text-runs-engine-clips` in
-  [LIMITATIONS.md](LIMITATIONS.md)); `TextInput` contents are not covered.
+  A widget reporting `InspectDetail::Clip` (scroll, list and page views, viewports, pan/zoom, the
+  navigator) bounds what is visible: a run it hides entirely is `hidden`, partly is `clipped`, and
+  neither is an overflow, so a tall scrolled screen passes; inside the visible part containment is
+  still checked. A clip pushed by any other widget is not consulted, and `TextInput` contents are
+  not covered (`testing-text-runs-engine-clips` in [LIMITATIONS.md](LIMITATIONS.md)).
 
 Run: `cargo test -p frust-ui --features test-support --lib`.
 
