@@ -39,3 +39,6 @@ tokio = { workspace = true, features = ["rt"] }
 any_spawner = { workspace = true, features = ["wasm-bindgen"] }
 # Direct: the wasm `CustomExecutor` in `runtime.rs` calls `wasm_bindgen_futures::spawn_local` itself.
 wasm-bindgen-futures = "0.4.50"
+# `time.rs`'s browser `sleep` is a `setTimeout` Promise, the same call the web shell makes.
+js-sys = { workspace = true }
+web-sys = { workspace = true, features = ["Window"] }

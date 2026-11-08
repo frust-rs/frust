@@ -127,14 +127,16 @@ impl CompositeWaker {
 }
 
 impl Wake for CompositeWaker {
+    // The pool's task is woken BEFORE the shell: the shell wake can trigger a pump at once,
+    // and that pump must already find this task ready or it would miss the wake.
     fn wake(self: Arc<Self>) {
-        Self::wake_shell();
         self.inner.wake_by_ref();
+        Self::wake_shell();
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
-        Self::wake_shell();
         self.inner.wake_by_ref();
+        Self::wake_shell();
     }
 }
 
