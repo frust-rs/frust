@@ -2,6 +2,9 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::cancel::CancelToken;
 
 /// Whether a picked item is a still image or a video.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,14 +29,34 @@ pub enum MediaFilter {
     ImagesAndVideos,
 }
 
+/// Loading progress of a pick, delivered to [`PickOptions::on_progress`].
+///
+/// The first call means the picker has closed and the chosen items are loading. `done` items
+/// are finished; `fraction` is `0.0..=1.0` across all items. Callbacks may run on any thread:
+/// never call them while holding a lock the callback might re-enter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct PickProgress {
+    /// Number of items chosen.
+    pub items: usize,
+    /// Number of items finished loading.
+    pub done: usize,
+    /// Overall progress, `0.0..=1.0`.
+    pub fraction: f64,
+}
+
 /// Options for [`PhotoLibrary::pick`](crate::PhotoLibrary::pick).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct PickOptions {
     /// Which kinds of media to offer.
     pub filter: MediaFilter,
     /// Maximum number of items; `0` means the platform maximum.
     pub limit: u32,
+    #[allow(dead_code)] // Read by the platform arms.
+    pub(crate) progress: Option<Arc<dyn Fn(PickProgress) + Send + Sync>>,
+    #[allow(dead_code)] // Read by the platform arms.
+    pub(crate) cancel: Option<CancelToken>,
 }
 
 impl PickOptions {
@@ -52,6 +75,29 @@ impl PickOptions {
     pub fn limit(mut self, limit: u32) -> Self {
         self.limit = limit;
         self
+    }
+
+    /// Reports loading progress after the picker closes. See [`PickProgress`].
+    pub fn on_progress(mut self, f: impl Fn(PickProgress) + Send + Sync + 'static) -> Self {
+        self.progress = Some(Arc::new(f));
+        self
+    }
+
+    /// Lets the caller cancel the pick through `token`.
+    pub fn cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+}
+
+impl fmt::Debug for PickOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PickOptions")
+            .field("filter", &self.filter)
+            .field("limit", &self.limit)
+            .field("progress", &self.progress.is_some())
+            .field("cancel", &self.cancel.is_some())
+            .finish()
     }
 }
 
@@ -124,6 +170,9 @@ pub enum PhotoError {
     /// This platform has no picker.
     #[error("photo picking is not supported on this platform")]
     Unsupported,
+    /// The pick was cancelled through its [`CancelToken`].
+    #[error("the pick was cancelled")]
+    Cancelled,
     /// Another pick is already in progress, or the pick cache is being cleared.
     #[error("another photo pick is already in progress")]
     Busy,
@@ -138,5 +187,30 @@ pub enum PhotoError {
 impl From<std::io::Error> for PhotoError {
     fn from(e: std::io::Error) -> Self {
         PhotoError::Io(e.kind())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builders_and_debug() {
+        let o = PickOptions::new();
+        assert_eq!(
+            format!("{o:?}"),
+            "PickOptions { filter: ImagesAndVideos, limit: 0, progress: false, cancel: false }"
+        );
+        let o = o
+            .filter(MediaFilter::Videos)
+            .limit(2)
+            .on_progress(|_| {})
+            .cancel(CancelToken::new());
+        assert_eq!(o.filter, MediaFilter::Videos);
+        assert_eq!(o.limit, 2);
+        assert_eq!(
+            format!("{:?}", o.clone()),
+            "PickOptions { filter: Videos, limit: 2, progress: true, cancel: true }"
+        );
     }
 }

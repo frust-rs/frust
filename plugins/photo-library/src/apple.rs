@@ -97,7 +97,7 @@ pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError>
     let _in_flight = pick_cache::PickGuard::acquire()?;
     let dir = pick_cache::new_call_dir()?;
     let (tx, rx) = mpsc::channel();
-    let options = *options;
+    let options = options.clone();
     let call_dir = dir.clone();
     DispatchQueue::main().exec_async(move || {
         // SAFETY: this closure is submitted to `dispatch_get_main_queue()`,

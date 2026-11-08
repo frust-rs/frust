@@ -24,17 +24,32 @@
 //! original files (`is_copy` is `false`) and never copies.
 //!
 //! ```no_run
-//! use frust_photo_library::{MediaFilter, PhotoLibrary, PickOptions};
+//! use frust_photo_library::{
+//!     CancelToken, MediaFilter, PhotoError, PhotoLibrary, PickOptions, PickProgress,
+//! };
+//!
+//! let cancel = CancelToken::new();
+//! let opts = PickOptions::new()
+//!     .filter(MediaFilter::Videos)
+//!     .on_progress(move |p: PickProgress| {
+//!         let _ = (p.items, p.done, p.fraction);
+//!     })
+//!     .cancel(cancel.clone());
+//! // UI: cancel.cancel();
 //!
 //! // Blocks: call inside `frust::spawn_blocking`.
-//! let picked = PhotoLibrary::pick(&PickOptions::new().filter(MediaFilter::Images).limit(5));
-//! if let Ok(items) = picked {
-//!     for item in items {
-//!         let _ = item.path; // decode with `frust::decode_image_async`
+//! match PhotoLibrary::pick(&opts) {
+//!     Err(PhotoError::Cancelled) => {}
+//!     Ok(items) => {
+//!         for item in items {
+//!             let _ = item.path; // decode with `frust::decode_image_async`
+//!         }
 //!     }
+//!     Err(_) => {}
 //! }
 //! ```
 
+mod cancel;
 mod types;
 
 // Desktop uses only part of these; mobile targets keep the dead-code lint.
@@ -43,7 +58,10 @@ mod media_types;
 #[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
 mod pick_cache;
 
-pub use types::{AssetId, MediaFilter, MediaKind, PhotoError, PickOptions, PickedItem};
+pub use cancel::CancelToken;
+pub use types::{
+    AssetId, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
+};
 
 #[cfg(target_os = "ios")]
 mod apple;
@@ -106,7 +124,16 @@ pub struct PhotoLibrary;
 
 impl PhotoLibrary {
     /// Shows the platform picker and waits. Blocks; see the crate-level threading notes.
-    /// An empty `Vec` means the user cancelled.
+    /// An empty `Vec` means the user dismissed the picker.
+    ///
+    /// # Loading and cancel
+    ///
+    /// After the picker closes, the chosen items may still be loading (an iCloud video or a
+    /// fresh photo can take seconds to minutes). [`PickOptions::on_progress`] reports that
+    /// phase: its first call is the loading signal, and calls are rate-limited. Pass a
+    /// [`CancelToken`] through [`PickOptions::cancel`] to abort from another thread.
+    /// Cancelling while the picker is open or while items load returns
+    /// `Err(`[`PhotoError::Cancelled`]`)` and the call's partial copies are removed.
     pub fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError> {
         platform::pick(options)
     }
