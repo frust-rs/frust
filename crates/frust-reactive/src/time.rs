@@ -8,12 +8,21 @@
 //! | Shell | A reached deadline runs |
 //! |---|---|
 //! | Desktop | on the next event-loop turn (the deadline wakes a parked loop) |
-//! | Android, iOS | on the next display tick while resumed; nothing runs while backgrounded |
+//! | Android, iOS | on the next display tick while resumed; no regular ticks while backgrounded |
 //! | Web | from the browser's task queue |
 //!
-//! So a timer does not fire in the background: an overdue one fires on the first tick after
-//! the app resumes, unless it was flagged [`Timer::flush_on_background`], which runs it
-//! synchronously inside the platform's foreground-exit callback.
+//! So there are no regular ticks in the background: a due timer normally fires on the first
+//! tick after the app resumes, but may run earlier in one of the few background pumps a shell
+//! makes (iOS `didEnterBackground` and memory warnings, Android trim-memory callbacks); do not
+//! rely on either. A timer flagged [`Timer::flush_on_background`] instead runs synchronously
+//! at the first of the app going Resumed to Inactive or Inactive to Hidden. One armed while
+//! already Inactive runs at the Hidden edge (Android `onStop`, iOS `didEnterBackground`),
+//! still synchronously on the UI thread.
+//!
+//! Flagged timers also fire on focus loss with no foreground exit: losing window focus on
+//! desktop and web; the notification shade, a system dialog or the unfocused half of
+//! split-screen on Android; Control Center or a call on iOS. The timer is one-shot and is
+//! consumed, so do not flag a timer whose delay must be honoured while the app stays visible.
 //!
 //! Arming and calling are safe anywhere on the UI thread, `Component::build` and event
 //! handlers included: the underlying wait is only constructed on first poll, inside a pump.
@@ -128,7 +137,9 @@ impl TimerInner {
     }
 
     /// Catches a panic so it cannot strand [`Owner::with`]'s thread-local (that function has
-    /// no unwind guard) or stop the other timers of a background flush.
+    /// no unwind guard) or stop the other timers of a background flush. Only in unwinding
+    /// builds: under `panic = "abort"` (the release profile) `catch_unwind` catches nothing
+    /// and a panicking callback aborts the process.
     fn run_callback(&self) {
         self.state.set(State::Fired);
         let Some(callback) = self.callback.take() else {
@@ -158,7 +169,8 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
 
 /// A one-shot UI-thread timer, cancelled when this handle is dropped or the owner it was
 /// armed under is cleaned up. The callback runs at most once, under that owner, and a panic
-/// in it is logged rather than propagated. See the [module docs](self) for when it fires.
+/// in it is logged rather than propagated in unwinding builds; with `panic = "abort"` (the
+/// release profile) a panicking callback aborts the process, including inside a flush. See the [module docs](self) for when it fires.
 #[must_use = "dropping a Timer cancels it; keep the handle, or call detach()"]
 pub struct Timer {
     inner: Rc<TimerInner>,
@@ -166,6 +178,10 @@ pub struct Timer {
 
 impl Timer {
     /// Arms a timer that runs `callback` once `duration` of wall time has passed.
+    ///
+    /// Each arming under an owner adds one small cleanup entry that lasts until that owner is
+    /// cleaned up, so a self-re-arming timer or per-event debounce that runs indefinitely
+    /// should arm under a short-lived child owner.
     ///
     /// # Panics
     ///
@@ -220,11 +236,17 @@ impl Timer {
         self.inner.detached.set(true);
     }
 
-    /// Also fires this timer when the app leaves the foreground ([`on_inactive`]; on desktop
-    /// and web that includes losing window focus).
+    /// Also fires this timer at the first of the app going Resumed to Inactive
+    /// ([`on_inactive`]) or Inactive to Hidden ([`on_hide`]). A timer armed while already
+    /// Inactive runs at the Hidden edge (Android `onStop`, iOS `didEnterBackground`). It also
+    /// fires on focus loss with no foreground exit (desktop and web window focus, the
+    /// Android notification shade or split-screen, iOS Control Center or a call); it is
+    /// one-shot and consumed, so do not flag a timer whose delay must be honoured while the
+    /// app stays visible.
     ///
     /// The callback runs synchronously on the UI thread inside iOS's
-    /// `applicationWillResignActive` or Android's `Activity.onPause`, before control returns
+    /// `applicationWillResignActive` or Android's `Activity.onPause` (or, at the Hidden edge,
+    /// `onStop` / `didEnterBackground`), before control returns
     /// to the OS, so work done **synchronously in the callback** completes before the
     /// platform can suspend the process. Work it hands to `spawn_blocking`, `spawn_local` or
     /// `spawn` is not covered: the process may be suspended first, and nothing pumps the
@@ -233,6 +255,7 @@ impl Timer {
     /// call is not.
     ///
     /// [`on_inactive`]: AppLifecycleListener::on_inactive
+    /// [`on_hide`]: AppLifecycleListener::on_hide
     pub fn flush_on_background(self) -> Self {
         if self.inner.is_active() && !self.inner.flush.replace(true) {
             register_flush(&self.inner);
@@ -280,13 +303,17 @@ fn register_flush(inner: &Rc<TimerInner>) {
         registry.push(Rc::downgrade(inner));
     });
     FLUSH_LISTENER.with_borrow_mut(|listener| {
-        listener
-            .get_or_insert_with(|| AppLifecycleListener::new().on_inactive(drain_flush_registry));
+        listener.get_or_insert_with(|| {
+            AppLifecycleListener::new()
+                .on_inactive(drain_flush_registry)
+                .on_hide(drain_flush_registry)
+        });
     });
 }
 
 /// Empties the registry before firing, so a callback that arms a flagged timer leaves it
-/// for the next foreground exit. [`TimerInner::run_callback`] isolates each panic.
+/// for the next foreground exit. Runs at Inactive and at Hidden; a timer fires at most once,
+/// because the drain empties the registry and `fire_now` is a no-op after the first. [`TimerInner::run_callback`] isolates each panic.
 fn drain_flush_registry() {
     let timers = FLUSH_REGISTRY.with_borrow_mut(std::mem::take);
     for timer in timers.iter().filter_map(Weak::upgrade) {
@@ -552,6 +579,52 @@ mod tests {
         push_app_lifecycle(AppLifecycleState::Resumed);
         push_app_lifecycle(AppLifecycleState::Inactive);
         assert_eq!(flushed.load(Ordering::SeqCst), 1, "a flush fires only once");
+    }
+
+    #[test]
+    fn a_timer_flagged_while_inactive_flushes_at_hidden() {
+        let (_guard, _rt) = setup();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        let (count, bump) = counter();
+        let timer = Timer::new(LONG, bump).flush_on_background();
+        assert!(timer.is_active());
+        assert_eq!(count.get(), 0);
+
+        push_app_lifecycle(AppLifecycleState::Paused);
+        assert_eq!(count.get(), 1, "fires synchronously inside the push");
+        assert!(!timer.is_active());
+
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn a_timer_flagged_while_resumed_fires_once_across_inactive_and_hidden() {
+        let (_guard, _rt) = setup();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        let (count, bump) = counter();
+        let _timer = Timer::new(LONG, bump).flush_on_background();
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        assert_eq!(count.get(), 1);
+        push_app_lifecycle(AppLifecycleState::Hidden);
+        push_app_lifecycle(AppLifecycleState::Paused);
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn a_timer_flagged_while_inactive_then_resumed_flushes_at_the_next_inactive() {
+        let (_guard, _rt) = setup();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        let (count, bump) = counter();
+        let timer = Timer::new(LONG, bump).flush_on_background();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        assert_eq!(count.get(), 0);
+        assert!(timer.is_active());
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        assert_eq!(count.get(), 1);
     }
 
     #[test]
