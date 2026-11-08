@@ -12,8 +12,8 @@
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View,
-    Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, InspectDetail, LayoutCtx, PaintCtx, PaintScene,
+    SemanticsCtx, TextInspect, View, Widget,
 };
 use frust_text::{
     FontFamily, FontStyle, FontWeight, LocaleStamp, OverflowWrap, TextAlign, TextContext,
@@ -23,7 +23,9 @@ use frust_theme::Theme;
 use kurbo::Size;
 use peniko::Color;
 
-use crate::text::{FamilySource, ThemeTextColor, ThemeTextType, paint_layout, resolve_style};
+use crate::text::{
+    FamilySource, ThemeTextColor, ThemeTextType, paint_layout, resolve_style, text_inspect,
+};
 
 /// A styled piece of text inside a [`RichTextView`].
 ///
@@ -236,6 +238,7 @@ impl<State: 'static> View<State> for RichTextView {
             view: self.clone(),
             layout: None,
             laid_out_max_width: None,
+            inspect: None,
             laid_out_span_styles: Vec::new(),
             laid_out_locale_stamp: LocaleStamp::default(),
         }
@@ -264,6 +267,8 @@ pub struct RichTextWidget {
     layout: Option<TextLayout>,
     /// The width the cached layout was broken at.
     laid_out_max_width: Option<f32>,
+    /// Layout report from the last real layout, served by `inspect_detail`.
+    inspect: Option<TextInspect>,
     /// Every span's effective style, so a bare theme swap or text-scale
     /// change re-shapes without a view change. Kept before grouping:
     /// grouping depends on the theme-resolved styles, so two layouts with
@@ -381,6 +386,8 @@ impl Widget for RichTextWidget {
             self.view.overflow,
         );
         let size = bc.constrain(layout.size());
+        let joined: String = self.view.spans.iter().map(|s| s.content.as_str()).collect();
+        self.inspect = Some(text_inspect(&joined, &layout, self.view.max_lines));
         self.layout = Some(layout);
         self.laid_out_max_width = max_width;
         self.laid_out_span_styles = all_styles;
@@ -392,6 +399,10 @@ impl Widget for RichTextWidget {
         if let Some(layout) = &self.layout {
             paint_layout(layout, ctx.origin(), scene);
         }
+    }
+
+    fn inspect_detail(&self) -> Option<InspectDetail> {
+        self.inspect.clone().map(InspectDetail::Text)
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
@@ -623,6 +634,31 @@ mod tests {
         let (_, full) = lay_out(&open, None, 120.0, &mut tcx);
         let (_, cut) = lay_out(&capped, None, 120.0, &mut tcx);
         assert!(full.height > cut.height * 1.5, "{full:?} vs {cut:?}");
+    }
+
+    #[test]
+    fn rich_text_reports_flags_and_concatenated_text() {
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        let words = "word ".repeat(40);
+        let mut root: frust_core::RenderRoot<(), RichTextView> = frust_core::RenderRoot::new();
+        root.rebuild(
+            &mut |_: &mut ()| {
+                rich_text([span(words.clone()), span("tail").weight(FontWeight::BOLD)])
+                    .max_lines(1)
+                    .overflow(TextOverflow::Ellipsis)
+            },
+            &mut (),
+        );
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(120.0, 200.0), &mut tcx as &mut dyn std::any::Any);
+        let Some(Some(InspectDetail::Text(r))) =
+            root.inspect().into_iter().map(|n| n.detail).next()
+        else {
+            panic!("no text detail");
+        };
+        assert_eq!(r.text, format!("{words}tail"));
+        assert_eq!(r.lines, 1);
+        assert!(r.did_exceed_max_lines && r.ellipsized, "{r:?}");
     }
 
     #[test]
