@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The FileProvider that serves the copies `FrustShareHost` shares. It is a
+  subclass (`FrustShareFileProvider`), not `androidx.core.content.FileProvider`
+  itself, so the merged manifest never collides with an app's own FileProvider
+  declaration. Not exported: access is granted per share through
+  `FLAG_GRANT_READ_URI_PERMISSION` on the chooser intent. The authority is
+  `${applicationId}.frustshare.fileprovider`, unique per consuming app.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.share`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <provider
+            android:name="dev.frust.share.FrustShareFileProvider"
+            android:authorities="${applicationId}.frustshare.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/frust_share_paths" />
+        </provider>
+    </application>
+
+</manifest>

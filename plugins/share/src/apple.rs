@@ -31,6 +31,8 @@
 //! [`ShareAnchor`] (logical points are UIKit points, 1:1, in the root view's
 //! space) or, without one, the root view's centre with no arrow.
 
+use std::path::PathBuf;
+
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
@@ -58,12 +60,38 @@ pub(crate) fn share(
     subject: Option<&str>,
     anchor: Option<&ShareAnchor>,
 ) -> Result<ShareOutcome, ShareError> {
+    enqueue(Items::Text(text.to_owned(), kind), subject, anchor)
+}
+
+/// Enqueue an activity sheet carrying `paths` (already validated and
+/// canonicalised by [`crate::files`]) as file URLs.
+///
+/// # Errors
+/// As [`share`].
+pub(crate) fn share_files(
+    paths: Vec<PathBuf>,
+    subject: Option<&str>,
+    anchor: Option<&ShareAnchor>,
+) -> Result<ShareOutcome, ShareError> {
+    enqueue(Items::Files(paths), subject, anchor)
+}
+
+/// What the activity sheet carries; owned so it can cross to the main queue.
+enum Items {
+    Text(String, PayloadKind),
+    Files(Vec<PathBuf>),
+}
+
+fn enqueue(
+    items: Items,
+    subject: Option<&str>,
+    anchor: Option<&ShareAnchor>,
+) -> Result<ShareOutcome, ShareError> {
     if let Some(mtm) = MainThreadMarker::new()
         && presenter(mtm).is_none()
     {
         return Err(ShareError::NoPresenter);
     }
-    let text = text.to_owned();
     let subject = subject.map(str::to_owned);
     let anchor = anchor.copied();
     DispatchQueue::main().exec_async(move || {
@@ -71,32 +99,46 @@ pub(crate) fn share(
         // which always executes its blocks on the process's main thread, so
         // constructing a `MainThreadMarker` here without re-checking is sound.
         let mtm = unsafe { MainThreadMarker::new_unchecked() };
-        present_on_main(mtm, &text, kind, subject.as_deref(), anchor.as_ref());
+        present_on_main(mtm, &items, subject.as_deref(), anchor.as_ref());
     });
     Ok(ShareOutcome::Presented)
+}
+
+/// The activity items: one `NSString`/`NSURL` for text, or one file `NSURL`
+/// per path.
+fn activity_items(items: &Items) -> Retained<NSArray<AnyObject>> {
+    let list: Vec<Retained<AnyObject>> = match items {
+        Items::Text(text, kind) => {
+            let ns_text = NSString::from_str(text);
+            vec![match kind {
+                PayloadKind::Text => ns_text.into(),
+                PayloadKind::Url => match NSURL::URLWithString(&ns_text) {
+                    Some(url) => url.into(),
+                    None => ns_text.into(),
+                },
+            }]
+        }
+        Items::Files(paths) => paths
+            .iter()
+            .filter_map(|p| p.to_str())
+            .map(|p| Retained::<AnyObject>::from(NSURL::fileURLWithPath(&NSString::from_str(p))))
+            .collect(),
+    };
+    NSArray::<AnyObject>::from_retained_slice(&list)
 }
 
 /// Build the controller and present it. Runs on the main queue; every miss
 /// here is dropped, as no caller is left to report to.
 fn present_on_main(
     mtm: MainThreadMarker,
-    text: &str,
-    kind: PayloadKind,
+    payload: &Items,
     subject: Option<&str>,
     anchor: Option<&ShareAnchor>,
 ) {
     let Some(presenter) = presenter(mtm) else {
         return;
     };
-    let ns_text = NSString::from_str(text);
-    let item: Retained<AnyObject> = match kind {
-        PayloadKind::Text => ns_text.into(),
-        PayloadKind::Url => match NSURL::URLWithString(&ns_text) {
-            Some(url) => url.into(),
-            None => ns_text.into(),
-        },
-    };
-    let items = NSArray::<AnyObject>::from_retained_slice(&[item]);
+    let items = activity_items(payload);
     // SAFETY: `activity_items` is an `NSArray` of `NSString`/`NSURL`, the item
     // types the binding's "correct type" obligation and UIKit's
     // documentation accept; `application_activities` is `None`.

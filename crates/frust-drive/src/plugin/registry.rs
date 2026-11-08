@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — twenty-six entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty-seven entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -63,10 +63,13 @@
 //! `frust_plugin::desktop` at first use — see `VIDEO_PLAYER_BASE`'s doc
 //! comment for the full accounting). `device-info` is dependency only: a
 //! device-memory query needing no permission, Gradle module or plist key.
-//! The newest entry, `permissions` (dependency, the plugin's own Android
-//! library module, and five optional features carrying the app-side
-//! manifest permissions, usage strings, framework links and macOS
-//! entitlements each permission needs), is described at `PERMISSIONS`.
+//! `permissions` (dependency, the plugin's own Android library module, and
+//! five optional features carrying the app-side manifest permissions, usage
+//! strings, framework links and macOS entitlements each permission needs) is
+//! described at `PERMISSIONS`. The newest entry, `photo-library`
+//! (dependency, the plugin's own Android library module and the `PhotosUI`
+//! framework link; no permission or plist key), is described at
+//! `PHOTO_LIBRARY`.
 
 use super::{Contribution, FeatureSpec, PluginSpec};
 
@@ -652,17 +655,25 @@ const NETWORK_IMAGE: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
-/// `share`'s single base contribution: a Cargo dependency only. Android's
+/// `share`'s base contributions: a Cargo dependency and the plugin's own
+/// Android library module (the `FileProvider` that serves shared files rides
+/// the module's manifest, folded in by the manifest merger). Android's
 /// `ACTION_SEND` chooser needs no permission or `<queries>` entry, and the iOS
 /// activity sheet needs no plist key.
-const SHARE_BASE: &[Contribution] = &[Contribution::CargoDep {
-    name: "frust-share",
-}];
+const SHARE_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-share",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-share",
+        rel_path: "plugins/share/platform/android",
+    },
+];
 
 const SHARE: PluginSpec = PluginSpec {
     id: "share",
-    summary: "Share text or a URL through the platform share sheet (Android chooser, iOS \
-              activity sheet, desktop clipboard fallback)",
+    summary: "Share text, a URL or files through the platform share sheet (Android chooser, \
+              iOS activity sheet, desktop clipboard fallback)",
     crate_dir: "share",
     base: SHARE_BASE,
     optional_features: &[],
@@ -943,6 +954,29 @@ const PERMISSIONS: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `photo-library`'s base: the Cargo dependency, the plugin's own Android
+/// library module (the Photo Picker host) and the `PhotosUI` framework for
+/// `PHPickerViewController`. No permission and no plist entry: the system
+/// pickers run out of process and need no photo-library access or usage
+/// string. No optional features yet.
+const PHOTO_LIBRARY: PluginSpec = PluginSpec {
+    id: "photo-library",
+    summary: "Pick photos and videos with the system picker (Android, iOS; file dialog on desktop)",
+    crate_dir: "photo-library",
+    base: &[
+        Contribution::CargoDep {
+            name: "frust-photo-library",
+        },
+        Contribution::GradleModule {
+            gradle_name: ":frust-photo-library",
+            rel_path: "plugins/photo-library/platform/android",
+        },
+        Contribution::IosFramework { name: "PhotosUI" },
+    ],
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -974,6 +1008,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         MATERIAL_I18N,
         DEVICE_INFO,
         PERMISSIONS,
+        PHOTO_LIBRARY,
     ]
 }
 
@@ -993,7 +1028,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_twenty_six_v1_plugins() {
+    fn registry_lists_the_twenty_seven_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -1024,6 +1059,7 @@ mod tests {
                 "material-i18n",
                 "device-info",
                 "permissions",
+                "photo-library",
             ]
         );
     }
@@ -1389,6 +1425,147 @@ mod tests {
             "connectivity adds no ManifestPermission (the module manifest carries \
              ACCESS_NETWORK_STATE) and no PlistEntry"
         );
+    }
+
+    /// The `share` entry's base contributions: Cargo dependency and the
+    /// plugin's Android library module; no permission or plist entry.
+    #[test]
+    fn share_base_contributions_match_the_final_accounting() {
+        let spec = find_plugin("share").unwrap();
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+        assert_eq!(spec.base.len(), 2);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-share"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-share",
+                rel_path: "plugins/share/platform/android",
+            }
+        ));
+    }
+
+    /// The `share` and `photo-library` module paths must exist in this checkout.
+    #[test]
+    fn share_and_photo_library_gradle_module_paths_exist_in_this_checkout() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        for id in ["share", "photo-library"] {
+            let spec = find_plugin(id).unwrap();
+            let mut seen = 0;
+            for c in spec.base {
+                if let Contribution::GradleModule { rel_path, .. } = c {
+                    seen += 1;
+                    assert!(
+                        repo_root.join(rel_path).join("build.gradle.kts").is_file(),
+                        "`{rel_path}` must be a Gradle module directory in this checkout"
+                    );
+                }
+            }
+            assert_eq!(seen, 1, "{id}");
+        }
+    }
+
+    /// The `photo-library` entry's base contributions: Cargo dependency,
+    /// Android library module, `PhotosUI` framework; no permission, plist
+    /// entry or optional feature.
+    #[test]
+    fn photo_library_base_contributions_match_the_final_accounting() {
+        let spec = find_plugin("photo-library").unwrap();
+        assert_eq!(spec.crate_dir, "photo-library");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+        assert_eq!(spec.base.len(), 3);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-photo-library"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-photo-library",
+                rel_path: "plugins/photo-library/platform/android",
+            }
+        ));
+        assert!(matches!(
+            spec.base[2],
+            Contribution::IosFramework { name: "PhotosUI" }
+        ));
+        assert!(
+            !spec.base.iter().any(|c| matches!(
+                c,
+                Contribution::ManifestPermission { .. } | Contribution::PlistEntry { .. }
+            )),
+            "photo-library adds no ManifestPermission and no PlistEntry"
+        );
+    }
+
+    /// `photo-library` applied twice: the Cargo dependency, Gradle wiring and
+    /// the `PhotosUI` link flag land in every build configuration, and a
+    /// re-apply leaves a byte-identical tree.
+    #[test]
+    fn photo_library_add_plugin_applies_every_contribution_and_reapply_is_idempotent() {
+        let root = scaffold_project("photo-library-idempotence");
+        let pre_plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+
+        let first = add_plugin(&root, "photo-library", &[]).unwrap();
+        assert_eq!(first.plugin_id, "photo-library");
+        assert_eq!(first.items.len(), 3, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-photo-library"), "{cargo}");
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            settings.contains("include(\":frust-photo-library\")"),
+            "{settings}"
+        );
+        let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();
+        assert!(
+            app_build.contains("implementation(project(\":frust-photo-library\"))"),
+            "{app_build}"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        let lists = pbxproj.matches("OTHER_LDFLAGS = (").count();
+        assert!(lists >= 2, "scaffold has {lists} OTHER_LDFLAGS lists");
+        assert_eq!(
+            pbxproj
+                .matches("\"-framework\",\n\t\t\t\t\tPhotosUI,\n")
+                .count(),
+            lists,
+            "{pbxproj}"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert_eq!(plist, pre_plist, "photo-library must add no Info.plist key");
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "photo-library", &[]).unwrap();
+        assert_eq!(second.items.len(), 3);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// The `SwiftPackageRef` counterpart of
