@@ -4,17 +4,24 @@ import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.system.ErrnoException
+import android.system.Os
+import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
  * Shares files through the system chooser using content URIs.
  *
  * The Rust side (`plugins/share/src/android.rs`) loads this class through the
- * application classloader and calls [shareFiles]. Each file is first copied
- * into `cacheDir/frust-share/<unique>/<name>`; only that directory is exposed
+ * application classloader and calls [shareFiles], which validates and returns;
+ * a background thread then stages each file (hard link, else copy) into
+ * `cacheDir/frust-share/<unique>/<name>`, removing every directory it created
+ * for the call if any file fails. Only that directory is exposed
  * by [FrustShareFileProvider], and the chooser receives read grants on the
  * copies, never on the originals.
  */
@@ -24,26 +31,50 @@ object FrustShareHost {
     const val ERR_COPY_FAILED = 2
     const val ERR_LAUNCH_FAILED = 3
 
+    private const val TAG = "FrustShare"
     private const val STAGING_DIR = "frust-share"
     private const val MAX_AGE_MS = 24L * 60 * 60 * 1000
 
+    private val executor: ExecutorService by lazy {
+        Executors.newSingleThreadExecutor { task ->
+            Thread(task, "frust-share-stage").apply { isDaemon = true }
+        }
+    }
+
+    /**
+     * Validates [paths] and returns [OK] once the share is enqueued. The
+     * staging and the chooser launch run on a background thread, so this never
+     * blocks on file size; a later failure is logged under tag `FrustShare`
+     * (error class only) and shows no chooser.
+     */
     @JvmStatic
     fun shareFiles(context: Context, paths: Array<String>, subject: String?): Int {
         if (paths.isEmpty()) return ERR_INVALID_ARGUMENT
+        val sources = paths.map { File(it) }
+        if (sources.any { !it.isFile }) return ERR_COPY_FAILED
+        val app = context.applicationContext ?: context
         return try {
-            val root = File(context.cacheDir, STAGING_DIR)
-            prune(root)
+            executor.execute { stageAndLaunch(app, sources, subject) }
+            OK
+        } catch (e: RuntimeException) {
+            ERR_LAUNCH_FAILED
+        }
+    }
 
+    private fun stageAndLaunch(context: Context, sources: List<File>, subject: String?) {
+        val root = File(context.cacheDir, STAGING_DIR)
+        val created = ArrayList<File>(sources.size)
+        try {
+            prune(root)
             val authority = context.packageName + ".frustshare.fileprovider"
-            val uris = ArrayList<Uri>(paths.size)
-            val mimes = ArrayList<String>(paths.size)
-            for (path in paths) {
-                val source = File(path)
-                if (!source.isFile) return ERR_COPY_FAILED
+            val uris = ArrayList<Uri>(sources.size)
+            val mimes = ArrayList<String>(sources.size)
+            for (source in sources) {
                 val dir = File(root, UUID.randomUUID().toString())
-                if (!dir.mkdirs()) return ERR_COPY_FAILED
+                created.add(dir)
+                if (!dir.mkdirs()) throw java.io.IOException("staging directory")
                 val copy = File(dir, source.name)
-                source.copyTo(copy)
+                stage(source, copy)
                 uris.add(FileProvider.getUriForFile(context, authority, copy))
                 mimes.add(mimeOf(copy.name))
             }
@@ -66,13 +97,20 @@ object FrustShareHost {
             val chooser = Intent.createChooser(send, null)
             chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(chooser)
-            OK
+        } catch (e: Exception) {
+            created.forEach { it.deleteRecursively() }
+            Log.w(TAG, "file share failed: " + e.javaClass.simpleName)
+        }
+    }
+
+    // A hard link when source and copy share a filesystem; a copy otherwise.
+    private fun stage(source: File, copy: File) {
+        try {
+            Os.link(source.path, copy.path)
+        } catch (e: ErrnoException) {
+            source.copyTo(copy)
         } catch (e: java.io.IOException) {
-            ERR_COPY_FAILED
-        } catch (e: IllegalArgumentException) {
-            ERR_INVALID_ARGUMENT
-        } catch (e: RuntimeException) {
-            ERR_LAUNCH_FAILED
+            source.copyTo(copy)
         }
     }
 

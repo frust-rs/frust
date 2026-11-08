@@ -128,6 +128,12 @@ impl Share {
     /// Each path must be absolute and name an existing regular file; paths
     /// are canonicalised before dispatch.
     ///
+    /// # Threading
+    /// Never blocks on file size on any platform, so it may be called from a
+    /// UI handler. On Android `Ok(ShareOutcome::Presented)` means the share
+    /// was enqueued: staging happens on a background thread, and a later
+    /// staging failure is logged and shows no chooser.
+    ///
     /// # Errors
     /// [`ShareError::EmptyPayload`] for no paths, [`ShareError::TooManyFiles`]
     /// above 64, [`ShareError::InvalidFile`] for a bad path,
@@ -138,6 +144,10 @@ impl Share {
 
     /// As [`Self::files`], with a popover `anchor` (iOS iPad and the macOS
     /// picker; ignored elsewhere).
+    ///
+    /// # Threading
+    /// As [`Self::files`]: never blocks on file size; on Android `Presented`
+    /// means enqueued and a later staging failure is logged.
     ///
     /// # Errors
     /// See [`Self::files`].
