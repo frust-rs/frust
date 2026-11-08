@@ -23,7 +23,8 @@ struct Inner {
 pub struct CancelToken(Arc<Inner>);
 
 impl CancelToken {
-    /// A fresh, uncancelled token.
+    /// A fresh, uncancelled token. A token is single-use: once cancelled it stays cancelled,
+    /// so make a new one for each pick.
     pub fn new() -> Self {
         Self(Arc::new(Inner {
             cancelled: AtomicBool::new(false),

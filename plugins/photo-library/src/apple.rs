@@ -40,9 +40,11 @@
 //!    queue.
 //! 5. A cancel runs the token's hook on the cancelling thread: it marks
 //!    [`Shared`] cancelled, enqueues on the main queue the abandon-then-dismiss
-//!    of a still-presented picker and `cancel` on each kept `NSProgress`, and
-//!    sends [`Event::Cancelled`], which ends either wait with
-//!    [`PhotoError::Cancelled`]. A handler that runs later deletes its copy.
+//!    of a still-presented picker and `cancel` on each kept `NSProgress`. Both
+//!    waits check the mark on every wake-up (at most [`POLL`] apart), and
+//!    [`pick`] checks the token once more after the wait, so a cancel that races
+//!    the last answer still returns [`PhotoError::Cancelled`]. A handler that
+//!    runs later deletes its copy.
 //!
 //! A picker released without answering sends `Finished(0)` from its delegate,
 //! the same as a dismissal. One pick runs at a time, until [`pick`] returns; a
@@ -108,8 +110,6 @@ pub(super) enum Event {
     Finished(usize),
     /// The outcome for the item at this selection index.
     Item(usize, Result<PickedItem, String>),
-    /// The call's [`CancelToken`] was cancelled.
-    Cancelled,
 }
 
 /// What one pick shares between the waiting thread, the main queue, the item
@@ -160,7 +160,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The token hook: runs once, on whichever thread cancels.
-fn on_cancel(shared: &Arc<Shared>, tx: &Sender<Event>) {
+fn on_cancel(shared: &Arc<Shared>) {
     shared.cancelled.store(true, Ordering::SeqCst);
     let main = Arc::clone(shared);
     DispatchQueue::main().exec_async(move || {
@@ -171,7 +171,6 @@ fn on_cancel(shared: &Arc<Shared>, tx: &Sender<Event>) {
             log::error!("photo picker: panic while cancelling the pick");
         }
     });
-    let _ = tx.send(Event::Cancelled);
 }
 
 pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError> {
@@ -190,8 +189,8 @@ pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError>
     let (tx, rx) = mpsc::channel();
     let shared = Arc::new(Shared::default());
     if let Some(token) = &options.cancel {
-        let (shared, tx) = (Arc::clone(&shared), tx.clone());
-        token.set_hook(move || on_cancel(&shared, &tx));
+        let shared = Arc::clone(&shared);
+        token.set_hook(move || on_cancel(&shared));
     }
     let present = {
         let options = options.clone();
@@ -218,10 +217,25 @@ pub(crate) fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError>
     };
     DispatchQueue::main().exec_async(present);
     let throttle = options.progress.clone().map(ProgressThrottle::new);
-    let result = collect(&rx, throttle.as_ref(), &|index| shared.load_fraction(index));
+    let result = collect(
+        &rx,
+        throttle.as_ref(),
+        &|index| shared.load_fraction(index),
+        &|| shared.is_cancelled(),
+    );
     if let Some(token) = &options.cancel {
         token.clear_hook();
     }
+    // Checked after the hook is cleared, so a cancel that raced the last answer still wins.
+    let cancelled = options
+        .cancel
+        .as_ref()
+        .is_some_and(CancelToken::is_cancelled);
+    let result = if cancelled {
+        Err(PhotoError::Cancelled)
+    } else {
+        result
+    };
     // Queued after the presentation and any cancel step, so the picker handle
     // is released on the main thread once nothing needs it.
     let release = Arc::clone(&shared);
@@ -299,20 +313,26 @@ fn present_on_main(
 
 /// Wait for the outcome of one pick (module doc's *Threading* and *Results*),
 /// reporting the loading phase through `progress`. `load_fraction` reads the
-/// started load for an index.
+/// started load for an index; `cancelled` is checked on every wake-up. The cancel
+/// path holds no sender, so a load that never answers still ends the wait when
+/// its handler is released.
 fn collect(
     rx: &Receiver<Event>,
     progress: Option<&ProgressThrottle>,
     load_fraction: &dyn Fn(usize) -> Option<f64>,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<PickedItem>, PhotoError> {
     let count = loop {
-        match rx.recv() {
+        let event = rx.recv_timeout(POLL);
+        if cancelled() {
+            return Err(PhotoError::Cancelled);
+        }
+        match event {
             Ok(Event::Failed(e)) => return Err(e),
-            Ok(Event::Cancelled) => return Err(PhotoError::Cancelled),
             Ok(Event::Finished(count)) => break count,
-            Ok(Event::Item(..)) => continue,
+            Ok(Event::Item(..)) | Err(RecvTimeoutError::Timeout) => continue,
             // Every sender is gone without an answer: a dismissal.
-            Err(_) => return Ok(Vec::new()),
+            Err(RecvTimeoutError::Disconnected) => return Ok(Vec::new()),
         }
     };
     if count == 0 {
@@ -332,7 +352,11 @@ fn collect(
     let mut answered = vec![false; count];
     let mut done = 0;
     while done < count {
-        match rx.recv_timeout(POLL) {
+        let event = rx.recv_timeout(POLL);
+        if cancelled() {
+            return Err(PhotoError::Cancelled);
+        }
+        match event {
             Ok(Event::Item(index, outcome)) => {
                 done += 1;
                 if let Some(flag) = answered.get_mut(index) {
@@ -349,7 +373,6 @@ fn collect(
                     }
                 }
             }
-            Ok(Event::Cancelled) => return Err(PhotoError::Cancelled),
             Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             // Every handler is gone; whatever did not answer is lost.
             Err(RecvTimeoutError::Disconnected) => {
@@ -360,15 +383,18 @@ fn collect(
                 break;
             }
         }
-        report(done, overall_fraction(&answered, load_fraction));
+        // The final report waits for a successful outcome, below.
+        if done < count {
+            report(done, overall_fraction(&answered, load_fraction));
+        }
     }
-    report(count, 1.0);
     let items: Vec<PickedItem> = slots.into_iter().flatten().collect();
     if items.is_empty() {
         return Err(PhotoError::Platform(format!(
             "none of the {count} picked items could be copied"
         )));
     }
+    report(count, 1.0);
     Ok(items)
 }
 
@@ -450,7 +476,7 @@ mod tests {
 
     /// `collect` with no progress callback and no started loads.
     fn collect_quiet(rx: &Receiver<Event>) -> Result<Vec<PickedItem>, PhotoError> {
-        collect(rx, None, &|_| None)
+        collect(rx, None, &|_| None, &|| false)
     }
 
     type Log = Arc<Mutex<Vec<PickProgress>>>;
@@ -540,9 +566,9 @@ mod tests {
     #[test]
     fn cancel_while_the_picker_is_open() {
         let (tx, rx) = mpsc::channel();
-        tx.send(Event::Cancelled).unwrap();
         tx.send(Event::Finished(1)).unwrap();
-        assert_eq!(collect_quiet(&rx).unwrap_err(), PhotoError::Cancelled);
+        let outcome = collect(&rx, None, &|_| None, &|| true);
+        assert_eq!(outcome.unwrap_err(), PhotoError::Cancelled);
     }
 
     #[test]
@@ -550,9 +576,36 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         tx.send(Event::Finished(2)).unwrap();
         tx.send(Event::Item(0, Ok(item("a")))).unwrap();
-        tx.send(Event::Cancelled).unwrap();
         tx.send(Event::Item(1, Ok(item("b")))).unwrap();
-        assert_eq!(collect_quiet(&rx).unwrap_err(), PhotoError::Cancelled);
+        // Cancelled on the wake-up after item 0 (Finished, item 0, then this).
+        let wakes = AtomicUsize::new(0);
+        let cancelled = || wakes.fetch_add(1, Ordering::SeqCst) >= 2;
+        let outcome = collect(&rx, None, &|_| None, &cancelled);
+        assert_eq!(outcome.unwrap_err(), PhotoError::Cancelled);
+    }
+
+    #[test]
+    fn a_cancel_that_races_the_last_answer_still_wins() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Finished(1)).unwrap();
+        tx.send(Event::Item(0, Err("cancelled".to_owned())))
+            .unwrap();
+        let wakes = AtomicUsize::new(0);
+        let cancelled = || wakes.fetch_add(1, Ordering::SeqCst) >= 1;
+        let outcome = collect(&rx, None, &|_| None, &cancelled);
+        assert_eq!(outcome.unwrap_err(), PhotoError::Cancelled);
+    }
+
+    #[test]
+    fn a_failed_pick_never_reports_completion() {
+        let (throttle, log) = unthrottled();
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Finished(1)).unwrap();
+        tx.send(Event::Item(0, Err("copy failed".to_owned())))
+            .unwrap();
+        let outcome = collect(&rx, Some(&throttle), &|_| None, &|| false);
+        assert!(matches!(outcome, Err(PhotoError::Platform(_))));
+        assert!(log.lock().unwrap().iter().all(|p| p.fraction < 1.0));
     }
 
     #[test]
@@ -564,7 +617,12 @@ mod tests {
         tx.send(Event::Item(1, Ok(item("b")))).unwrap();
         // Item 1's load is half done when item 0 answers.
         let source = |index: usize| (index == 1).then_some(0.5);
-        assert_eq!(collect(&rx, Some(&throttle), &source).unwrap().len(), 2);
+        assert_eq!(
+            collect(&rx, Some(&throttle), &source, &|| false)
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(
             *log.lock().unwrap(),
             [p(2, 0, 0.0), p(2, 1, 0.75), p(2, 2, 1.0)]
@@ -591,7 +649,12 @@ mod tests {
             }
             tx.send(Event::Item(0, Ok(item("a")))).unwrap();
         });
-        assert_eq!(collect(&rx, Some(&throttle), &source).unwrap().len(), 1);
+        assert_eq!(
+            collect(&rx, Some(&throttle), &source, &|| false)
+                .unwrap()
+                .len(),
+            1
+        );
         answer.join().unwrap();
         let log = log.lock().unwrap();
         assert_eq!(log.first(), Some(&p(1, 0, 0.0)));

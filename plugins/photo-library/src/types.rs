@@ -173,7 +173,8 @@ pub enum PhotoError {
     /// The pick was cancelled through its [`CancelToken`].
     #[error("the pick was cancelled")]
     Cancelled,
-    /// Another pick is already in progress, or the pick cache is being cleared.
+    /// Another pick is already in progress, or the pick cache is being cleared. On Android this
+    /// can briefly follow [`Cancelled`](Self::Cancelled) while the host's copy thread stops.
     #[error("another photo pick is already in progress")]
     Busy,
     /// A filesystem error while preparing the pick cache.

@@ -132,8 +132,11 @@ impl PhotoLibrary {
     /// fresh photo can take seconds to minutes). [`PickOptions::on_progress`] reports that
     /// phase: its first call is the loading signal, and calls are rate-limited. Pass a
     /// [`CancelToken`] through [`PickOptions::cancel`] to abort from another thread.
-    /// Cancelling while the picker is open or while items load returns
-    /// `Err(`[`PhotoError::Cancelled`]`)` and the call's partial copies are removed.
+    /// Cancelling while items load returns `Err(`[`PhotoError::Cancelled`]`)` and the call's
+    /// partial copies are removed. Cancelling while the picker is open returns the same error
+    /// at once on iOS (which dismisses the picker) and on Android (where the system picker
+    /// stays on screen until the user closes it, and its result is discarded). On desktop the
+    /// call returns only after the file dialog closes.
     pub fn pick(options: &PickOptions) -> Result<Vec<PickedItem>, PhotoError> {
         platform::pick(options)
     }
