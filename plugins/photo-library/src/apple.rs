@@ -466,6 +466,23 @@ fn anchor_window(mtm: MainThreadMarker) -> Option<Retained<UIWindow>> {
     fallback
 }
 
+// Originals and saving: replaced by the platform implementations.
+#[cfg(feature = "library")]
+pub(crate) fn export_original(
+    _id: &crate::AssetId,
+    _options: &crate::ExportOptions,
+) -> Result<crate::ExportedOriginal, PhotoError> {
+    Err(PhotoError::Unsupported) // Replaced by the platform implementation.
+}
+
+#[cfg(feature = "save")]
+pub(crate) fn save(
+    _request: &crate::SaveRequest,
+    _kind: crate::MediaKind,
+) -> Result<crate::SavedAsset, PhotoError> {
+    Err(PhotoError::Unsupported) // Replaced by the platform implementation.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
