@@ -820,6 +820,11 @@ impl PanZoomWidget {
 }
 
 impl Widget for PanZoomWidget {
+    /// [`frust_core::InspectDetail::Clip`]: the pan/zoom viewport clips its content to its box.
+    fn inspect_detail(&self) -> Option<frust_core::InspectDetail> {
+        Some(frust_core::InspectDetail::Clip)
+    }
+
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         let max = bc.max();
         let unbounded = BoxConstraints::new(Size::ZERO, Size::new(f64::INFINITY, f64::INFINITY));
@@ -1038,6 +1043,15 @@ mod tests {
     impl PaintScene for NullScene {
         fn fill_rect(&mut self, _o: Point, _s: Size, _c: peniko::Color) {}
         fn draw_text(&mut self, _o: Point, _t: &str) {}
+    }
+
+    #[test]
+    fn pan_zoom_reports_clip_detail() {
+        let h = Harness::new(|v| v);
+        assert_eq!(
+            h.root.inspect()[0].detail,
+            Some(frust_core::InspectDetail::Clip)
+        );
     }
 
     type Root = RenderRoot<App, PanZoomView<App>>;
