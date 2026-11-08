@@ -168,16 +168,12 @@ pub struct InspectNode {
     pub children: Vec<WidgetId>,
     /// Distance from the root (roots are `0`).
     pub depth: usize,
-    /// Structured facts the widget reports about its last layout, filled from
-    /// [`Widget::inspect_detail`] at snapshot time; `None` for every widget that
-    /// does not override it.
+    /// What the widget reports about its last layout, from [`Widget::inspect_detail`]
+    /// at snapshot time; `None` unless the widget overrides that hook.
     pub detail: Option<InspectDetail>,
 }
 
-/// A widget's structured diagnostics, carried on [`InspectNode::detail`].
-///
-/// Read-only tooling data, produced by [`Widget::inspect_detail`]; more variants
-/// may be added, hence `#[non_exhaustive]`.
+/// A widget's read-only diagnostics on [`InspectNode::detail`]; variants may be added.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum InspectDetail {
@@ -185,12 +181,8 @@ pub enum InspectDetail {
     Text(TextInspect),
 }
 
-/// Facts about one text widget's last layout, for [`InspectDetail::Text`].
-///
-/// Deliberately not `#[non_exhaustive]`, so a widget crate can build it with a
-/// plain struct literal and `..Default::default()`. Adding a field is therefore
-/// a minor-version change for out-of-tree literals that do not use that update
-/// syntax.
+/// One text widget's last layout, for [`InspectDetail::Text`]. Not `#[non_exhaustive]`, so a
+/// widget crate builds it as a struct literal; adding a field is a minor-version change.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextInspect {
     /// The text content laid out.
