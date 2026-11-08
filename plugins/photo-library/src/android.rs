@@ -97,6 +97,12 @@
 //! [`WAITS`] slot and wakes the waiter; the waiter forwards it through a
 //! [`ProgressThrottle`] after releasing the lock, and reports the final
 //! `{items, done: items, fraction: 1.0}` once the copies are renamed.
+//!
+//! # Library browsing
+//!
+//! With the `library` feature, `android_library` adds the `albums`, `assets`,
+//! `thumbnail` and `manageLimitedSelection` host calls and refuses the UI
+//! thread on each; see that module and the Kotlin host's contract table.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -765,26 +771,9 @@ pub extern "system" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeO
     .resolve::<LogErrorAndDefault>();
 }
 
-// Library browsing stubs: the platform implementation replaces each body.
+// Library browsing: `albums`, `assets`, `thumbnail`, `manage_limited_selection`.
 #[cfg(feature = "library")]
-pub(crate) fn albums() -> Result<Vec<crate::Album>, PhotoError> {
-    Err(PhotoError::Unsupported)
-}
-
+#[path = "android_library.rs"]
+mod android_library;
 #[cfg(feature = "library")]
-pub(crate) fn assets(_query: &crate::AssetQuery) -> Result<crate::AssetPage, PhotoError> {
-    Err(PhotoError::Unsupported)
-}
-
-#[cfg(feature = "library")]
-pub(crate) fn thumbnail(
-    _id: &crate::AssetId,
-    _request: &crate::ThumbnailRequest,
-) -> Result<crate::Thumbnail, PhotoError> {
-    Err(PhotoError::Unsupported)
-}
-
-#[cfg(feature = "library")]
-pub(crate) fn manage_limited_selection() -> Result<(), PhotoError> {
-    Err(PhotoError::Unsupported)
-}
+pub(crate) use android_library::{albums, assets, manage_limited_selection, thumbnail};

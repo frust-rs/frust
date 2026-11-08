@@ -21,7 +21,11 @@
 //! - the Rust wait has no deadline;
 //! - cancel: the hook calls the host and ends the wait locally, the copy loop
 //!   is chunked and checks the flag, `CANCELLED` maps to `Cancelled`;
-//! - progress is never forwarded under a lock on either side.
+//! - progress is never forwarded under a lock on either side;
+//! - library browsing: the JNI calls and result objects match their Kotlin
+//!   declarations, every blocking call refuses the UI thread, browsing never
+//!   takes the pick slot, paging and the access check keep their shape, and
+//!   the asked-flag keys and permission table match `frust-permissions`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -35,9 +39,14 @@ const MANIFEST: &str = "platform/android/src/main/AndroidManifest.xml";
 const CONSUMER_RULES: &str = "platform/android/consumer-rules.pro";
 const GRADLE: &str = "platform/android/build.gradle.kts";
 const RUST_ANDROID: &str = "src/android.rs";
+const KOTLIN_BROWSER: &str =
+    "platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreBrowser.kt";
+const RUST_ANDROID_LIBRARY: &str = "src/android_library.rs";
+const KOTLIN_PERMISSIONS: &str =
+    "../permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt";
 
-/// How many leading [`SHARED_CODES`] are result codes (the rest are filters).
-const RESULT_CODES: usize = 7;
+/// How many leading [`SHARED_CODES`] are result codes (the rest are filters and kinds).
+const RESULT_CODES: usize = 12;
 
 /// Every code the two sides share, by name.
 const SHARED_CODES: &[&str] = &[
@@ -48,9 +57,16 @@ const SHARED_CODES: &[&str] = &[
     "LAUNCH_FAILED",
     "COPY_FAILED",
     "CANCELLED",
+    "OK",
+    "PERMISSION_DENIED",
+    "NOT_FOUND",
+    "QUERY_FAILED",
+    "NOT_LIMITED",
     "FILTER_IMAGES",
     "FILTER_VIDEOS",
     "FILTER_IMAGES_AND_VIDEOS",
+    "KIND_IMAGE",
+    "KIND_VIDEO",
 ];
 
 fn read(rel: &str) -> String {
@@ -145,7 +161,8 @@ fn rust_code(contents: &str) -> String {
 #[test]
 fn kotlin_codes_equal_their_rust_twins() {
     let kotlin = kotlin_int_consts(&read(KOTLIN_HOST));
-    let rust = rust_jint_consts(&read(RUST_ANDROID));
+    let mut rust = rust_jint_consts(&read(RUST_ANDROID));
+    rust.extend(rust_jint_consts(&read(RUST_ANDROID_LIBRARY)));
     for name in SHARED_CODES {
         let k = kotlin
             .get(*name)
@@ -601,4 +618,289 @@ fn progress_is_never_forwarded_under_a_lock() {
     assert!(start < first_copy, "progress starts before the first copy");
     assert!(copy_all.contains("progress.itemDone()"));
     assert!(kotlin.contains("OpenableColumns.SIZE"));
+}
+
+/// `listOf("a", "b")` argument text of the first declaration line containing `decl`.
+fn list_literal<'a>(contents: &'a str, decl: &str) -> &'a str {
+    let line = contents
+        .lines()
+        .find(|line| line.contains(decl))
+        .unwrap_or_else(|| panic!("source has no `{decl}`"));
+    let start = line.find("listOf(").expect("a listOf declaration") + "listOf(".len();
+    let end = line.rfind(')').expect("a closed listOf");
+    &line[start..end]
+}
+
+#[test]
+fn browse_jni_calls_match_the_kotlin_declarations() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_LIBRARY);
+    for (decl, name, sig) in [
+        (
+            "@JvmStatic\n    fun albums(): AlbumsResult",
+            "albums",
+            "()Ldev/frust/photolibrary/FrustPhotoLibraryHost$AlbumsResult;",
+        ),
+        (
+            "@JvmStatic\n    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult",
+            "assets",
+            "(Ljava/lang/String;IJI)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;",
+        ),
+        (
+            "@JvmStatic\n    fun thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult",
+            "thumbnail",
+            "(Ljava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;",
+        ),
+        (
+            "@JvmStatic\n    fun manageLimitedSelection(requestId: Long): Int",
+            "manageLimitedSelection",
+            "(J)I",
+        ),
+    ] {
+        assert!(kotlin.contains(decl), "Kotlin host must declare `{decl}`");
+        let at = rust
+            .find(&format!("jni_str!(\"{name}\")"))
+            .unwrap_or_else(|| panic!("src/android_library.rs never calls `{name}`"));
+        let window = &rust[at..(at + 300).min(rust.len())];
+        assert!(
+            window.contains(&format!("\"{sig}\"")),
+            "src/android_library.rs must call `{name}` with `{sig}`"
+        );
+    }
+}
+
+/// `@JvmField val <name>: <kotlin type>` lines of the Kotlin class declared by
+/// `class_marker`, up to the `)` that closes its constructor.
+fn jvm_fields(contents: &str, class_marker: &str) -> Vec<(String, String)> {
+    let start = contents
+        .find(class_marker)
+        .unwrap_or_else(|| panic!("source has no `{class_marker}`"));
+    let end = start
+        + contents[start..]
+            .find("\n    )")
+            .unwrap_or_else(|| panic!("`{class_marker}` constructor is not closed"));
+    contents[start..end]
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("@JvmField val "))
+        .map(|field| {
+            let (name, ty) = field
+                .trim_end_matches(',')
+                .split_once(": ")
+                .expect("a typed field");
+            (name.to_string(), ty.to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn browse_result_fields_match_their_rust_reads() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_LIBRARY);
+    let reads = [
+        (
+            "class AlbumsResult(",
+            vec![
+                ("code", "Int", "int_field"),
+                ("ids", "Array<String>", "string_array_field"),
+                ("titles", "Array<String?>", "string_array_field"),
+                ("counts", "LongArray", "long_array_field"),
+            ],
+        ),
+        (
+            "class AssetsResult(",
+            vec![
+                ("code", "Int", "int_field"),
+                ("total", "Long", "get_field"),
+                ("ids", "Array<String>", "string_array_field"),
+                ("kinds", "IntArray", "int_array_field"),
+                ("widths", "IntArray", "int_array_field"),
+                ("heights", "IntArray", "int_array_field"),
+                ("dates", "LongArray", "long_array_field"),
+                ("durations", "LongArray", "long_array_field"),
+            ],
+        ),
+        (
+            "class ThumbnailResult(",
+            vec![
+                ("code", "Int", "int_field"),
+                ("width", "Int", "int_field"),
+                ("height", "Int", "int_field"),
+                ("rowBytes", "Int", "int_field"),
+                ("pixels", "ByteArray?", "get_field"),
+            ],
+        ),
+    ];
+    for (class, fields) in reads {
+        let declared = jvm_fields(&kotlin, class);
+        let expected: Vec<_> = fields
+            .iter()
+            .map(|(name, ty, _)| (name.to_string(), ty.to_string()))
+            .collect();
+        assert_eq!(declared, expected, "`{class}` fields changed");
+        for (name, _, reader) in fields {
+            let read = if reader == "get_field" {
+                format!(".get_field(&result, jni_str!(\"{name}\")")
+            } else {
+                format!("{reader}(env, &result, jni_str!(\"{name}\"))")
+            };
+            assert!(
+                rust.contains(&read),
+                "no `{read}` in src/android_library.rs"
+            );
+        }
+    }
+    assert!(
+        rust.contains(".get_field(&result, jni_str!(\"total\"), jni_sig!(\"J\"))"),
+        "`total` is a Long"
+    );
+    assert!(
+        rust.contains(".get_field(&result, jni_str!(\"pixels\"), jni_sig!(\"[B\"))"),
+        "`pixels` is a byte array"
+    );
+    let strings = kotlin_string_consts(&kotlin);
+    assert_eq!(
+        strings.get("ALL_MEDIA_ALBUM_ID").map(String::as_str),
+        Some("frust.all_media")
+    );
+    assert!(rust.contains("const ALL_MEDIA_ALBUM_ID: &str = \"frust.all_media\";"));
+    assert!(
+        read(RUST_ANDROID).contains("#[path = \"android_library.rs\"]\nmod android_library;"),
+        "src/android.rs declares the browsing arm"
+    );
+}
+
+#[test]
+fn every_blocking_library_call_refuses_the_ui_thread() {
+    let rust = rust_code(&read(RUST_ANDROID_LIBRARY));
+    for name in [
+        "pub(crate) fn albums(",
+        "pub(crate) fn assets(",
+        "pub(crate) fn thumbnail(",
+    ] {
+        let body = function(&rust, name);
+        let ui = body
+            .find("ensure_off_ui_thread(env)?;")
+            .unwrap_or_else(|| panic!("`{name}` must refuse the UI thread"));
+        let call = body.find("call_static_method").unwrap();
+        assert!(
+            ui < call,
+            "`{name}` checks the UI thread before the host call"
+        );
+        assert!(
+            !body.contains("PickGuard"),
+            "`{name}` is read-only and never takes the pick guard"
+        );
+    }
+    let manage = function(&rust, "pub(crate) fn manage_limited_selection(");
+    let ui = manage
+        .find("ensure_off_ui_thread(env)")
+        .expect("manage_limited_selection refuses the UI thread");
+    let guard = manage
+        .find("let _one_at_a_time = pick_cache::PickGuard::acquire()?;")
+        .expect("manage_limited_selection takes the pick guard in a named guard");
+    let host = manage.find("jni_str!(\"manageLimitedSelection\")").unwrap();
+    assert!(ui < guard && guard < host);
+    assert!(manage.contains("await_answer(request_id, None)"));
+
+    let browser = read(KOTLIN_BROWSER);
+    assert!(
+        !browser.contains("claimInFlight"),
+        "browsing never takes the pick slot"
+    );
+    let kotlin = read(KOTLIN_HOST);
+    let manage = function(
+        &kotlin,
+        "fun manageLimitedSelection(requestId: Long): Int {",
+    );
+    assert!(manage.contains("if (!MediaStoreBrowser.isLimited(ctx)) return NOT_LIMITED"));
+    assert!(
+        manage.contains("if (!claimInFlight(requestId, activity)) {")
+            && manage.contains("return BUSY"),
+        "the selection prompt shares the pick's single in-flight slot"
+    );
+    assert!(manage.contains("mainHandler.post { launchSelectionPrompt("));
+    let launch = function(&kotlin, "private fun launchSelectionPrompt(");
+    assert!(launch.contains("val key = LAUNCHER_KEY_PREFIX + requestId"));
+    assert!(launch.contains("ActivityResultContracts.RequestMultiplePermissions()"));
+    assert!(launch.contains("MediaStoreBrowser.recordAsked(ctx, results.keys)"));
+    assert!(
+        launch.contains("notifyCancelled(requestId)"),
+        "the prompt's close answers through the pick relay"
+    );
+}
+
+#[test]
+fn browsing_checks_access_and_pages_by_sdk() {
+    let browser = read(KOTLIN_BROWSER);
+    let guard = function(&browser, "private inline fun <T> browse(");
+    assert!(
+        guard.contains("if (ctx == null) return failed(FrustPhotoLibraryHost.NOT_INITIALIZED)")
+    );
+    assert!(
+        guard.contains(
+            "if (!hasAccess(ctx)) return failed(FrustPhotoLibraryHost.PERMISSION_DENIED)"
+        )
+    );
+    assert!(guard.contains("catch (e: SecurityException)"));
+    let page = function(&browser, "private fun queryPage(");
+    assert!(page.contains("if (Build.VERSION.SDK_INT < 30) {"));
+    assert!(page.contains("ContentResolver.QUERY_ARG_OFFSET"));
+    assert!(page.contains("ContentResolver.QUERY_ARG_LIMIT"));
+    let rows = function(&browser, "private fun readRows(");
+    assert!(rows.contains("val first = if (Build.VERSION.SDK_INT < 30) offset else 0"));
+    assert!(rows.contains("cursor.moveToPosition(first)"));
+    assert!(
+        browser.contains("MediaStore.Video.Media.EXTERNAL_CONTENT_URI"),
+        "asset ids are typed collection URIs, which loadThumbnail resolves on every API level"
+    );
+    let thumb = function(&browser, "fun thumbnail(");
+    assert!(thumb.contains("loadThumbnail(uri, Size(width, height), null)"));
+    assert!(thumb.contains("catch (e: FileNotFoundException)"));
+    assert!(thumb.contains("Bitmap.Config.ARGB_8888"));
+    assert!(thumb.contains("copyPixelsToBuffer"));
+
+    let rust = rust_code(&read(RUST_ANDROID_LIBRARY));
+    let thumbnail_from = function(&rust, "fn thumbnail_from(");
+    assert!(
+        thumbnail_from.contains("pixels::unpremultiply_rgba8_in_place(&mut rgba);"),
+        "the host's premultiplied rows become straight alpha"
+    );
+    let error = function(&rust, "fn browse_error(");
+    assert!(error.contains("PERMISSION_DENIED => PhotoError::PermissionDenied,"));
+    assert!(error.contains("NOT_FOUND => PhotoError::NotFound,"));
+}
+
+#[test]
+fn asked_flag_keys_and_permissions_match_frust_permissions() {
+    let browser = read(KOTLIN_BROWSER);
+    let permissions = read(KOTLIN_PERMISSIONS);
+    let ours = kotlin_string_consts(&browser);
+    let theirs = kotlin_string_consts(&permissions);
+    for name in ["PREFS_FILE", "ASKED_KEY_PREFIX"] {
+        assert!(
+            ours.contains_key(name),
+            "MediaStoreBrowser has no `const val {name}`"
+        );
+        assert_eq!(
+            ours.get(name),
+            theirs.get(name),
+            "`{name}` must equal frust-permissions'"
+        );
+    }
+    assert!(
+        function(&browser, "internal fun recordAsked(")
+            .contains("editor.putBoolean(ASKED_KEY_PREFIX + it, true)"),
+        "the asked flag is the same key and value frust-permissions reads"
+    );
+    for (ours_decl, theirs_decl) in [
+        ("MEDIA_PERMISSIONS_SDK29 =", "PHOTOS_READ_WRITE_SDK29 ="),
+        ("MEDIA_PERMISSIONS_SDK33 =", "PHOTOS_READ_WRITE_SDK33 ="),
+        ("MEDIA_PERMISSIONS_SDK34 =", "PHOTOS_READ_WRITE_SDK34 ="),
+    ] {
+        assert_eq!(
+            list_literal(&browser, ours_decl),
+            list_literal(&permissions, theirs_decl),
+            "the media permission table must match frust-permissions' `{theirs_decl}`"
+        );
+    }
 }
