@@ -42,6 +42,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `set_metrics` / `resize`. Built with `new`, `with_options` (`TesterOptions`) or `new_with`. There
   is no process-wide lock, so Tester tests run in parallel. The one-shot helpers `semantics_of`,
   `scene_of` and `scene_of_with` are unchanged. `frust::authoring` re-exports `TextWidget`.
+  `Tester::up_at` releases a gesture at a point it never moved to (the `Up` carries the point; no
+  travel reaches a velocity tracker), and `frust::testing` re-exports `InspectDetail` and
+  `TextInspect` next to `InspectNode`, so a test can honour clipping ancestors for any control.
 - `frust::paths::{data_dir, cache_dir, atomic_write}`: the platform data and cache directories and the
   write-to-temp-and-rename helper, re-exported from `frust-paths` so an app depending on the facade
   alone can place caches, sidecars and export staging; the module docs say what each platform backs up.
