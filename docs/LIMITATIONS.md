@@ -9162,7 +9162,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ### `testing-text-runs-engine-clips` — `Tester::text_runs` sees only clips a widget declares, and no text inputs
 
-**Observed**: `text_runs` and `assert_no_text_overflow` read clips only from widgets that report `InspectDetail::Clip` (scroll, list and page views, viewports, pan/zoom, the navigator). A clip pushed by any other widget (a design-system plugin widget, a rounded clip, a custom widget) is not consulted: a run it hides while inside its ancestors' boxes is not reported, and a run it legitimately keeps outside its own box reads as `outside_parent`. `TextInput` runs are not reported at all.
+**Observed**: `text_runs` and `assert_no_text_overflow` read clips only from widgets that report `InspectDetail::Clip` (scroll, list and page views, viewports and their slivers, pan/zoom, the navigator). A clip pushed by any other widget (a design-system plugin widget, a rounded clip, a custom widget) is not consulted: a run it hides while inside its ancestors' boxes is not reported, and a run it legitimately keeps outside its own box reads as `outside_parent`. A `hidden` run (scrolled fully out of view) is not checked at all, so whether an over-wide or cut run is caught depends on the scroll position. Under `PanZoomWidget` the visibility judgement assumes an identity transform: inspect bounds ignore pan and zoom. `TextInput` runs are not reported at all.
 
 **Applies to**: `frust::testing::Tester` text-run diagnostics, all hosts.
 

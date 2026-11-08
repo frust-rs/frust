@@ -340,7 +340,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `EitherWidget`, `EitherOf3Widget`…`EitherOf8Widget` and `ShortcutsWidget` forward it from their
   child. A hand-written `InspectNode` struct literal now needs `detail: None`. `InspectDetail::Clip`
   marks a widget that clips its descendants to its own box: `ScrollWidget`, `ListViewWidget`,
-  `PageViewWidget`, `ViewportWidget`, `PanZoomWidget` and `NavigatorWidget` report it.
+  `PageViewWidget`, `ViewportWidget`, `PanZoomWidget`, `NavigatorWidget` and, while they clip
+  overflowing content, the sliver list, grid, fixed-extent list, box adapter, fill-remaining and
+  padding widgets report it.
 - `frust::testing::Tester::{text_runs, text_overflows, assert_no_text_overflow}` and `TextRun`:
   list every text run with its geometry and flags, and fail a test when one is cut or sticks out.
   Containment stops at a clipping ancestor: content a scroll, list or page viewport hides is

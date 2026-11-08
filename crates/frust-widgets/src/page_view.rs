@@ -833,13 +833,20 @@ mod tests {
         let rig = Rig::new(&PageController::new(), ScrollAxis::Vertical, None);
         let nodes = rig.root.inspect();
         assert_eq!(nodes[0].detail, Some(InspectDetail::Clip));
+        let run_of = |nodes: &[frust_core::InspectNode]| {
+            let run = nodes
+                .iter()
+                .find(|n| n.type_name.contains("PageSliverWidget"));
+            run.expect("page run pod").detail.clone()
+        };
+        assert_eq!(run_of(&nodes), Some(InspectDetail::Clip));
 
         let mut fit: RenderRoot<(), PageView<()>> = RenderRoot::new();
         fit.rebuild(&mut |_: &mut ()| page_view((leaf(1.0, 1.0),)), &mut ());
         fit.layout(WINDOW);
         let nodes = fit.inspect();
         // The page run fits its viewport, so its own pod reports no clip.
-        assert!(nodes.iter().skip(1).any(|n| n.detail.is_none()));
+        assert_eq!(run_of(&nodes), None);
     }
 
     /// The rig's build closure.

@@ -1369,7 +1369,7 @@ pub trait Widget: Any {
     /// Structured facts about this widget's last layout, for read-only tooling
     /// like [`Widget::visit_children`]; defaults to `None`. Called only by the
     /// inspector and must not mutate pass state. A transparent wrapper forwards
-    /// it to its single child.
+    /// it to its single child; a widget clipping its children reports `Clip`.
     fn inspect_detail(&self) -> Option<InspectDetail> {
         None
     }

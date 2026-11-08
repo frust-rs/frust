@@ -19,7 +19,6 @@ use super::Tester;
 const TOLERANCE: f64 = 0.5;
 
 /// One text run of the retained tree, from [`Tester::text_runs`].
-///
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct TextRun {
@@ -352,6 +351,25 @@ mod tests {
         assert!(runs.iter().any(|r| r.hidden), "{runs:?}");
         assert!(runs.iter().any(|r| r.clipped), "{runs:?}");
         assert!(tester.text_overflows().is_empty());
+    }
+
+    #[test]
+    fn sliver_rows_past_the_edge_do_not_overflow() {
+        let mut tester = tester(300.0, |_: &mut ()| {
+            crate::custom_scroll_view((crate::sliver_list(
+                30,
+                |i| crate::ChildKey::new(i as u64),
+                |i| text(format!("row {i}")),
+            ),))
+        });
+        tester.pump_and_settle();
+        let runs = tester.text_runs();
+        assert!(runs.iter().any(|r| r.clipped && !r.hidden), "{runs:?}");
+        assert!(
+            tester.text_overflows().is_empty(),
+            "{:?}",
+            tester.text_overflows()
+        );
     }
 
     #[test]
