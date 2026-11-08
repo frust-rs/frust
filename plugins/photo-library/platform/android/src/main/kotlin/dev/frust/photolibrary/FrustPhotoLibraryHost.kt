@@ -48,8 +48,20 @@ import java.util.concurrent.Executors
  * | Kotlin → Rust | `nativeOnPickResult(requestId: Long, paths: Array<String>, names: Array<String?>, mimes: Array<String?>)` | the copies, in pick order; three empty arrays mean cancelled |
  * | Kotlin → Rust | `nativeOnPickError(requestId: Long, code: Int)` | [NO_ACTIVITY], [LAUNCH_FAILED], [COPY_FAILED] or [CANCELLED] |
  * | Kotlin → Rust | `nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)` | copy progress, never an answer |
+ * | Rust → Kotlin | `albums(): AlbumsResult` | an [AlbumsResult]; `code` is [OK], [NOT_INITIALIZED], [PERMISSION_DENIED] or [QUERY_FAILED] |
+ * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult` | an [AssetsResult], same codes as `albums` |
+ * | Rust → Kotlin | `thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] |
+ * | Rust → Kotlin | `manageLimitedSelection(requestId: Long): Int` — `(J)I` | [PENDING] after posting the prompt, [NOT_LIMITED], [NO_ACTIVITY], [BUSY] or [NOT_INITIALIZED]; answered through [nativeOnPickResult] (three empty arrays) or [nativeOnPickError] |
  *
  * Every request that returned [PENDING] gets exactly one of the two answers.
+ *
+ * ## Browsing
+ *
+ * [albums], [assets] and [thumbnail] run in [MediaStoreBrowser] on the calling
+ * thread, return their result object synchronously, and never touch the
+ * in-flight slot. [manageLimitedSelection] presents the Android 14 selection
+ * UI: `RequestMultiplePermissions` for the SDK media set, through the same
+ * slot and launcher key as a pick.
  *
  * ## The picker
  *
@@ -127,6 +139,16 @@ object FrustPhotoLibraryHost {
     const val COPY_FAILED = 5
     /** The pick was cancelled through [cancel]. */
     const val CANCELLED = 6
+    /** A browse call succeeded; the result object carries its data. */
+    const val OK = 7
+    /** No photo permission of the SDK set is granted. */
+    const val PERMISSION_DENIED = 8
+    /** The asset no longer exists (a stale identifier). */
+    const val NOT_FOUND = 9
+    /** A `MediaStore` query or decode failed. */
+    const val QUERY_FAILED = 10
+    /** [manageLimitedSelection] had nothing to do: access is not limited. */
+    const val NOT_LIMITED = 11
 
     // --- Filter codes: mirror `src/android.rs`.
 
@@ -136,6 +158,16 @@ object FrustPhotoLibraryHost {
     const val FILTER_VIDEOS = 1
     /** Images and videos. */
     const val FILTER_IMAGES_AND_VIDEOS = 2
+
+    // --- Asset kinds in [AssetsResult.kinds]: mirror `src/android_library.rs`.
+
+    /** A still image. */
+    const val KIND_IMAGE = 0
+    /** A video. */
+    const val KIND_VIDEO = 1
+
+    /** The synthetic all-media album's id, listed first by [albums]. */
+    const val ALL_MEDIA_ALBUM_ID = "frust.all_media"
 
     /**
      * File-name prefix of a staging copy inside `destDir`; the item's index
@@ -152,6 +184,38 @@ object FrustPhotoLibraryHost {
 
     /** Minimum spacing of in-copy progress reports. */
     const val PROGRESS_INTERVAL_MS = 100L
+
+    // --- Browse results: read field by field from Rust, nested here so the
+    // module's `FrustPhotoLibraryHost$*` keep rule covers them.
+
+    /** [albums]: parallel arrays, one entry per album. */
+    class AlbumsResult(
+        @JvmField val code: Int,
+        @JvmField val ids: Array<String>,
+        @JvmField val titles: Array<String?>,
+        @JvmField val counts: LongArray,
+    )
+
+    /** [assets]: parallel arrays for one page; [total] counts the whole query. */
+    class AssetsResult(
+        @JvmField val code: Int,
+        @JvmField val total: Long,
+        @JvmField val ids: Array<String>,
+        @JvmField val kinds: IntArray,
+        @JvmField val widths: IntArray,
+        @JvmField val heights: IntArray,
+        @JvmField val dates: LongArray,
+        @JvmField val durations: LongArray,
+    )
+
+    /** [thumbnail]: premultiplied RGBA8 with [rowBytes] per row. */
+    class ThumbnailResult(
+        @JvmField val code: Int,
+        @JvmField val width: Int,
+        @JvmField val height: Int,
+        @JvmField val rowBytes: Int,
+        @JvmField val pixels: ByteArray?,
+    )
 
     /** The application [Context], installed once by [FrustPhotoLibraryInitProvider]. */
     @Volatile
@@ -252,6 +316,39 @@ object FrustPhotoLibraryHost {
     @JvmStatic
     fun cancel(requestId: Long) {
         if (cancelInFlight(requestId)) notifyError(requestId, CANCELLED)
+    }
+
+    /** The albums the app can see. Any thread but the main one (the query blocks). */
+    @JvmStatic
+    fun albums(): AlbumsResult = MediaStoreBrowser.albums(appContext)
+
+    /** One page of assets, newest first. Any thread but the main one (the query blocks). */
+    @JvmStatic
+    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult =
+        MediaStoreBrowser.assets(appContext, albumId, filter, offset, limit)
+
+    /** One thumbnail. Any thread but the main one (the decode blocks). */
+    @JvmStatic
+    fun thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
+        MediaStoreBrowser.thumbnail(appContext, id, width, height, fill)
+
+    /**
+     * Re-show the Android 14 photo selection UI by requesting the SDK media
+     * set (class doc, "Browsing"). Returns [PENDING] after posting the prompt,
+     * answered through [nativeOnPickResult] with three empty arrays, or
+     * [NOT_LIMITED] when the app does not hold a partial grant.
+     */
+    @JvmStatic
+    fun manageLimitedSelection(requestId: Long): Int {
+        val ctx = appContext ?: return NOT_INITIALIZED
+        if (!MediaStoreBrowser.isLimited(ctx)) return NOT_LIMITED
+        val activity = resumedActivity as? ComponentActivity ?: return NO_ACTIVITY
+        if (!claimInFlight(requestId, activity)) {
+            Log.i(TAG, "frust-photo-library: a pick is already in flight")
+            return BUSY
+        }
+        mainHandler.post { launchSelectionPrompt(ctx, requestId, activity) }
+        return PENDING
     }
 
     // --- Kotlin -> Rust -----------------------------------------------------
@@ -393,14 +490,41 @@ object FrustPhotoLibraryHost {
         }
     }
 
+    /**
+     * Register, launch and answer the selection prompt. Main thread. An empty
+     * result (the request was cancelled) records no asked flag.
+     */
+    private fun launchSelectionPrompt(ctx: Context, requestId: Long, activity: ComponentActivity) {
+        if (!holdsInFlight(requestId)) return
+        if (activity.isFinishing || activity.isDestroyed) {
+            if (releaseInFlight(requestId)) notifyError(requestId, NO_ACTIVITY)
+            return
+        }
+        val key = LAUNCHER_KEY_PREFIX + requestId
+        var launcher: ActivityResultLauncher<Array<String>>? = null
+        try {
+            launcher = register(activity, key, ActivityResultContracts.RequestMultiplePermissions()) { results ->
+                if (releaseInFlight(requestId)) {
+                    MediaStoreBrowser.recordAsked(ctx, results.keys)
+                    notifyCancelled(requestId)
+                }
+            }
+            launcher.launch(MediaStoreBrowser.mediaPermissions(Build.VERSION.SDK_INT).toTypedArray())
+        } catch (e: Exception) {
+            launcher?.unregister()
+            Log.w(TAG, "frust-photo-library: launching the selection prompt failed: ${e.javaClass.name}")
+            if (releaseInFlight(requestId)) notifyError(requestId, LAUNCH_FAILED)
+        }
+    }
+
     /** A one-shot launcher under [key] that unregisters itself before [onResult]. */
-    private fun <O> register(
+    private fun <I, O> register(
         activity: ComponentActivity,
         key: String,
-        contract: ActivityResultContract<PickVisualMediaRequest, O>,
+        contract: ActivityResultContract<I, O>,
         onResult: (O) -> Unit,
-    ): ActivityResultLauncher<PickVisualMediaRequest> {
-        var launcher: ActivityResultLauncher<PickVisualMediaRequest>? = null
+    ): ActivityResultLauncher<I> {
+        var launcher: ActivityResultLauncher<I>? = null
         val registered = activity.activityResultRegistry.register(key, contract) { result ->
             launcher?.unregister()
             onResult(result)
