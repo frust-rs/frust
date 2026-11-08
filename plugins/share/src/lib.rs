@@ -131,8 +131,11 @@ impl Share {
     /// # Threading
     /// Never blocks on file size on any platform, so it may be called from a
     /// UI handler. On Android `Ok(ShareOutcome::Presented)` means the share
-    /// was enqueued: staging happens on a background thread, and a later
-    /// staging failure is logged and shows no chooser.
+    /// was enqueued: the files are copied on a background thread (a snapshot
+    /// taken then), and a later staging failure is logged and shows no
+    /// chooser. A chooser Android refuses to launch because the app went to
+    /// the background in the meantime does not appear either, and nothing is
+    /// logged.
     ///
     /// # Errors
     /// [`ShareError::EmptyPayload`] for no paths, [`ShareError::TooManyFiles`]

@@ -170,10 +170,11 @@ fn host_error(code: i32) -> ShareError {
 }
 
 /// Share `paths` through `FrustShareHost`, which validates them and returns at
-/// once; a background thread then stages them in the cache (hard link, else
-/// copy), grants read access via the module's `FileProvider` and starts the
-/// chooser. `Presented` therefore means enqueued: a later staging or launch
-/// failure is logged under tag `FrustShare` and shows no chooser.
+/// once; a background thread then copies them into the cache, grants read
+/// access via the module's `FileProvider` and starts the chooser. `Presented`
+/// therefore means enqueued: a later staging or launch failure is logged under
+/// tag `FrustShare` and shows no chooser, and a launch Android refuses because
+/// the app went to the background shows no chooser and logs nothing.
 /// Exceptions map to the class name only; a missing host class means the
 /// Gradle module is not wired into the app.
 pub(crate) fn share_files(

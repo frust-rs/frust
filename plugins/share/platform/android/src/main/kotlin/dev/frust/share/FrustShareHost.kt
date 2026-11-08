@@ -4,8 +4,6 @@ import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import android.system.ErrnoException
-import android.system.Os
 import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
@@ -19,11 +17,11 @@ import java.util.concurrent.Executors
  *
  * The Rust side (`plugins/share/src/android.rs`) loads this class through the
  * application classloader and calls [shareFiles], which validates and returns;
- * a background thread then stages each file (hard link, else copy) into
+ * a background thread then copies each file into
  * `cacheDir/frust-share/<unique>/<name>`, removing every directory it created
- * for the call if any file fails. Only that directory is exposed
- * by [FrustShareFileProvider], and the chooser receives read grants on the
- * copies, never on the originals.
+ * for the call if any file fails. The copies are snapshots taken when staging
+ * runs; only that directory is exposed by [FrustShareFileProvider], and the
+ * chooser receives read grants on the copies, never on the originals.
  */
 object FrustShareHost {
     const val OK = 0
@@ -45,7 +43,9 @@ object FrustShareHost {
      * Validates [paths] and returns [OK] once the share is enqueued. The
      * staging and the chooser launch run on a background thread, so this never
      * blocks on file size; a later failure is logged under tag `FrustShare`
-     * (error class only) and shows no chooser.
+     * (error class only) and shows no chooser. If the app is backgrounded
+     * while staging runs, Android may refuse the chooser launch without an
+     * error, so that case shows no chooser and logs nothing.
      */
     @JvmStatic
     fun shareFiles(context: Context, paths: Array<String>, subject: String?): Int {
@@ -74,7 +74,7 @@ object FrustShareHost {
                 created.add(dir)
                 if (!dir.mkdirs()) throw java.io.IOException("staging directory")
                 val copy = File(dir, source.name)
-                stage(source, copy)
+                source.copyTo(copy)
                 uris.add(FileProvider.getUriForFile(context, authority, copy))
                 mimes.add(mimeOf(copy.name))
             }
@@ -100,17 +100,6 @@ object FrustShareHost {
         } catch (e: Exception) {
             created.forEach { it.deleteRecursively() }
             Log.w(TAG, "file share failed: " + e.javaClass.simpleName)
-        }
-    }
-
-    // A hard link when source and copy share a filesystem; a copy otherwise.
-    private fun stage(source: File, copy: File) {
-        try {
-            Os.link(source.path, copy.path)
-        } catch (e: ErrnoException) {
-            source.copyTo(copy)
-        } catch (e: java.io.IOException) {
-            source.copyTo(copy)
         }
     }
 
