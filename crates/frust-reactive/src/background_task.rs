@@ -177,10 +177,10 @@ mod tests {
     use std::sync::MutexGuard;
     use std::sync::atomic::AtomicU64;
 
-    static LOCK: Mutex<()> = Mutex::new(());
-
     fn setup() -> MutexGuard<'static, ()> {
-        let g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let g = crate::WAKER_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         ReactiveRuntime::init(Arc::new(|| {}));
         *BACKEND.lock().unwrap_or_else(|e| e.into_inner()) = None;
         g
