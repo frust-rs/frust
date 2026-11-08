@@ -92,8 +92,8 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
   0.5 px per edge). Ellipsized alone is not an overflow: the ellipsis is the intended fit.
   `assert_no_text_overflow()` panics listing each offender with its size, parent size and flags.
   Containment comes from pod geometry, never engine clips, so a run hidden by a `PushClip` inside its
-  ancestors' boxes is not reported (`testing-text-runs-engine-clips` in LIMITATIONS.md); `TextInput`
-  contents are not covered.
+  ancestors' boxes is not reported (`testing-text-runs-engine-clips` in
+  [LIMITATIONS.md](LIMITATIONS.md)); `TextInput` contents are not covered.
 
 Run: `cargo test -p frust-ui --features test-support --lib`.
 
