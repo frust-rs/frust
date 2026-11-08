@@ -1,6 +1,6 @@
 # frust-share
 
-Share text or an http/https URL through the platform share sheet.
+Share text, an http/https URL or files through the platform share sheet.
 
 ## Add the dependency
 
@@ -18,6 +18,9 @@ Share::text("Hello", Some("Subject"))?;
 Share::url("https://frust.dev", None)?;
 // iOS iPad popover anchor (logical points); ignored elsewhere.
 Share::text_anchored("Hello", None, Some(&ShareAnchor { rect }))?;
+// One or more files (absolute paths to existing regular files).
+Share::files(&[path.as_path()], None)?;
+Share::files_anchored(&[path.as_path()], None, Some(&ShareAnchor { rect }))?;
 ```
 
 Fire-and-forget: `Ok` means the platform call was enqueued. `ShareError` is
@@ -30,8 +33,23 @@ absolute http/https URLs.
 |----------|-----------|---------|
 | Android | `ACTION_SEND` chooser (`text/plain`, `EXTRA_TEXT`, `EXTRA_SUBJECT`) via JNI | `Presented` |
 | iOS | `UIActivityViewController` from the key window's top view controller, on the main queue | `Presented` |
-| macOS / Linux / Windows | desktop = clipboard copy via `frust-clipboard` | `CopiedToClipboard` |
-| Other | `ShareError::Platform("unsupported platform")` | - |
+| macOS | text/URL: clipboard copy via `frust-clipboard`; files: `NSSharingServicePicker` | `CopiedToClipboard` / `Presented` |
+| Linux / Windows | text/URL: clipboard copy via `frust-clipboard`; files: `ShareError::Unsupported` | `CopiedToClipboard` / - |
+| Android (files) | `ShareError::Unsupported` for now | - |
+| Other | `ShareError::Platform("unsupported platform")` (text/URL), `Unsupported` (files) | - |
+
+## Files
+
+`Share::files(paths, subject)` takes 1 to 64 paths; each must be absolute and
+name an existing regular file (checked and canonicalised before any platform
+call). Failures are `EmptyPayload` (no paths), `TooManyFiles` (more than 64)
+and `InvalidFile` (relative, missing, a directory, or not UTF-8); none echoes
+a path. On iOS the activity sheet carries one file URL per path (iPad popover
+rules below apply). On macOS an `NSSharingServicePicker` opens relative to the
+key window's content view: with a `ShareAnchor` (top-left logical points) at
+that rect, otherwise a zero-size rect at the view's centre; the `subject` is
+ignored. Linux and Windows have no file share UI and return
+`ShareError::Unsupported`.
 
 ## iOS
 

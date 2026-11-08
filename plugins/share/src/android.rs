@@ -143,6 +143,14 @@ pub(crate) fn share(text: &str, subject: Option<&str>) -> Result<ShareOutcome, S
     })
 }
 
+/// File sharing is not implemented on Android yet.
+pub(crate) fn share_files(
+    _paths: &[std::path::PathBuf],
+    _subject: Option<&str>,
+) -> Result<ShareOutcome, ShareError> {
+    Err(ShareError::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

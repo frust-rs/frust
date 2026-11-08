@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Share plugin for Frust apps: opens the platform share sheet for text or a URL (Android chooser, iOS activity sheet, desktop clipboard fallback)."
+description = "Share plugin for Frust apps: opens the platform share sheet for text, a URL or files (Android chooser, iOS activity sheet, macOS sharing picker, clipboard fallback for text and URLs on desktop)."
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -48,6 +48,23 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIPopoverSupport",
 ] }
 # Main-queue bounce (`src/apple.rs`); features repeated for the same `default-features` reason.
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }
+
+# macOS only: the file-share `NSSharingServicePicker` (`src/macos.rs`). `NSSharingService`
+# gates the picker, `NSView`/`NSResponder` its `showRelativeToRect:ofView:`; the rest is the
+# key-window walk. `dispatch2` repeats its features for the same `default-features` reason.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSSharingService",
+    "NSView",
+    "NSResponder",
+    "NSWindow",
+    "NSApplication",
+    "objc2-core-foundation",
+] }
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }
 
 # Plugin->plugin edge (docs/PLUGINS_CODE_STANDARDS.md): desktop has no share sheet,
