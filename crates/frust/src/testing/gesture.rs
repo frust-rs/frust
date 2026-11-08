@@ -170,6 +170,22 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
         self.send(&gesture.event(PointerPhase::Up))
     }
 
+    /// Release `gesture` at window-space `at`, with no `Move` first.
+    ///
+    /// A real pointer can lift at a point it never reported a position for, and the `Up` carries
+    /// that point. Nothing else is sent, so no travel reaches a velocity tracker: a release far
+    /// from the last `Move` stays a release and never becomes a fling, which a
+    /// [`move_to`](Self::move_to) just before the [`up`](Self::up) would make it.
+    ///
+    /// A gesture detector learns that a finger left its bounds from `Move`s, not from the `Up`'s
+    /// position, so an `up_at` outside the bounds with no `Move` before it still resolves as a
+    /// tap — on a device an `Up` never lands away from the last `Move`. To model a finger that
+    /// left, [`move_to`](Self::move_to) out of the bounds first, then [`up`](Self::up).
+    pub fn up_at(&mut self, mut gesture: Gesture, at: impl Into<Point>) -> EventOutcome {
+        gesture.position = at.into();
+        self.send(&gesture.event(PointerPhase::Up))
+    }
+
     /// Cancel `gesture` where it is, as a platform gesture steal does.
     ///
     /// A widget never mutates app state from a `Cancel`; a callback it owes (a gesture
@@ -284,6 +300,7 @@ mod tests {
     struct Log {
         log: Vec<&'static str>,
         deltas: Vec<Vec2>,
+        up_at: Option<Point>,
     }
 
     fn pad<S: 'static>(side: f64) -> impl View<S> {
@@ -295,7 +312,10 @@ mod tests {
     fn tap_detector(_: &mut Log) -> GestureDetectorView<Log> {
         crate::GestureDetector(pad(200.0))
             .on_tap_down(|s: &mut Log, _: TapDownDetails| s.log.push("down"))
-            .on_tap_up(|s: &mut Log, _: TapUpDetails| s.log.push("up"))
+            .on_tap_up(|s: &mut Log, d: TapUpDetails| {
+                s.log.push("up");
+                s.up_at = Some(d.local_position);
+            })
             .on_tap_cancel(|s: &mut Log| s.log.push("cancel"))
             .on_tap(|s: &mut Log| s.log.push("tap"))
             .on_long_press(|s: &mut Log| s.log.push("long"))
@@ -306,6 +326,34 @@ mod tests {
         let mut tester = Tester::new(Log::default(), tap_detector, SIZE);
         tester.tap((50.0, 50.0));
         assert_eq!(tester.state().log, ["down", "up", "tap"]);
+    }
+
+    #[test]
+    fn up_at_releases_at_the_given_point_without_a_move() {
+        let mut tester = Tester::new(Log::default(), tap_detector, SIZE);
+        let press = tester.press((50.0, 50.0));
+        tester.up_at(press, (120.0, 130.0));
+        assert_eq!(
+            tester.state().log,
+            ["down", "up", "tap"],
+            "an in-bounds release is a tap"
+        );
+        assert_eq!(
+            tester.state().up_at,
+            Some(Point::new(120.0, 130.0)),
+            "the Up carries the release point, not the press point"
+        );
+    }
+
+    #[test]
+    fn up_at_outside_the_bounds_without_a_move_is_still_a_tap() {
+        // The detector notices a finger leaving from Moves, never from the Up's position; this
+        // pins that an `up_at` far outside is not a substitute for `move_to` out of the bounds.
+        let mut tester = Tester::new(Log::default(), tap_detector, SIZE);
+        let press = tester.press((50.0, 50.0));
+        tester.up_at(press, (50.0, 260.0));
+        assert_eq!(tester.state().log, ["down", "up", "tap"]);
+        assert_eq!(tester.state().up_at, Some(Point::new(50.0, 260.0)));
     }
 
     #[test]

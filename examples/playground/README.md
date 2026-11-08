@@ -226,7 +226,15 @@ The sections, in order:
     request runs off the UI thread; an error (feature disabled, missing usage
     description, unsupported platform) shows its message in the row. Status is
     read only on a button press or after a request finishes, never while the page
-    builds. Deep link: `frustplay://section/photos`.
+    builds. Below it a **Picker** panel drives `frust-photo-library`: filter
+    (Images / Videos / Both) and limit (1 / 5 / Unlimited) selectors, **Pick**
+    (the blocking pick runs off the UI thread), a list of picked items (file name,
+    kind, mime, byte size, copy or original), a preview of the first image
+    (PNG and JPEG decode; HEIC, WebP and GIF show a decode error),
+    **Share picked** (`Share::files_anchored` with a fixed anchor rectangle) and
+    **Clear cache**. While a pick runs the Picker panel shows loading progress
+    ("Loading N of M (P%)") with a **Cancel** button; Pick and Clear cache are
+    disabled until it ends. Deep link: `frustplay://section/photos`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -312,6 +320,16 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Memory: `DeviceMemory::query()` readout and the `frust-gate device-memory:` log line (open + Query) | macOS 27.0.1 (MacBook, Apple M4), 2026-11-07 | PASS (feat/device-info b0bcad0d6: Total 24.00 GiB = `sysctl hw.memsize` 25769803776 bytes, Low-RAM no, system available / process headroom / system low 'not reported on this platform' by design; two identical log lines, one on open and one on Query) |
 | Memory: the same readout plus `process_headroom_bytes` > 0 | iPhone 13 mini (iPhone14,4), iOS 27.2, 2026-11-07 | PASS (feat/device-info ada443d3b, XCUITest-driven More → Memory → Query: Total 3.59 GiB (3853369344 bytes), Low-RAM no, Process headroom 1.87 GiB (2007939184) on open and 1.88 GiB (2023553136) after Query, system available / system low 'not reported on this platform'; two on-screen log rows) |
 | Memory: the same readout plus `system_available_bytes`, `system_low`, and the `am send-trim-memory RUNNING_CRITICAL` re-query line | Pixel 5 (redfin), Android 14 (API 34), 2026-11-07 | PASS (feat/device-info ada443d3b, opened via `frustplay://section/memory`: Total 7.29 GiB (7823970304 bytes), Low-RAM no, System available 3.96 GiB (4256919552), System low no, headroom 'not reported'; `am send-trim-memory it.f0x.playground RUNNING_CRITICAL` logged `pressure=Critical` followed by a re-query line; the Query tap logged a fourth line — all under `frust-gate device-memory:` in logcat) |
+| Photos: Picker panel Pick (filter/limit selectors, item list, first-image preview) | iPhone | OWED |
+| Photos: Picker panel Pick (filter/limit selectors, item list, first-image preview) | Android device | OWED |
+| Photos: Picker panel Pick (native file dialog) | macOS | OWED |
+| Photos: Picker panel Share picked (files) | iPhone | OWED |
+| Photos: Picker panel Share picked (files) | Android device | OWED |
+| Photos: Picker panel Share picked (files) | macOS | OWED |
+| Photos: Picker panel Clear cache | iPhone | OWED |
+| Photos: Picker panel Clear cache | Android device | OWED |
+| Photos: Picker panel Cancel while an iCloud item downloads | iPhone | OWED |
+| Photos: Picker panel Cancel during a large video copy | Android device | OWED |
 
 ### Drag gate notes
 

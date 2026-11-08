@@ -42,10 +42,13 @@ pub use gesture::{Gesture, Target};
 pub use tester::{PumpOutcome, Tester, TesterOptions};
 pub use text::TextRun;
 
-/// What [`Tester::inspect`] returns: one retained-tree node with its absolute bounds.
-pub use frust_core::InspectNode;
 /// Run a closure with the animation time scale overridden on this thread only.
 pub use frust_core::anim::with_thread_animation_time_scale;
+/// What [`Tester::inspect`] returns: one retained-tree node with its absolute bounds and the
+/// typed detail its widget attached — [`InspectDetail::Text`] (a [`TextInspect`]) on a text run,
+/// [`InspectDetail::Clip`] on a widget that clips its descendants, so a test bounding controls can
+/// stop at a clipping ancestor the way [`Tester::text_overflows`] does.
+pub use frust_core::{InspectDetail, InspectNode, TextInspect};
 /// The reactive owner type, for a test that sets an ambient owner before constructing a
 /// [`Tester`] (`let owner = Owner::new(); owner.set();`).
 pub use frust_reactive::Owner;
@@ -170,6 +173,24 @@ where
 #[cfg(test)]
 mod tests {
     use kurbo::Size;
+
+    #[test]
+    fn inspect_detail_and_text_inspect_resolve_through_the_facade() {
+        let tester = crate::testing::Tester::new(
+            (),
+            |_: &mut ()| crate::text("hello"),
+            Size::new(200.0, 100.0),
+        );
+        let text = tester
+            .inspect()
+            .into_iter()
+            .find_map(|node| match node.detail {
+                Some(crate::testing::InspectDetail::Text(detail)) => Some(detail),
+                _ => None,
+            });
+        let detail: crate::testing::TextInspect = text.expect("the text run carries a TextInspect");
+        assert_eq!(detail.text, "hello");
+    }
 
     #[test]
     fn semantics_of_a_text_view_finds_the_text_node() {

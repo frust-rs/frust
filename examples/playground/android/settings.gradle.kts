@@ -158,3 +158,35 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("../build/android/frust-permissions"))
     }
 }
+
+// frust-photo-library: the same include/projectDir/build-dir-redirect trio as
+// `:frust-camera` above, and exactly what `frust-drive::plugin::apply_gradle_module`
+// writes for this plugin's `Contribution::GradleModule`. Carried in-tree
+// because playground is a committed example, not a generated project.
+//
+// The module supplies the system photo-picker host (`FrustPhotoLibraryHost`)
+// + its process-start init provider, and declares no permission (the picker
+// needs none).
+include(":frust-photo-library")
+project(":frust-photo-library").projectDir =
+    file("../../../plugins/photo-library/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-photo-library") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-photo-library"))
+    }
+}
+
+// frust-share: the same include/projectDir/build-dir-redirect trio as
+// `:frust-photo-library` above. The module supplies the file-share host
+// (`FrustShareHost`) and its `FileProvider` subclass; text and URL sharing
+// need no module.
+include(":frust-share")
+project(":frust-share").projectDir =
+    file("../../../plugins/share/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-share") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-share"))
+    }
+}

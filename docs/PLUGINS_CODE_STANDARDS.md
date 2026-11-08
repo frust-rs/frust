@@ -99,6 +99,9 @@ is additional or different for a plugin.
   `FeatureSpec`, never declared in a plugin's module manifest** (`frust-permissions`' module manifest
   declares no `uses-permission`). A plugin host launches Activity Result contracts through the resumed
   `ComponentActivity`'s `activityResultRegistry`, under a plugin-prefixed key.
+- **Content a plugin picks or shares is staged in a plugin-named cache subdirectory** (`frust-photo-library` picks, `frust-share/<uuid>/`
+  copies), never linked to the original. A plugin's `FileProvider` is a subclass with its own authority that exposes only that
+  staging directory, so it never collides with an app-declared provider.
 - **`frust-material`'s ported/vendored modules carry a 2–4 line attribution header**: upstream
   file or package, version/revision, license, and any porting decisions, e.g.
   `// Ported from material_3_expressive v1.0.8 (MIT, © 2026 Paa Developments)`. Binding for every

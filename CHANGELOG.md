@@ -34,6 +34,19 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- The new `frust-photo-library` plugin crate: `PhotoLibrary::pick(&PickOptions)` opens the system photo
+  picker on Android and iOS (no permission and no Info.plist string needed) and a native file dialog on
+  Linux, macOS and Windows. Options: a media filter, a limit, `on_progress` loading reports
+  (`PickProgress`, throttled to 20 per second, ending at 1.0) and a `CancelToken`. Mobile picks are
+  copies in an app cache (`PickedItem::is_copy`), reclaimed with `PhotoLibrary::clear_pick_cache`;
+  `pick` blocks, refuses the UI thread on mobile and allows one pick at a time (`PhotoError::Busy`).
+  Cancelling returns `PhotoError::Cancelled` and removes the call's partial copies. The registry entry
+  `photo-library` adds the plugin's Gradle module and the `PhotosUI` link; the playground gains a Picker
+  panel.
+- `Share::files` and `Share::files_anchored` share one to 64 files: the Android chooser (through a
+  `FileProvider` in the plugin's own Gradle module), the iOS activity sheet and a macOS sharing picker.
+  Linux and Windows answer `ShareError::Unsupported`. On Android `Ok` means the share is enqueued: the
+  files are copied on a background thread and a failure is logged under tag `FrustShare`.
 - `frust::testing::Tester` (facade `test-support` feature): a state-generic headless driver. `pump` /
   `pump_and_settle` / `pump_until` on a manual clock under its own child reactive owner;
   `tap` / `press` / `long_press` / `drag` / `timed_drag`; `start_gesture` / `start_touch` with
@@ -42,6 +55,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `set_metrics` / `resize`. Built with `new`, `with_options` (`TesterOptions`) or `new_with`. There
   is no process-wide lock, so Tester tests run in parallel. The one-shot helpers `semantics_of`,
   `scene_of` and `scene_of_with` are unchanged. `frust::authoring` re-exports `TextWidget`.
+  `Tester::up_at` releases a gesture at a point it never moved to (the `Up` carries the point; no
+  travel reaches a velocity tracker), and `frust::testing` re-exports `InspectDetail` and
+  `TextInspect` next to `InspectNode`, so a test can honour clipping ancestors for any control.
 - `frust::paths::{data_dir, cache_dir, atomic_write}`: the platform data and cache directories and the
   write-to-temp-and-rename helper, re-exported from `frust-paths` so an app depending on the facade
   alone can place caches, sidecars and export staging; the module docs say what each platform backs up.
@@ -350,6 +366,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- `frust-share` now carries an Android Gradle module (the `FileProvider` behind `Share::files`). An
+  existing app re-runs Add Plugin for `share` to include the module before sharing files on Android;
+  text and URL sharing are unchanged.
+- The Android logger's level follows the `debug.frust.log` system property (`adb shell setprop
+  debug.frust.log debug`, cleared on reboot; off / error / warn / info / debug / trace, the
+  `FRUST_LOG` vocabulary of the other shells) instead of being fixed at `Info`; unset, it stays
+  `Info` in every build. The chosen level is logged once at startup under the `frust` tag.
 - `frust::gpu::with_context` keeps its signature but answers the current device, which may change
   between calls: do not keep device or queue clones across frames, and rebuild device-owned
   resources when `device_generation()` changes.
