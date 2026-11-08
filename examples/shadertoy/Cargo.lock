@@ -1145,11 +1145,13 @@ version = "0.6.5"
 dependencies = [
  "any_spawner",
  "futures",
+ "js-sys",
  "libc",
  "log",
  "reactive_graph",
  "tokio",
  "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]

@@ -9377,3 +9377,32 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 **Evidence**: (2026-11-08) `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/FrustPhotoLibraryHost.kt` (picker selection, limit handling); leg owed.
 
 ---
+
+### `time-no-firing-while-backgrounded` — a `frust::time::Timer` gets no regular ticks while the app is backgrounded (Android, iOS)
+
+**Observed**: Android removes its frame callback at `onPause` and pumps nothing at `onPause`/`onStop`; iOS
+pauses its display link at `willResignActive` and pumps the local queue at `didEnterBackground` and on
+memory warnings; Android also pumps in its trim-memory callbacks. So there are no regular ticks while
+backgrounded: a due `Timer` normally runs at the first tick after resume but may run earlier in one of
+those pumps; do not rely on either. `flush_on_background` runs the callback synchronously at the first
+of the app going Resumed to Inactive or Inactive to Hidden (a timer armed while already Inactive runs at
+the Hidden edge: Android `onStop`, iOS `didEnterBackground`). It therefore also fires on focus loss with
+no foreground exit: losing window focus on desktop and web, the notification shade, a system dialog or
+the unfocused half of split-screen on Android, Control Center or a call on iOS. It is one-shot and is
+consumed, so do not flag a timer whose delay must be honoured while the app stays visible. Only
+synchronous work in the callback is guaranteed to complete before suspension, work it spawns is not,
+and no background-task assertion is provided. On desktop a window that lost focus keeps running, so a
+plain timer fires on time.
+
+**Applies to**: Android, iOS.
+
+**Why accepted**: the shells' wakers are no-ops by design because the display tick already pumps;
+background execution belongs to OS work managers.
+
+**Evidence**: (2026-11-09) device gate on a Pixel 5 and an iPhone 13 mini: a plain 10 s timer stayed
+silent in the background and fired on resume (16744 ms on the Pixel 5, 17557 ms on the iPhone); a flagged
+timer's marker file written at backgrounding survived killing the process about 2 s later on both. On
+desktop a plain timer fired on time (10001 ms measured). `examples/playground/src/pages/network.rs`
+(Timers block).
+
+---
