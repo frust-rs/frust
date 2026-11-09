@@ -601,7 +601,8 @@ impl Timer {
     /// the few background pumps a shell makes are not guaranteed to happen, and the process
     /// may be suspended first. Keep it short, because the OS waits on these main-thread
     /// callbacks: a small SQLite transaction or an atomic file write is in budget, a network
-    /// call is not.
+    /// call is not. The budget is 8 ms per callback and 16 ms per drain; debug builds log a
+    /// warning when a callback or a drain exceeds it, and release builds do not measure.
     ///
     /// [`on_inactive`]: AppLifecycleListener::on_inactive
     /// [`on_hide`]: AppLifecycleListener::on_hide
@@ -677,9 +678,56 @@ fn drain_on_owner(owner: std::thread::ThreadId) {
 /// first. [`TimerInner::run_callback`] isolates each panic.
 fn drain_flush_registry() {
     let timers = FLUSH_REGISTRY.with_borrow_mut(std::mem::take);
+    // Debug builds only; `cfg!` const-folds, so release takes no `Instant`. Wasm has no
+    // monotonic `Instant`, so it is skipped there too.
+    let measure = cfg!(debug_assertions) && !cfg!(target_family = "wasm");
+    let drain_start = measure.then(std::time::Instant::now);
+    let mut fired = 0usize;
     for timer in timers.iter().filter_map(Weak::upgrade) {
+        let start = measure.then(std::time::Instant::now);
         timer.fire_now();
+        fired += 1;
+        if let Some(start) = start {
+            let elapsed = start.elapsed();
+            if over_budget(elapsed, FLUSH_CALLBACK_BUDGET) {
+                warn_over_budget(format_args!(
+                    "frust-reactive: a flush callback took {} ms (budget {} ms; the OS callback is blocked meanwhile)",
+                    elapsed.as_millis(),
+                    FLUSH_CALLBACK_BUDGET.as_millis(),
+                ));
+            }
+        }
     }
+    if let Some(start) = drain_start {
+        let elapsed = start.elapsed();
+        if over_budget(elapsed, FLUSH_DRAIN_BUDGET) {
+            warn_over_budget(format_args!(
+                "frust-reactive: flushing {fired} timer callback(s) took {} ms (budget {} ms; the OS callback is blocked meanwhile)",
+                elapsed.as_millis(),
+                FLUSH_DRAIN_BUDGET.as_millis(),
+            ));
+        }
+    }
+}
+
+/// Per-callback budget for a flush drain, checked in debug builds.
+const FLUSH_CALLBACK_BUDGET: Duration = Duration::from_millis(8);
+/// Whole-drain budget, checked in debug builds.
+const FLUSH_DRAIN_BUDGET: Duration = Duration::from_millis(16);
+
+fn over_budget(elapsed: Duration, budget: Duration) -> bool {
+    elapsed > budget
+}
+
+fn warn_over_budget(message: fmt::Arguments<'_>) {
+    #[cfg(test)]
+    BUDGET_WARNINGS.with(|count| count.set(count.get() + 1));
+    log::warn!("{message}");
+}
+
+#[cfg(test)]
+thread_local! {
+    static BUDGET_WARNINGS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -1111,6 +1159,31 @@ mod tests {
         let _next = Timer::new(LONG, bump).flush_on_background();
         push_app_lifecycle(AppLifecycleState::Inactive);
         assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn over_budget_is_strictly_greater() {
+        let budget = Duration::from_millis(8);
+        assert!(!over_budget(budget, budget));
+        assert!(over_budget(budget + Duration::from_millis(1), budget));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_slow_flush_callback_warns_in_debug_builds() {
+        let (_guard, _rt) = setup();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        let before = BUDGET_WARNINGS.with(Cell::get);
+        let (count, bump) = counter();
+        let _slow = Timer::new(LONG, move || {
+            std::thread::sleep(Duration::from_millis(20));
+            bump();
+        })
+        .flush_on_background();
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        assert_eq!(count.get(), 1);
+        // One for the callback, one for the drain.
+        assert_eq!(BUDGET_WARNINGS.with(Cell::get) - before, 2);
     }
 
     #[test]
