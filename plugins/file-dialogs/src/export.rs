@@ -77,13 +77,17 @@ pub(crate) fn copy_file_with(
     result
 }
 
-/// Applies the source's permissions to the staged file. Narrowing or applying a mode that
-/// fails is a copy failure: the file would otherwise end up with a mode the source never had.
+/// Applies the source's access bits to the staged file, without setuid, setgid or sticky.
+/// Best effort: a volume with fixed modes (exFAT, for one) refuses this, and a finished copy
+/// that keeps its private staging mode is better than a lost one.
 #[cfg(unix)]
 fn apply_mode(writer: &File, metadata: &std::fs::Metadata) -> Result<(), FileDialogError> {
-    writer
-        .set_permissions(metadata.permissions())
-        .map_err(io_error)
+    use std::os::unix::fs::PermissionsExt;
+    let mode = metadata.permissions().mode() & 0o777;
+    if let Err(err) = writer.set_permissions(std::fs::Permissions::from_mode(mode)) {
+        log::warn!("frust-file-dialogs: the copy keeps its private mode: {err}");
+    }
+    Ok(())
 }
 
 /// Other platforms: best effort, as `fs::copy` carries the permissions over.
@@ -322,5 +326,21 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o640);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_copy_drops_the_setuid_and_setgid_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TestDir::new();
+        let source = dir.write("source.txt", b"data");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o6750)).unwrap();
+        let destination = dir.path().join("out.txt");
+        copy_file(&source, &destination).unwrap();
+        let mode = std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o750);
     }
 }

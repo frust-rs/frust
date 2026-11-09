@@ -1895,7 +1895,7 @@ fn save_button(
 }
 
 /// The shared-preferences key holding the picked folder's grant token.
-const FOLDER_TOKEN_KEY: &str = "playground.folder_token";
+pub(super) const FOLDER_TOKEN_KEY: &str = "playground.folder_token";
 
 /// Files per scan page; **Load more** fetches the next page.
 const FOLDER_PAGE: u32 = 50;

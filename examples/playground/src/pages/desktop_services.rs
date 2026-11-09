@@ -58,6 +58,8 @@ use frust_file_dialogs::{
     CancelToken, ExportOutcome, FileDialog, FileDialogError, FileFilter, FileProgress, ListOptions,
 };
 
+use frust_shared_preferences::SharedPreferences;
+
 use crate::PlaygroundState;
 
 /// Which dialog a button press asked for.
@@ -205,9 +207,18 @@ fn run_dialog(
                         || "(folder)".to_string(),
                         |name| name.to_string_lossy().into_owned(),
                     );
-                // Not released: `release()` is the call that gives the folder up (on Android it
-                // revokes the persisted permission), and dropping the grant does not make it.
                 let listed = grant.list(&ListOptions::new().cancel(cancel.clone()));
+                // On Android `release()` revokes the persisted permission, so give it up unless
+                // the Folders panel on the Photos page holds this same folder.
+                let held = match SharedPreferences::standard() {
+                    Ok(prefs) => prefs
+                        .get_string(super::photos::FOLDER_TOKEN_KEY)
+                        .is_some_and(|token| token == grant.token()),
+                    Err(_) => true,
+                };
+                if !held {
+                    grant.release();
+                }
                 let count = listed?.len();
                 vec![format!("Folder: {name}"), format!("{count} file(s) inside")]
             }

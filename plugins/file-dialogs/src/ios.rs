@@ -227,8 +227,8 @@ struct PickerSpec {
 }
 
 /// The `UTType` class, found at run time. No `UTType*` framework constant is referenced, so
-/// the crate adds no link-time dependency on UniformTypeIdentifiers (an app that only embeds
-/// this crate through another plugin still links).
+/// an app that embeds this crate through another plugin has no such symbol to resolve. UIKit
+/// loads the framework; were it absent, every picker call would report `Platform`.
 fn ut_type_class() -> Result<&'static AnyClass, FileDialogError> {
     AnyClass::get(c"UTType").ok_or_else(|| {
         log::warn!("frust-file-dialogs: the UTType class is not available");
