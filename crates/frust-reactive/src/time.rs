@@ -51,8 +51,8 @@ use crate::executor::is_ui_thread;
 ///
 /// On the web, dropping or aborting the future also clears the browser timer. A duration
 /// above `i32::MAX` ms (about 24.8 days) clamps to `i32::MAX`, and a background tab may
-/// throttle `setTimeout` to one-second granularity or coarser; that is browser policy (see
-/// the web shell README).
+/// throttle `setTimeout` to one-second granularity or coarser; that is browser policy, and a
+/// timer may fire late on a hidden tab.
 pub async fn sleep(duration: Duration) {
     #[cfg(any(test, feature = "test-support"))]
     if test_support::is_virtual() {
@@ -601,8 +601,9 @@ impl Timer {
     /// the few background pumps a shell makes are not guaranteed to happen, and the process
     /// may be suspended first. Keep it short, because the OS waits on these main-thread
     /// callbacks: a small SQLite transaction or an atomic file write is in budget, a network
-    /// call is not. The budget is 8 ms per callback and 16 ms per drain; debug builds log a
-    /// warning when a callback or a drain exceeds it, and release builds do not measure.
+    /// call is not. The budget is 8 ms per callback and 16 ms per drain; debug builds on native
+    /// targets log a warning when a callback or a drain exceeds it. That is a development aid,
+    /// not a guarantee: release builds and the web do not measure.
     ///
     /// [`on_inactive`]: AppLifecycleListener::on_inactive
     /// [`on_hide`]: AppLifecycleListener::on_hide
@@ -685,6 +686,11 @@ fn drain_flush_registry() {
     let mut fired = 0usize;
     for timer in timers.iter().filter_map(Weak::upgrade) {
         let start = measure.then(std::time::Instant::now);
+        // `fire_now` is a no-op for a timer that already fired or was cancelled, and a
+        // callback that did not run counts toward neither the drain total nor its timing.
+        if !timer.is_active() {
+            continue;
+        }
         timer.fire_now();
         fired += 1;
         if let Some(start) = start {
@@ -698,6 +704,8 @@ fn drain_flush_registry() {
             }
         }
     }
+    #[cfg(test)]
+    LAST_DRAIN_FIRED.with(|count| count.set(fired));
     if let Some(start) = drain_start {
         let elapsed = start.elapsed();
         if over_budget(elapsed, FLUSH_DRAIN_BUDGET) {
@@ -728,6 +736,8 @@ fn warn_over_budget(message: fmt::Arguments<'_>) {
 #[cfg(test)]
 thread_local! {
     static BUDGET_WARNINGS: Cell<usize> = const { Cell::new(0) };
+    /// Callbacks that actually ran in the most recent drain.
+    static LAST_DRAIN_FIRED: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
@@ -1184,6 +1194,27 @@ mod tests {
         assert_eq!(count.get(), 1);
         // One for the callback, one for the drain.
         assert_eq!(BUDGET_WARNINGS.with(Cell::get) - before, 2);
+    }
+
+    #[test]
+    fn drain_counts_only_callbacks_that_ran() {
+        let (_guard, _rt) = setup();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        let (done, bump_done) = counter();
+        // Already fired, handle still held: it stays in the registry but will not run again.
+        let spent = Timer::new(LONG, bump_done).flush_on_background();
+        spent.fire_now();
+        assert_eq!(done.get(), 1);
+        let (slow_count, bump_slow) = counter();
+        let _slow = Timer::new(LONG, move || {
+            std::thread::sleep(Duration::from_millis(20));
+            bump_slow();
+        })
+        .flush_on_background();
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        assert_eq!(slow_count.get(), 1);
+        assert_eq!(done.get(), 1, "the spent timer does not run again");
+        assert_eq!(LAST_DRAIN_FIRED.with(Cell::get), 1);
     }
 
     #[test]

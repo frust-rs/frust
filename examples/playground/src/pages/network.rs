@@ -54,7 +54,11 @@ const FLUSH_LOG_DDL: &str = "CREATE TABLE IF NOT EXISTS flush_log \
      (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, at INTEGER NOT NULL)";
 
 /// The `flush_log.kind` values, in the order their evidence rows are emitted.
-const FLUSH_KINDS: [&str; 2] = ["guarded", "plain"];
+const FLUSH_KINDS: [&str; 3] = ["guarded", "plain", "save-shaped"];
+
+/// Serializes the page's write legs: each holds a transaction for its whole length on its
+/// own connection, and a second writer would fail with SQLITE_BUSY after the busy timeout.
+static WRITE_LEGS: Mutex<()> = Mutex::new(());
 
 /// The write-length choices (ms) of the guarded and unguarded legs: a save-sized write,
 /// the default, an iOS-expiry-sized hold and an Android-watchdog-sized hold.
@@ -337,6 +341,17 @@ impl NetworkPage {
     /// Blocking: insert one `flush_log` row of `kind` stamped with epoch-ms, then hold
     /// the transaction open for `hold` so a kill during the hold lands mid-transaction.
     fn write_flush_row(kind: &str, hold: Duration) -> Result<(), DatabaseError> {
+        // Held across open and transaction; a poisoned lock only means an earlier leg panicked.
+        let _turn = match WRITE_LEGS.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                log::info!("{LOG_PREFIX} write leg ({kind}) waiting for an earlier write leg");
+                WRITE_LEGS
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            }
+        };
         let at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
@@ -452,7 +467,7 @@ impl NetworkPage {
             let sink = sink.clone();
             drop(spawn_blocking(move || {
                 let result =
-                    Self::write_flush_row("guarded", Duration::from_millis(SAVE_SHAPED_MS));
+                    Self::write_flush_row("save-shaped", Duration::from_millis(SAVE_SHAPED_MS));
                 let lost = task.expired();
                 drop(task);
                 match (result, lost) {
