@@ -79,7 +79,7 @@ use frust_file_dialogs::{
 use frust_permissions::{
     Permission, PermissionError, PermissionStatus, PhotoAccess, open_settings, request, status,
 };
-use frust_photo_library::folder::{EntryLocation, FolderEntry};
+use frust_photo_library::folder::FolderEntry;
 use frust_photo_library::{
     Album, AlbumId, Asset, AssetId, AssetPage, AssetQuery, AssetVersion, CancelToken,
     ExportOptions, ExportedOriginal, FolderMedia, FolderPage, FolderScan, MediaFilter, MediaKind,
@@ -1023,7 +1023,8 @@ struct BrowseSignals {
 }
 
 impl BrowseSignals {
-    /// Copies a finished step into the signals (UI thread). Skipped once the panel is gone.
+    /// Copies a finished step into the signals. Called from the task future, which runs on the
+    /// tokio runtime rather than the UI thread. Skipped once the panel is gone.
     fn apply(&self, step: BrowseStep) {
         if self.message.try_get_untracked().is_none() {
             return;
@@ -1591,7 +1592,8 @@ struct OriginalsSignals {
 }
 
 impl OriginalsSignals {
-    /// Copies a finished step into the signals (UI thread). Skipped once the panel is gone.
+    /// Copies a finished step into the signals. Called from the task future, which runs on the
+    /// tokio runtime rather than the UI thread. Skipped once the panel is gone.
     fn apply(&self, step: OriginalsStep) {
         if self.result.try_get_untracked().is_none() {
             return;
@@ -1663,8 +1665,9 @@ impl Component for OriginalsPanel {
             let poll_cell = poll_cell.clone();
             async move {
                 let mut handle = spawn_blocking(move || run_originals_action(requested));
-                // The progress callback only writes the cell; this loop copies it into the
-                // signal on the UI thread. Stop copying once the panel is gone.
+                // The progress callback only writes the cell; this loop, in the task future on
+                // the tokio runtime, copies it into the signal. Stop copying once the panel is
+                // gone.
                 while !handle.is_finished() {
                     let latest = *poll_cell.lock().expect("progress cell poisoned");
                     let Some(current) = signals.progress.try_get_untracked() else {
@@ -1930,12 +1933,16 @@ enum FoldersAction {
     Release,
 }
 
-/// What a background step produced, applied to the signals on the UI side.
+/// What a background step produced, applied to the signals by the task future.
 enum FoldersStep {
     /// A status line; `clear` also empties the listing and previews.
     Message { text: String, clear: bool },
-    /// A scan page and the offset it started at.
-    Page { page: FolderPage, offset: u64 },
+    /// A scan page, the offset it started at and whether the scan descended into subfolders.
+    Page {
+        page: FolderPage,
+        offset: u64,
+        recursive: bool,
+    },
 }
 
 impl FoldersStep {
@@ -2048,7 +2055,11 @@ fn scan_step(
         return FoldersStep::message("Cancelled");
     }
     match result {
-        Ok(page) => FoldersStep::Page { page, offset },
+        Ok(page) => FoldersStep::Page {
+            page,
+            offset,
+            recursive,
+        },
         Err(err) => FoldersStep::message(folder_error_text(&err)),
     }
 }
@@ -2105,21 +2116,19 @@ fn folder_count_line(loaded: usize, total: u64) -> String {
     format!("Showing {loaded} of {total} file(s)")
 }
 
-/// The bytes of a listed image: a content URI is copied into the cache first, a path is read.
-fn read_entry(entry: &FolderEntry) -> Result<Vec<u8>, String> {
-    if matches!(entry.location, EntryLocation::ContentUri(_)) {
-        let dir = frust::paths::cache_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("frust-playground-folder");
-        let copy = entry.copy_to(&dir).map_err(|err| err.to_string())?;
-        let bytes = std::fs::read(&copy).map_err(|err| err.to_string());
-        let _ = std::fs::remove_file(&copy);
-        bytes
-    } else {
-        entry
-            .read_to_vec(MAX_PREVIEW_BYTES)
-            .map_err(|err| err.to_string())
+/// Load more's step: the next page of the listing on screen, scanned with the listing's own
+/// recursive flag so the page continues the same result set.
+fn load_more_action(loaded: usize, listing_recursive: bool) -> FoldersAction {
+    FoldersAction::Scan {
+        offset: loaded as u64,
+        recursive: listing_recursive,
     }
+}
+
+/// The bytes of a listed file, refused past `max_bytes`. Every location goes through
+/// `read_to_vec`, so the cap holds for a content URI as well as a path.
+fn read_preview_bytes(entry: &FolderEntry, max_bytes: u64) -> Result<Vec<u8>, String> {
+    entry.read_to_vec(max_bytes).map_err(|err| err.to_string())
 }
 
 /// One preview tile: the file name and its decode result.
@@ -2148,13 +2157,14 @@ async fn decode_previews(
         }
         phase.set(format!("Decoding image {} of {}", index + 1, images.len()));
         let entry = media.entry.clone();
-        let image = match spawn_blocking(move || read_entry(&entry)).await {
-            Ok(Ok(bytes)) => decode_image_async(bytes)
-                .await
-                .map_err(|err| format!("decode error: {err}")),
-            Ok(Err(text)) => Err(format!("read error: {text}")),
-            Err(err) => Err(err.to_string()),
-        };
+        let image =
+            match spawn_blocking(move || read_preview_bytes(&entry, MAX_PREVIEW_BYTES)).await {
+                Ok(Ok(bytes)) => decode_image_async(bytes)
+                    .await
+                    .map_err(|err| format!("decode error: {err}")),
+                Ok(Err(text)) => Err(format!("read error: {text}")),
+                Err(err) => Err(err.to_string()),
+            };
         tiles.push(PreviewTile {
             name: media.entry.name.clone(),
             image,
@@ -2171,6 +2181,9 @@ struct FoldersSignals {
     /// The last step's result line.
     status: RwSignal<String>,
     lines: RwSignal<Vec<String>>,
+    /// Whether the listing on screen came from a recursive scan. Load more continues that
+    /// scan, so it must not follow the toggle, which may have changed since.
+    listing_recursive: RwSignal<bool>,
     total: RwSignal<u64>,
     previews: RwSignal<Vec<PreviewTile>>,
     holds_grant: RwSignal<bool>,
@@ -2178,7 +2191,8 @@ struct FoldersSignals {
 }
 
 impl FoldersSignals {
-    /// Applies a finished step (UI side only).
+    /// Applies a finished step to the signals. Runs in the task future, on the tokio runtime
+    /// rather than the UI thread.
     async fn apply(self, step: FoldersStep, cancel: &FolderCancel) {
         match step {
             FoldersStep::Message { text, clear } => {
@@ -2189,7 +2203,11 @@ impl FoldersSignals {
                     self.previews.set(Vec::new());
                 }
             }
-            FoldersStep::Page { page, offset } => {
+            FoldersStep::Page {
+                page,
+                offset,
+                recursive,
+            } => {
                 let mut lines = if offset == 0 {
                     Vec::new()
                 } else {
@@ -2199,6 +2217,7 @@ impl FoldersSignals {
                 self.status.set(folder_count_line(lines.len(), page.total));
                 self.total.set(page.total);
                 self.lines.set(lines);
+                self.listing_recursive.set(recursive);
                 if offset == 0 {
                     self.previews.set(Vec::new());
                     let tiles = decode_previews(&page.items, cancel, self.phase).await;
@@ -2258,6 +2277,7 @@ impl Component for FoldersPanel {
             phase: RwSignal::new(start_phase(FoldersAction::Restore).to_string()),
             status: RwSignal::new(String::new()),
             lines: RwSignal::new(Vec::new()),
+            listing_recursive: RwSignal::new(false),
             total: RwSignal::new(0),
             previews: RwSignal::new(Vec::new()),
             holds_grant: RwSignal::new(false),
@@ -2323,6 +2343,7 @@ impl Component for FoldersPanel {
         let busy = matches!(state.work.signal().get(), AsyncValue::Loading(_));
         let holds = signals.holds_grant.get();
         let recursive = state.recursive.get();
+        let listing_recursive = signals.listing_recursive.get();
         let loaded = signals.lines.get();
         let more = has_more(loaded.len(), signals.total.get());
         let status = if busy {
@@ -2401,10 +2422,7 @@ impl Component for FoldersPanel {
             .child(listing)
             .child(row().child(press_button(
                 "Load more",
-                FoldersAction::Scan {
-                    offset: loaded.len() as u64,
-                    recursive,
-                },
+                load_more_action(loaded.len(), listing_recursive),
                 state,
                 busy,
                 !more,
@@ -2853,12 +2871,70 @@ mod tests {
         let grants = no_grants();
         restore_step(&prefs, &grants);
         match scan_step(&grants, 0, false, &FolderCancel::new()) {
-            FoldersStep::Page { page, offset } => {
+            FoldersStep::Page {
+                page,
+                offset,
+                recursive,
+            } => {
                 assert_eq!((offset, page.total, page.items.len()), (0, 1, 1));
+                assert!(!recursive);
                 assert_eq!(media_line(&page.items[0]), "a.png | image | 1 bytes");
             }
             other => panic!("expected a page, got {}", message_of(&other)),
         }
+    }
+
+    #[test]
+    fn a_page_records_the_recursive_flag_it_was_scanned_with() {
+        let dir = Scratch::new("scan-recursive");
+        std::fs::write(dir.0.join("a.png"), b"x").unwrap();
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        restore_step(&prefs, &grants);
+        match scan_step(&grants, 0, true, &FolderCancel::new()) {
+            FoldersStep::Page { recursive, .. } => assert!(recursive),
+            other => panic!("expected a page, got {}", message_of(&other)),
+        }
+    }
+
+    #[test]
+    fn load_more_continues_the_listing_with_its_own_flag() {
+        assert_eq!(
+            load_more_action(50, true),
+            FoldersAction::Scan {
+                offset: 50,
+                recursive: true,
+            }
+        );
+        assert_eq!(
+            load_more_action(50, false),
+            FoldersAction::Scan {
+                offset: 50,
+                recursive: false,
+            }
+        );
+    }
+
+    #[test]
+    fn preview_read_refuses_a_file_past_the_cap() {
+        let dir = Scratch::new("preview-cap");
+        std::fs::write(dir.0.join("big.png"), [7u8; 16]).unwrap();
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        restore_step(&prefs, &grants);
+        let FoldersStep::Page { page, .. } = scan_step(&grants, 0, false, &FolderCancel::new())
+        else {
+            panic!("expected a page");
+        };
+        let entry = &page.items[0].entry;
+        assert!(read_preview_bytes(entry, 15).is_err());
+        assert_eq!(read_preview_bytes(entry, 16).unwrap(), vec![7u8; 16]);
     }
 
     #[test]
