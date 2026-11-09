@@ -64,9 +64,21 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
 | `find.text` / `find.byType` / `find.bySemanticsLabel` | `find::text` / `find::by_type::<W>()` / `find::label(role, s)` |
 | `getSemantics` / `getRect` | `get_semantics` / `bounds` |
 
-- Time enters only through paint: `pump(dt)` advances the manual clock and paints one frame; nothing
-  else moves it. `pump_until(what, timeout, predicate)` is the only real-time wait, for
-  `spawn_blocking` or background work.
+- The Tester installs a virtual `frust::time` clock before user code runs; Testers on one thread
+  share it.
+- `pump(dt)` drains the local queue (registering anything armed since the last pump, at the current
+  virtual time), advances the clock by `dt`, drains again (firing what came due), then paints the
+  frame. A sleep takes its deadline at its first poll, so a timer armed before a pump is measured
+  from that pump's start. The advance steps through each deadline in order, draining the queue at
+  each, so a chain of sleeps or a re-armed timer inside `dt` fires at its own virtual time, and for
+  work on the local task queue `pump(a + b)` matches `pump(a); pump(b)`. A timer armed by a rebuild
+  depends on where the frames fall: each pump runs one frame, after its advance.
+- A deferred callback delivered by the rebuild's housekeeping flush asks for its redraw on the
+  frame after, so it still costs two pumps to settle (`pump_and_settle` waits for two quiet pumps).
+- `pump_until(what, timeout, predicate)` is the only real-time wait, for `spawn_blocking` or
+  background work; its real sleeps never move the virtual clock.
+- Any future polled off the Tester's thread stays on wall time, explicitly including `frust::spawn`
+  and `use_task` fetch futures.
 - `tap` does not pump. Callbacks that fire on a frame (a long press, the callback owed by a
   `Cancel`, any other Housekeeping-delivered fire) need a pump; such a fire costs two pumps to
   settle.
