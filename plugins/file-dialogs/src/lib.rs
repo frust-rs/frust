@@ -173,6 +173,7 @@ pub(crate) enum Kind {
 
 /// Everything a backend needs; built by [`FileDialog`], asserted in tests.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // The fallback backend reads none of it.
 pub(crate) struct Request {
     pub kind: Kind,
     pub title: Option<String>,
