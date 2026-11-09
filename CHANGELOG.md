@@ -94,6 +94,16 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `InvalidRequest`. Stored location is kept by Android browse + export with Media location granted and by
   the iOS picker, and zeroed by the Android Photo Picker (see the
   `photo-library-android-location-redacted` limitation). The playground gains an Originals panel.
+- `frust-file-dialogs` opens files on Android (Storage Access Framework) and iOS
+  (`UIDocumentPickerViewController`) and gains `FileDialog::export_file` (a save dialog or the platform's
+  export UI, then a copy; `ExportOutcome`), `pick_folder` with persistable `FolderGrant`s (`token`,
+  `restore`, `local_path`, `list`, `release`; `FolderEntry::copy_to` and `read_to_vec`; `ListOptions`),
+  and `FileDialog::cancel`, `on_progress` and `ListOptions::cancel` with the crate's own `CancelToken`
+  and `FileProgress`. `FileDialogError` gains `UiThread`, `NoPresenter`, `PlatformNotInitialized`,
+  `AccessLost`, `Io`, `Platform` and `Cancelled`. The `file-dialogs` registry entry adds the plugin's Gradle
+  module and the `UniformTypeIdentifiers` link. `PhotoLibrary::scan_folder(&FolderGrant, &FolderScan)`
+  pages the images and videos of a granted folder, newest first, on desktop, Android and iOS. The playground
+  gains a Folders panel and Export file, Pick folder and Cancel on its Desktop page.
 - `Share::files` and `Share::files_anchored` share one to 64 files: the Android chooser (through a
   `FileProvider` in the plugin's own Gradle module), the iOS activity sheet and a macOS sharing picker.
   Linux and Windows answer `ShareError::Unsupported`. On Android `Ok` means the share is enqueued: the
@@ -417,6 +427,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- `frust-file-dialogs` on Android and iOS: `open_file` and `open_files` used to answer `Unsupported` and now
+  work, returning app-private copies of the chosen files; `save_file` still answers `Unsupported` there, so
+  use `export_file`. Calls on the UI thread are refused with `UiThread`. Web is unchanged.
 - `frust-share` now carries an Android Gradle module (the `FileProvider` behind `Share::files`). An
   existing app re-runs Add Plugin for `share` to include the module before sharing files on Android;
   text and URL sharing are unchanged.

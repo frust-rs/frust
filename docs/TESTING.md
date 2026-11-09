@@ -246,6 +246,10 @@ The repository already contains substantial non-pixel coverage:
   (`codes.rs`, pinned against the Kotlin host by `tests/kotlin_contract.rs`) and the Apple arm
   (`cargo test -p frust-permissions --all-features`); the prompts themselves are manual device
   gates ([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)'s Permissions manual test).
+- `plugins/file-dialogs`: host tests for filters, the cancel token, the chunked export, the folder
+  walk and the iOS bookmark codec, plus `tests/kotlin_contract.rs`, which pins the Rust code contract
+  against `FrustFileDialogsHost.kt`; the dialogs, grants and restart legs are manual device gates
+  ([PLUGINS_DEVELOPMENT.md](PLUGINS_DEVELOPMENT.md)'s File-dialogs manual test).
 - `benchmarks/`: deterministic scenario logic, harness parser tests, and the
   S1-S8 cross-framework device protocol.
 

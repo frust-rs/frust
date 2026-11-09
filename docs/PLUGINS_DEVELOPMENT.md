@@ -131,21 +131,29 @@ URL and, for the round-trip cases below, a `frustplay://` return link:
   [DEVELOPMENT.md](DEVELOPMENT.md)'s cross-target Prerequisites; the arm itself has also built and
   run natively on the Windows 11 rig (`plugins/url-launcher/README.md` §6, *Windows*, 2026-10-01).
 
-## File-dialogs manual test (desktop)
+## File-dialogs manual test (desktop + Android + iOS)
 
-A desktop gate for `frust-file-dialogs` (`plugins/file-dialogs`), against `examples/playground`'s
-Desktop section (`src/pages/desktop_services.rs`): Open file, Open files and Save as… each run in
-`spawn_blocking` and report file names only. The playground README's gate table is the record:
+A gate for `frust-file-dialogs` (`plugins/file-dialogs`), against `examples/playground`: the Desktop
+section (`src/pages/desktop_services.rs`: Open file, Open files, Save as…, Export file, Pick folder,
+Cancel) and the Photos page's Folders panel (`src/pages/photos.rs`: Pick, Scan, Recursive, Release,
+Cancel). Every call runs in `spawn_blocking`; panels report file names only.
 
-- **Linux — passed** (2026-10-18, linux-native rig): open, open-multi and save-as round trips
-  through the host xdg-desktop-portal-gtk (the GTK chooser with the Images filter; the save pre-fills the suggested
-  name). With neither a portal nor `zenity` the call returns no selection, indistinguishable from a
-  cancel (`file-dialogs-linux-runtime-deps` in [LIMITATIONS.md](LIMITATIONS.md)).
-- **macOS — owed:** the same three round trips through `NSOpenPanel`/`NSSavePanel`.
-- **Windows — owed:** the same three round trips; the dialog has no owner window
-  (`file-dialogs-windows-app-modal`).
-- **Compile tripwire:** `cargo check -p frust-file-dialogs`; Android/iOS/web compile no `rfd` and
-  answer `Unsupported`.
+- **Desktop — passed** (2026-10-18): the open, open-multi and save-as round trips on Linux (host
+  xdg-desktop-portal-gtk, the suggested name pre-filled; with neither a portal nor `zenity` the call
+  returns no selection, `file-dialogs-linux-runtime-deps` in [LIMITATIONS.md](LIMITATIONS.md)), macOS
+  (`NSOpenPanel`/`NSSavePanel`, a sheet on the app window) and Windows (`IFileOpenDialog`; no owner
+  window, `file-dialogs-windows-app-modal`).
+- **iPhone SE 2nd gen (iOS 26.7.1, profile build) and Pixel 5 (Android 14, debug build) — passed
+  (2026-11-09):** open copies into the app cache; Export through Files / the system UI; Pick folder
+  and Scan with a relaunch that restores the folder without asking; Release; Cancel during a load.
+  Android also passed force-stop, reboot and lost access (folder deleted or grant revoked: "Pick
+  folder again"). Plain *Clear storage* removes the stored token, so a lost-access test must restore
+  it. An iCloud pick waits inside the iOS picker (`file-dialogs-ios-icloud-download-in-picker`).
+- **Owed:** the desktop Export file, Pick folder, Scan and Cancel legs on Windows and Linux; GPS
+  through an Android folder read (`photo-library-android-location-redacted`).
+- **Compile tripwires:** `cargo check -p frust-file-dialogs` and, per [DEVELOPMENT.md](DEVELOPMENT.md)'s
+  cross-target Prerequisites, the `aarch64-linux-android` and `aarch64-apple-ios-sim` targets; the
+  web target compiles no backend and answers `Unsupported`.
 
 ## Share manual test (desktop + Android + iOS)
 
@@ -377,7 +385,8 @@ LAW; re-run the row's tripwire after touching it, and never run a blind `cargo u
 | `androidx.browser:browser 1.10.0` (Gradle, not a Cargo pin) minor | `frust-auth-session`'s Android Chrome Custom Tabs host (`plugins/auth-session/platform/android/build.gradle.kts`); `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled`, confirmed present on this exact version via `javap`, is what makes `AuthSessionRequest::ephemeral` a real advisory flag on Android rather than a silent no-op | `(cd examples/playground/android && ./gradlew :frust-auth-session:compileDebugKotlin)` |
 | `keyring-core 1.0` / `zbus-secret-service-keyring-store 1.0` (`rt-async-io-crypto-rust` feature, keeps the plugin tokio-free) / `windows-native-keyring-store 1.1` minor | `frust-secure-storage`'s desktop Linux/Windows backend | `cargo test -p frust-secure-storage` |
 | `arboard =3.6.1` exact | `frust-clipboard`'s desktop (macOS/Linux/Windows) text-clipboard backend — **shared across three consumers**: `frust-shell-desktop`'s own clipboard route rides this same row (see [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md)), and so does the TUI unit's `frust-tui::clipboard` system backend (see [TUI_DEVELOPMENT.md](TUI_DEVELOPMENT.md)) — one pin, three consumers, so a bump is all three units' business. Same shape across them: `default-features = false` drops the default `image-data` feature and `wl-clipboard-rs`'s native-Wayland `wayland-data-control` feature is deliberately not enabled. `frust-clipboard` and `frust-shell-desktop` hold arboard differently — a `Clipboard` per call on the caller's thread versus one kept open for the process lifetime on a clipboard worker thread — so both can be live on different threads of the *same* app process at once, which each manifest records as observed to crash arboard's macOS backend; an app using this plugin's API *and* a clipboard-capable widget on desktop is in unsupported territory. The TUI holds its own per-write instance in its own process, never sharing a process with the plugin or the shell, so this two-live-instances hazard is unchanged by its addition as a third consumer | `cargo check -p frust-clipboard` **and** `cargo check -p frust-shell-desktop` **and** `cargo check -p frust-tui` (all three arms, every time) |
-| `rfd 0.17` minor | Native file dialogs for `plugins/file-dialogs`; default features (`xdg-portal`, `wayland`), not `gtk3`, so Linux links no GTK and reaches the portal over a runtime-loaded libdbus; compiled only under the crate's desktop `target_os` cfg. Bump only with the plugin's per-OS manual gate (*File-dialogs manual test* above); owner `frust-file-dialogs` | `cargo check -p frust-file-dialogs` |
+| `objc2-uniform-type-identifiers 0.3` minor | `frust-file-dialogs`'s iOS picker content types (`UTType` looked up at run time, so no data symbol links); the lockfile carries `0.3.2` beside a `0.2.2` that an older `objc2-ui-kit` pulls, a split to expect | `cargo check --target aarch64-apple-ios-sim -p frust-file-dialogs` |
+| `rfd 0.17` minor | Native file dialogs for `plugins/file-dialogs`; default features (`xdg-portal`, `wayland`), not `gtk3`, so Linux links no GTK and reaches the portal over a runtime-loaded libdbus; compiled only under the crate's desktop `target_os` cfg. Used for the open, save and `pick_folder` dialogs (`export_file` copies by hand). Bump only with the plugin's per-OS manual gate (*File-dialogs manual test* above); owner `frust-file-dialogs` | `cargo check -p frust-file-dialogs` |
 | `rusqlite =0.40.1` exact, `default-features = false, features = ["bundled"]` | `frust-database`'s default (`engine-sqlite`) backend; `bundled` compiles SQLite `3.53.2` via `cc` — this crate's own conformance suite is the bump tripwire | `cargo test -p frust-database` |
 | `turso =0.7.2` exact, `default-features = false` | `frust-database`'s optional `engine-turso` backend (pre-1.0 rewrite); dropping the default `mimalloc`+`fts` features saves ~4 MB. Needs libclang on the host — [DEVELOPMENT.md](DEVELOPMENT.md)'s Prerequisites. `scripts/size-report.sh` is a whole-artifact snapshot, not a delta tool; `plugins/database/README.md` §6 documents the two-release-build procedure that produced the recorded size delta, reproducible on a pin bump | `cargo test -p frust-database --features engine-turso` |
 | `fluent-bundle 0.16` / `fluent-langneg 0.13` / `unic-langid 0.9` / `fluent-syntax 0.12` minor | `frust-i18n`'s Fluent Project message-bundle engine, locale negotiation, BCP-47 locale type, and (via `frust-i18n-macros`) the `locales!` macro's compile-time `.ftl` syntax check — all pre-1.0, same upstream `fluent-rs` repo, same churn risk | `cargo test -p frust-i18n` + `cargo check --target aarch64-linux-android -p frust-i18n && cargo check --target aarch64-apple-ios-sim -p frust-i18n` |

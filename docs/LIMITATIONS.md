@@ -8068,23 +8068,199 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `file-dialogs-mobile-web-unsupported` — `frust-file-dialogs` has no Android, iOS or web backend
+### `file-dialogs-web-unsupported` — `frust-file-dialogs` has no web backend
 
-**Observed**: on Android, iOS and web every terminal call (`open_file`, `open_files`, `save_file`) returns `Err(FileDialogError::Unsupported)`; `rfd` is not compiled for those targets.
+**Observed**: on web every terminal call returns `Err(FileDialogError::Unsupported)`; neither `rfd` nor the mobile backends are compiled for it, and the folder API in `frust-photo-library` does not exist on wasm.
 
-**Applies to**: Android, iOS and web; every `FileDialog` call.
+**Applies to**: web; every `FileDialog` call.
 
-**Why accepted**: scope. The plugin is a desktop capability returning file-system paths; the mobile and browser pickers hand back content URIs, security-scoped URLs or file handles instead and need their own API shape.
+**Why accepted**: the browser's pickers hand back file handles, not paths or copies, and need their own API shape.
 
-**Trigger for removal**: a mobile or web document-picker backend ships.
+**Trigger for removal**: a web document-picker backend ships.
 
-**Evidence**: `plugins/file-dialogs/src/lib.rs` (the non-desktop `run` arm); `plugins/file-dialogs/Cargo.toml` (the desktop-only `rfd` target table).
+**Evidence**: `plugins/file-dialogs/src/fallback.rs`; `plugins/file-dialogs/Cargo.toml` (the target tables).
+
+---
+
+### `file-dialogs-mobile-save-file-unsupported` — `save_file` answers `Unsupported` on Android and iOS
+
+**Observed**: `FileDialog::save_file` returns `Err(FileDialogError::Unsupported)` on Android and iOS. The system save UIs hand back no writable path, so the plugin offers `export_file` (the platform's export UI, then a copy) instead.
+
+**Applies to**: Android and iOS; apps that expect a destination path from a save dialog.
+
+**Workaround**: `FileDialog::export_file(&source, Some("name"))`, which works on every platform.
+
+**Why accepted**: a destination path does not exist on those systems; the content is written by the system's export flow.
+
+**Trigger for removal**: none planned; the contract is deliberate.
+
+**Evidence**: `plugins/file-dialogs/src/lib.rs` (crate docs); `plugins/file-dialogs/README.md` (*Platforms*); iPhone SE 2nd gen (iOS 26.7.1) and Pixel 5 (Android 14) device gates.
+
+---
+
+### `file-dialogs-mobile-open-returns-copies` — mobile `open_file` returns an app-private copy
+
+**Observed**: on Android and iOS `open_file` and `open_files` copy each chosen file into the app's cache and return those paths, not the originals (Android: `<cache>/frust-file-dialogs/<unique>/`, iOS: `Caches/frust-file-dialogs/<unique>/`). The plugin does not remove iOS copies; Android copies stay until the OS clears the cache or the call fails or is cancelled. A cloud file is fetched in full first.
+
+**Applies to**: Android and iOS; apps that expect the user's original path or write back to it.
+
+**Workaround**: move or delete the copies when done; use a `FolderGrant` to reach originals.
+
+**Why accepted**: neither system hands a stable file path to a picked document; a copy is the only portable result.
+
+**Trigger for removal**: a platform path that survives the picker, or a plugin cleanup call.
+
+**Evidence**: `plugins/file-dialogs/src/ios.rs` and `android.rs` (module docs); iPhone SE 2nd gen and Pixel 5 device gates.
+
+---
+
+### `file-dialogs-android-persisted-grant-cap` — Android caps the folder grants an app can keep
+
+**Observed**: Android limits the persisted URI permissions per app. At the cap the system either refuses a new grant, which `pick_folder` reports as `FileDialogError::Platform` (distinct from a dismissal), or drops the oldest.
+
+**Applies to**: Android; apps that persist many folders.
+
+**Workaround**: call `FolderGrant::release` on folders no longer needed and keep few grants.
+
+**Why accepted**: a platform quota the plugin cannot raise.
+
+**Trigger for removal**: the platform lifts the cap.
+
+**Evidence**: `plugins/file-dialogs/src/android.rs` (*Folder grants*); `FrustFileDialogsHost.kt` (persist failure path).
+
+---
+
+### `file-dialogs-dialog-not-closable-by-token` — a cancel cannot close a dialog that is already showing
+
+**Observed**: `FileDialog::cancel` and `ListOptions::cancel` take effect before a dialog shows, while the plugin waits and while it copies or lists. A native dialog already on screen cannot be closed: on desktop the token is checked again when the dialog closes, and on Android the call returns `Cancelled` at once while the system dialog stays up until the user dismisses it. A cancel in the narrow window just after the Android host commits can report `Cancelled` for an export that was saved. The token is the plugin's own `CancelToken`, separate from `frust-photo-library`'s, because neither crate can depend on the other on every target.
+
+**Applies to**: desktop and Android; apps with a Cancel button beside a dialog. iOS cancels the wait.
+
+**Workaround**: offer Cancel for the loading phase (`on_progress` has started); convert between the two token types in app code.
+
+**Why accepted**: `rfd` and the Storage Access Framework offer no dismissal call.
+
+**Trigger for removal**: a platform dismissal API.
+
+**Evidence**: `plugins/file-dialogs/README.md` (*Cancel and progress*); `plugins/file-dialogs/src/cancel.rs`; Pixel 5 (Android 14) device gate.
+
+---
+
+### `file-dialogs-ios-icloud-download-in-picker` — the iOS picker downloads an iCloud file before it closes
+
+**Observed**: with copy picks the system picker fetches an iCloud file before it dismisses, so the wait is inside the picker: its own Cancel covers it and the app's Cancel and `on_progress` cannot be reached until it closes.
+
+**Applies to**: iOS; `open_file` and `open_files` on cloud-only files.
+
+**Workaround**: none; tell the user the picker is working.
+
+**Why accepted**: the download is the picker's, not the plugin's.
+
+**Trigger for removal**: a picker mode that returns before the download.
+
+**Evidence**: iPhone SE 2nd gen (iOS 26.7.1) device finding; `plugins/file-dialogs/src/ios.rs`.
+
+---
+
+### `file-dialogs-android-listing-truncation-unflagged` — a long Android listing is cut short without a flag
+
+**Observed**: the Android listing keeps one path component per provider name and stops after 16 times `max_entries` visits. A tree with many entries that do not match returns a shorter list with no marker that it stopped.
+
+**Applies to**: Android; `FolderGrant::list` and `PhotoLibrary::scan_folder` over large trees.
+
+**Workaround**: filter by extension and narrow the folder; page with `scan_folder`.
+
+**Why accepted**: the bound keeps a slow provider from running unbounded; a flag needs an additive API.
+
+**Trigger for removal**: a truncation flag on the listing result.
+
+**Evidence**: `FrustFileDialogsHost.kt` (`WALK_VISIT_MULTIPLE`); `plugins/file-dialogs/src/android.rs`.
+
+---
+
+### `file-dialogs-android-work-pool-stall` — a hung provider can stall Android file-dialog work
+
+**Observed**: the Android host runs copies and listings on a four-thread pool. Four calls blocked on a hung document provider hold every thread, and later calls wait behind them. A cancel stops the wait but not a read already blocked in the provider.
+
+**Applies to**: Android; apps reading cloud or removable providers.
+
+**Workaround**: cancel and retry later; avoid unresponsive providers.
+
+**Why accepted**: a blocked provider read cannot be interrupted from the app.
+
+**Trigger for removal**: per-call deadlines or isolated pools.
+
+**Evidence**: `FrustFileDialogsHost.kt` (the work executor).
+
+---
+
+### `file-dialogs-export-stale-temp-after-kill` — a process kill can leave a hidden temporary export file
+
+**Observed**: an export copies in 64 KiB chunks to a hidden temporary sibling of the destination (mode 0600) and renames it once complete. A failure or cancel removes the sibling; killing the process mid-copy leaves it. On Unix the source's access bits are applied best effort (setuid and setgid are dropped) and a volume with fixed modes keeps the private mode.
+
+**Applies to**: desktop; `export_file` and `FolderEntry::copy_to`.
+
+**Workaround**: sweep hidden leftovers beside export destinations after an abnormal exit.
+
+**Why accepted**: no signal-safe cleanup exists; an existing destination is never touched.
+
+**Trigger for removal**: a startup sweep or an exclusive-create staging directory.
+
+**Evidence**: `plugins/file-dialogs/src/export.rs` (`copy_file_with`).
+
+---
+
+### `file-dialogs-entry-reopen-follows-links` — a listed entry is reopened by path
+
+**Observed**: `list` neither follows nor lists links, but `copy_to` and `read_to_vec` reopen the entry by its path. A file replaced by a link between the listing and the read is opened through the link.
+
+**Applies to**: desktop and iOS; folders other programs write to.
+
+**Workaround**: list again just before reading; do not grant folders an untrusted program controls.
+
+**Why accepted**: the platforms give no handle that survives the listing.
+
+**Trigger for removal**: handles kept from the listing.
+
+**Evidence**: `plugins/file-dialogs/src/folder.rs`, `walk.rs`.
+
+---
+
+### `file-dialogs-ios-entry-needs-grant` — an iOS entry is readable only while its grant is alive
+
+**Observed**: a `FolderGrant` holds the folder's security scope while it lives. After `release` or a drop, `FolderEntry::copy_to` and `read_to_vec` fail with `AccessLost` where the system's denial can be told apart, otherwise `Io`.
+
+**Applies to**: iOS; apps that keep entries after the grant.
+
+**Workaround**: keep the grant alive while any entry is in use.
+
+**Why accepted**: the scope belongs to the bookmark; the system ends it with the grant.
+
+**Trigger for removal**: none planned.
+
+**Evidence**: `plugins/file-dialogs/README.md` (*Folder access*); iPhone SE 2nd gen device gate.
+
+---
+
+### `file-dialogs-android-release-revokes-all-grants` — Android `release` ends access for every grant on that folder
+
+**Observed**: `FolderGrant::release` revokes the persisted permission for the folder, including for any other `FolderGrant` on it; later calls on those return `AccessLost`.
+
+**Applies to**: Android; apps holding two grants on one folder.
+
+**Workaround**: keep one grant per folder.
+
+**Why accepted**: the persisted permission is the grant, one per tree URI.
+
+**Trigger for removal**: none planned.
+
+**Evidence**: `plugins/file-dialogs/src/android.rs` (*Folder grants*).
 
 ---
 
 ### `file-dialogs-windows-app-modal` — the dialog has no owner window
 
-**Observed**: the plugin never gives `rfd` a parent window, so on Windows `rfd` shows the `IFileOpenDialog`/`IFileSaveDialog` with a null owner. The dialog is not modal to the app's window: the window stays interactive (the call runs off the UI thread under `spawn_blocking`) and the dialog can fall behind it. The Linux portal request likewise carries no parent-window identifier. Unverified on a Windows desktop until the plugin's Windows manual gate runs.
+**Observed**: the plugin never gives `rfd` a parent window, so on Windows `rfd` shows the `IFileOpenDialog`/`IFileSaveDialog` with a null owner. The dialog is not modal to the app's window: the window stays interactive (the call runs off the UI thread under `spawn_blocking`) and the dialog can fall behind it. The Linux portal request likewise carries no parent-window identifier. The Windows gate (2026-10-18) recorded the round trips only, not the dialog's modality.
 
 **Applies to**: Windows (observably); every `FileDialog` call.
 
@@ -8098,13 +8274,13 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ### `file-dialogs-linux-runtime-deps` — Linux dialogs need a portal or `zenity` at runtime
 
-**Observed**: on Linux `rfd` asks xdg-desktop-portal's file chooser over D-Bus (libdbus is loaded at runtime, nothing links at build time) and falls back to `zenity`. With neither present, `rfd` logs an error and returns no selection: the call yields `Ok(None)` or an empty `Vec`, indistinguishable from a user cancel. On a zenity-only desktop `rfd` splits a multi-selection on `|`, so `open_files` splits a file name containing `|` into two paths. Threading follows `rfd`: on macOS it marshals the panel to the main thread through dispatch when `NSApplication` is running (the main thread blocks while the panel runs), on Windows it initialises COM per calling thread, and on Linux the portal call blocks only the calling thread. Only the Linux leg has been exercised (2026-10-18); the macOS and Windows threading is read from `rfd`, not yet run on this plugin.
+**Observed**: on Linux `rfd` asks xdg-desktop-portal's file chooser over D-Bus (libdbus is loaded at runtime, nothing links at build time) and falls back to `zenity`. With neither present, `rfd` logs an error and returns no selection: the call yields `Ok(None)` or an empty `Vec`, indistinguishable from a user cancel. On a zenity-only desktop `rfd` splits a multi-selection on `|`, so `open_files` splits a file name containing `|` into two paths. Threading follows `rfd`: on macOS it marshals the panel to the main thread through dispatch when `NSApplication` is running (the main thread blocks while the panel runs), on Windows it initialises COM per calling thread, and on Linux the portal call blocks only the calling thread. The playground's Desktop page exercised all three threading legs from `spawn_blocking` on 2026-10-18 (Linux, macOS, Windows).
 
-**Applies to**: Linux desktops without a running xdg-desktop-portal file-chooser backend (GTK, KDE, …) and without `zenity`; the `|` split to zenity-only desktops; the unrun threading legs to macOS and Windows.
+**Applies to**: Linux desktops without a running xdg-desktop-portal file-chooser backend (GTK, KDE, …) and without `zenity`; the `|` split to zenity-only desktops.
 
 **Why accepted**: `rfd`'s synchronous API cannot report a backend failure, and the default features (`xdg-portal`, not `gtk3`) are what keep GTK out of the build. An app that must tell the two apart has to check for a portal itself.
 
-**Trigger for removal**: `rfd` surfaces backend failures through its synchronous API, or the plugin probes for a backend before showing the dialog; for the threading legs, a macOS and Windows run of the playground's Desktop page.
+**Trigger for removal**: `rfd` surfaces backend failures through its synchronous API, or the plugin probes for a backend before showing the dialog.
 
 **Evidence**: `plugins/file-dialogs/src/lib.rs` (threading note, *Cancellation and failure*); `plugins/file-dialogs/README.md` (*Linux runtime requirements*, threading paragraph).
 
@@ -9420,12 +9596,13 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 | Android browse + `export_original`, Media location not granted | latitude, longitude and GPS date zeroed in place, same file size |
 | Android Photo Picker (`pick`), even with Media location granted | latitude, longitude and GPS date zeroed |
 | iOS `PHPicker` (`pick`), default options | kept |
+| Android `scan_folder` / `FolderEntry` read through a Storage Access Framework tree | not measured |
 
 Media location has no user-facing switch on Android 14: it is granted along with Photos.
 
 **Applies to**: Android apps that need stored location from a pick, or from an export without Media location.
 
-**Workaround**: browse and export (`library`), with `permissions`' `media-location` feature requested and granted. An app can tell its user that picked photos lose their location on Android and that the library route keeps it.
+**Workaround**: browse and export (`library`), with `permissions`' `media-location` feature requested and granted; that is the route known to keep location. GPS through a folder-grant read on Android has not been measured, so do not rely on it. An app can tell its user that picked photos lose their location on Android and that the library route keeps it.
 
 **Why accepted**: Android redacts the location of Photo Picker items and of items opened without `ACCESS_MEDIA_LOCATION`; the export host falls back to the plain URI instead of failing when redaction is refused.
 
@@ -9447,7 +9624,7 @@ Media location has no user-facing switch on Android 14: it is granted along with
 
 **Trigger for removal**: a platform API for edited renditions on Android.
 
-**Evidence**: (2026-11-09) `plugins/photo-library/src/android_originals.rs` (module docs); Pixel 5 (Android 14) device gate. A DNG export on a phone has not been run.
+**Evidence**: (2026-11-09) `plugins/photo-library/src/android_originals.rs` (module docs); Pixel 5 (Android 14) device gate. A DNG export on an iPhone SE 2nd gen (iOS 26.7.1) produced a real DNG 1.4, size-identical to the source; an Android DNG export is not recorded.
 
 ---
 

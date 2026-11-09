@@ -156,8 +156,15 @@ Desktop threading follows `rfd`: on macOS it marshals the panel to the main thre
 `spawn_blocking` under the frust desktop shell is correct and the main thread
 blocks while the modal panel runs; on Windows it initialises COM per calling
 thread, so a worker thread is fine; on Linux the portal call blocks only the
-calling thread. The Linux leg was exercised on 2026-10-18; the macOS and
-Windows legs have not been run on this plugin yet.
+calling thread.
+
+## Tested platforms
+
+Round trips by hand on real hardware: Linux, macOS and Windows desktops (2026-10-18, open, open-multi and
+save-as), an iPhone SE 2nd gen (iOS 26.7.1) and a Pixel 5 (Android 14), 2026-11-09 (open copies, export,
+folder pick and restore across relaunch, release, cancel). Not measured: GPS location through an
+Android folder read; the desktop export, folder and cancel legs on Windows and Linux. Web only reports
+`Unsupported`. See the *File-dialogs manual test* in `docs/PLUGINS_DEVELOPMENT.md`.
 
 ## Security
 
