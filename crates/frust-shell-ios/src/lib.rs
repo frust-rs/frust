@@ -200,7 +200,7 @@ macro_rules! ios_app {
         ) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::init_accessibility(handle, view)
+                $crate::ffi_glue::init_accessibility(handle, view)
             }
         }
 
@@ -221,7 +221,7 @@ macro_rules! ios_app {
         ) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::resize(handle, width, height, scale)
+                $crate::ffi_glue::resize(handle, width, height, scale)
             }
         }
 
@@ -250,7 +250,7 @@ macro_rules! ios_app {
         ) -> u8 {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::render_frame(handle, timestamp_ns)
+                $crate::ffi_glue::render_frame(handle, timestamp_ns)
             }
         }
 
@@ -279,7 +279,7 @@ macro_rules! ios_app {
         ) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::dispatch_touch(handle, phase, pointer_id, x, y)
+                $crate::ffi_glue::dispatch_touch(handle, phase, pointer_id, x, y)
             }
         }
 
@@ -306,7 +306,7 @@ macro_rules! ios_app {
         ) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::ime_apply(handle, text, sel_base, sel_ext, comp_base, comp_ext)
+                $crate::ffi_glue::ime_apply(handle, text, sel_base, sel_ext, comp_base, comp_ext)
             }
         }
 
@@ -326,7 +326,7 @@ macro_rules! ios_app {
         ) -> *mut ::core::ffi::c_char {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::ime_state_json(handle)
+                $crate::ffi_glue::ime_state_json(handle)
             }
         }
 
@@ -345,7 +345,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_string_free(s: *mut ::core::ffi::c_char) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::string_free(s)
+                $crate::ffi_glue::string_free(s)
             }
         }
 
@@ -372,7 +372,7 @@ macro_rules! ios_app {
         ) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::edit_command(handle, cmd, text)
+                $crate::ffi_glue::edit_command(handle, cmd, text)
             }
         }
 
@@ -394,7 +394,7 @@ macro_rules! ios_app {
         ) -> *mut ::core::ffi::c_char {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::take_clipboard_write(handle)
+                $crate::ffi_glue::take_clipboard_write(handle)
             }
         }
 
@@ -415,7 +415,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_take_paste_request(handle: *mut ::core::ffi::c_void) -> u8 {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::take_paste_request(handle)
+                $crate::ffi_glue::take_paste_request(handle)
             }
         }
 
@@ -438,7 +438,7 @@ macro_rules! ios_app {
         ) -> *mut ::core::ffi::c_char {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::selection_toolbar_json(handle)
+                $crate::ffi_glue::selection_toolbar_json(handle)
             }
         }
 
@@ -455,7 +455,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_pause(handle: *mut ::core::ffi::c_void) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::pause(handle)
+                $crate::ffi_glue::pause(handle)
             }
         }
 
@@ -472,7 +472,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_resume(handle: *mut ::core::ffi::c_void) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::resume(handle)
+                $crate::ffi_glue::resume(handle)
             }
         }
 
@@ -490,7 +490,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_did_enter_background(handle: *mut ::core::ffi::c_void) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::did_enter_background(handle)
+                $crate::ffi_glue::did_enter_background(handle)
             }
         }
 
@@ -507,7 +507,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_memory_warning(handle: *mut ::core::ffi::c_void) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::memory_warning(handle)
+                $crate::ffi_glue::memory_warning(handle)
             }
         }
 
@@ -525,7 +525,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_will_enter_foreground(handle: *mut ::core::ffi::c_void) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::will_enter_foreground(handle)
+                $crate::ffi_glue::will_enter_foreground(handle)
             }
         }
 
@@ -545,7 +545,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_sync_lifecycle(handle: *mut ::core::ffi::c_void, state: i32) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::sync_lifecycle(handle, state)
+                $crate::ffi_glue::sync_lifecycle(handle, state)
             }
         }
 
@@ -569,7 +569,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_set_appearance(handle: *mut ::core::ffi::c_void, dark: u8) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::set_appearance(handle, dark)
+                $crate::ffi_glue::set_appearance(handle, dark)
             }
         }
 
@@ -588,7 +588,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_set_reduce_motion(handle: *mut ::core::ffi::c_void, reduce: u8) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::set_reduce_motion(handle, reduce)
+                $crate::ffi_glue::set_reduce_motion(handle, reduce)
             }
         }
 
@@ -606,7 +606,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_set_text_scale(handle: *mut ::core::ffi::c_void, scale: f32) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::set_text_scale(handle, scale)
+                $crate::ffi_glue::set_text_scale(handle, scale)
             }
         }
 
@@ -638,7 +638,7 @@ macro_rules! ios_app {
         ) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::set_insets(handle, vp_l, vp_t, vp_r, vp_b, vi_l, vi_t, vi_r, vi_b)
+                $crate::ffi_glue::set_insets(handle, vp_l, vp_t, vp_r, vp_b, vi_l, vi_t, vi_r, vi_b)
             }
         }
 
@@ -672,9 +672,9 @@ macro_rules! ios_app {
         ) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::set_corner_insets(
-                handle, tl_w, tl_h, tr_w, tr_h, bl_w, bl_h, br_w, br_h,
-            )
+                $crate::ffi_glue::set_corner_insets(
+                    handle, tl_w, tl_h, tr_w, tr_h, bl_w, bl_h, br_w, br_h,
+                )
             }
         }
 
@@ -695,7 +695,7 @@ macro_rules! ios_app {
         ) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::on_deep_link(handle, url)
+                $crate::ffi_glue::on_deep_link(handle, url)
             }
         }
 
@@ -740,7 +740,7 @@ macro_rules! ios_app {
         ) -> *mut ::core::ffi::c_char {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::platform_view_commands_json(handle, ack_generation)
+                $crate::ffi_glue::platform_view_commands_json(handle, ack_generation)
             }
         }
 
@@ -776,7 +776,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_present_frame(handle: *mut ::core::ffi::c_void) {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::present_frame(handle)
+                $crate::ffi_glue::present_frame(handle)
             }
         }
 
@@ -794,7 +794,7 @@ macro_rules! ios_app {
         pub unsafe extern "C" fn frust_overlay_mode(handle: *mut ::core::ffi::c_void) -> u32 {
             // SAFETY: forwarded unchanged under this fn's documented contract.
             unsafe {
-            $crate::ffi_glue::overlay_mode(handle)
+                $crate::ffi_glue::overlay_mode(handle)
             }
         }
 
