@@ -8819,7 +8819,7 @@ covered. A crashed writer's temp file from another process lingers up to 24 hour
 liveness check (this process's own are swept after 10 minutes). A desktop window that is merely behind another is
 neither minimized nor occluded, so winit reports no hide and nothing flushes until it is. On Wayland the compositor
 reports no occlusion and no minimized state, so the desktop hide flush fires only on suspend (the exit flush still
-covers quit). iOS flushes inside UIKit's background grace with no `UIBackgroundTask`: a first write measured 14.3 ms on
+covers quit). iOS flushes inside UIKit's background grace, and the shell's own background flush still runs without the `BackgroundTask` assertion that apps now have (follow-up noted): a first write measured 14.3 ms on
 an iPhone 13 mini (iOS 27.2), then 0.1 ms. The web tier has no persistent font cache, so nothing persists across page
 loads. Two live copies of one cache file exist only after a stamp or font-directory change mid-process; between them
 the last writer wins, so a copy whose write was replaced still reports clean and its answers miss the disk until it
@@ -9512,7 +9512,7 @@ no foreground exit: losing window focus on desktop and web, the notification sha
 the unfocused half of split-screen on Android, Control Center or a call on iOS. It is one-shot and is
 consumed, so do not flag a timer whose delay must be honoured while the app stays visible. Only
 synchronous work in the callback is guaranteed to complete before suspension, work it spawns is not,
-and no background-task assertion is provided. On desktop a window that lost focus keeps running, so a
+and only an iOS `BackgroundTask` extends it. On desktop a window that lost focus keeps running, so a
 plain timer fires on time.
 
 **Applies to**: Android, iOS.
@@ -9525,5 +9525,28 @@ silent in the background and fired on resume (16744 ms on the Pixel 5, 17557 ms 
 timer's marker file written at backgrounding survived killing the process about 2 s later on both. On
 desktop a plain timer fired on time (10001 ms measured). `examples/playground/src/pages/network.rs`
 (Timers block).
+
+---
+
+### `background-task-no-op-platforms` — `BackgroundTask` protects work only on iOS
+
+**Observed**: on Android, desktop and web `frust::BackgroundTask` is a no-op that reports itself granted and unexpired,
+and Android documents no equivalent, so a write begun there when the app leaves the foreground races process death as
+before; `spawn_blocking` panics on web, so the flush pattern does not apply there. On iOS Apple documents no numeric budget (about 30 s per Apple DTS), and the system may revoke the assertion
+early; `expired()` reports that loss, and also a refusal.
+
+**Applies to**: Android, desktop, web (no protection); iOS (unspecified, revocable budget).
+
+**Workaround**: keep the guarded write short, write it atomically (`frust::paths`' atomic write), and check
+`expired()` when the work can be abandoned or retried.
+
+**Why accepted**: only Apple offers an in-process assertion of this kind; background execution elsewhere belongs to OS
+work managers.
+
+**Evidence**: (2026-11-09) device gate on an iPhone SE and a Pixel 5: a 200 ms database write begun from a flush
+callback finished and survived killing the process about 5 s after backgrounding, on the iPhone with the guard and with
+no `task expired`. A control without the guard also survived, because a write this short fits the normal suspension
+delay, so the gate shows the guard works rather than that this write needed it. `examples/playground/src/pages/network.rs`
+(Timers block); `crates/frust-shell-ios/src/background_task.rs`.
 
 ---

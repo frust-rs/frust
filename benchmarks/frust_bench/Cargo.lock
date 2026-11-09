@@ -74,7 +74,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "objc2 0.5.2",
  "objc2-foundation 0.2.2",
- "objc2-ui-kit",
+ "objc2-ui-kit 0.2.2",
 ]
 
 [[package]]
@@ -826,6 +826,7 @@ checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.13.1",
  "block2 0.6.2",
+ "libc",
  "objc2 0.6.4",
 ]
 
@@ -1281,6 +1282,8 @@ dependencies = [
  "accesskit",
  "accesskit_ios",
  "anyhow",
+ "block2 0.6.2",
+ "dispatch2",
  "frust-core",
  "frust-reactive",
  "frust-render",
@@ -1292,6 +1295,8 @@ dependencies = [
  "libc",
  "log",
  "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
  "peniko",
  "pollster",
 ]
@@ -2817,6 +2822,18 @@ dependencies = [
  "objc2-symbols",
  "objc2-uniform-type-identifiers",
  "objc2-user-notifications",
+]
+
+[[package]]
+name = "objc2-ui-kit"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d87d638e33c06f577498cbcc50491496a3ed4246998a7fbba7ccb98b1e7eab22"
+dependencies = [
+ "bitflags 2.13.1",
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
 ]
 
 [[package]]
@@ -4789,7 +4806,7 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
- "objc2-ui-kit",
+ "objc2-ui-kit 0.2.2",
  "orbclient",
  "percent-encoding",
  "pin-project",
