@@ -51,8 +51,8 @@ only (S1–S8, D1–D2 per `benchmarks/PROTOCOL.md`), not a framework showcase.
 - **Scene-layer purity** — `frust-scene` and `frust-text` expose only `kurbo`/`peniko` types; `wgpu`
   is confined to `frust-render`/`frust-gpu`/`frust-engine`. No widget or core code depends on a GPU
   crate directly.
-- **`frust-reactive` is a leaf** — depends only on `reactive_graph`/`any_spawner`/`tokio`/`futures`;
-  nothing in core, scene, render, or a shell may appear in its dependency graph.
+- **`frust-reactive` is a leaf** — depends only on `reactive_graph`, `any_spawner`, `futures`, `log`, `tokio`,
+  `libc` (Android/Linux/Apple) and `wasm-bindgen-futures`/`js-sys`/`web-sys` (wasm); nothing in core, scene, render, or a shell may appear in its dependency graph.
 - **`frust-core`'s one documented exception** — `frust-core` depends on `reactive_graph` directly
   (alongside `frust-scene`, `tree_arena`, `kurbo`, `peniko`, `accesskit`) rather than through the
   `frust-reactive` wrapper; this is the single sanctioned bypass of the reactive seam.

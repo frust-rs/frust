@@ -353,6 +353,8 @@ cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features de
 
 # Same --all-targets rationale as Android above:
 cargo check --all-targets --target aarch64-apple-ios-sim  -p frust-shell-ios -p frust-iap
+cargo clippy -p frust-shell-ios --target aarch64-apple-ios --all-targets -- -D warnings
+cargo clippy -p frust-shell-ios --target aarch64-apple-ios-sim --all-targets -- -D warnings  # CI `clippy-ios` (macOS, advisory, sim only, not in `ci-ok`)
 
 # wasm compile gate (no browser): the facade graph + web_app!, the web shell and gallery registry.
 cargo check --target wasm32-unknown-unknown -p frust-ui --tests
