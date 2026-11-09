@@ -245,7 +245,9 @@ impl PhotoLibrary {
     /// [`clear_pick_cache`](Self::clear_pick_cache) does not touch it. Progress and cancellation
     /// work as for [`pick`](Self::pick): a cancelled export returns
     /// `Err(`[`PhotoError::Cancelled`]`)` and leaves no partial file. A cloud-only original with
-    /// [`ExportOptions::allow_network`] off returns [`PhotoError::NetworkRequired`].
+    /// [`ExportOptions::allow_network`] off returns [`PhotoError::NetworkRequired`]. Android has
+    /// no rendition split or network distinction, so [`AssetVersion::Current`] and
+    /// `allow_network` are ignored there.
     pub fn export_original(
         id: &AssetId,
         options: &ExportOptions,
@@ -266,7 +268,12 @@ impl PhotoLibrary {
 
     /// Saves a file into the photo library, optionally into a named album. Blocks; needs the
     /// `save` feature. The request is validated first: the source must exist and its kind must
-    /// be given or inferable from the extension.
+    /// be given or inferable from the extension, and a bad file name, album or kind returns
+    /// [`PhotoError::InvalidRequest`]. On iOS an album save needs read-write Photos access and
+    /// `NSPhotoLibraryUsageDescription` (the `library` feature provides the key), while a plain
+    /// save needs only the add-only key the `save` feature provides; add-only access with an
+    /// album returns [`PhotoError::PermissionDenied`], and a missing key returns
+    /// [`PhotoError::MissingUsageDescription`].
     pub fn save(request: &SaveRequest) -> Result<SavedAsset, PhotoError> {
         #[cfg(feature = "save")]
         {

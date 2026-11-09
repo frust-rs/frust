@@ -30,10 +30,12 @@ pub struct ExportOptions {
     /// `<cache_dir>/frust-photo-library/originals/`, which the app owns and cleans up
     /// ([`PhotoLibrary::clear_pick_cache`](crate::PhotoLibrary::clear_pick_cache) leaves it alone).
     pub dest_dir: Option<PathBuf>,
-    /// Which rendition to export.
+    /// Which rendition to export. Android has no rendition split, so
+    /// [`AssetVersion::Current`] behaves like [`AssetVersion::Original`] there.
     pub version: AssetVersion,
     /// Whether a cloud-only original may be downloaded (default `true`). When `false` such an
-    /// asset fails with [`PhotoError::NetworkRequired`].
+    /// asset fails with [`PhotoError::NetworkRequired`]. Android makes no network distinction,
+    /// so this is ignored there.
     pub allow_network: bool,
     /// Progress callback, rate-limited and monotonic; the final `1.0` is delivered on success.
     pub progress: Option<ProgressFn>,
@@ -126,7 +128,14 @@ pub struct SaveRequest {
     pub source: PathBuf,
     /// Image or video; inferred from the file extension when `None`.
     pub kind: Option<MediaKind>,
-    /// Album to add the saved asset to, created when missing.
+    /// Album to add the saved asset to, created when missing. A blank name, one holding a path
+    /// separator, or one made only of dots is rejected with [`PhotoError::InvalidRequest`].
+    ///
+    /// On iOS an album save needs read-write Photos access and `NSPhotoLibraryUsageDescription`
+    /// (the `library` feature provides the key); a plain save needs only the add-only key the
+    /// `save` feature provides. Add-only access with an album returns
+    /// [`PhotoError::PermissionDenied`], and a missing key returns
+    /// [`PhotoError::MissingUsageDescription`].
     pub album: Option<String>,
     /// Name for the saved asset; the source's file name when `None`. A bare name, never a path.
     pub file_name: Option<String>,
@@ -215,16 +224,30 @@ pub(crate) fn validate_save(request: &SaveRequest) -> Result<MediaKind, PhotoErr
     if let Some(name) = &request.file_name
         && !is_bare_name(name)
     {
-        return Err(PhotoError::Platform(
-            "save file name must be a bare file name".into(),
-        ));
+        return Err(PhotoError::InvalidRequest {
+            reason: "save file name must be a bare file name",
+        });
+    }
+    if let Some(album) = &request.album
+        && !is_valid_album(album)
+    {
+        return Err(PhotoError::InvalidRequest {
+            reason: "album name must be non-blank, hold no path separator and not be only dots",
+        });
     }
     match request.kind {
         Some(kind) => Ok(kind),
-        None => infer_kind(&request.source).ok_or_else(|| {
-            PhotoError::Platform("cannot tell whether the file is an image or a video".into())
+        None => infer_kind(&request.source).ok_or(PhotoError::InvalidRequest {
+            reason: "cannot tell whether the file is an image or a video",
         }),
     }
+}
+
+#[allow(dead_code)] // Used by `validate_save`.
+fn is_valid_album(name: &str) -> bool {
+    !name.trim().is_empty()
+        && !name.contains(['/', '\\', '\0'])
+        && !name.trim().chars().all(|c| c == '.')
 }
 
 #[allow(dead_code)] // Used by `validate_save`.
@@ -339,7 +362,7 @@ mod tests {
         let unknown = temp_file("c.xyz");
         assert!(matches!(
             validate_save(&SaveRequest::new(&unknown)),
-            Err(PhotoError::Platform(_))
+            Err(PhotoError::InvalidRequest { .. })
         ));
         assert_eq!(
             validate_save(&SaveRequest::new(&unknown).kind(MediaKind::Image)),
@@ -349,7 +372,16 @@ mod tests {
             assert!(
                 matches!(
                     validate_save(&SaveRequest::new(&jpg).file_name(bad)),
-                    Err(PhotoError::Platform(_))
+                    Err(PhotoError::InvalidRequest { .. })
+                ),
+                "{bad:?}"
+            );
+        }
+        for bad in ["", "  ", ".", "..", "...", "a/b", "a\\b", "a\0b"] {
+            assert!(
+                matches!(
+                    validate_save(&SaveRequest::new(&jpg).album(bad)),
+                    Err(PhotoError::InvalidRequest { .. })
                 ),
                 "{bad:?}"
             );

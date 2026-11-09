@@ -192,6 +192,12 @@ pub enum PhotoError {
     /// A filesystem error while preparing the pick cache.
     #[error("filesystem error: {0:?}")]
     Io(std::io::ErrorKind),
+    /// The request is malformed, for example a bad file name, album or media kind.
+    #[error("invalid request: {reason}")]
+    InvalidRequest {
+        /// What is wrong with the request.
+        reason: &'static str,
+    },
     /// Any other platform failure.
     #[error("platform error: {0}")]
     Platform(String),
