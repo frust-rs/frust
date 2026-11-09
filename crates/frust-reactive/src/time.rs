@@ -679,18 +679,15 @@ fn drain_on_owner(owner: std::thread::ThreadId) {
 /// first. [`TimerInner::run_callback`] isolates each panic.
 fn drain_flush_registry() {
     let timers = FLUSH_REGISTRY.with_borrow_mut(std::mem::take);
-    // Debug builds only; `cfg!` const-folds, so release takes no `Instant`. Wasm has no
-    // monotonic `Instant`, so it is skipped there too.
-    let measure = cfg!(debug_assertions) && !cfg!(target_family = "wasm");
-    let drain_start = measure.then(std::time::Instant::now);
+    let drain_start = FlushStopwatch::start();
     let mut fired = 0usize;
     for timer in timers.iter().filter_map(Weak::upgrade) {
-        let start = measure.then(std::time::Instant::now);
         // `fire_now` is a no-op for a timer that already fired or was cancelled, and a
         // callback that did not run counts toward neither the drain total nor its timing.
         if !timer.is_active() {
             continue;
         }
+        let start = FlushStopwatch::start();
         timer.fire_now();
         fired += 1;
         if let Some(start) = start {
@@ -715,6 +712,36 @@ fn drain_flush_registry() {
                 FLUSH_DRAIN_BUDGET.as_millis(),
             ));
         }
+    }
+}
+
+/// Times a flush in native debug builds. Compiled out everywhere else, so release builds read
+/// no clock and the web build, where `std`'s clock panics, has none to read.
+#[cfg(all(debug_assertions, not(target_family = "wasm")))]
+struct FlushStopwatch(std::time::Instant);
+
+#[cfg(all(debug_assertions, not(target_family = "wasm")))]
+impl FlushStopwatch {
+    fn start() -> Option<Self> {
+        Some(Self(std::time::Instant::now()))
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.0.elapsed()
+    }
+}
+
+#[cfg(not(all(debug_assertions, not(target_family = "wasm"))))]
+struct FlushStopwatch;
+
+#[cfg(not(all(debug_assertions, not(target_family = "wasm"))))]
+impl FlushStopwatch {
+    fn start() -> Option<Self> {
+        None
+    }
+
+    fn elapsed(&self) -> Duration {
+        Duration::ZERO
     }
 }
 
