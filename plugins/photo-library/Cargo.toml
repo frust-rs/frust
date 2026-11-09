@@ -27,9 +27,10 @@ log = { workspace = true }
 frust-paths = { path = "../../crates/frust-paths", version = "0.6.5" }
 
 # Plugin->plugin edge (docs/PLUGINS_CODE_STANDARDS.md): desktop has no photo picker, so the
-# picker is the native file dialog and reimplementing that would duplicate `rfd`. Same cfg list
-# as `frust-file-dialogs`' own desktop backend; target-gated so mobile and wasm never see it.
-[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
+# picker is the native file dialog and reimplementing that would duplicate `rfd`; folder scans
+# reuse its `FolderGrant` on mobile too. The desktop cfg list is `frust-file-dialogs`' own;
+# target-gated so wasm never sees the edge.
+[target.'cfg(any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
 frust-file-dialogs = { path = "../file-dialogs", version = "0.6.5" }
 
 # `jni` for the plugin's own JNI export; `frust-plugin` (the only other `frust-*` dependency a
