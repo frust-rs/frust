@@ -37,7 +37,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `frust-reactive`'s `test-support` feature (forwarded by the facade's `test-support`) adds
   `time::test_support::{install_virtual_clock, advance, now}`. `frust::testing::Tester` installs a
   per-thread virtual clock, and `pump(Duration)` fires due `frust::time` sleeps and `Timer`s
-  deterministically. `pump_until` remains the real-time wait. `frust::spawn` futures are not reached.
+  deterministically, stepping through each deadline in order (a chain or re-armed timer inside one pump
+  fires at its own virtual time). `pump_until` remains the real-time wait. Any future polled off the
+  Tester's thread stays on wall time, including `frust::spawn` and `use_task` fetch futures.
 - `frust::time::{sleep, Timer, Duration}`: `sleep(duration)` is an awaitable wall-clock delay (a real
   browser `setTimeout` on web) and `Timer::new(duration, callback)` runs a callback once, with `cancel`,
   `is_active`, `fire_now` and `detach`. A `Timer` is cancelled when dropped and with its owner, and its
