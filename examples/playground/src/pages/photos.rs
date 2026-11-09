@@ -1989,8 +1989,8 @@ fn restore_step(prefs: &SharedPreferences, grants: &GrantCell) -> FoldersStep {
             let name = folder_name(&grant);
             *grants.lock().expect("grant cell poisoned") = Some(Arc::new(grant));
             FoldersStep::message(match stored {
-                Ok(()) => format!("Restored folder {name}. Scan to list it."),
-                Err(text) => format!("Restored folder {name}, but {text}."),
+                Ok(()) => format!("Restored {name}. Scan to list it."),
+                Err(text) => format!("Restored {name}, but {text}."),
             })
         }
         Err(FileDialogError::AccessLost) => {
@@ -2024,8 +2024,8 @@ fn pick_step(
             // the persisted permission, which is the same one when the same folder is picked.
             *grants.lock().expect("grant cell poisoned") = Some(Arc::new(grant));
             FoldersStep::cleared(match stored {
-                Ok(()) => format!("Picked folder {name}. Scan to list it."),
-                Err(text) => format!("Picked folder {name}, but {text}."),
+                Ok(()) => format!("Picked {name}. Scan to list it."),
+                Err(text) => format!("Picked {name}, but {text}."),
             })
         }
         Ok(None) => FoldersStep::message("Nothing picked."),
@@ -2815,7 +2815,7 @@ mod tests {
         let grants = no_grants();
         let step = restore_step(&prefs, &grants);
         assert!(
-            message_of(&step).starts_with("Restored folder"),
+            message_of(&step).starts_with("Restored "),
             "{}",
             message_of(&step)
         );
