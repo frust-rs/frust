@@ -546,9 +546,18 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   it to keep state across a font-size change.
 - `frust-material-i18n` depends on `frust-reactive`.
 - Docs: `clean-signals-frust` shows localized failure text through the helpers' closures.
+- `frust-shell-ios`: every `ios_app!` export and `ffi_glue` function that dereferences a caller-supplied
+  pointer is now `unsafe` with its own Safety contract, `frust_destroy` and the overlay exports among them.
+  C symbols and signatures are unchanged, so Swift callers are unaffected; a Rust caller of those functions
+  now needs an `unsafe` block. The iOS-target clippy run is clean, and CI gained an advisory macOS
+  `clippy-ios` job for the iOS simulator target.
 
 ### Fixed
 
+- The Android hot-patch discovery-cancel test and the TUI clipboard abandoned-write test are deterministic.
+  `interrupt_e2e` reports the captured output and leaves no orphan on a timeout, the engine retained
+  parallel-walk test retries a bounded number of frames until a helper merges a run, and the
+  `frust-reactive` timer tests run on the virtual clock.
 - The motion-token conversions behind reduce-motion, navigation transitions, the switcher and presence
   no longer panic paint: each uses `Duration::try_from_secs_f64` and falls back on a negative,
   non-finite or too-large value (`MotionExtras::reduced_fade_duration` 120 ms, navigation transitions

@@ -2,9 +2,10 @@
 //! `extern "C" fn frust_*`s delegate to, and where this crate's `unsafe` is
 //! confined.
 //!
-//! The crate's `unsafe` surface is this module plus the `#[unsafe(no_mangle)]`
-//! attributes the [`crate::ios_app!`] macro emits on its generated exports
-//! (edition-2024 spells `no_mangle` as an unsafe attribute). Every entry point
+//! The crate's `unsafe` surface is this module plus what the [`crate::ios_app!`]
+//! macro emits on its generated exports: the `#[unsafe(no_mangle)]` attributes
+//! (edition-2024 spells `no_mangle` as an unsafe attribute), and the `unsafe extern
+//! "C" fn` wrappers with their forwarding `unsafe` blocks. Every entry point
 //! here is wrapped in [`guard`](frust_shell_common::guard) so a panic is
 //! caught and turned into a benign default instead of unwinding across the C-ABI
 //! boundary (undefined behaviour). The `unsafe` *code* in this module is confined
@@ -290,8 +291,10 @@ fn init_logger_once() {
 /// # Safety
 ///
 /// When non-null, `handle` must be a pointer previously returned by [`init`] and
-/// not yet passed to [`destroy`]. The returned reference must not outlive the
-/// current native call (it aliases the boxed handle the Swift side still owns).
+/// not yet passed to [`destroy`], used on the main thread with no other export
+/// active for the same handle, on the stack or concurrently (this builds a
+/// `&mut IosAppHandle`). The returned reference must not outlive the current
+/// native call (it aliases the boxed handle the Swift side still owns).
 unsafe fn handle_mut<'a>(handle: *mut c_void) -> Option<&'a mut IosAppHandle> {
     if crate::ffi_support::handle_is_null(handle) {
         return None;
@@ -350,7 +353,14 @@ fn report_device_memory() {
 /// on any failure (null layer, GPU init error, panic) returns null, matching
 /// Swift's "no native side yet" sentinel. `pre_init` is the macro's optional
 /// `@pre_init` hook (a no-op closure when absent); a panic in it also returns null.
-pub fn init(
+///
+/// # Safety
+///
+/// `metal_layer` must be a live `CAMetalLayer*` (null is rejected and `frust_init`
+/// returns null) that stays valid, owned and unreleased by the caller until
+/// [`destroy`] has returned: the handle retains it and the render thread builds the
+/// surface from it. Call on the main thread.
+pub unsafe fn init(
     metal_layer: *mut c_void,
     width: u32,
     height: u32,
@@ -429,7 +439,16 @@ pub fn init(
 /// Idempotent-adjacent: accesskit_ios panics if an adapter is *already* attached
 /// to the view, so Swift calls this exactly once (latched by the `handle == nil`
 /// first-init branch it lives in).
-pub fn init_accessibility(handle: *mut c_void, view: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+/// `view` must be the app's live, unreleased `FrustView` (`UIView`) pointer, passed
+/// on the main thread; a null `view` is ignored.
+pub unsafe fn init_accessibility(handle: *mut c_void, view: *mut c_void) {
     guard("frust_init_accessibility", (), || {
         if crate::ffi_support::handle_is_null(view) {
             log::warn!(
@@ -1483,7 +1502,14 @@ fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
 /// surface is instead recreated from the retained layer at the incoming dimensions
 /// (self-recovery — see [`recover_surface`]); the split self-heals render-side, so
 /// it always routes a plain resize.
-pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
     guard("frust_resize", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -1524,7 +1550,14 @@ pub fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
 /// `renderFrame` latches `initFailed` and invalidates its `CADisplayLink`;
 /// [`FRAME_ALIVE`](crate::ffi_support::FRAME_ALIVE) (`1`) = keep driving frames.
 /// The bridging header's `void` return becomes `uint8_t` in lockstep.
-pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
     // Benign default `FRAME_ALIVE` on a caught panic: a single frame's failure
     // must not stop the CADisplayLink — only a render-thread FATAL does.
     guard(
@@ -1575,7 +1608,14 @@ pub fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
 /// export stamped out by [`crate::ios_app!`] in `lib.rs`, and the C declaration in the
 /// generated app's hand-kept header (`platform/ios/FrustEmbedding/Sources/CFrustFFI/include/frust_ffi.h`)
 /// must have matching signatures and must change together.
-pub fn dispatch_touch(handle: *mut c_void, phase: u32, pointer_id: u32, x: f32, y: f32) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn dispatch_touch(handle: *mut c_void, phase: u32, pointer_id: u32, x: f32, y: f32) {
     guard("frust_dispatch_touch", (), || {
         // Cheap; keeps controller-driven updates fresh between CADisplayLink
         // frames rather than waiting for the next `frust_render_frame`.
@@ -1603,7 +1643,15 @@ pub fn dispatch_touch(handle: *mut c_void, phase: u32, pointer_id: u32, x: f32, 
 /// `insertText("\n")`, so a lone `"\n"` insertion arriving here is the submit
 /// gesture; the `TextInput` widget treats a single-line newline insert
 /// as its `on_submit` trigger.
-pub fn ime_apply(
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+/// `text` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
+pub unsafe fn ime_apply(
     handle: *mut c_void,
     text: *const c_char,
     sel_base: i32,
@@ -1626,7 +1674,7 @@ pub fn ime_apply(
                 composing_base: comp_base,
                 composing_extent: comp_ext,
             };
-            let _ = app.ime_apply(state);
+            app.ime_apply(state);
         }
     });
 }
@@ -1640,7 +1688,14 @@ pub fn ime_apply(
 /// [`string_free`]/`frust_string_free`; a null return (no live handle, or a
 /// text containing an interior NUL) is the "no editing state" sentinel the Swift
 /// side treats as inactive.
-pub fn ime_state_json(handle: *mut c_void) -> *mut c_char {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn ime_state_json(handle: *mut c_void) -> *mut c_char {
     guard("frust_ime_state_json", std::ptr::null_mut(), || {
         // Cheap; keeps controller-driven updates fresh between frames.
         pump_reactive();
@@ -1683,7 +1738,15 @@ pub fn ime_state_json(handle: *mut c_void) -> *mut c_char {
 /// system-initiated action — a menu tap or `Cmd+V` — which iOS exempts from
 /// both the 14+ banner and the 16+ per-app prompt; see [`take_paste_request`]
 /// for the direction that does *not* get that exemption.
-pub fn edit_command(handle: *mut c_void, cmd: u8, text: *const c_char) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+/// `text` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
+pub unsafe fn edit_command(handle: *mut c_void, cmd: u8, text: *const c_char) {
     guard("frust_edit_command", (), || {
         // Cheap; keeps controller-driven updates fresh between frames (mirrors
         // `dispatch_touch`/`ime_apply`, the other input entry points).
@@ -1729,7 +1792,14 @@ pub fn edit_command(handle: *mut c_void, cmd: u8, text: *const c_char) {
 /// null (mirroring [`ime_state_json`]); the copy is dropped rather than
 /// truncated at the NUL, which would hand the user a silently shortened
 /// clipboard.
-pub fn take_clipboard_write(handle: *mut c_void) -> *mut c_char {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn take_clipboard_write(handle: *mut c_void) -> *mut c_char {
     guard("frust_take_clipboard_write", std::ptr::null_mut(), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         let Some(app) = (unsafe { handle_mut(handle) }) else {
@@ -1775,7 +1845,14 @@ pub fn take_clipboard_write(handle: *mut c_void) -> *mut c_char {
 /// drain is kept wired rather than stubbed so a widget that asks by some other
 /// route still gets a real answer instead of silence, and so the iOS shell
 /// implements the whole `AppTree` clipboard channel rather than half of it.
-pub fn take_paste_request(handle: *mut c_void) -> u8 {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn take_paste_request(handle: *mut c_void) -> u8 {
     guard("frust_take_paste_request", 0, || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         match unsafe { handle_mut(handle) } {
@@ -1815,7 +1892,14 @@ pub fn take_paste_request(handle: *mut c_void) -> u8 {
 /// value is a product of the *paint* pass, not of a reactive effect, and the
 /// Swift poll runs immediately after the `frust_render_frame` that produced it
 /// — a pump here could only cost work, never freshen the answer.
-pub fn selection_toolbar_json(handle: *mut c_void) -> *mut c_char {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn selection_toolbar_json(handle: *mut c_void) -> *mut c_char {
     guard("frust_selection_toolbar_json", std::ptr::null_mut(), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         let Some(app) = (unsafe { handle_mut(handle) }) else {
@@ -1857,15 +1941,21 @@ pub fn selection_toolbar_json(handle: *mut c_void) -> *mut c_char {
 /// [`selection_toolbar_json`]/`frust_selection_toolbar_json` or
 /// [`platform_view_commands_json`]/`frust_platform_view_commands_json`.
 /// Idempotent on null.
-pub fn string_free(s: *mut c_char) {
+///
+/// # Safety
+///
+/// `s` must be null (a no-op) or a pointer returned by one of the string-returning
+/// exports (`frust_ime_state_json`, `frust_take_clipboard_write`,
+/// `frust_selection_toolbar_json`, `frust_platform_view_commands_json`) that has not
+/// been freed already, and it must not be used after this call.
+pub unsafe fn string_free(s: *mut c_char) {
     guard("frust_string_free", (), || {
         if s.is_null() {
             return;
         }
-        // SAFETY: `s` was produced by `CString::into_raw` in one of this
-        // module's string-returning exports (see this fn's doc) and is
-        // reclaimed exactly once here (the Swift side calls this exactly once
-        // per non-null result, via `defer`).
+        // SAFETY: by this fn's contract `s` is non-null here, came from
+        // `CString::into_raw` in one of the string-returning exports, and has not
+        // been freed, so it is reclaimed exactly once here.
         drop(unsafe { CString::from_raw(s) });
     });
 }
@@ -1983,7 +2073,14 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
 /// `on_show` fire), `didBecomeActive` → `Resumed` ([`resume`]). iOS never
 /// pushes `Detached` and never calls `request_app_exit` (no app-initiated
 /// exit; the OS terminates the process without notice).
-pub fn pause(handle: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn pause(handle: *mut c_void) {
     guard("frust_pause", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -1996,7 +2093,14 @@ pub fn pause(handle: *mut c_void) {
 /// `frust_resume`: the app became active (`didBecomeActive`) — resume
 /// submitting frames (see [`IosAppHandle::resume`]) and push the
 /// Flutter-parity `Resumed` lifecycle state before the reactive pump.
-pub fn resume(handle: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn resume(handle: *mut c_void) {
     guard("frust_resume", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -2020,7 +2124,14 @@ pub fn resume(handle: *mut c_void) {
 /// edge, then pump so listener-queued work runs. Render pause already happened
 /// on `willResignActive` (`frust_pause` always precedes this), so no GPU work
 /// is in flight while the write runs. A missing handle is a no-op.
-pub fn did_enter_background(handle: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn did_enter_background(handle: *mut c_void) {
     guard("frust_did_enter_background", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -2039,7 +2150,14 @@ pub fn did_enter_background(handle: *mut c_void) {
 /// thread (UIKit delivers the notification on the main thread, the reactive
 /// UI thread) and pumps. iOS reports a single warning level, so it always maps
 /// to [`MemoryPressure::Critical`]. A missing handle is a no-op.
-pub fn memory_warning(handle: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn memory_warning(handle: *mut c_void) {
     guard("frust_memory_warning", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -2099,7 +2217,14 @@ pub(crate) fn phys_footprint_bytes() -> Option<u64> {
 /// (`Hidden` is synthesized, so `on_restart` then `on_show` fire), re-arm the
 /// font-cache flush at that shown edge, then pump. `didBecomeActive` follows
 /// with `Resumed`. A missing handle is a no-op.
-pub fn will_enter_foreground(handle: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn will_enter_foreground(handle: *mut c_void) {
     guard("frust_will_enter_foreground", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -2118,7 +2243,14 @@ pub fn will_enter_foreground(handle: *mut c_void) {
 /// before `frust_init` (when the lifecycle observers had no handle to act on)
 /// is not left `Detached`. Render submission is untouched. A missing handle is
 /// a no-op.
-pub fn sync_lifecycle(handle: *mut c_void, state: i32) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn sync_lifecycle(handle: *mut c_void, state: i32) {
     guard("frust_sync_lifecycle", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if unsafe { handle_mut(handle) }.is_some() {
@@ -2144,7 +2276,14 @@ pub fn sync_lifecycle(handle: *mut c_void, state: i32) {
 /// plain `u8` (see `Runner-Bridging-Header.h`). The continuous `CADisplayLink`
 /// loop repaints the next tick with no extra wake needed. A missing handle is
 /// a no-op.
-pub fn set_appearance(handle: *mut c_void, dark: u8) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn set_appearance(handle: *mut c_void, dark: u8) {
     guard("frust_set_appearance", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -2165,7 +2304,14 @@ pub fn set_appearance(handle: *mut c_void, dark: u8) {
 /// rather than `traitCollectionDidChange`. The continuous `CADisplayLink` loop
 /// repaints the next tick with no extra wake needed. A missing handle is a
 /// no-op.
-pub fn set_reduce_motion(handle: *mut c_void, reduce: u8) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn set_reduce_motion(handle: *mut c_void, reduce: u8) {
     guard("frust_set_reduce_motion", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -2183,7 +2329,14 @@ pub fn set_reduce_motion(handle: *mut c_void, reduce: u8) {
 /// trait Swift observes here, so it is sourced from
 /// `UIContentSizeCategory.didChangeNotification`. Non-finite or non-positive
 /// values are treated as `1.0` by the theme side. A missing handle is a no-op.
-pub fn set_text_scale(handle: *mut c_void, scale: f32) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn set_text_scale(handle: *mut c_void, scale: f32) {
     guard("frust_set_text_scale", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -2204,8 +2357,15 @@ pub fn set_text_scale(handle: *mut c_void, scale: f32) {
 /// framework's logical `WindowInsets` by [`IosAppHandle::set_insets`] and pushed
 /// onto the render root (no-op-guarded, marks `LAYOUT | PAINT` on a real change).
 /// A missing handle is a no-op.
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 #[allow(clippy::too_many_arguments)]
-pub fn set_insets(
+pub unsafe fn set_insets(
     handle: *mut c_void,
     vp_l: f32,
     vp_t: f32,
@@ -2244,8 +2404,15 @@ pub fn set_insets(
 /// [`IosAppHandle::set_corner_insets`] — which keeps the edge half
 /// `frust_set_insets` delivered and no-op-guards an unchanged value, so Swift's
 /// per-layout push is free. A missing handle is a no-op.
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 #[allow(clippy::too_many_arguments)]
-pub fn set_corner_insets(
+pub unsafe fn set_corner_insets(
     handle: *mut c_void,
     tl_w: f32,
     tl_h: f32,
@@ -2287,7 +2454,15 @@ pub fn set_corner_insets(
 /// a no-op: Swift's own queue-until-handle-ready contract means this should
 /// not normally be reachable with a null handle, but the native side stays
 /// defensive (mirrors every other export here).
-pub fn on_deep_link(handle: *mut c_void, url: *const c_char) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+/// `url` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
+pub unsafe fn on_deep_link(handle: *mut c_void, url: *const c_char) {
     guard("frust_on_deep_link", (), || {
         // Cheap; keeps controller-driven updates fresh between frames.
         pump_reactive();
@@ -2435,7 +2610,14 @@ fn present_sync_enabled() -> bool {
 /// unconditionally: with present-sync unarmed (the default), on the inline
 /// render path, or on a gate-skipped tick, nothing is ever parked and this is a
 /// mutex check plus a return. A null/dead handle is a benign no-op.
-pub fn present_frame(handle: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn present_frame(handle: *mut c_void) {
     guard("frust_present_frame", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         if let Some(app) = unsafe { handle_mut(handle) } {
@@ -2562,7 +2744,14 @@ pub(crate) fn record_overlay_presents(delta: std::time::Duration, overlays: usiz
 /// `frust_overlay_mode`: whether `FrustViewHost` builds overlay views — `1`
 /// with the switch on, `0` with it off, on the inline render path (which has
 /// no overlay tail), or for a dead handle.
-pub fn overlay_mode(handle: *mut c_void) -> u32 {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn overlay_mode(handle: *mut c_void) -> u32 {
     guard("frust_overlay_mode", 0, || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
         let Some(app) = (unsafe { handle_mut(handle) }) else {
@@ -2589,7 +2778,15 @@ pub fn overlay_mode(handle: *mut c_void) -> u32 {
 /// through `frust_overlay_take_released`. The render thread builds (or
 /// resizes) the surface before its next frame, and a frame is requested so
 /// that frame comes at once. Never waits on the render thread.
-pub fn overlay_attach(
+///
+/// # Safety
+///
+/// `handle` must be null (the call is ignored) or satisfy the handle contract of
+/// the other exports: a pointer returned by [`init`] not yet passed to [`destroy`],
+/// main thread, no other export active for it. `layer` must be null (ignored) or a
+/// live `CAMetalLayer*` that the caller keeps alive until it is handed back through
+/// `frust_overlay_take_released` or [`destroy`] has returned.
+pub unsafe fn overlay_attach(
     handle: *mut c_void,
     overlay_id: u64,
     layer: *mut c_void,
@@ -2606,7 +2803,8 @@ pub fn overlay_attach(
         let current = table.layer(overlay_id);
         if current.is_some_and(|current| current != layer) {
             // A surface replaced at rest drops now: its parked present first.
-            drop_parked_overlay(handle, overlay_id);
+            // SAFETY: `handle` meets this fn's contract (see `handle_mut`).
+            unsafe { drop_parked_overlay(handle, overlay_id) };
         }
         if !table.attach(overlay_id, layer, size) {
             return;
@@ -2629,7 +2827,11 @@ pub fn overlay_attach(
 /// Drop overlay `overlay_id`'s parked present-sync frame, if any, through the
 /// handle's handoff — its surface (and the drawable the frame holds) is about
 /// to go.
-fn drop_parked_overlay(handle: *mut c_void, overlay_id: u64) {
+///
+/// # Safety
+///
+/// `handle` must satisfy [`handle_mut`]'s contract.
+unsafe fn drop_parked_overlay(handle: *mut c_void, overlay_id: u64) {
     // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
     if let Some(app) = unsafe { handle_mut(handle) } {
         app.drop_parked_overlay(overlay_id);
@@ -2641,10 +2843,18 @@ fn drop_parked_overlay(handle: *mut c_void, overlay_id: u64) {
 /// land of the frame drawing it — and only then is its layer handed back
 /// through `frust_overlay_take_released`, when Swift may release the view. A
 /// no-op for an unknown id.
-pub fn overlay_detach(handle: *mut c_void, overlay_id: u64) {
+///
+/// # Safety
+///
+/// `handle` must be null (only the parked-present drop is skipped) or a pointer
+/// returned by [`init`] not yet passed to [`destroy`]. The call must be made on the
+/// main thread, with no other export active for the same `handle`, on the stack or
+/// concurrently.
+pub unsafe fn overlay_detach(handle: *mut c_void, overlay_id: u64) {
     guard("frust_overlay_detach", (), || {
         let mut table = overlay_table();
-        drop_parked_overlay(handle, overlay_id);
+        // SAFETY: `handle` meets this fn's contract (see `handle_mut`).
+        unsafe { drop_parked_overlay(handle, overlay_id) };
         match table.detach(overlay_id) {
             frust_shell_common::overlay::Withdraw::Released(_) => {
                 log::info!("frust-overlay: overlay {overlay_id} detached");
@@ -2670,11 +2880,19 @@ const RELEASED_PER_CALL: usize = 64;
 /// surface is gone into `layers`, oldest first, and answer how many. Each is
 /// a `CAMetalLayer*` Swift handed to `frust_overlay_attach`, now Swift's to
 /// release with its view. `0` for a null buffer or handle, or nothing pending.
-#[allow(
-    clippy::not_unsafe_ptr_arg_deref,
-    reason = "a C-ABI entry point: Swift's buffer contract, stated at the write, is the safety argument"
-)]
-pub fn overlay_take_released(handle: *mut c_void, layers: *mut *mut c_void, capacity: u32) -> u32 {
+///
+/// # Safety
+///
+/// `layers` must be null (answered with `0`) or point to a buffer, writable for the
+/// duration of the call, with room for `capacity` pointers (at most 64 are written).
+/// `handle` is only tested for null (answered with `0`), not dereferenced; pass a
+/// pointer returned by [`init`] not yet passed to [`destroy`], or null. Call on the
+/// main thread.
+pub unsafe fn overlay_take_released(
+    handle: *mut c_void,
+    layers: *mut *mut c_void,
+    capacity: u32,
+) -> u32 {
     guard("frust_overlay_take_released", 0, || {
         if layers.is_null() || crate::ffi_support::handle_is_null(handle) {
             return 0;
@@ -2682,8 +2900,8 @@ pub fn overlay_take_released(handle: *mut c_void, layers: *mut *mut c_void, capa
         let capacity = (capacity as usize).min(RELEASED_PER_CALL);
         let mut taken = [SendableMetalLayer::new(std::ptr::null_mut()); RELEASED_PER_CALL];
         let count = overlay_table().take_released(&mut taken[..capacity]);
-        // SAFETY: Swift passes a buffer of at least `capacity` pointers,
-        // writable for the length of this call, and `count <= capacity`.
+        // SAFETY: the caller's contract gives `layers` room for `capacity`
+        // pointers, writable for this call, and `count <= capacity`.
         let out = unsafe { std::slice::from_raw_parts_mut(layers, count) };
         for (slot, layer) in out.iter_mut().zip(&taken[..count]) {
             *slot = layer.as_ptr();
@@ -2922,7 +3140,14 @@ pub(crate) fn land_frame_overlays(overlays: FrameOverlays, present: &PresentHand
 /// otherwise a fresh `CString` the caller **must** release via
 /// [`string_free`]/`frust_string_free` (identical ownership contract to
 /// [`ime_state_json`]).
-pub fn platform_view_commands_json(handle: *mut c_void, ack_generation: u64) -> *mut c_char {
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn platform_view_commands_json(handle: *mut c_void, ack_generation: u64) -> *mut c_char {
     guard(
         "frust_platform_view_commands_json",
         std::ptr::null_mut(),
@@ -2948,14 +3173,21 @@ pub fn platform_view_commands_json(handle: *mut c_void, ack_generation: u64) -> 
 /// `frust_destroy`: reclaim and drop the boxed handle (which drops the surface;
 /// the Swift-owned layer is released separately, afterwards). Idempotent from
 /// Swift's side because it nulls its handle right after calling this.
-pub fn destroy(handle: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (a no-op) or a pointer returned by [`init`] that has not
+/// yet been passed to this function. Call it exactly once per handle, on the main
+/// thread, with no other export active for that `handle`, on the stack or
+/// concurrently; the handle must not be used afterwards.
+pub unsafe fn destroy(handle: *mut c_void) {
     guard("frust_destroy", (), || {
         if crate::ffi_support::handle_is_null(handle) {
             return;
         }
-        // SAFETY: `handle` was produced by `Box::into_raw` in `create_handle` and
-        // is reclaimed exactly once here; the Swift side nulls its copy afterwards
-        // so it is never passed back in.
+        // SAFETY: by this fn's contract `handle` is non-null here, was produced by
+        // `Box::into_raw` in `create_handle`, and has not been passed here before,
+        // so it is reclaimed exactly once; the caller does not use it afterwards.
         drop(unsafe { Box::from_raw(handle as *mut IosAppHandle) });
         // The render thread that drew the overlays is joined: forget their
         // surfaces and layers before Swift releases the overlay views.
