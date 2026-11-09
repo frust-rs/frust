@@ -9,7 +9,7 @@
 //! |---|---|
 //! | Desktop | on the next event-loop turn (the deadline wakes a parked loop) |
 //! | Android, iOS | on the next display tick while resumed; no regular ticks while backgrounded |
-//! | Web | from the browser's task queue |
+//! | Web | from the browser's task queue (a background tab may throttle it to ≥1 s) |
 //!
 //! So there are no regular ticks in the background: a due timer normally fires on the first
 //! tick after the app resumes, but may run earlier in one of the few background pumps a shell
@@ -48,6 +48,11 @@ use crate::executor::is_ui_thread;
 ///
 /// With a virtual clock installed on the polling thread (`test-support` feature or this
 /// crate's own tests, see [`test_support`]) the wait is for virtual time instead.
+///
+/// On the web, dropping or aborting the future also clears the browser timer. A duration
+/// above `i32::MAX` ms (about 24.8 days) clamps to `i32::MAX`, and a background tab may
+/// throttle `setTimeout` to one-second granularity or coarser; that is browser policy (see
+/// the web shell README).
 pub async fn sleep(duration: Duration) {
     #[cfg(any(test, feature = "test-support"))]
     if test_support::is_virtual() {
@@ -381,18 +386,37 @@ mod imp {
         tokio::time::sleep(duration).await;
     }
 
+    /// Owns a pending `setTimeout` handle and clears it on drop, so aborting a sleep also
+    /// cancels the browser timer instead of leaving it to run to its deadline.
+    #[cfg(target_family = "wasm")]
+    struct TimeoutGuard(Option<i32>);
+
+    #[cfg(target_family = "wasm")]
+    impl Drop for TimeoutGuard {
+        fn drop(&mut self) {
+            if let (Some(handle), Some(window)) = (self.0.take(), web_sys::window()) {
+                window.clear_timeout_with_handle(handle);
+            }
+        }
+    }
+
     /// The wasm runtime has no time driver, so the browser's `setTimeout` keeps the time.
     #[cfg(target_family = "wasm")]
     pub(super) async fn sleep(duration: Duration) {
         let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+        let mut guard = TimeoutGuard(None);
+        let handle = &mut guard.0;
         let promise = js_sys::Promise::new(&mut |resolve, _reject| match web_sys::window() {
             Some(window) => {
-                let _ =
-                    window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis);
+                *handle = window
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, millis)
+                    .ok();
             }
             None => log::warn!("frust-reactive: sleep has no `window`, so it never completes"),
         });
         let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        // Fired: the handle is spent, so dropping the guard must not clear it.
+        guard.0 = None;
     }
 }
 
