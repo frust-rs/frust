@@ -52,6 +52,9 @@
 //! .await??;
 //! ```
 //!
+//! Writes that must finish when the app leaves the foreground wrap the
+//! `spawn_blocking` in `frust::BackgroundTask::begin(..)` (see the facade docs).
+//!
 //! Unlike `secure-storage`'s biometric gate or `camera`'s permission/
 //! capture calls, this crate has **no code-level UI-thread guard** — there
 //! is no shared guard helper in this codebase, and adding one here would
