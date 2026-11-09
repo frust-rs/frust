@@ -18,6 +18,10 @@ const MAX_UNIQUE_NAME_ATTEMPTS: u32 = 1024;
 ///
 /// Listing and copying block; on Android and iOS they refuse the UI thread
 /// (see the crate-level blocking contract).
+///
+/// On iOS the grant holds the folder's security scope for as long as it lives,
+/// and the [`FolderEntry`] values it lists are only readable while it does: keep
+/// the grant alive for as long as its entries are in use.
 pub struct FolderGrant {
     pub(crate) token: String,
     pub(crate) local_path: Option<PathBuf>,
@@ -65,8 +69,16 @@ impl FolderGrant {
         backend::list_folder(self, &options.normalized())
     }
 
-    /// Gives up the access this grant holds. On Android this also revokes the
-    /// persisted permission, so the token stops being honoured.
+    /// Gives up the access this grant holds.
+    ///
+    /// On iOS this leaves the security scope. Every [`FolderEntry`] this grant
+    /// listed needs the grant alive to be read: once it is released or dropped,
+    /// reading an entry fails ([`FileDialogError::AccessLost`] when the failure can
+    /// be told apart, otherwise [`FileDialogError::Io`]).
+    ///
+    /// On Android this ends the persisted permission for the folder, which also
+    /// ends it for any other grant on the same folder (a restored copy, or one
+    /// held elsewhere in the app), so their tokens stop being honoured.
     pub fn release(self) {
         backend::release_folder(self.state, &self.token);
     }
@@ -207,12 +219,21 @@ impl FolderEntry {
     /// Copies the file into `dir`, creating `dir` if needed, and returns the new
     /// path. Blocks. An existing file is never replaced: the copy takes a
     /// numbered name instead (`photo-1.png`).
+    ///
+    /// On Android and iOS this refuses the UI thread with
+    /// [`FileDialogError::UiThread`]. On iOS the [`FolderGrant`] that listed the
+    /// entry must still be alive; after that the copy fails, with
+    /// [`FileDialogError::AccessLost`] when the system denies access.
     pub fn copy_to(&self, dir: &Path) -> Result<PathBuf, FileDialogError> {
+        refuse_ui_thread()?;
         if !is_single_component(&self.name) {
             log::warn!("frust-file-dialogs: refusing an entry name that is not a file name");
             return Err(FileDialogError::Io);
         }
         fs::create_dir_all(dir).map_err(io_error)?;
+        if let EntryLocation::Path(path) = &self.location {
+            probe_access(path)?;
+        }
         let destination = reserve_unique_name(dir, &self.name)?;
         let copied = match &self.location {
             EntryLocation::Path(path) => copy_file(path, &destination),
@@ -229,7 +250,13 @@ impl FolderEntry {
 
     /// Reads the whole file. Blocks. A file larger than `max_bytes` is refused
     /// with [`FileDialogError::Io`] rather than returned truncated.
+    ///
+    /// On Android and iOS this refuses the UI thread with
+    /// [`FileDialogError::UiThread`]. On iOS the [`FolderGrant`] that listed the
+    /// entry must still be alive; after that the read fails, with
+    /// [`FileDialogError::AccessLost`] when the system denies access.
     pub fn read_to_vec(&self, max_bytes: u64) -> Result<Vec<u8>, FileDialogError> {
+        refuse_ui_thread()?;
         match &self.location {
             EntryLocation::Path(path) => read_capped(path, max_bytes),
             EntryLocation::ContentUri(uri) => backend::read_content_uri(uri, max_bytes),
@@ -268,7 +295,40 @@ fn reserve_unique_name(dir: &Path, name: &str) -> Result<PathBuf, FileDialogErro
     Err(FileDialogError::Io)
 }
 
+/// Refuses the UI thread where the platform has one to refuse. Android's content-URI arms
+/// refuse it themselves, so only iOS (whose entries are plain paths) needs the check here.
+#[cfg(target_os = "ios")]
+fn refuse_ui_thread() -> Result<(), FileDialogError> {
+    backend::refuse_ui_thread()
+}
+
+#[cfg(not(target_os = "ios"))]
+#[allow(clippy::unnecessary_wraps)]
+fn refuse_ui_thread() -> Result<(), FileDialogError> {
+    Ok(())
+}
+
+/// On iOS, tells a read denied for lost security scope apart from other failures: the system
+/// answers a path outside a live scope with a permission error.
+#[cfg(target_os = "ios")]
+fn probe_access(path: &Path) -> Result<(), FileDialogError> {
+    match File::open(path) {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => {
+            log::warn!("frust-file-dialogs: access to an entry was denied (grant released?)");
+            Err(FileDialogError::AccessLost)
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+#[allow(clippy::unnecessary_wraps)]
+fn probe_access(_path: &Path) -> Result<(), FileDialogError> {
+    Ok(())
+}
+
 fn read_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>, FileDialogError> {
+    probe_access(path)?;
     let file = File::open(path).map_err(io_error)?;
     let mut bytes = Vec::new();
     file.take(max_bytes.saturating_add(1))
@@ -279,58 +339,6 @@ fn read_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>, FileDialogError> 
         return Err(FileDialogError::Io);
     }
     Ok(bytes)
-}
-
-/// Standard-alphabet base64 with padding: the text form of an iOS bookmark token.
-#[cfg(any(target_os = "ios", test))]
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) mod base64 {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    pub(crate) fn encode(bytes: &[u8]) -> String {
-        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-        for chunk in bytes.chunks(3) {
-            let group = u32::from(chunk[0]) << 16
-                | u32::from(chunk.get(1).copied().unwrap_or(0)) << 8
-                | u32::from(chunk.get(2).copied().unwrap_or(0));
-            for index in 0..4 {
-                if index <= chunk.len() {
-                    let sextet = (group >> (18 - 6 * index)) & 0x3f;
-                    out.push(char::from(ALPHABET[sextet as usize]));
-                } else {
-                    out.push('=');
-                }
-            }
-        }
-        out
-    }
-
-    /// `None` for anything [`encode`] cannot have produced.
-    pub(crate) fn decode(text: &str) -> Option<Vec<u8>> {
-        let bytes = text.as_bytes();
-        if !bytes.len().is_multiple_of(4) {
-            return None;
-        }
-        let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-        for (position, chunk) in bytes.chunks(4).enumerate() {
-            let is_last = position + 1 == bytes.len() / 4;
-            let padding = chunk.iter().rev().take_while(|b| **b == b'=').count();
-            if padding > 2 || (padding > 0 && !is_last) {
-                return None;
-            }
-            let mut group = 0u32;
-            for byte in &chunk[..4 - padding] {
-                let value = ALPHABET.iter().position(|a| a == byte)?;
-                group = group << 6 | value as u32;
-            }
-            group <<= 6 * padding as u32;
-            if group.trailing_zeros() < (padding * 8) as u32 {
-                return None;
-            }
-            out.extend_from_slice(&group.to_be_bytes()[1..=3 - padding]);
-        }
-        Some(out)
-    }
 }
 
 #[cfg(test)]
@@ -418,37 +426,5 @@ mod tests {
         assert_eq!(e.read_to_vec(5).unwrap(), b"12345");
         assert_eq!(e.read_to_vec(u64::MAX).unwrap(), b"12345");
         assert_eq!(e.read_to_vec(4), Err(FileDialogError::Io));
-    }
-
-    #[test]
-    fn base64_matches_known_vectors() {
-        for (plain, encoded) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(base64::encode(plain.as_bytes()), encoded);
-            assert_eq!(base64::decode(encoded).unwrap(), plain.as_bytes());
-        }
-    }
-
-    #[test]
-    fn base64_round_trips_every_byte_value() {
-        let bytes: Vec<u8> = (0..=255).chain((0..=255).rev()).collect();
-        for len in 0..bytes.len() {
-            let encoded = base64::encode(&bytes[..len]);
-            assert_eq!(base64::decode(&encoded).as_deref(), Some(&bytes[..len]));
-        }
-    }
-
-    #[test]
-    fn base64_rejects_malformed_text() {
-        for bad in ["Z", "Zg=", "Z===", "Zg==Zg==", "Z!==", "Zm9v=", "Zh=="] {
-            assert_eq!(base64::decode(bad), None, "{bad:?}");
-        }
     }
 }

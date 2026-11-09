@@ -75,6 +75,14 @@ change on restore, so persist the restored grant's token again.
 `FileDialogError::AccessLost` means the token is no longer honoured (the folder
 is gone or the grant was revoked): ask the user again.
 
+On iOS the grant holds the folder's security scope while it lives, so a listed
+`FolderEntry` can only be read while its `FolderGrant` is alive. Once the grant
+is released or dropped, `copy_to` and `read_to_vec` fail: with `AccessLost` when
+the system's denial can be told apart, otherwise `Io`. On Android,
+`FolderGrant::release` ends the persisted permission for that folder, including
+for any other grant on the same folder. `copy_to` and `read_to_vec` refuse the UI
+thread with `UiThread` on Android and iOS, like the rest of the plugin.
+
 ```rust
 use frust_file_dialogs::{FileDialog, ListOptions};
 
@@ -85,7 +93,7 @@ if let Some(grant) = FileDialog::new().title("Choose a folder").pick_folder()? {
         let copy = entry.copy_to(&cache_dir)?;        // never replaces a file
         let bytes = entry.read_to_vec(16 * 1024 * 1024)?;  // refused above the limit
     }
-    grant.release();                                  // on Android, also revokes the grant
+    grant.release();     // iOS: ends the scope; Android: ends the persisted permission
 }
 ```
 

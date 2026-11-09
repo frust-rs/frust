@@ -2,8 +2,9 @@
 //! [`FolderEntry::copy_to`](crate::FolderEntry::copy_to).
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{CancelToken, FileDialogError};
 
@@ -27,8 +28,11 @@ pub(crate) fn io_error(err: std::io::Error) -> FileDialogError {
 /// Bytes moved between cancel checks and progress reports.
 const CHUNK: usize = 64 * 1024;
 
-/// Copies `source` over `destination`. A file this call created is removed again
-/// if the copy fails part-way.
+/// Staging names tried before giving up.
+const MAX_STAGING_ATTEMPTS: u32 = 1024;
+
+/// Copies `source` over `destination`. The bytes are staged in a short, uniquely named hidden
+/// sibling that is removed again if the copy fails part-way.
 pub(crate) fn copy_file(source: &Path, destination: &Path) -> Result<(), FileDialogError> {
     copy_file_with(source, destination, None, &mut |_, _| {})
 }
@@ -38,6 +42,10 @@ pub(crate) fn copy_file(source: &Path, destination: &Path) -> Result<(), FileDia
 ///
 /// The bytes go to a temporary sibling that replaces `destination` only once complete, so a
 /// cancel or failure leaves no partial file and an existing destination keeps its contents.
+/// The sibling's name does not depend on the destination's (a long destination name cannot
+/// overflow the filename limit) and is unique per copy in progress, so two copies to one
+/// destination never share it. On Unix it is created with mode 0600 and takes the source's
+/// mode just before the rename; failing to apply that mode fails the copy.
 pub(crate) fn copy_file_with(
     source: &Path,
     destination: &Path,
@@ -55,17 +63,11 @@ pub(crate) fn copy_file_with(
     let mut reader = File::open(source).map_err(io_error)?;
     let metadata = reader.metadata().map_err(io_error)?;
     let total = metadata.len();
-    let partial = partial_path(destination);
-    let mut writer = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&partial)
-        .map_err(io_error)?;
+    let (partial, mut writer) = create_partial(destination)?;
     let result = copy_chunks(&mut reader, &mut writer, total, &cancelled, progress)
         .and_then(|()| writer.sync_all().map_err(io_error))
+        .and_then(|()| apply_mode(&writer, &metadata))
         .and_then(|()| {
-            // Best effort, as `fs::copy` carries the mode over.
-            let _ = writer.set_permissions(metadata.permissions());
             drop(writer);
             std::fs::rename(&partial, destination).map_err(io_error)
         });
@@ -73,6 +75,22 @@ pub(crate) fn copy_file_with(
         let _ = std::fs::remove_file(&partial);
     }
     result
+}
+
+/// Applies the source's permissions to the staged file. Narrowing or applying a mode that
+/// fails is a copy failure: the file would otherwise end up with a mode the source never had.
+#[cfg(unix)]
+fn apply_mode(writer: &File, metadata: &std::fs::Metadata) -> Result<(), FileDialogError> {
+    writer
+        .set_permissions(metadata.permissions())
+        .map_err(io_error)
+}
+
+/// Other platforms: best effort, as `fs::copy` carries the permissions over.
+#[cfg(not(unix))]
+fn apply_mode(writer: &File, metadata: &std::fs::Metadata) -> Result<(), FileDialogError> {
+    let _ = writer.set_permissions(metadata.permissions());
+    Ok(())
 }
 
 fn copy_chunks(
@@ -98,13 +116,29 @@ fn copy_chunks(
     }
 }
 
-/// A free-looking sibling name for the in-progress bytes.
-fn partial_path(destination: &Path) -> PathBuf {
-    let name = destination
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    destination.with_file_name(format!(".{name}.{}.partial", std::process::id()))
+/// Distinguishes the staging files of copies in progress within this process.
+static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Creates the staging file next to `destination` and returns it with its path. The name is
+/// `.frust-<pid>-<counter>.partial`, independent of the destination's name; a name already in
+/// use (for example a stale file from an earlier process with the same pid) is skipped.
+fn create_partial(destination: &Path) -> Result<(PathBuf, File), FileDialogError> {
+    for _ in 0..MAX_STAGING_ATTEMPTS {
+        let id = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let partial =
+            destination.with_file_name(format!(".frust-{}-{id}.partial", std::process::id()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        match options.open(&partial) {
+            Ok(file) => return Ok((partial, file)),
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(io_error(err)),
+        }
+    }
+    log::warn!("frust-file-dialogs: no free staging name left in the destination folder");
+    Err(FileDialogError::Io)
 }
 
 fn is_same_file(a: &Path, b: &Path) -> bool {
@@ -227,5 +261,66 @@ mod tests {
         let destination = dir.path().join("out");
         copy_file(&source, &destination).unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), b"");
+    }
+
+    #[test]
+    fn a_long_destination_name_does_not_overflow_the_staging_name() {
+        let dir = TestDir::new();
+        let source = dir.write("source.txt", b"payload");
+        let name = format!("{}.txt", "n".repeat(240));
+        let destination = dir.path().join(&name);
+        copy_file(&source, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"payload");
+        assert_eq!(leftovers(&dir).len(), 2);
+    }
+
+    #[test]
+    fn staging_names_are_short_and_unique_per_copy() {
+        let dir = TestDir::new();
+        let destination = dir.path().join("out.bin");
+        let (first, _a) = create_partial(&destination).unwrap();
+        let (second, _b) = create_partial(&destination).unwrap();
+        assert_ne!(first, second);
+        for partial in [&first, &second] {
+            let name = partial.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(name.len() < 48 && !name.contains("out.bin"), "{name}");
+        }
+    }
+
+    #[test]
+    fn two_copies_to_one_destination_both_complete() {
+        let dir = TestDir::new();
+        let source = dir.write("source.bin", &vec![3u8; CHUNK * 3]);
+        let destination = dir.path().join("out.bin");
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| copy_file(&source, &destination).unwrap());
+            }
+        });
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+        assert_eq!(leftovers(&dir).len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_staged_file_is_private_and_takes_the_source_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TestDir::new();
+        let source = dir.write("source.txt", b"data");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let destination = dir.path().join("out.txt");
+        let (partial, _file) = create_partial(&destination).unwrap();
+        let staged = std::fs::metadata(&partial).unwrap().permissions().mode();
+        assert_eq!(staged & 0o077, 0, "group and other get nothing");
+        std::fs::remove_file(&partial).unwrap();
+        copy_file(&source, &destination).unwrap();
+        let mode = std::fs::metadata(&destination)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o640);
     }
 }
