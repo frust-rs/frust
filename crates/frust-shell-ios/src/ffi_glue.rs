@@ -2,9 +2,10 @@
 //! `extern "C" fn frust_*`s delegate to, and where this crate's `unsafe` is
 //! confined.
 //!
-//! The crate's `unsafe` surface is this module plus the `#[unsafe(no_mangle)]`
-//! attributes the [`crate::ios_app!`] macro emits on its generated exports
-//! (edition-2024 spells `no_mangle` as an unsafe attribute). Every entry point
+//! The crate's `unsafe` surface is this module plus what the [`crate::ios_app!`]
+//! macro emits on its generated exports: the `#[unsafe(no_mangle)]` attributes
+//! (edition-2024 spells `no_mangle` as an unsafe attribute), and the `unsafe extern
+//! "C" fn` wrappers with their forwarding `unsafe` blocks. Every entry point
 //! here is wrapped in [`guard`](frust_shell_common::guard) so a panic is
 //! caught and turned into a benign default instead of unwinding across the C-ABI
 //! boundary (undefined behaviour). The `unsafe` *code* in this module is confined

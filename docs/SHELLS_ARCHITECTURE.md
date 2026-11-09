@@ -144,7 +144,7 @@ builder parses the target triple, and the web shell at compile time (`frust-hotp
 Each concrete shell confines all unsafe/FFI code to one named module — `jni_glue` on Android,
 `ffi_glue` on iOS, `appkit_glue` on macOS, `win32_glue` on Windows — so each platform boundary is
 auditable as a single surface. The exceptions are on iOS: `background_task` holds a single read of
-UIKit's `UIBackgroundTaskInvalid` constant, and `accessibility`'s `IosA11yAdapter::new` holds one block. `frust-shell-common` and `frust-shell-linux` hold no `unsafe` at
+UIKit's `UIBackgroundTaskInvalid` constant, and `accessibility`'s `IosA11yAdapter::new` holds one block, and the `ios_app!` wrappers forward into `ffi_glue` from their one `unsafe` block each. `frust-shell-common` and `frust-shell-linux` hold no `unsafe` at
 all, hot-patch code included (the patch loader's `unsafe` lives in `frust-hotpatch`);
 `frust-shell-desktop` holds exactly one macOS-only block, `render.rs`'s `build_overlay_surface`;
 macOS has a second zone, `frust-shell-macos`'s `cfg(macos)` `title_buttons` AppKit section. The

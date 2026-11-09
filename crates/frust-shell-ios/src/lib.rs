@@ -49,14 +49,16 @@
 //! `&mut`, and — under the default-off `FRUST_OVERLAYS` switch — the one
 //! `OverlaySurface::new` over an overlay view's `CAMetalLayer*` and the write
 //! of released overlay layers into Swift's buffer — each with a
-//! safety comment, plus the `#[unsafe(no_mangle)]`
-//! attributes the [`ios_app!`] macro emits on its generated `extern "C"` exports
-//! (edition 2024 spells `no_mangle` as an unsafe attribute). The `app` module —
+//! safety comment, plus what the [`ios_app!`] macro emits on its generated
+//! exports: the `#[unsafe(no_mangle)]` attributes (edition 2024 spells `no_mangle`
+//! as an unsafe attribute), `unsafe extern "C" fn` on every export that dereferences
+//! a caller-supplied pointer, and each of those exports' one forwarding `unsafe`
+//! block. The `app` module —
 //! the frame/lifecycle runtime — contains no `unsafe`; the only `unsafe fn`
 //! declaration outside `ffi_glue` is `IosA11yAdapter::new`, and its sole call
-//! site is `ffi_glue::init_accessibility`. The `unsafe` blocks outside `ffi_glue`
-//! are the one in that function and `background_task`'s read of UIKit's
-//! `UIBackgroundTaskInvalid` constant.
+//! site is `ffi_glue::init_accessibility`. Apart from the macro's forwarding blocks,
+//! the `unsafe` blocks outside `ffi_glue` are the one in that function and
+//! `background_task`'s read of UIKit's `UIBackgroundTaskInvalid` constant.
 
 // The iOS-specific pure helpers (the null-handle sentinel and the paused/ready
 // frame gate), consumed by the (iOS-only) FFI layer and by host unit tests. In a
@@ -179,12 +181,12 @@ macro_rules! ios_app {
             height: u32,
             scale: f32,
         ) -> *mut ::core::ffi::c_void {
+            // Built outside the `unsafe` block: these expand the app's own expressions,
+            // which must be unsafe-checked exactly as on the other platforms.
+            let pre_init = || { $(let () = $pre;)? };
+            let make_app = || $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build);
             // SAFETY: forwarded unchanged under this fn's documented contract.
-            unsafe {
-                $crate::ffi_glue::init(metal_layer, width, height, scale, || { $(let () = $pre;)? }, || {
-                    $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
-                })
-            }
+            unsafe { $crate::ffi_glue::init(metal_layer, width, height, scale, pre_init, make_app) }
         }
 
         /// `frust_init_accessibility`: attach the accesskit adapter to the

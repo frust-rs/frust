@@ -1777,9 +1777,10 @@ mod tests {
         .expect("a cancel is not an error");
         assert!(attached.is_none());
         assert_eq!(runner.runs(), vec![FORCE_STOP]);
-        // Lines buffered before the kill may still be queued, and the
-        // channel may be momentarily empty before the kill lands: drain and
-        // retry on `Empty` until the channel reports closed, within a bound.
+        // Lines buffered before the kill may still be queued. The kill joins
+        // the stream's worker before `attach_launched` returns, so after them
+        // the channel reports closed; the bound only stops a hang if that
+        // ordering ever regresses.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let killed = loop {
             match launch.stream.lines.try_recv() {
