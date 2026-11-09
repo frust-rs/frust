@@ -771,30 +771,29 @@ mod tests {
     fn abandoned_write_is_not_applied_after_timeout() {
         let applied = Arc::new(AtomicBool::new(false));
         let inner_applied = Arc::clone(&applied);
-        let done = Arc::new(AtomicBool::new(false));
-        let inner_done = Arc::clone(&done);
+        // The writer blocks on `gate_rx` until the caller has already timed
+        // out, so the outcome does not depend on relative sleep lengths.
+        let (gate_tx, gate_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
         let result = write_system_with(
             "text",
             Duration::from_millis(20),
             move |_owned, still_wanted| {
-                // Simulate a wedged clipboard mechanism: sleep well past the
-                // caller's timeout before checking whether it's still wanted.
-                std::thread::sleep(Duration::from_millis(150));
+                let _ = gate_rx.recv();
                 if still_wanted.load(Ordering::Acquire) {
                     inner_applied.store(true, Ordering::Release);
                 }
-                inner_done.store(true, Ordering::Release);
+                let _ = done_tx.send(());
                 Ok(())
             },
         );
         assert_eq!(result, Err("system clipboard timed out".to_string()));
 
-        // Wait for the detached thread to actually run its check.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while !done.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert!(done.load(Ordering::Acquire), "writer thread never ran");
+        // The flag is already cleared; release the writer and wait for it.
+        gate_tx.send(()).unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("writer thread never ran");
         assert!(
             !applied.load(Ordering::Acquire),
             "abandoned write must not be applied once the caller gave up"
