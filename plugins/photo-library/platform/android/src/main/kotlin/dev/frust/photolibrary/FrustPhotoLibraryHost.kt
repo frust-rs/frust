@@ -59,7 +59,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult` | an [AssetsResult], same codes as `albums` |
  * | Rust → Kotlin | `thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] |
  * | Rust → Kotlin | `manageLimitedSelection(requestId: Long): Int` — `(J)I` | [PENDING] after posting the prompt, [NOT_LIMITED], [NO_ACTIVITY], [BUSY] or [NOT_INITIALIZED]; answered through [nativeOnPickResult] (three empty arrays) or [nativeOnPickError] |
- * | Rust → Kotlin | `exportOriginal(requestId: Long, uri: String, destPath: String): Int` — `(JLjava/lang/String;Ljava/lang/String;)I` | [PENDING] after queuing the copy, [NOT_INITIALIZED], or [NOT_FOUND] for an id that is not a `MediaStore` content URI |
+ * | Rust → Kotlin | `exportOriginal(requestId: Long, uri: String, destPath: String): Int` — `(JLjava/lang/String;Ljava/lang/String;)I` | [PENDING] after queuing the copy, [NOT_INITIALIZED], or [NOT_FOUND] for an id that is not a `MediaStore` image or video item on an external volume |
  * | Rust → Kotlin | `cancelExport(requestId: Long)` — `(J)V` | nothing; an unknown or already-answered id is ignored |
  * | Rust → Kotlin | `saveToLibrary(requestId: Long, sourcePath: String, isVideo: Boolean, displayName: String, album: String?): Int` — `(JLjava/lang/String;ZLjava/lang/String;Ljava/lang/String;)I` | [PENDING] after queuing the save, or [NOT_INITIALIZED] |
  * | Kotlin → Rust | `nativeOnExportProgress(requestId: Long, done: Long, total: Long)` | bytes copied, once per chunk; absent when the size is unknown |
@@ -423,13 +423,26 @@ object FrustPhotoLibraryHost {
     fun exportOriginal(requestId: Long, uri: String, destPath: String): Int {
         val ctx = appContext ?: return NOT_INITIALIZED
         val source = Uri.parse(uri)
-        if (source.scheme != ContentResolver.SCHEME_CONTENT || source.authority != MediaStore.AUTHORITY) {
-            return NOT_FOUND
-        }
+        if (!isExportableId(source)) return NOT_FOUND
         val flight = ExportFlight()
         exports[requestId] = flight
         exportExecutor.execute { runExport(ctx, requestId, source, File(destPath), flight) }
         return PENDING
+    }
+
+    /**
+     * True for `content://media/<external volume>/images|video/media/<id>`, the
+     * shape [MediaStoreBrowser] reports; every other URI is not exportable.
+     */
+    internal fun isExportableId(uri: Uri): Boolean {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY) return false
+        val segments = uri.pathSegments
+        if (segments.size != 4) return false
+        val volume = segments[0]
+        return (volume == MediaStore.VOLUME_EXTERNAL || volume == MediaStore.VOLUME_EXTERNAL_PRIMARY) &&
+            (segments[1] == "images" || segments[1] == "video") &&
+            segments[2] == "media" &&
+            segments[3].isNotEmpty() && segments[3].all { it in '0'..'9' }
     }
 
     /** Cancels export [requestId] (class doc). Any thread; an unknown id is ignored. */

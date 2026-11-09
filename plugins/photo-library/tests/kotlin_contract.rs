@@ -1355,7 +1355,7 @@ fn the_writer_publishes_or_deletes_every_row() {
         "a folder is a single segment"
     );
     let save = function(&writer, "fun save(");
-    assert!(save.contains("sweepStalePending(ctx)"));
+    assert!(!save.contains("sweep"));
     assert!(
         save.contains("FrustPhotoLibraryHost.notifySaveDone(requestId, code, uri)"),
         "every save answers once"
@@ -1364,46 +1364,38 @@ fn the_writer_publishes_or_deletes_every_row() {
 }
 
 #[test]
-fn the_stale_pending_sweep_is_guarded_and_best_effort() {
+fn the_writer_has_no_sweep_and_names_the_expiry_cleanup() {
     let writer = read(KOTLIN_WRITER);
-    let sweep = function(&writer, "private fun sweepStalePending(");
-    let once = sweep
-        .find("if (!swept.compareAndSet(false, true)) return")
-        .expect("the sweep runs at most once per process");
-    let guard = sweep
-        .find("if (Build.VERSION.SDK_INT < 30) return")
-        .expect("the sweep needs API 30's pending query arguments");
-    let delete = sweep.find("resolver.delete(").unwrap();
-    assert!(once < guard && guard < delete);
-    assert!(sweep.contains("MediaStore.MediaColumns.IS_PENDING"));
-    assert!(sweep.contains("MediaStore.MediaColumns.OWNER_PACKAGE_NAME"));
-    assert!(sweep.contains("arrayOf(ctx.packageName, cutoff.toString())"));
-    assert!(sweep.contains("MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE"));
-    assert!(sweep.contains("catch (e: Exception)"), "best effort");
-    assert_eq!(
-        kotlin_int_consts_long(&writer).get("STALE_PENDING_SECONDS"),
-        Some(&3600),
-        "an hour is older than any live save"
+    assert!(!writer.contains("sweepStalePending"));
+    assert!(!writer.contains("STALE_PENDING_SECONDS"));
+    assert!(!writer.contains("MATCH_INCLUDE"));
+    assert!(
+        writer.contains("DATE_EXPIRES"),
+        "the class doc names Android's own cleanup of pending rows"
     );
 }
 
-/// `const val NAME = <a> * <b>` Long products of a Kotlin file, by name.
-fn kotlin_int_consts_long(contents: &str) -> BTreeMap<String, i64> {
-    let mut out = BTreeMap::new();
-    for line in contents.lines() {
-        let Some(rest) = line.trim().strip_prefix("const val ") else {
-            continue;
-        };
-        let Some((name, value)) = rest.split_once('=') else {
-            continue;
-        };
-        let parts: Option<Vec<i64>> = value
-            .split('*')
-            .map(|part| part.trim().trim_end_matches('L').parse().ok())
-            .collect();
-        if let Some(parts) = parts {
-            out.insert(name.trim().to_string(), parts.iter().product());
-        }
-    }
-    out
+#[test]
+fn the_save_mime_falls_back_from_the_name_to_the_source() {
+    let writer = read(KOTLIN_WRITER);
+    let mime = function(&writer, "private fun mimeFor(");
+    let name = mime.find("listOf(displayName, source.name)").unwrap();
+    let default = mime.find("\"image/jpeg\"").unwrap();
+    assert!(name < default, "name, then source, then the default");
+    assert!(writer.contains("mimeFor(displayName, source, isVideo)"));
+    assert!(writer.contains("put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)"));
+}
+
+#[test]
+fn export_ids_are_media_store_image_and_video_items() {
+    let kotlin = read(KOTLIN_HOST);
+    let export = function(&kotlin, "fun exportOriginal(");
+    assert!(export.contains("if (!isExportableId(source)) return NOT_FOUND"));
+    let check = function(&kotlin, "fun isExportableId(");
+    assert!(check.contains("uri.authority != MediaStore.AUTHORITY"));
+    assert!(check.contains("segments.size != 4"));
+    assert!(check.contains("MediaStore.VOLUME_EXTERNAL_PRIMARY"));
+    assert!(check.contains("segments[1] == \"images\" || segments[1] == \"video\""));
+    assert!(check.contains("segments[2] == \"media\""));
+    assert!(check.contains("all { it in '0'..'9' }"));
 }
