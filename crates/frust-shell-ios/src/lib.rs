@@ -54,9 +54,9 @@
 //! (edition 2024 spells `no_mangle` as an unsafe attribute). The `app` module —
 //! the frame/lifecycle runtime — contains no `unsafe`; the only `unsafe fn`
 //! declaration outside `ffi_glue` is `IosA11yAdapter::new`, and its sole call
-//! site is `ffi_glue::init_accessibility`. The one `unsafe` block outside
-//! `ffi_glue` is `background_task`'s read of UIKit's `UIBackgroundTaskInvalid`
-//! constant.
+//! site is `ffi_glue::init_accessibility`. The `unsafe` blocks outside `ffi_glue`
+//! are the one in that function and `background_task`'s read of UIKit's
+//! `UIBackgroundTaskInvalid` constant.
 
 // The iOS-specific pure helpers (the null-handle sentinel and the paused/ready
 // frame gate), consumed by the (iOS-only) FFI layer and by host unit tests. In a
