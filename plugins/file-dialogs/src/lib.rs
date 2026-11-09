@@ -15,7 +15,8 @@
 //! `frust::spawn_blocking` and deliver the result through `use_task` /
 //! `AsyncValue`; never call them from a paint or event handler or write a signal
 //! from the background thread. Android and iOS refuse a call on the UI thread
-//! with [`FileDialogError::UiThread`]. A user dismissing the dialog is `Ok(None)`, an empty
+//! with [`FileDialogError::UiThread`], including [`FolderEntry::copy_to`] and
+//! [`FolderEntry::read_to_vec`]. A user dismissing the dialog is `Ok(None)`, an empty
 //! `Vec` or [`ExportOutcome::Cancelled`]; `rfd` cannot report a missing desktop backend,
 //! which looks like that (see the README).
 //!

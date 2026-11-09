@@ -27,7 +27,9 @@ use objc2_foundation::{
     NSData, NSError, NSURL, NSURLBookmarkCreationOptions, NSURLBookmarkResolutionOptions,
 };
 
-use crate::folder::base64;
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+
 use crate::{FileDialogError, FolderGrant};
 
 /// One entered security scope, left when dropped.
@@ -91,13 +93,15 @@ pub(super) fn grant_from_pick(url: &Retained<NSURL>) -> Result<FolderGrant, File
         log_ns_error("creating a folder bookmark", &error);
         FileDialogError::Platform
     })?;
-    Ok(grant(base64::encode(&data), path, scope))
+    Ok(grant(STANDARD.encode(&data), path, scope))
 }
 
 /// Re-acquires the folder behind `token`. Any token that no longer leads to a readable folder is
 /// [`FileDialogError::AccessLost`].
 pub(super) fn restore(token: &str) -> Result<FolderGrant, FileDialogError> {
-    let data = base64::decode(token)
+    let data = STANDARD
+        .decode(token)
+        .ok()
         .filter(|data| !data.is_empty())
         .ok_or_else(|| {
             log::warn!("frust-file-dialogs: the folder token is not a bookmark");
@@ -136,7 +140,7 @@ pub(super) fn restore(token: &str) -> Result<FolderGrant, FileDialogError> {
 /// the old token, which still resolved.
 fn refreshed_token(url: &NSURL, old: &str) -> String {
     match bookmark(url) {
-        Ok(data) => base64::encode(&data),
+        Ok(data) => STANDARD.encode(&data),
         Err(error) => {
             log_ns_error("refreshing a stale folder bookmark", &error);
             old.to_owned()
@@ -201,7 +205,7 @@ mod tests {
         let folder = dir.path().join("folder");
         fs::create_dir_all(&folder).unwrap();
         let url = NSURL::from_directory_path(&folder).unwrap();
-        let token = base64::encode(&bookmark(&url).unwrap());
+        let token = STANDARD.encode(bookmark(&url).unwrap());
         fs::remove_dir_all(&folder).unwrap();
         assert!(matches!(restore(&token), Err(FileDialogError::AccessLost)));
     }

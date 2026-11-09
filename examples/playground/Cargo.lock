@@ -1369,6 +1369,7 @@ dependencies = [
 name = "frust-file-dialogs"
 version = "0.6.5"
 dependencies = [
+ "base64 0.22.1",
  "block2 0.6.2",
  "dispatch2",
  "frust-plugin",

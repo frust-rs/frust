@@ -59,6 +59,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = [
     "UIWindow",
     "UIView",
 ] }
-objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }
 block2 = { version = "0.6", default-features = false, features = ["std"] }
+base64 = { workspace = true }
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }

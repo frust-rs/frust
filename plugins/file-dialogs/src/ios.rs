@@ -53,8 +53,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchTime, MainThreadBound};
 use objc2::rc::{Retained, Weak};
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
+use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{
     NSArray, NSFileManager, NSSearchPathDirectory, NSSearchPathDomainMask, NSString, NSURL,
 };
@@ -63,7 +63,7 @@ use objc2_ui_kit::{
     UIDocumentPickerViewController, UIPresentationController, UISceneActivationState,
     UIViewController, UIWindow, UIWindowScene,
 };
-use objc2_uniform_type_identifiers::{UTType, UTTypeFolder, UTTypeItem};
+use objc2_uniform_type_identifiers::UTType;
 
 pub(crate) use ios_bookmark::GrantState;
 
@@ -226,30 +226,58 @@ struct PickerSpec {
     directory: Option<PathBuf>,
 }
 
-fn item_type() -> Retained<UTType> {
-    // SAFETY: `UTTypeItem` is an immutable framework constant, valid for the whole process.
-    unsafe { UTTypeItem }.retain()
+/// The `UTType` class, found at run time. No `UTType*` framework constant is referenced, so
+/// the crate adds no link-time dependency on UniformTypeIdentifiers (an app that only embeds
+/// this crate through another plugin still links).
+fn ut_type_class() -> Result<&'static AnyClass, FileDialogError> {
+    AnyClass::get(c"UTType").ok_or_else(|| {
+        log::warn!("frust-file-dialogs: the UTType class is not available");
+        FileDialogError::Platform
+    })
 }
 
-fn folder_type() -> Retained<UTType> {
-    // SAFETY: `UTTypeFolder` is an immutable framework constant, valid for the whole process.
-    unsafe { UTTypeFolder }.retain()
+fn type_with_identifier(identifier: &str) -> Result<Retained<UTType>, FileDialogError> {
+    let class = ut_type_class()?;
+    let identifier = NSString::from_str(identifier);
+    // SAFETY: `+[UTType typeWithIdentifier:]` takes an `NSString` and returns a nullable
+    // autoreleased `UTType`; `class` is the runtime `UTType` class.
+    let found: Option<Retained<UTType>> =
+        unsafe { msg_send![class, typeWithIdentifier: &*identifier] };
+    found.ok_or_else(|| {
+        log::warn!("frust-file-dialogs: the system does not know a content type");
+        FileDialogError::Platform
+    })
+}
+
+fn type_with_extension(extension: &str) -> Option<Retained<UTType>> {
+    let class = ut_type_class().ok()?;
+    let extension = NSString::from_str(extension);
+    // SAFETY: `+[UTType typeWithFilenameExtension:]` takes an `NSString` and returns a nullable
+    // autoreleased `UTType`; `class` is the runtime `UTType` class.
+    unsafe { msg_send![class, typeWithFilenameExtension: &*extension] }
+}
+
+fn item_type() -> Result<Retained<UTType>, FileDialogError> {
+    type_with_identifier("public.item")
+}
+
+fn folder_type() -> Result<Retained<UTType>, FileDialogError> {
+    type_with_identifier("public.folder")
 }
 
 /// The picker's content types: one per filter extension, or any item when there are none.
-fn content_types(filters: &[FileFilter]) -> Retained<NSArray<UTType>> {
-    let mut types: Vec<Retained<UTType>> = filters
-        .iter()
-        .flat_map(FileFilter::extensions)
-        .map(|extension| {
-            UTType::typeWithFilenameExtension(&NSString::from_str(extension))
-                .unwrap_or_else(item_type)
-        })
-        .collect();
-    if types.is_empty() {
-        types.push(item_type());
+fn content_types(filters: &[FileFilter]) -> Result<Retained<NSArray<UTType>>, FileDialogError> {
+    let mut types: Vec<Retained<UTType>> = Vec::new();
+    for extension in filters.iter().flat_map(FileFilter::extensions) {
+        types.push(match type_with_extension(extension) {
+            Some(found) => found,
+            None => item_type()?,
+        });
     }
-    NSArray::from_retained_slice(&types)
+    if types.is_empty() {
+        types.push(item_type()?);
+    }
+    Ok(NSArray::from_retained_slice(&types))
 }
 
 /// A configured picker and its delegate.
@@ -259,20 +287,24 @@ struct Picker {
 }
 
 impl Picker {
-    fn new(mtm: MainThreadMarker, spec: PickerSpec, tx: Sender<Event>) -> Self {
+    fn new(
+        mtm: MainThreadMarker,
+        spec: PickerSpec,
+        tx: Sender<Event>,
+    ) -> Result<Self, FileDialogError> {
         let alloc = UIDocumentPickerViewController::alloc(mtm);
         let controller = match &spec.mode {
             PickerMode::Open { filters, .. } => {
                 UIDocumentPickerViewController::initForOpeningContentTypes_asCopy(
                     alloc,
-                    &content_types(filters),
+                    &*content_types(filters)?,
                     true,
                 )
             }
             PickerMode::Folder => {
                 UIDocumentPickerViewController::initForOpeningContentTypes_asCopy(
                     alloc,
-                    &NSArray::from_retained_slice(&[folder_type()]),
+                    &NSArray::from_retained_slice(&[folder_type()?]),
                     false,
                 )
             }
@@ -307,10 +339,10 @@ impl Picker {
             // touched on the main thread only.
             unsafe { presentation.setDelegate(Some(ProtocolObject::from_ref(&*delegate))) };
         }
-        Self {
+        Ok(Self {
             controller,
             delegate,
-        }
+        })
     }
 
     fn answer(&self, event: Event) {
@@ -488,7 +520,7 @@ fn present_on_main(
         return Err(FileDialogError::Cancelled);
     }
     let presenter = presenter(mtm).ok_or(FileDialogError::NoPresenter)?;
-    let picker = Picker::new(mtm, spec, tx.clone());
+    let picker = Picker::new(mtm, spec, tx.clone())?;
     let shown = Rc::new(Cell::new(Shown::Pending));
     let on_shown = {
         let shown = Rc::clone(&shown);
@@ -562,6 +594,11 @@ fn anchor_window(mtm: MainThreadMarker) -> Option<Retained<UIWindow>> {
         fallback = fallback.or(Some(window));
     }
     fallback
+}
+
+/// The refusal [`FolderEntry`] reads share with the backend calls.
+pub(crate) fn refuse_ui_thread() -> Result<(), FileDialogError> {
+    refuse_main_thread()
 }
 
 fn refuse_main_thread() -> Result<(), FileDialogError> {
@@ -1174,10 +1211,10 @@ mod tests {
     #[test]
     fn filters_become_content_types_and_no_filter_means_any_item() {
         let filters = [FileFilter::new("Images", &["png", "jpg"])];
-        assert_eq!(content_types(&filters).count(), 2);
-        let any = content_types(&[]);
+        assert_eq!(content_types(&filters).unwrap().count(), 2);
+        let any = content_types(&[]).unwrap();
         assert_eq!(any.count(), 1);
-        assert_eq!(*any.firstObject().unwrap(), *item_type());
+        assert_eq!(*any.firstObject().unwrap(), *item_type().unwrap());
     }
 
     #[test]
