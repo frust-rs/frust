@@ -97,10 +97,10 @@ default = ["complex-scripts"]
 # with `default-features = false`: unspaced Thai/Lao/Khmer/Myanmar text then overflows a line and
 # Chinese/Japanese word motion falls back to per-character stops.
 complex-scripts = ["frust-text/complex-scripts"]
-# Opt-in, dev-dependency use only: exposes `frust::testing::{Tester, semantics_of, scene_of, ..}`
-# and, through `frust-core/test-support`, `frust::authoring::PaintCtx::for_test`. Features are
-# additive, so never enable it on a normal dependency.
-test-support = ["frust-core/test-support"]
+# Opt-in, dev-dependency use only: exposes `frust::testing::{Tester, semantics_of, scene_of, ..}`,
+# `frust::authoring::PaintCtx::for_test` and the virtual `frust::time` clock the Tester installs.
+# Features are additive, so never enable it on a normal dependency.
+test-support = ["frust-core/test-support", "frust-reactive/test-support"]
 # Opt-in, never default (opt-in survives additive unification; the CLI is the sole enabler). Each
 # shell's forward activates only on that shell's own targets.
 perf-trace = [
