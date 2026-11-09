@@ -19,7 +19,7 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 | web | none: `PhotoError::Unsupported` |
 
 `PhotoLibrary::scan_folder(&FolderGrant, &FolderScan)` pages through the images and videos of a folder the user
-granted (`photo_library::folder::FolderGrant`, from `frust-file-dialogs`), newest first, on Android (a tree URI),
+granted (`frust_photo_library::folder::FolderGrant`, from `frust-file-dialogs`), newest first, on Android (a tree URI),
 iOS (a bookmarked folder) and desktop. It is not available on web.
 
 ## Browse the library
