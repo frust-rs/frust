@@ -46,27 +46,40 @@
 //! When a picked item carries an asset id (iOS), the Picker preview tries the native thumbnail
 //! first and decodes the copied file only when that fails. A HEIC pick therefore previews when
 //! the library grants access, and otherwise shows the file's decode error.
+//!
+//! An Originals panel below Browse acts on one asset: the thumbnail tapped in the Browse grid
+//! (it insets while selected) or, without a selection, the Picker's most recent asset id.
+//! Version (Original / Current) and Network (allowed / off) toggles feed
+//! `PhotoLibrary::export_original`, which runs in [`frust::spawn_blocking`] behind a
+//! [`use_task`]. Its progress callback writes only a shared cell; the task future polls the
+//! cell and copies it into a signal (the same shape as the Picker), driving a status line and a
+//! bar, and **Cancel** calls the export's own [`CancelToken`]. The result line shows the file
+//! name, mime, byte size and the first 12 bytes in hex with a printable-text rendering, so
+//! `ftypheic` (HEIC) or `II*` (DNG) is visible. **Save copy back** files the exported copy
+//! through `PhotoLibrary::save` into the album `Frust Playground`; **Save (no album)** is the
+//! add-only variant. Neither export nor save takes the pick guard.
 
 use std::collections::HashSet;
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use frust::authoring::Rect;
 use frust::{
-    AsyncValue, ButtonStyle, ChildKey, Component, EdgeInsets, Get, GetUntracked, Image, ImageFit,
-    ImageSource, ListView, Padding, RwSignal, ScrollbarStyle, Set, SizedBox, Theme, UseTask, View,
-    button, colored_box, column, component, decode_image_async, either, row, spawn_blocking, text,
-    use_context, use_task,
+    AsyncValue, ButtonStyle, ChildKey, Component, EdgeInsets, GestureDetector, Get, GetUntracked,
+    Image, ImageFit, ImageSource, ListView, Padding, RwSignal, ScrollbarStyle, Set, SizedBox,
+    Theme, UseTask, View, button, colored_box, column, component, decode_image_async, either, row,
+    spawn_blocking, text, use_context, use_task,
 };
 use frust_permissions::{
     Permission, PermissionError, PermissionStatus, PhotoAccess, open_settings, request, status,
 };
 use frust_photo_library::{
-    Album, AlbumId, Asset, AssetId, AssetPage, AssetQuery, CancelToken, MediaFilter, MediaKind,
-    PhotoError, PhotoLibrary, PickOptions, PickProgress, PickedItem, ThumbnailMode,
-    ThumbnailRequest,
+    Album, AlbumId, Asset, AssetId, AssetPage, AssetQuery, AssetVersion, CancelToken,
+    ExportOptions, ExportedOriginal, MediaFilter, MediaKind, PhotoError, PhotoLibrary, PickOptions,
+    PickProgress, PickedItem, SaveRequest, ThumbnailMode, ThumbnailRequest,
 };
 
 use frust_share::{Share, ShareAnchor};
@@ -114,12 +127,27 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
 
 struct PhotosPage;
 
+/// The asset ids the Browse and Picker panels hand to the Originals panel.
+#[derive(Clone, Copy)]
+struct SharedAssets {
+    /// The asset tapped in the Browse grid.
+    selected: RwSignal<Option<AssetId>>,
+    /// The first asset id of the Picker's most recent pick that carried one.
+    picked: RwSignal<Option<AssetId>>,
+}
+
 impl Component for PhotosPage {
-    type State = ();
+    type State = SharedAssets;
 
-    fn init(&self) {}
+    fn init(&self) -> SharedAssets {
+        SharedAssets {
+            selected: RwSignal::new(None),
+            picked: RwSignal::new(None),
+        }
+    }
 
-    fn build(&self, _state: &mut ()) -> impl View<()> {
+    fn build(&self, state: &mut SharedAssets) -> impl View<SharedAssets> {
+        let shared = *state;
         let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
         let accent = theme.scheme().primary;
         let muted = theme.scheme().on_surface_variant;
@@ -140,9 +168,18 @@ impl Component for PhotosPage {
                 .child(SizedBox(None, Some(12.0)))
                 .child(component(PermissionsPanel))
                 .child(SizedBox(None, Some(16.0)))
-                .child(component(PickerPanel))
+                .child(component(PickerPanel {
+                    picked: shared.picked,
+                }))
                 .child(SizedBox(None, Some(16.0)))
-                .child(component(BrowsePanel)),
+                .child(component(BrowsePanel {
+                    selected: shared.selected,
+                }))
+                .child(SizedBox(None, Some(16.0)))
+                .child(component(OriginalsPanel {
+                    selected: shared.selected,
+                    picked: shared.picked,
+                })),
         )
     }
 }
@@ -372,6 +409,8 @@ struct PickerOutcome {
     message: String,
     rows: Vec<ItemRow>,
     paths: Vec<PathBuf>,
+    /// The first picked item's library asset id, when one carried it.
+    asset_id: Option<AssetId>,
     /// The first image's decode result, `None` when no image was picked.
     preview: Option<Result<ImageSource, String>>,
 }
@@ -382,6 +421,7 @@ impl PickerOutcome {
             message,
             rows: Vec::new(),
             paths: Vec::new(),
+            asset_id: None,
             preview: None,
         }
     }
@@ -473,6 +513,7 @@ fn run_picker_action(
                 let outcome = PickerOutcome {
                     message: format!("Picked {} item(s).", items.len()),
                     rows,
+                    asset_id: items.iter().find_map(|item| item.asset_id.clone()),
                     paths: items.into_iter().map(|item| item.path).collect(),
                     preview: None,
                 };
@@ -482,7 +523,10 @@ fn run_picker_action(
     }
 }
 
-struct PickerPanel;
+struct PickerPanel {
+    /// Receives the most recent pick's asset id for the Originals panel.
+    picked: RwSignal<Option<AssetId>>,
+}
 
 struct PickerPanelState {
     /// Index into [`FILTERS`], written by the filter buttons only.
@@ -513,6 +557,7 @@ impl Component for PickerPanel {
         let progress_cell: Arc<Mutex<Option<PickProgress>>> = Arc::new(Mutex::new(None));
         let progress = RwSignal::new(None);
         let poll_cell = progress_cell.clone();
+        let picked = self.picked;
         let outcome = use_task(move || {
             let requested = cell.lock().expect("action cell poisoned").take();
             let poll_cell = poll_cell.clone();
@@ -536,6 +581,11 @@ impl Component for PickerPanel {
                 let Some((mut outcome, first_image)) = step else {
                     return Ok::<Option<PickerOutcome>, JoinFailure>(None);
                 };
+                if let Some(id) = &outcome.asset_id
+                    && picked.try_get_untracked().is_some()
+                {
+                    picked.set(Some(id.clone()));
+                }
                 match first_image {
                     Some(PreviewSource::Asset { id, path }) => {
                         let thumb = spawn_blocking(move || {
@@ -1002,6 +1052,8 @@ impl BrowseSignals {
 /// requests that asset's thumbnail once, off the UI thread.
 struct ThumbCell {
     id: AssetId,
+    /// Set to this cell's asset on a tap; the cell insets itself while it is the selection.
+    selected: RwSignal<Option<AssetId>>,
 }
 
 impl Component for ThumbCell {
@@ -1029,23 +1081,51 @@ impl Component for ThumbCell {
             _ => (None, false),
         };
         let (empty, error_fill) = (scheme.surface_container_highest, scheme.error_container);
-        SizedBox(Some(CELL), Some(CELL)).child(either(
-            source.is_some(),
-            move || Image(source.expect("checked above")).fit(ImageFit::Cover),
-            move || {
-                either(
-                    failed,
-                    move || colored_box().fill(error_fill).radius(4.0),
-                    move || colored_box().fill(empty).radius(4.0),
-                )
-            },
-        ))
+        let is_selected = self.selected.get().as_ref() == Some(&self.id);
+        let target = self.id.clone();
+        let selected = self.selected;
+        let content = move || thumb_content(source.clone(), failed, empty, error_fill);
+        let inset_content = content.clone();
+        GestureDetector(SizedBox(Some(CELL), Some(CELL)).child(either(
+            is_selected,
+            move || Padding(EdgeInsets::all(SELECTED_INSET), inset_content()),
+            move || Padding(EdgeInsets::all(0.0), content()),
+        )))
+        .on_tap(move |_state: &mut Self::State| selected.set(Some(target.clone())))
     }
 }
 
-struct BrowsePanel;
+/// The inset around the selected cell's thumbnail, in logical points.
+const SELECTED_INSET: f64 = 8.0;
+
+/// A cell's picture: the thumbnail, or a flat placeholder (tinted when its load failed).
+fn thumb_content(
+    source: Option<ImageSource>,
+    failed: bool,
+    empty: frust::Color,
+    error_fill: frust::Color,
+) -> impl View<UseTask<Result<ImageSource, String>>> {
+    either(
+        source.is_some(),
+        move || Image(source.clone().expect("checked above")).fit(ImageFit::Cover),
+        move || {
+            either(
+                failed,
+                move || colored_box().fill(error_fill).radius(4.0),
+                move || colored_box().fill(empty).radius(4.0),
+            )
+        },
+    )
+}
+
+struct BrowsePanel {
+    /// Written by a tap on a thumbnail cell.
+    selected: RwSignal<Option<AssetId>>,
+}
 
 struct BrowsePanelState {
+    /// The asset tapped in the grid, shared with the Originals panel.
+    selected: RwSignal<Option<AssetId>>,
     /// The access line, written by Refresh and after Manage selection.
     access: RwSignal<String>,
     /// Whether access is Limited, which shows the Manage selection banner.
@@ -1097,6 +1177,7 @@ impl Component for BrowsePanel {
             }
         });
         BrowsePanelState {
+            selected: self.selected,
             access,
             limited,
             albums,
@@ -1143,11 +1224,12 @@ impl Component for BrowsePanel {
 
         let ids = listing.ids.clone();
         let key_ids = ids.clone();
+        let tapped = state.selected;
         let list = ListView::builder_keyed(
             row_count(ids.len()),
             ROW_EXTENT,
             move |index| row_key(&key_ids, index),
-            move |index| thumb_row(row_ids(&ids, index).to_vec()),
+            move |index| thumb_row(row_ids(&ids, index).to_vec(), tapped),
         )
         .scrollbar(ScrollbarStyle::default());
 
@@ -1158,7 +1240,8 @@ impl Component for BrowsePanel {
                     "Lists the photo library through frust-photo-library: Refresh reads \
                      the access status and the albums, then the first page of 60 assets \
                      as thumbnails. Load more fetches the next page. With limited access \
-                     Manage selection reopens the system selection.",
+                     Manage selection reopens the system selection. Tap a thumbnail to \
+                     select it for the Originals panel.",
                 )
                 .size(11.0)
                 .color(muted),
@@ -1209,13 +1292,19 @@ impl Component for BrowsePanel {
 const UNREAD_ACCESS: &str = "Photo access: not read yet";
 
 /// One list row: up to [`COLUMNS`] thumbnail cells with a gap between them.
-fn thumb_row(ids: Vec<AssetId>) -> impl View<BrowsePanelState> {
+fn thumb_row(
+    ids: Vec<AssetId>,
+    selected: RwSignal<Option<AssetId>>,
+) -> impl View<BrowsePanelState> {
     let mut cells = row();
     for (index, id) in ids.iter().enumerate() {
         if index > 0 {
             cells = cells.child(SizedBox(Some(GAP), None));
         }
-        cells = cells.child(component(ThumbCell { id: id.clone() }));
+        cells = cells.child(component(ThumbCell {
+            id: id.clone(),
+            selected,
+        }));
     }
     SizedBox(None, Some(ROW_EXTENT)).child(cells)
 }
@@ -1280,6 +1369,485 @@ fn more_button(
     })
     .style(ButtonStyle::Secondary)
     .disabled(disabled)
+    .small()
+}
+
+/// The album **Save copy back** files the exported copy into.
+const SAVE_ALBUM: &str = "Frust Playground";
+
+/// The version selector's choices.
+const VERSIONS: [(&str, AssetVersion); 2] = [
+    ("Original", AssetVersion::Original),
+    ("Current", AssetVersion::Current),
+];
+
+/// How many leading bytes of the exported file the result line shows.
+const HEADER_LEN: usize = 12;
+
+/// The progress bar's full width in logical points.
+const BAR_WIDTH: f64 = 240.0;
+
+/// The progress bar's height in logical points.
+const BAR_HEIGHT: f64 = 6.0;
+
+/// The asset an export acts on and where it came from: the Browse selection first, then the
+/// Picker's most recent asset id.
+fn export_target(
+    selected: Option<AssetId>,
+    picked: Option<AssetId>,
+) -> Option<(AssetId, &'static str)> {
+    selected
+        .map(|id| (id, "Browse selection"))
+        .or_else(|| picked.map(|id| (id, "Picker pick")))
+}
+
+/// Space-separated lowercase hex of `bytes`.
+fn header_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `bytes` as text with every non-printable byte shown as `.`, so a `ftypheic` or `II*` marker
+/// reads at a glance.
+fn header_ascii(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b as char
+            } else {
+                '.'
+            }
+        })
+        .collect()
+}
+
+/// An exported file as the result line reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportReport {
+    file_name: String,
+    mime: String,
+    byte_len: u64,
+    header: Vec<u8>,
+}
+
+impl ExportReport {
+    fn new(exported: &ExportedOriginal, header: Vec<u8>) -> Self {
+        Self {
+            file_name: exported
+                .file_name
+                .clone()
+                .or_else(|| {
+                    exported
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .unwrap_or_else(|| "(unnamed)".to_string()),
+            mime: exported
+                .mime
+                .clone()
+                .unwrap_or_else(|| "unknown mime".into()),
+            byte_len: exported.byte_len,
+            header,
+        }
+    }
+
+    fn line(&self) -> String {
+        format!(
+            "{} | {} | {} bytes | first {} bytes: {} ({})",
+            self.file_name,
+            self.mime,
+            self.byte_len,
+            self.header.len(),
+            header_hex(&self.header),
+            header_ascii(&self.header),
+        )
+    }
+}
+
+/// The first [`HEADER_LEN`] bytes of `path` (call inside `spawn_blocking`).
+fn read_header(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut header = Vec::with_capacity(HEADER_LEN);
+    std::fs::File::open(path)?
+        .take(HEADER_LEN as u64)
+        .read_to_end(&mut header)?;
+    Ok(header)
+}
+
+/// The status line while an export runs.
+fn export_progress_text(fraction: Option<f64>) -> String {
+    match fraction {
+        None => "Waiting for the platform\u{2026}".to_string(),
+        Some(fraction) => {
+            let pct = (fraction.clamp(0.0, 1.0) * 100.0).round() as u32;
+            format!("Exporting\u{2026} {pct}%")
+        }
+    }
+}
+
+/// The filled and empty widths of the progress bar for `fraction`.
+fn bar_split(fraction: f64) -> (f64, f64) {
+    let filled = BAR_WIDTH * fraction.clamp(0.0, 1.0);
+    (filled, BAR_WIDTH - filled)
+}
+
+/// What an Originals button asks the background step to do.
+enum OriginalsAction {
+    Export(AssetId, ExportOptions),
+    /// Save the exported file, into [`SAVE_ALBUM`] or (`false`) no album.
+    Save(PathBuf, bool),
+}
+
+/// What one background step learned.
+enum OriginalsStep {
+    Exported(Result<(PathBuf, ExportReport), String>),
+    Saved(String),
+}
+
+/// The save outcome as one line.
+fn save_text(result: Result<(), PhotoError>, album: bool) -> String {
+    let target = if album { SAVE_ALBUM } else { "no album" };
+    match result {
+        Ok(_) => format!("Saved a copy to the library ({target})."),
+        Err(err) => pick_error_text(&err),
+    }
+}
+
+/// Runs one action (call inside `spawn_blocking`). `None` is the mount-time fetch.
+fn run_originals_action(action: Option<OriginalsAction>) -> Option<OriginalsStep> {
+    Some(match action? {
+        OriginalsAction::Export(id, options) => {
+            OriginalsStep::Exported(match PhotoLibrary::export_original(&id, &options) {
+                Ok(exported) => match read_header(&exported.path) {
+                    Ok(header) => {
+                        let report = ExportReport::new(&exported, header);
+                        Ok((exported.path, report))
+                    }
+                    Err(err) => Err(format!("error: reading the exported file: {err}")),
+                },
+                Err(err) => Err(pick_error_text(&err)),
+            })
+        }
+        OriginalsAction::Save(path, album) => {
+            let mut request = SaveRequest::new(path);
+            if album {
+                request = request.album(SAVE_ALBUM);
+            }
+            OriginalsStep::Saved(save_text(PhotoLibrary::save(&request).map(|_| ()), album))
+        }
+    })
+}
+
+/// The Originals panel's signals, copied into the task future.
+#[derive(Clone, Copy)]
+struct OriginalsSignals {
+    progress: RwSignal<Option<f64>>,
+    result: RwSignal<String>,
+    exported: RwSignal<Option<PathBuf>>,
+    saved: RwSignal<String>,
+}
+
+impl OriginalsSignals {
+    /// Copies a finished step into the signals (UI thread). Skipped once the panel is gone.
+    fn apply(&self, step: OriginalsStep) {
+        if self.result.try_get_untracked().is_none() {
+            return;
+        }
+        match step {
+            OriginalsStep::Exported(Ok((path, report))) => {
+                self.result.set(report.line());
+                self.exported.set(Some(path));
+            }
+            OriginalsStep::Exported(Err(text)) => {
+                self.result.set(text);
+                self.exported.set(None);
+            }
+            OriginalsStep::Saved(line) => self.saved.set(line),
+        }
+        self.progress.set(None);
+    }
+}
+
+struct OriginalsPanel {
+    /// The Browse grid's selection.
+    selected: RwSignal<Option<AssetId>>,
+    /// The Picker's most recent asset id.
+    picked: RwSignal<Option<AssetId>>,
+}
+
+struct OriginalsPanelState {
+    selected: RwSignal<Option<AssetId>>,
+    picked: RwSignal<Option<AssetId>>,
+    /// Index into [`VERSIONS`], written by the version buttons only.
+    version: RwSignal<usize>,
+    /// Whether a cloud-only original may be downloaded.
+    network: RwSignal<bool>,
+    /// The pending action; `None` resolves to nothing.
+    action: Arc<Mutex<Option<OriginalsAction>>>,
+    /// The running step; a press restarts it.
+    work: UseTask<()>,
+    /// Written by the progress callback on a background thread; read only by the task future.
+    progress_cell: Arc<Mutex<Option<f64>>>,
+    /// The latest progress fraction, copied from the cell by the task future.
+    progress: RwSignal<Option<f64>>,
+    /// The running export's token; Cancel takes it, each Export press replaces it.
+    token: Arc<Mutex<Option<CancelToken>>>,
+    /// The export result line, empty before the first export.
+    result: RwSignal<String>,
+    /// The last exported file, which **Save copy back** saves.
+    exported: RwSignal<Option<PathBuf>>,
+    /// The last save result line.
+    saved: RwSignal<String>,
+}
+
+impl Component for OriginalsPanel {
+    type State = OriginalsPanelState;
+
+    fn init(&self) -> OriginalsPanelState {
+        let action: Arc<Mutex<Option<OriginalsAction>>> = Arc::new(Mutex::new(None));
+        let cell = action.clone();
+        let progress_cell: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
+        let poll_cell = progress_cell.clone();
+        let signals = OriginalsSignals {
+            progress: RwSignal::new(None),
+            result: RwSignal::new(String::new()),
+            exported: RwSignal::new(None),
+            saved: RwSignal::new(String::new()),
+        };
+        let work = use_task(move || {
+            let requested = cell.lock().expect("action cell poisoned").take();
+            let poll_cell = poll_cell.clone();
+            async move {
+                let mut handle = spawn_blocking(move || run_originals_action(requested));
+                // The progress callback only writes the cell; this loop copies it into the
+                // signal on the UI thread. Stop copying once the panel is gone.
+                while !handle.is_finished() {
+                    let latest = *poll_cell.lock().expect("progress cell poisoned");
+                    let Some(current) = signals.progress.try_get_untracked() else {
+                        break;
+                    };
+                    if latest != current {
+                        signals.progress.set(latest);
+                    }
+                    let _ = spawn_blocking(move || std::thread::sleep(PROGRESS_POLL)).await;
+                }
+                let step = (&mut handle)
+                    .await
+                    .map_err(|err| JoinFailure(err.to_string()))?;
+                if let Some(step) = step {
+                    signals.apply(step);
+                }
+                Ok::<(), JoinFailure>(())
+            }
+        });
+        OriginalsPanelState {
+            selected: self.selected,
+            picked: self.picked,
+            version: RwSignal::new(0),
+            network: RwSignal::new(true),
+            action,
+            work,
+            progress_cell,
+            progress: signals.progress,
+            token: Arc::new(Mutex::new(None)),
+            result: signals.result,
+            exported: signals.exported,
+            saved: signals.saved,
+        }
+    }
+
+    fn build(&self, state: &mut OriginalsPanelState) -> impl View<OriginalsPanelState> {
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+        let scheme = theme.scheme();
+        let (accent, muted) = (scheme.primary, scheme.on_surface_variant);
+        let track = scheme.surface_container_highest;
+
+        let busy = matches!(state.work.signal().get(), AsyncValue::Loading(_));
+        let target = export_target(state.selected.get(), state.picked.get());
+        let selected_version = state.version.get();
+        let network = state.network.get();
+        let progress = state.progress.get();
+        let result = state.result.get();
+        let saved = state.saved.get();
+        let can_save = state.exported.get().is_some() && !busy;
+
+        let mut versions = row();
+        for (index, (label, _)) in VERSIONS.iter().enumerate() {
+            let signal = state.version;
+            versions = versions.child(
+                button(*label, move |_state: &mut OriginalsPanelState| {
+                    signal.set(index);
+                })
+                .style(selector_style(index == selected_version))
+                .disabled(busy)
+                .small(),
+            );
+            versions = versions.child(SizedBox(Some(8.0), None));
+        }
+        let network_signal = state.network;
+        let network_toggle = button(
+            if network {
+                "Network: allowed"
+            } else {
+                "Network: off"
+            },
+            move |_state: &mut OriginalsPanelState| {
+                network_signal.set(!network_signal.get_untracked());
+            },
+        )
+        .style(selector_style(network))
+        .disabled(busy)
+        .small();
+
+        let target_line = match &target {
+            Some((_, source)) => format!("Target: {source}"),
+            None => "Target: none (tap a Browse thumbnail or pick an item)".to_string(),
+        };
+
+        let mut body = column();
+        if busy {
+            body = body.child(text(export_progress_text(progress)).size(12.0).color(muted));
+            let (filled, rest) = bar_split(progress.unwrap_or(0.0));
+            let mut bar = row();
+            if filled > 0.0 {
+                bar = bar.child(
+                    SizedBox(Some(filled), Some(BAR_HEIGHT))
+                        .child(colored_box().fill(accent).radius(BAR_HEIGHT / 2.0)),
+                );
+            }
+            if rest > 0.0 {
+                bar = bar.child(
+                    SizedBox(Some(rest), Some(BAR_HEIGHT))
+                        .child(colored_box().fill(track).radius(BAR_HEIGHT / 2.0)),
+                );
+            }
+            body = body.child(bar);
+        }
+
+        column()
+            .child(text("Originals").size(13.0).color(accent))
+            .child(
+                text(
+                    "Export copies the selected asset's original file (or its edited \
+                     rendition) into the app cache off the UI thread; an iCloud-only \
+                     original downloads with progress when the network is allowed, and \
+                     Cancel stops it. The result line shows the file's name, mime, size and \
+                     first bytes. Save copy back files the exported copy into the library.",
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(text(target_line).size(12.0))
+            .child(SizedBox(None, Some(4.0)))
+            .child(text("Version").size(12.0))
+            .child(versions)
+            .child(SizedBox(None, Some(4.0)))
+            .child(network_toggle)
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                row()
+                    .child(export_button(state, target.map(|(id, _)| id), busy))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(originals_cancel_button(state, busy)),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(body)
+            .child(text(result).size(11.0))
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                row()
+                    .child(save_button(state, "Save copy back", true, can_save))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(save_button(state, "Save (no album)", false, can_save)),
+            )
+            .child(text(saved).size(11.0).color(muted))
+    }
+}
+
+fn export_button(
+    state: &OriginalsPanelState,
+    target: Option<AssetId>,
+    busy: bool,
+) -> impl View<OriginalsPanelState> {
+    let (action, work) = (state.action.clone(), state.work.clone());
+    let (progress_cell, progress, token) = (
+        state.progress_cell.clone(),
+        state.progress,
+        state.token.clone(),
+    );
+    let (version, network) = (state.version, state.network);
+    let (result, saved, exported) = (state.result, state.saved, state.exported);
+    let disabled = busy || target.is_none();
+    button("Export", move |_state: &mut OriginalsPanelState| {
+        let Some(id) = target.clone() else {
+            return;
+        };
+        // A fresh token and a cleared progress cell for every export.
+        let cancel = CancelToken::new();
+        *token.lock().expect("token cell poisoned") = Some(cancel.clone());
+        *progress_cell.lock().expect("progress cell poisoned") = None;
+        progress.set(None);
+        result.set(String::new());
+        saved.set(String::new());
+        exported.set(None);
+        let sink = progress_cell.clone();
+        let options = ExportOptions::new()
+            .version(VERSIONS[version.get_untracked()].1)
+            .allow_network(network.get_untracked())
+            .on_progress(move |fraction| {
+                *sink.lock().expect("progress cell poisoned") = Some(fraction);
+            })
+            .cancel(cancel);
+        *action.lock().expect("action cell poisoned") = Some(OriginalsAction::Export(id, options));
+        work.restart();
+    })
+    .disabled(disabled)
+    .small()
+}
+
+fn originals_cancel_button(
+    state: &OriginalsPanelState,
+    busy: bool,
+) -> impl View<OriginalsPanelState> {
+    let token = state.token.clone();
+    button("Cancel", move |_state: &mut OriginalsPanelState| {
+        let current = token.lock().expect("token cell poisoned").clone();
+        if let Some(current) = current {
+            current.cancel();
+        }
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(!busy)
+    .small()
+}
+
+fn save_button(
+    state: &OriginalsPanelState,
+    label: &'static str,
+    album: bool,
+    enabled: bool,
+) -> impl View<OriginalsPanelState> {
+    let (action, work, exported, saved) = (
+        state.action.clone(),
+        state.work.clone(),
+        state.exported,
+        state.saved,
+    );
+    button(label, move |_state: &mut OriginalsPanelState| {
+        let Some(path) = exported.get_untracked() else {
+            return;
+        };
+        saved.set(String::new());
+        *action.lock().expect("action cell poisoned") = Some(OriginalsAction::Save(path, album));
+        work.restart();
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(!enabled)
     .small()
 }
 
@@ -1451,6 +2019,87 @@ mod tests {
         record_page(&None, true, Ok(page), &mut step);
         assert!(step.album.is_none());
         assert!(matches!(step.page, Some(PageUpdate::Append(_))));
+    }
+
+    #[test]
+    fn target_prefers_the_browse_selection() {
+        let a = Some(AssetId::from_raw("a"));
+        let b = Some(AssetId::from_raw("b"));
+        assert_eq!(
+            export_target(a.clone(), b.clone()),
+            Some((AssetId::from_raw("a"), "Browse selection"))
+        );
+        assert_eq!(
+            export_target(None, b),
+            Some((AssetId::from_raw("b"), "Picker pick"))
+        );
+        assert_eq!(export_target(None, None), None);
+    }
+
+    #[test]
+    fn header_shows_hex_and_printable_text() {
+        let heic = [
+            0, 0, 0, 0x18, b'f', b't', b'y', b'p', b'h', b'e', b'i', b'c',
+        ];
+        assert_eq!(header_hex(&heic), "00 00 00 18 66 74 79 70 68 65 69 63");
+        assert_eq!(header_ascii(&heic), "....ftypheic");
+        assert_eq!(header_ascii(&[b'I', b'I', b'*', 0]), "II*.");
+    }
+
+    #[test]
+    fn export_report_line_lists_name_mime_size_and_header() {
+        let report = ExportReport {
+            file_name: "IMG_1.HEIC".into(),
+            mime: "image/heic".into(),
+            byte_len: 3,
+            header: vec![b'I', b'I', b'*'],
+        };
+        assert_eq!(
+            report.line(),
+            "IMG_1.HEIC | image/heic | 3 bytes | first 3 bytes: 49 49 2a (II*)"
+        );
+    }
+
+    #[test]
+    fn header_reads_at_most_twelve_bytes() {
+        let dir = std::env::temp_dir().join("frust-playground-originals-header-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("sample.bin");
+        std::fs::write(&file, (0u8..40).collect::<Vec<_>>()).expect("write sample");
+        assert_eq!(
+            read_header(&file).expect("read header"),
+            (0u8..12).collect::<Vec<_>>()
+        );
+        std::fs::remove_file(&file).expect("cleanup");
+    }
+
+    #[test]
+    fn export_status_waits_then_shows_percent() {
+        assert_eq!(
+            export_progress_text(None),
+            "Waiting for the platform\u{2026}"
+        );
+        assert_eq!(export_progress_text(Some(0.426)), "Exporting\u{2026} 43%");
+        assert_eq!(export_progress_text(Some(2.0)), "Exporting\u{2026} 100%");
+    }
+
+    #[test]
+    fn bar_splits_the_track() {
+        assert_eq!(bar_split(0.0), (0.0, BAR_WIDTH));
+        assert_eq!(bar_split(0.5), (BAR_WIDTH / 2.0, BAR_WIDTH / 2.0));
+        assert_eq!(bar_split(3.0), (BAR_WIDTH, 0.0));
+    }
+
+    #[test]
+    fn no_originals_action_resolves_to_nothing() {
+        assert!(run_originals_action(None).is_none());
+    }
+
+    #[test]
+    fn save_text_names_the_album_and_failures() {
+        assert!(save_text(Ok(()), true).contains(SAVE_ALBUM));
+        assert!(save_text(Ok(()), false).contains("no album"));
+        assert_eq!(save_text(Err(PhotoError::Cancelled), true), "Cancelled");
     }
 
     #[test]
