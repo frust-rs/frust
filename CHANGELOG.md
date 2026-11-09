@@ -34,8 +34,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
-- Debug builds log a warning when a flush-on-background callback runs over 8 ms, or a whole drain over
-  16 ms, because the OS lifecycle callback is blocked meanwhile. Release builds do not measure.
+- Native debug builds log a warning when a flush-on-background callback runs over 8 ms, or a whole drain over
+  16 ms, because the OS lifecycle callback is blocked meanwhile. Release and web builds do not measure.
 - `frust::BackgroundTask` (`begin`, `expired`, `is_granted`, `end`; dropping it ends the task exactly
   once, from any thread). iOS takes a UIKit background-task assertion from Rust; Android, desktop and web
   are no-ops. The sanctioned pattern: a `flush_on_background` callback calls `BackgroundTask::begin` on the
