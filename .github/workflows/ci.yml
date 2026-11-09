@@ -407,6 +407,54 @@ jobs:
         run: |
           echo "SKIPPED (scope: $REASON)" >> "$GITHUB_STEP_SUMMARY"
 
+  clippy-ios:
+    # Clippy for frust-shell-ios on the iOS simulator target, which no other job
+    # builds: the clippy job lints the host target only. Outside `ci-ok`'s needs:
+    # it is advisory, and it only runs when the change touches the paths it covers
+    # (the scope step below).
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Does this change touch the iOS shell paths
+        id: scope
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
+        run: |
+          # The iOS shell and the crates it builds against: the lockfile, the
+          # manifests, the toolchain pin, the reactive, core and plugin crates, and
+          # this workflow.
+          paths=(Cargo.lock Cargo.toml rust-toolchain.toml crates/frust-shell-ios crates/frust-reactive crates/frust-core crates/frust-plugin .github/workflows/ci.yml)
+          # An unusable base (a new branch's all-zero `before`) runs the leg.
+          if changed="$(git diff --name-only "$BASE" HEAD -- "${paths[@]}" 2>/dev/null)" && [ -z "$changed" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "reason=no iOS shell paths changed" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "reason=iOS shell paths changed or base unusable" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install the pinned toolchain
+        if: steps.scope.outputs.run == 'true'
+        run: rustup toolchain install
+      - name: Add the iOS simulator target
+        if: steps.scope.outputs.run == 'true'
+        run: rustup target add aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: steps.scope.outputs.run == 'true'
+        with:
+          key: clippy-ios-sim
+      - name: Clippy frust-shell-ios for the iOS simulator
+        if: steps.scope.outputs.run == 'true'
+        run: cargo clippy -p frust-shell-ios --target aarch64-apple-ios-sim --all-targets --locked -- -D warnings
+      - name: Report a skipped leg
+        if: steps.scope.outputs.run != 'true'
+        env:
+          REASON: ${{ steps.scope.outputs.reason }}
+        run: |
+          echo "SKIPPED (scope: $REASON)" >> "$GITHUB_STEP_SUMMARY"
+
   text-oracle-windows:
     # The DirectWrite text-oracle backend (`oracle/dwrite.rs`), which no other job
     # runs. Outside `ci-ok`'s needs, and path-scoped like the macOS leg.
