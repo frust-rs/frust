@@ -1543,6 +1543,37 @@ fn run_originals_action(action: Option<OriginalsAction>) -> Option<OriginalsStep
 }
 
 /// The Originals panel's signals, copied into the task future.
+/// The newest file an earlier run exported, so a save still has a source after the app restarts.
+/// iOS ends the app when Photos access changes, and add-only access cannot export.
+fn previous_export() -> Option<PathBuf> {
+    let dir = frust::paths::cache_dir()?
+        .join("frust-photo-library")
+        .join("originals");
+    newest_file_in(&dir)
+}
+
+/// The newest visible file in `dir`; staging files start with a dot.
+fn newest_file_in(dir: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            meta.is_file().then_some(())?;
+            Some((meta.modified().ok()?, entry.path()))
+        })
+        .max_by_key(|(modified, _)| *modified)
+        .map(|(_, path)| path)
+}
+
+/// The result line for a file left by an earlier run; empty when there is none.
+fn previous_export_text(path: Option<&Path>) -> String {
+    path.and_then(Path::file_name)
+        .map(|name| format!("Previous export: {}", name.to_string_lossy()))
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Copy)]
 struct OriginalsSignals {
     progress: RwSignal<Option<f64>>,
@@ -1598,7 +1629,7 @@ struct OriginalsPanelState {
     token: Arc<Mutex<Option<CancelToken>>>,
     /// The export result line, empty before the first export.
     result: RwSignal<String>,
-    /// The last exported file, which **Save copy back** saves.
+    /// The last exported file, which **Save copy back** saves. Starts as an earlier run's newest.
     exported: RwSignal<Option<PathBuf>>,
     /// The last save result line.
     saved: RwSignal<String>,
@@ -1612,10 +1643,11 @@ impl Component for OriginalsPanel {
         let cell = action.clone();
         let progress_cell: Arc<Mutex<Option<f64>>> = Arc::new(Mutex::new(None));
         let poll_cell = progress_cell.clone();
+        let previous = previous_export();
         let signals = OriginalsSignals {
             progress: RwSignal::new(None),
-            result: RwSignal::new(String::new()),
-            exported: RwSignal::new(None),
+            result: RwSignal::new(previous_export_text(previous.as_deref())),
+            exported: RwSignal::new(previous),
             saved: RwSignal::new(String::new()),
         };
         let work = use_task(move || {
@@ -2071,6 +2103,22 @@ mod tests {
             (0u8..12).collect::<Vec<_>>()
         );
         std::fs::remove_file(&file).expect("cleanup");
+    }
+
+    #[test]
+    fn newest_file_ignores_staging_files_and_empty_dirs() {
+        let dir = std::env::temp_dir().join("frust-playground-originals-newest-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(newest_file_in(&dir), None);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join(".a.jpg.part"), b"staging").expect("write staging");
+        assert_eq!(newest_file_in(&dir), None);
+        let file = dir.join("a.jpg");
+        std::fs::write(&file, b"done").expect("write file");
+        assert_eq!(newest_file_in(&dir), Some(file.clone()));
+        assert_eq!(previous_export_text(Some(&file)), "Previous export: a.jpg");
+        assert_eq!(previous_export_text(None), "");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]
