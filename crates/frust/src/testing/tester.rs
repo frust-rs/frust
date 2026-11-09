@@ -2,6 +2,7 @@
 //! reactive owner and a manual clock. See the [module docs](super) for the Flutter mapping.
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,7 @@ use frust_core::{
     DiscardScene, EventOutcome, FrameTime, InputEvent, InspectNode, PaintOutcome, PaintScene,
     RenderRoot, SemanticsUpdate, View, WindowInsets, WindowMetrics,
 };
+use frust_reactive::time::test_support::{VirtualClockGuard, install_virtual_clock};
 use frust_reactive::{Owner, ReactiveRuntime, provide_context};
 use frust_scene::{Scene, SceneBuilder};
 use kurbo::Size;
@@ -22,6 +24,39 @@ pub(super) const FRAME: Duration = Duration::from_millis(16);
 const SETTLE_FRAME_CAP: usize = 600;
 /// Real time [`Tester::pump_until`] sleeps between pumps, so background threads make progress.
 const UNTIL_POLL: Duration = Duration::from_millis(20);
+
+thread_local! {
+    /// Testers alive on this thread and the virtual clock they share, installed on the first.
+    static CLOCK: RefCell<(usize, Option<VirtualClockGuard>)> = const { RefCell::new((0, None)) };
+}
+
+/// One Tester's reference to the thread's shared virtual clock; the last one released
+/// uninstalls it.
+struct ClockRef;
+
+impl ClockRef {
+    fn acquire() -> Self {
+        CLOCK.with_borrow_mut(|(count, guard)| {
+            if *count == 0 {
+                *guard = Some(install_virtual_clock());
+            }
+            *count += 1;
+        });
+        Self
+    }
+}
+
+impl Drop for ClockRef {
+    fn drop(&mut self) {
+        let released = CLOCK.try_with(|cell| {
+            let mut state = cell.borrow_mut();
+            state.0 -= 1;
+            if state.0 == 0 { state.1.take() } else { None }
+        });
+        // Dropped outside the borrow: uninstalling drops wakers, which can run arbitrary code.
+        drop(released);
+    }
+}
 
 /// How [`Tester::with_options`] and [`Tester::new_with`] set up the window and the clock.
 ///
@@ -92,6 +127,10 @@ pub struct PumpOutcome {
 /// share contexts and dropping one disposes the signals and contexts it created. Construct and
 /// pump a Tester on one thread: the constructing thread becomes that thread's UI thread, whose
 /// local task queue each pump drains. Tests on separate threads each get their own.
+///
+/// Every Tester makes the thread's virtual `frust::time` clock available before user code runs.
+/// Testers on one thread share that clock, so a pump on either advances it for both; the last
+/// Tester dropped uninstalls it, and the next starts again from zero.
 pub struct Tester<S: 'static, V: View<S>> {
     root: RenderRoot<S, V>,
     state: S,
@@ -101,6 +140,9 @@ pub struct Tester<S: 'static, V: View<S>> {
     clock: FrameTime,
     runtime: &'static ReactiveRuntime,
     owner: Owner,
+    /// Declared last: released after `Drop::drop` has cleaned the owner up, so a cancelled
+    /// timer's teardown still sees a live clock.
+    _clock: ClockRef,
 }
 
 impl<S: 'static, V: View<S>> Tester<S, V> {
@@ -134,6 +176,7 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
     where
         F: FnMut(&mut S) -> V + 'static,
     {
+        let clock = ClockRef::acquire();
         let runtime = ReactiveRuntime::init(Arc::new(|| {}));
         let owner = match Owner::current() {
             Some(ambient) => ambient.child(),
@@ -161,18 +204,36 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
             clock: options.start_time,
             runtime,
             owner,
+            _clock: clock,
         };
         let _outcome = tester.frame(&mut DiscardScene);
         tester
     }
 
-    /// Advance the clock by `dt`, drain the local task queue, then rebuild, lay out and paint
-    /// one frame at the new clock.
+    /// Advance the clock by `dt`, fire every `frust::time` sleep and `Timer` that comes due, then
+    /// rebuild, lay out and paint one frame at the new clock.
+    ///
+    /// The order is: drain the local task queue (registering whatever was armed since the last
+    /// pump, at the current virtual time), advance the virtual clock by `dt`, drain again (firing
+    /// what came due), then the frame work. A sleep takes its deadline at its first poll, so a
+    /// timer armed before a pump is measured from that pump's start, as in Flutter. A timer armed
+    /// during this pump's frame is registered by the next pump's first step, at that pump's
+    /// starting time.
+    ///
+    /// The advance steps through each deadline in order, draining the queue at each, so a chain
+    /// of sleeps or a re-armed timer inside `dt` fires at its own virtual time, each wait measured
+    /// from the previous deadline. For work on the local task queue `pump(a + b)` therefore
+    /// behaves as `pump(a); pump(b)`; a timer armed by a rebuild depends on where the frames
+    /// fall, since each pump runs one frame after its advance. Only
+    /// futures polled on this thread are stepped; `frust::spawn` and `use_task` fetch futures
+    /// run elsewhere and stay on wall time.
     ///
     /// `needs_frame` folds the paint's request with a still-pending deferred-callback flush.
     pub fn pump(&mut self, dt: Duration) -> PumpOutcome {
         let dt = u64::try_from(dt.as_nanos()).unwrap_or(u64::MAX);
         self.clock = FrameTime::from_nanos(self.clock.as_nanos().saturating_add(dt));
+        self.runtime.pump_local();
+        frust_reactive::time::test_support::advance(Duration::from_nanos(dt));
         self.runtime.pump_local();
         let outcome = self.frame(&mut DiscardScene);
         PumpOutcome {
@@ -210,6 +271,9 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
     /// once a real thread finishes, so a virtual-clock [`pump_and_settle`](Self::pump_and_settle)
     /// never waits for it. This is the one place real time enters a Tester. `what` names the
     /// awaited condition in the failure message.
+    ///
+    /// The virtual clock advances only by each pumped 16 ms; the real 20 ms sleeps do not move it,
+    /// so a `frust::time` timer fires after the matching number of pumps, not of real time.
     ///
     /// # Panics
     ///
@@ -361,7 +425,7 @@ impl<S: 'static, V: View<S>> Drop for Tester<S, V> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
@@ -722,5 +786,214 @@ mod tests {
     fn pump_until_panics_when_the_predicate_never_holds() {
         let mut tester = Tester::new((), |_: &mut ()| crate::text("idle"), SIZE);
         tester.pump_until("never true", Duration::from_millis(200), |_| false);
+    }
+
+    fn virtual_now() -> Duration {
+        frust_reactive::time::test_support::now()
+    }
+
+    /// Holds a flag a timer sets, plus the stored timer.
+    struct Armed {
+        fired: RwSignal<bool>,
+        _timer: Option<crate::time::Timer>,
+    }
+
+    fn armed_view(_: &mut Armed) -> crate::TextView {
+        crate::text("armed")
+    }
+
+    fn arm(ms: u64) -> (Armed, fn(&mut Armed) -> crate::TextView) {
+        let fired = RwSignal::new(false);
+        let timer = crate::time::Timer::new(Duration::from_millis(ms), move || fired.set(true));
+        (
+            Armed {
+                fired,
+                _timer: Some(timer),
+            },
+            armed_view,
+        )
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[test]
+    fn timer_armed_in_setup_fires_once_at_its_deadline() {
+        let mut tester = Tester::new_with(SIZE, &TesterOptions::default(), || arm(300));
+        tester.pump(ms(299));
+        assert!(!tester.state().fired.get_untracked());
+        tester.pump(ms(1));
+        assert!(tester.state().fired.get_untracked());
+        tester.state().fired.set(false);
+        tester.pump(ms(1000));
+        assert!(!tester.state().fired.get_untracked(), "a timer fires once");
+    }
+
+    #[test]
+    fn debounce_fires_once_at_the_last_deadline() {
+        let count = Rc::new(Cell::new(0_u32));
+        let mut tester = Tester::new_with(SIZE, &TesterOptions::default(), || {
+            (
+                None::<crate::time::Timer>,
+                |_: &mut Option<crate::time::Timer>| crate::text("debounce"),
+            )
+        });
+        let rearm = |tester: &mut Tester<Option<crate::time::Timer>, crate::TextView>,
+                     count: &Rc<Cell<u32>>| {
+            let count = Rc::clone(count);
+            *tester.state_mut() = Some(crate::time::Timer::new(ms(250), move || {
+                count.set(count.get() + 1);
+            }));
+        };
+        // Edits at t = 0, 100, 200 (each registered by the pump that follows it).
+        for _ in 0..3 {
+            rearm(&mut tester, &count);
+            tester.pump(ms(50));
+            tester.pump(ms(50));
+        }
+        // The last timer was armed at 200 ms and is due at 450 ms; 300 ms have passed since.
+        assert_eq!(virtual_now(), ms(300));
+        tester.pump(ms(50));
+        tester.pump(ms(50));
+        assert_eq!(count.get(), 0, "400 ms: before the last deadline");
+        tester.pump(ms(50));
+        assert_eq!(count.get(), 1, "450 ms: at the last deadline");
+        for _ in 0..10 {
+            tester.pump(ms(50));
+        }
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn scoped_sleep_resolves_on_the_pump_crossing_it_and_reads_context() {
+        let result = Rc::new(Cell::new(None::<Marker>));
+        let sink = Rc::clone(&result);
+        let mut tester = Tester::new_with(SIZE, &TesterOptions::default(), || {
+            provide_context(Marker(7));
+            crate::spawn_local_scoped(async move {
+                crate::time::sleep(ms(50)).await;
+                sink.set(use_context::<Marker>());
+            });
+            ((), |_: &mut ()| crate::text("sleeper"))
+        });
+        tester.pump(ms(49));
+        assert_eq!(result.get(), None);
+        tester.pump(ms(1));
+        assert_eq!(result.get(), Some(Marker(7)));
+    }
+
+    #[test]
+    fn pump_until_moves_the_virtual_clock_only_by_pumped_frames() {
+        let mut tester = Tester::new_with(SIZE, &TesterOptions::default(), || {
+            let task = crate::use_task(|| async {
+                crate::spawn_blocking(|| {
+                    std::thread::sleep(ms(60));
+                    1_u32
+                })
+                .await
+            });
+            (Loaded { task }, loaded_view)
+        });
+        let pumps = tester.pump_until("blocking result", Duration::from_secs(5), |tester| {
+            tester.state().task.signal().get_untracked().ready() == Some(&1)
+        });
+        assert!(pumps > 0);
+        assert_eq!(virtual_now(), FRAME * u32::try_from(pumps).unwrap());
+    }
+
+    #[test]
+    fn dropping_a_tester_with_a_pending_timer_neither_fires_nor_hangs() {
+        let fired = Rc::new(Cell::new(false));
+        {
+            let flag = Rc::clone(&fired);
+            let mut tester = Tester::new_with(SIZE, &TesterOptions::default(), || {
+                let timer = crate::time::Timer::new(ms(100), move || flag.set(true));
+                (Some(timer), |_: &mut Option<crate::time::Timer>| {
+                    crate::text("pending")
+                })
+            });
+            tester.pump(ms(50));
+            assert_eq!(virtual_now(), ms(50));
+        }
+        assert!(!fired.get());
+        assert!(!frust_reactive::time::test_support::is_virtual());
+        let _fresh = Tester::new((), |_: &mut ()| crate::text("fresh"), SIZE);
+        assert_eq!(virtual_now(), Duration::ZERO);
+    }
+
+    #[test]
+    fn two_testers_on_a_thread_share_one_clock() {
+        let mut first = Tester::new_with(SIZE, &TesterOptions::default(), || arm(100));
+        let mut second = Tester::new_with(SIZE, &TesterOptions::default(), || arm(100));
+        first.pump(ms(60));
+        second.pump(ms(60));
+        assert_eq!(virtual_now(), ms(120));
+        assert!(first.state().fired.get_untracked());
+        assert!(second.state().fired.get_untracked());
+        drop(first);
+        assert!(frust_reactive::time::test_support::is_virtual());
+        second.pump(ms(10));
+        assert_eq!(virtual_now(), ms(130));
+    }
+
+    #[test]
+    fn testers_on_two_threads_have_independent_clocks() {
+        let mut here = Tester::new((), |_: &mut ()| crate::text("here"), SIZE);
+        here.pump(ms(500));
+        let there = std::thread::spawn(|| {
+            let mut tester = Tester::new((), |_: &mut ()| crate::text("there"), SIZE);
+            assert_eq!(virtual_now(), Duration::ZERO);
+            tester.pump(ms(20));
+            virtual_now()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(there, ms(20));
+        assert_eq!(virtual_now(), ms(500));
+    }
+
+    #[test]
+    fn a_timer_armed_between_pumps_is_measured_from_the_next_pump() {
+        let mut tester = Tester::new((), |_: &mut ()| crate::text("idle"), SIZE);
+        tester.pump(ms(1000));
+        let fired = RwSignal::new(false);
+        let timer = crate::time::Timer::new(ms(100), move || fired.set(true));
+        // Armed at 1000 ms; the next pump registers it at its starting time, then advances.
+        tester.pump(ms(99));
+        assert!(!fired.get_untracked());
+        tester.pump(ms(1));
+        assert!(fired.get_untracked());
+        drop(timer);
+    }
+
+    #[test]
+    fn one_pump_steps_through_a_chain_and_a_re_armed_timer_at_their_own_times() {
+        let mut tester = Tester::new((), |_: &mut ()| crate::text("idle"), SIZE);
+        let chained = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&chained);
+        crate::spawn_local(async move {
+            crate::time::sleep(ms(50)).await;
+            crate::time::sleep(ms(50)).await;
+            flag.set(true);
+        });
+        let times = Rc::new(RefCell::new(Vec::new()));
+        fn rearm(times: Rc<RefCell<Vec<Duration>>>, left: u32) {
+            let next = Rc::clone(&times);
+            crate::time::Timer::new(Duration::from_millis(100), move || {
+                next.borrow_mut().push(virtual_now());
+                if left > 1 {
+                    rearm(next, left - 1);
+                }
+            })
+            .detach();
+        }
+        rearm(Rc::clone(&times), 5);
+        tester.pump(ms(0));
+        tester.pump(ms(500));
+        assert!(chained.get());
+        let expected: Vec<Duration> = (1..=5).map(|n| ms(100 * n)).collect();
+        assert_eq!(*times.borrow(), expected);
+        assert_eq!(virtual_now(), ms(500));
     }
 }
