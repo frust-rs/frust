@@ -86,7 +86,8 @@ mod virtual_clock {
         Virtual(VirtualClock),
     }
 
-    // Allow-scoped like `tls` below.
+    // Clippy's `missing_const_for_thread_local` flags even an already-const initializer on
+    // the mobile targets, so the module is allow-scoped.
     #[allow(clippy::missing_const_for_thread_local)]
     mod tls {
         use super::*;
@@ -97,31 +98,65 @@ mod virtual_clock {
     pub(super) use tls::SOURCE;
 
     impl VirtualClock {
-        /// Moves time forward and returns the wakers of the live sleeps that came due, in
-        /// (deadline, registration) order. Stale entries (dropped sleeps) are discarded.
-        pub(super) fn advance(&mut self, by: Duration) -> Vec<Waker> {
-            self.now += by;
-            let mut due = Vec::new();
+        /// Takes the next group of live sleeps due at or before `target`: sets `now` to their
+        /// shared deadline and removes them in registration order. Stale heap tuples (sleeps
+        /// dropped or already removed) are discarded without moving `now`. Returns the removed
+        /// entries so the caller can wake and drop them outside the borrow; `None` when
+        /// nothing live is due.
+        pub(super) fn take_next_due(&mut self, target: Duration) -> Option<Vec<Entry>> {
+            let mut taken = Vec::new();
+            let mut group: Option<Duration> = None;
             while let Some(Reverse((deadline, seq))) = self.heap.peek().copied() {
-                if deadline > self.now {
+                if deadline > target || group.is_some_and(|g| deadline != g) {
                     break;
                 }
                 self.heap.pop();
-                if let Some(entry) = self.entries.remove(&seq)
-                    && entry.alive.load(Ordering::Relaxed)
-                    && let Some(waker) = entry.waker
-                {
-                    due.push(waker);
+                match self.entries.remove(&seq) {
+                    Some(entry) if entry.alive.load(Ordering::Relaxed) => {
+                        group = Some(deadline);
+                        self.now = deadline;
+                        taken.push(entry);
+                    }
+                    // Stale: handed back so it drops outside the borrow, never woken.
+                    Some(entry) => taken.push(entry),
+                    None => {}
                 }
             }
-            due
+            group.map(|_| taken)
         }
+
+        /// The sleeps registered and not dropped.
+        pub(super) fn live_count(&self) -> usize {
+            self.entries
+                .values()
+                .filter(|entry| entry.alive.load(Ordering::Relaxed))
+                .count()
+        }
+    }
+
+    impl Entry {
+        pub(super) fn wake_if_live(self) {
+            if self.alive.load(Ordering::Relaxed)
+                && let Some(waker) = self.waker
+            {
+                waker.wake();
+            }
+        }
+    }
+
+    enum Slot {
+        Unpolled,
+        /// The deadline is not representable: never due, no heap entry.
+        Never,
+        /// Due at once (zero duration): no heap entry.
+        Immediate,
+        Registered(Duration, u64),
     }
 
     /// A sleep on the thread's virtual clock; registered on first poll.
     pub(super) struct VirtualSleep {
         duration: Duration,
-        registered: Option<(Duration, u64)>,
+        slot: Slot,
         alive: Arc<AtomicBool>,
     }
 
@@ -129,7 +164,7 @@ mod virtual_clock {
         pub(super) fn new(duration: Duration) -> Self {
             Self {
                 duration,
-                registered: None,
+                slot: Slot::Unpolled,
                 alive: Arc::new(AtomicBool::new(true)),
             }
         }
@@ -144,13 +179,13 @@ mod virtual_clock {
                     // The clock was uninstalled under a pending sleep: nothing can wake it.
                     return Poll::Pending;
                 };
-                let (deadline, seq) = match self.registered {
-                    Some(registered) => registered,
-                    None => {
-                        let deadline = clock.now + self.duration;
-                        let seq = clock.next_seq;
-                        clock.next_seq += 1;
-                        if deadline > clock.now {
+                if matches!(self.slot, Slot::Unpolled) {
+                    self.slot = match clock.now.checked_add(self.duration) {
+                        None => Slot::Never,
+                        Some(deadline) if deadline <= clock.now => Slot::Immediate,
+                        Some(deadline) => {
+                            let seq = clock.next_seq;
+                            clock.next_seq += 1;
                             clock.heap.push(Reverse((deadline, seq)));
                             clock.entries.insert(
                                 seq,
@@ -159,18 +194,23 @@ mod virtual_clock {
                                     alive: Arc::clone(&self.alive),
                                 },
                             );
+                            Slot::Registered(deadline, seq)
                         }
-                        self.registered = Some((deadline, seq));
-                        (deadline, seq)
+                    };
+                }
+                match self.slot {
+                    Slot::Unpolled | Slot::Never => Poll::Pending,
+                    Slot::Immediate => Poll::Ready(()),
+                    Slot::Registered(deadline, seq) => {
+                        if clock.now >= deadline {
+                            return Poll::Ready(());
+                        }
+                        if let Some(entry) = clock.entries.get_mut(&seq) {
+                            entry.waker = Some(cx.waker().clone());
+                        }
+                        Poll::Pending
                     }
-                };
-                if clock.now >= deadline {
-                    return Poll::Ready(());
                 }
-                if let Some(entry) = clock.entries.get_mut(&seq) {
-                    entry.waker = Some(cx.waker().clone());
-                }
-                Poll::Pending
             })
         }
     }
@@ -178,6 +218,31 @@ mod virtual_clock {
     impl Drop for VirtualSleep {
         fn drop(&mut self) {
             self.alive.store(false, Ordering::Relaxed);
+            let Slot::Registered(_, seq) = self.slot else {
+                return;
+            };
+            // A sleep moved to another thread sees that thread's source, where `seq` may name
+            // a foreign entry: only remove ours. The removed entry (and its waker) drops
+            // outside the borrow. If the borrow is unavailable the alive flag is the fallback.
+            let removed = SOURCE
+                .try_with(|source| {
+                    let mut source = source.try_borrow_mut().ok()?;
+                    let Source::Virtual(clock) = &mut *source else {
+                        return None;
+                    };
+                    if clock
+                        .entries
+                        .get(&seq)
+                        .is_some_and(|entry| Arc::ptr_eq(&entry.alive, &self.alive))
+                    {
+                        clock.entries.remove(&seq)
+                    } else {
+                        None
+                    }
+                })
+                .ok()
+                .flatten();
+            drop(removed);
         }
     }
 }
@@ -190,12 +255,18 @@ mod virtual_clock {
 /// the install, raw and unscaled (it ignores the animation time scale).
 ///
 /// A sleep takes its deadline (`now + duration`) at its first poll, so pump once after
-/// arming a timer and before advancing. `advance` wakes the due sleeps; the caller then
-/// pumps the UI-thread queue, which polls them. Futures spawned with `frust::spawn` run on
-/// tokio workers, not this thread, and are NOT reached.
+/// arming a timer and before advancing. `advance` steps through each intervening deadline in
+/// order: it moves `now` to the deadline, wakes the sleeps due there, and drains the UI-thread
+/// queue before moving on, so a continuation runs with `now` at that deadline and a sleep it
+/// arms is measured from it. `advance(a + b)` therefore matches `advance(a); advance(b)`.
+///
+/// Only futures polled on the installing thread are reached. Any future polled elsewhere
+/// stays on wall time, explicitly including `frust::spawn` futures (tokio workers) and
+/// `use_task` fetch futures.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::virtual_clock::{SOURCE, Source, VirtualClock};
+    use crate::ReactiveRuntime;
     use std::time::Duration;
 
     /// Uninstalls the virtual clock on drop, restoring wall time and discarding pending
@@ -233,22 +304,42 @@ pub mod test_support {
         }
     }
 
-    /// Moves virtual time forward by `by` and wakes every live sleep that is now due, in
-    /// deadline order. Pump the UI-thread queue afterwards to run them.
+    /// Moves virtual time forward by `by`, stepping through each intervening deadline in
+    /// order. For each deadline it sets `now` to it, wakes the live sleeps due there in
+    /// registration order, then drains this thread's local task queue (when a runtime
+    /// exists) so continuations run at that time and new sleeps are measured from it. A
+    /// sleep armed inside the interval fires in the same call. Afterwards `now` is the
+    /// target, `now + by` saturating at [`Duration::MAX`].
     ///
     /// # Panics
     ///
     /// Panics if no virtual clock is installed on this thread.
     pub fn advance(by: Duration) {
-        let due = SOURCE.with_borrow_mut(|source| match source {
-            Source::Virtual(clock) => clock.advance(by),
+        let target = SOURCE.with_borrow(|source| match source {
+            Source::Virtual(clock) => clock.now.saturating_add(by),
             Source::Real => {
                 panic!("frust-reactive: advance called with no virtual clock installed")
             }
         });
-        for waker in due {
-            waker.wake();
+        loop {
+            // Woken and dropped outside the borrow: both can run arbitrary code.
+            let due = SOURCE.with_borrow_mut(|source| match source {
+                Source::Virtual(clock) => clock.take_next_due(target),
+                Source::Real => None,
+            });
+            let Some(entries) = due else { break };
+            for entry in entries {
+                entry.wake_if_live();
+            }
+            if let Some(runtime) = ReactiveRuntime::get() {
+                runtime.pump_local();
+            }
         }
+        SOURCE.with_borrow_mut(|source| {
+            if let Source::Virtual(clock) = source {
+                clock.now = clock.now.max(target);
+            }
+        });
     }
 
     /// The virtual time elapsed since install, or zero when none is installed.
@@ -264,11 +355,11 @@ pub mod test_support {
         SOURCE.with_borrow(|source| matches!(source, Source::Virtual(_)))
     }
 
-    /// Registered sleeps not yet due or discarded (stale entries of dropped sleeps stay
-    /// until their deadline is passed by [`advance`]).
+    /// Live sleeps registered and not yet due: a dropped sleep leaves the count at once.
+    /// (A sleep whose deadline cannot be represented is never registered.)
     pub fn pending_count() -> usize {
         SOURCE.with_borrow(|source| match source {
-            Source::Virtual(clock) => clock.entries.len(),
+            Source::Virtual(clock) => clock.live_count(),
             Source::Real => 0,
         })
     }
@@ -1112,5 +1203,128 @@ mod tests {
         advance(LONG);
         rt.pump_local();
         assert_eq!(count.get(), 1);
+    }
+
+    fn spawn(fut: impl Future<Output = ()> + 'static) {
+        Executor::spawn_local(fut);
+    }
+
+    #[test]
+    fn chained_sleeps_fire_under_one_advance_as_under_two() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let flag = Rc::new(Cell::new(false));
+        let set = Rc::clone(&flag);
+        spawn(async move {
+            sleep(MS(50)).await;
+            sleep(MS(50)).await;
+            set.set(true);
+        });
+        rt.pump_local();
+        advance(MS(100));
+        assert!(flag.get());
+        assert_eq!(test_support::now(), MS(100));
+
+        let split = Rc::new(Cell::new(false));
+        let set = Rc::clone(&split);
+        spawn(async move {
+            sleep(MS(50)).await;
+            sleep(MS(50)).await;
+            set.set(true);
+        });
+        rt.pump_local();
+        advance(MS(50));
+        rt.pump_local();
+        advance(MS(50));
+        assert!(split.get());
+    }
+
+    fn rearm(times: Rc<RefCell<Vec<Duration>>>, left: u32) {
+        let next = Rc::clone(&times);
+        let timer = Timer::new(MS(100), move || {
+            next.borrow_mut().push(test_support::now());
+            if left > 1 {
+                rearm(next, left - 1);
+            }
+        });
+        timer.detach();
+    }
+
+    #[test]
+    fn a_re_arming_timer_fires_from_each_previous_deadline() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let times = Rc::new(RefCell::new(Vec::new()));
+        rearm(Rc::clone(&times), 10);
+        rt.pump_local();
+        advance(MS(1000));
+        let expected: Vec<Duration> = (1..=10).map(|n| MS(100 * n)).collect();
+        assert_eq!(*times.borrow(), expected);
+    }
+
+    #[test]
+    fn interleaved_chains_log_in_virtual_time_order() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let a = Rc::clone(&log);
+        spawn(async move {
+            sleep(MS(10)).await;
+            sleep(MS(10)).await;
+            a.borrow_mut().push("A");
+        });
+        let b = Rc::clone(&log);
+        spawn(async move {
+            sleep(MS(30)).await;
+            b.borrow_mut().push("B");
+        });
+        rt.pump_local();
+        advance(MS(30));
+        assert_eq!(*log.borrow(), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn now_is_the_deadline_during_a_firing_and_the_target_after() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let (a, b) = (Rc::clone(&seen), Rc::clone(&seen));
+        let _t1 = Timer::new(MS(30), move || a.borrow_mut().push(test_support::now()));
+        let _t2 = Timer::new(MS(70), move || b.borrow_mut().push(test_support::now()));
+        rt.pump_local();
+        advance(MS(100));
+        assert_eq!(*seen.borrow(), vec![MS(30), MS(70)]);
+        assert_eq!(test_support::now(), MS(100));
+    }
+
+    #[test]
+    fn an_unrepresentable_deadline_never_fires_and_does_not_panic() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        advance(MS(5));
+        let (count, bump) = counter();
+        let timer = Timer::new(Duration::MAX, bump);
+        rt.pump_local();
+        assert_eq!(test_support::pending_count(), 0);
+        advance(Duration::MAX);
+        rt.pump_local();
+        assert_eq!(count.get(), 0);
+        assert!(timer.is_active());
+        assert_eq!(test_support::now(), Duration::MAX);
+    }
+
+    #[test]
+    fn a_dropped_sleep_leaves_pending_count_at_once() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let (task, handle) = futures::future::abortable(sleep(MS(100)));
+        spawn(async move {
+            let _ = task.await;
+        });
+        rt.pump_local();
+        assert_eq!(test_support::pending_count(), 1);
+        handle.abort();
+        rt.pump_local();
+        assert_eq!(test_support::pending_count(), 0);
     }
 }

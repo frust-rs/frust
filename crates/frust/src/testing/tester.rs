@@ -220,6 +220,12 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
     /// during this pump's frame is registered by the next pump's first step, at that pump's
     /// starting time.
     ///
+    /// The advance steps through each deadline in order, draining the queue at each, so
+    /// `pump(a + b)` behaves as `pump(a); pump(b)`: a chain of sleeps or a re-armed timer inside
+    /// `dt` fires at its own virtual time, each wait measured from the previous deadline. Only
+    /// futures polled on this thread are stepped; `frust::spawn` and `use_task` fetch futures
+    /// run elsewhere and stay on wall time.
+    ///
     /// `needs_frame` folds the paint's request with a still-pending deferred-callback flush.
     pub fn pump(&mut self, dt: Duration) -> PumpOutcome {
         let dt = u64::try_from(dt.as_nanos()).unwrap_or(u64::MAX);
@@ -417,7 +423,7 @@ impl<S: 'static, V: View<S>> Drop for Tester<S, V> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
@@ -957,5 +963,35 @@ mod tests {
         tester.pump(ms(1));
         assert!(fired.get_untracked());
         drop(timer);
+    }
+
+    #[test]
+    fn one_pump_steps_through_a_chain_and_a_re_armed_timer_at_their_own_times() {
+        let mut tester = Tester::new((), |_: &mut ()| crate::text("idle"), SIZE);
+        let chained = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&chained);
+        crate::spawn_local(async move {
+            crate::time::sleep(ms(50)).await;
+            crate::time::sleep(ms(50)).await;
+            flag.set(true);
+        });
+        let times = Rc::new(RefCell::new(Vec::new()));
+        fn rearm(times: Rc<RefCell<Vec<Duration>>>, left: u32) {
+            let next = Rc::clone(&times);
+            crate::time::Timer::new(Duration::from_millis(100), move || {
+                next.borrow_mut().push(virtual_now());
+                if left > 1 {
+                    rearm(next, left - 1);
+                }
+            })
+            .detach();
+        }
+        rearm(Rc::clone(&times), 5);
+        tester.pump(ms(0));
+        tester.pump(ms(500));
+        assert!(chained.get());
+        let expected: Vec<Duration> = (1..=5).map(|n| ms(100 * n)).collect();
+        assert_eq!(*times.borrow(), expected);
+        assert_eq!(virtual_now(), ms(500));
     }
 }
