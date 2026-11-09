@@ -38,7 +38,7 @@ use frust::time::{Duration, Timer, sleep};
 use frust::{
     AppExitResponse, AppLifecycleListener, BackgroundTask, ButtonStyle, Component, EdgeInsets, Get,
     Padding, RwSignal, Set, SizedBox, Theme, Update, View, app_lifecycle, button, checkbox, column,
-    component, spawn_blocking, spawn_local, spawn_local_scoped, text, use_context,
+    component, radio, spawn_blocking, spawn_local, spawn_local_scoped, text, use_context,
 };
 use frust_connectivity::{Connectivity, ConnectivityEvent, ListenerHandle, NetworkPath};
 use frust_database::{Database, DatabaseError, Value};
@@ -55,6 +55,16 @@ const FLUSH_LOG_DDL: &str = "CREATE TABLE IF NOT EXISTS flush_log \
 
 /// The `flush_log.kind` values, in the order their evidence rows are emitted.
 const FLUSH_KINDS: [&str; 2] = ["guarded", "plain"];
+
+/// The write-length choices (ms) of the guarded and unguarded legs: a save-sized write,
+/// the default, an iOS-expiry-sized hold and an Android-watchdog-sized hold.
+const WRITE_LENGTHS_MS: [u64; 4] = [25, 200, 40_000, 200_000];
+
+/// The default entry of [`WRITE_LENGTHS_MS`].
+const DEFAULT_WRITE_MS: u64 = 200;
+
+/// Length of the save-shaped leg's transaction.
+const SAVE_SHAPED_MS: u64 = 25;
 
 /// The grep prefix every row carries in the platform log.
 const LOG_PREFIX: &str = "frust-gate network:";
@@ -90,7 +100,7 @@ struct NetworkPageState {
     block_exit_sig: RwSignal<bool>,
     sink: RowSink,
     timers: Vec<Timer>,
-    armed_at: Option<Instant>,
+    write_ms: RwSignal<u64>,
     _lifecycle: AppLifecycleListener,
     _connectivity: ListenerHandle,
 }
@@ -123,7 +133,7 @@ impl Component for NetworkPage {
             block_exit_sig: RwSignal::new(false),
             sink,
             timers: Vec::new(),
-            armed_at: None,
+            write_ms: RwSignal::new(DEFAULT_WRITE_MS),
             _lifecycle: lifecycle,
             _connectivity: connectivity,
         }
@@ -164,6 +174,8 @@ impl Component for NetworkPage {
                 .child(Self::clear_button(state))
                 .child(SizedBox(None, Some(8.0)))
                 .child(text("Timers").size(13.0).color(accent))
+                .child(text("Write length (guarded and unguarded legs)").size(11.0))
+                .child(Self::write_length_selector(state))
                 .child(Self::timer_buttons(state))
                 .child(SizedBox(None, Some(8.0)))
                 .child(rows),
@@ -322,8 +334,9 @@ impl NetworkPage {
         Ok(out)
     }
 
-    /// Blocking: insert one `flush_log` row of `kind` stamped with epoch-ms.
-    fn write_flush_row(kind: &str) -> Result<(), DatabaseError> {
+    /// Blocking: insert one `flush_log` row of `kind` stamped with epoch-ms, then hold
+    /// the transaction open for `hold` so a kill during the hold lands mid-transaction.
+    fn write_flush_row(kind: &str, hold: Duration) -> Result<(), DatabaseError> {
         let at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
@@ -334,8 +347,147 @@ impl NetworkPage {
                 "INSERT INTO flush_log (kind, at) VALUES (?1, ?2)",
                 [Value::Text(kind.to_string()), Value::Integer(at)],
             )?;
+            std::thread::sleep(hold);
             Ok(())
         })
+    }
+
+    /// Blocking: `PRAGMA integrity_check` verdict and the row count per kind.
+    fn verify_db() -> Result<String, DatabaseError> {
+        let db = Database::open("playground")?;
+        db.execute(FLUSH_LOG_DDL, ())?;
+        let verdict = db
+            .query("PRAGMA integrity_check", ())?
+            .iter()
+            .filter_map(|row| match row.get(0) {
+                Some(Value::Text(text)) => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        let mut counts = Vec::new();
+        for kind in FLUSH_KINDS {
+            let rows = db.query("SELECT COUNT(*) FROM flush_log WHERE kind = ?1", [kind])?;
+            let n = match rows.first().and_then(|row| row.get(0)) {
+                Some(Value::Integer(n)) => *n,
+                _ => 0,
+            };
+            counts.push(format!("{kind}={n}"));
+        }
+        Ok(format!(
+            "verify db: integrity_check {verdict}; rows {}",
+            counts.join(", ")
+        ))
+    }
+
+    /// The timer of one guarded or unguarded write leg: armed for 10 s, flushed on
+    /// background, then a blocking transaction held open for `write_len`.
+    fn arm_write_leg(sink: &RowSink, guarded: bool, write_len: Duration) -> Timer {
+        let sink = sink.clone();
+        Timer::new(Duration::from_secs(10), move || {
+            // Begun on the UI thread; the write below never needs the UI queue.
+            let task = guarded.then(|| {
+                let begun = Instant::now();
+                let task = BackgroundTask::begin("playground-save");
+                sink.emit(&format!(
+                    "write leg (guarded) begin: granted {}, begin {} us, write {} ms",
+                    task.is_granted(),
+                    begun.elapsed().as_micros(),
+                    write_len.as_millis()
+                ));
+                task
+            });
+            let sink = sink.clone();
+            drop(spawn_blocking(move || {
+                let kind = if guarded { "guarded" } else { "plain" };
+                let result = Self::write_flush_row(kind, write_len);
+                let lost = task.as_ref().is_some_and(BackgroundTask::expired);
+                drop(task);
+                match (guarded, result, lost) {
+                    (true, Ok(()), false) => sink.emit("flush write done (guarded)"),
+                    (true, Ok(()), true) => sink.emit("flush write done (guarded, task expired)"),
+                    (true, Err(e), _) => sink.emit(&format!("flush write failed (guarded): {e}")),
+                    (false, Ok(()), _) => sink.emit("flush write done (plain)"),
+                    (false, Err(e), _) => sink.emit(&format!("flush write failed (plain): {e}")),
+                }
+            }));
+        })
+        .flush_on_background()
+    }
+
+    /// A flagged timer whose callback arms a second flagged timer that begins a
+    /// background task: consumed at the hidden edge, the expected-refused path.
+    fn arm_refusal_leg(sink: &RowSink) -> Timer {
+        let sink = sink.clone();
+        Timer::new(Duration::from_secs(10), move || {
+            let inner_sink = sink.clone();
+            sink.emit("refusal leg: outer fired, arming inner");
+            Timer::new(Duration::from_millis(1), move || {
+                let begun = Instant::now();
+                let task = BackgroundTask::begin("playground-refusal");
+                inner_sink.emit(&format!(
+                    "refusal leg: granted {}, begin {} us",
+                    task.is_granted(),
+                    begun.elapsed().as_micros()
+                ));
+            })
+            .flush_on_background()
+            .detach();
+        })
+        .flush_on_background()
+    }
+
+    /// A ~300 ms flagged debounce whose callback begins a task and runs a short
+    /// transaction off the UI thread, like a save on leaving an editor.
+    fn arm_save_shaped_leg(sink: &RowSink) -> Timer {
+        let sink = sink.clone();
+        Timer::new(Duration::from_millis(300), move || {
+            let begun = Instant::now();
+            let task = BackgroundTask::begin("playground-save");
+            sink.emit(&format!(
+                "save-shaped leg: granted {}, begin {} us",
+                task.is_granted(),
+                begun.elapsed().as_micros()
+            ));
+            let sink = sink.clone();
+            drop(spawn_blocking(move || {
+                let result =
+                    Self::write_flush_row("guarded", Duration::from_millis(SAVE_SHAPED_MS));
+                let lost = task.expired();
+                drop(task);
+                match (result, lost) {
+                    (Ok(()), false) => sink.emit("save-shaped write done"),
+                    (Ok(()), true) => sink.emit("save-shaped write done (task expired)"),
+                    (Err(e), _) => sink.emit(&format!("save-shaped write failed: {e}")),
+                }
+            }));
+        })
+        .flush_on_background()
+    }
+
+    /// Keeps `timer` on the page, first dropping handles that fired or were cancelled.
+    fn keep_timer(state: &mut NetworkPageState, timer: Timer) {
+        state.timers.retain(Timer::is_active);
+        state.timers.push(timer);
+    }
+
+    /// Radios choosing the write length the guarded and unguarded legs hold.
+    fn write_length_selector(state: &NetworkPageState) -> impl View<NetworkPageState> {
+        let selected = state.write_ms.get();
+        let sig = state.write_ms;
+        let mut col = column();
+        for ms in WRITE_LENGTHS_MS {
+            let label = if ms >= 1000 {
+                format!("{} s", ms / 1000)
+            } else {
+                format!("{ms} ms")
+            };
+            col = col.child(
+                radio(selected == ms, label)
+                    .on_select(move |_state: &mut NetworkPageState| sig.set(ms)),
+            );
+        }
+        col
     }
 
     /// A button that arms a timer and stores its handle on the page state.
@@ -344,9 +496,18 @@ impl NetworkPage {
         make: impl Fn(&RowSink, Instant) -> Timer + 'static,
     ) -> impl View<NetworkPageState> {
         button(label, move |state: &mut NetworkPageState| {
-            let armed = Instant::now();
-            state.armed_at = Some(armed);
-            state.timers.push(make(&state.sink, armed));
+            let timer = make(&state.sink, Instant::now());
+            Self::keep_timer(state, timer);
+        })
+        .small()
+    }
+
+    /// A button arming one write leg with the page's selected write length.
+    fn arm_write_button(label: &'static str, guarded: bool) -> impl View<NetworkPageState> {
+        button(label, move |state: &mut NetworkPageState| {
+            let write_len = Duration::from_millis(state.write_ms.get());
+            let timer = Self::arm_write_leg(&state.sink, guarded, write_len);
+            Self::keep_timer(state, timer);
         })
         .small()
     }
@@ -392,45 +553,30 @@ impl NetworkPage {
             })
             .flush_on_background()
         });
-        let guarded_10 = Self::arm_button("Arm 10 s (flush + task + DB write)", |sink, _| {
-            let sink = sink.clone();
-            Timer::new(Duration::from_secs(10), move || {
-                // Begun on the UI thread; the write below never needs the UI queue.
-                let task = BackgroundTask::begin("playground-save");
-                let sink = sink.clone();
-                drop(spawn_blocking(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    let result = Self::write_flush_row("guarded");
-                    let lost = task.expired();
-                    drop(task);
-                    match (result, lost) {
-                        (Ok(()), false) => sink.emit("flush write done (guarded)"),
-                        (Ok(()), true) => sink.emit("flush write done (guarded, task expired)"),
-                        (Err(e), _) => sink.emit(&format!("flush write failed (guarded): {e}")),
-                    }
-                }));
-            })
-            .flush_on_background()
-        });
-        let unguarded_10 = Self::arm_button("Arm 10 s (flush + DB write, no guard)", |sink, _| {
-            let sink = sink.clone();
-            Timer::new(Duration::from_secs(10), move || {
-                let sink = sink.clone();
-                drop(spawn_blocking(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(200));
-                    match Self::write_flush_row("plain") {
-                        Ok(()) => sink.emit("flush write done (plain)"),
-                        Err(e) => sink.emit(&format!("flush write failed (plain): {e}")),
-                    }
-                }));
-            })
-            .flush_on_background()
-        });
+        let guarded_10 = Self::arm_write_button("Arm 10 s (flush + task + DB write)", true);
+        let unguarded_10 = Self::arm_write_button("Arm 10 s (flush + DB write, no guard)", false);
+        let refusal = button("Refusal leg", |state: &mut NetworkPageState| {
+            let timer = Self::arm_refusal_leg(&state.sink);
+            Self::keep_timer(state, timer);
+        })
+        .small();
+        let save_shaped = button("Save-shaped leg", |state: &mut NetworkPageState| {
+            let timer = Self::arm_save_shaped_leg(&state.sink);
+            Self::keep_timer(state, timer);
+        })
+        .small();
+        let verify = button("Verify DB", |state: &mut NetworkPageState| {
+            let sink = state.sink.clone();
+            drop(spawn_blocking(move || match Self::verify_db() {
+                Ok(report) => sink.emit(&report),
+                Err(e) => sink.emit(&format!("verify db failed: {e}")),
+            }));
+        })
+        .small();
         let sleeper = button(
             "Sleep 2 s (spawn_local_scoped)",
             |state: &mut NetworkPageState| {
                 let armed = Instant::now();
-                state.armed_at = Some(armed);
                 let sink = state.sink.clone();
                 spawn_local_scoped(async move {
                     sleep(Duration::from_secs(2)).await;
@@ -444,7 +590,6 @@ impl NetworkPage {
         .small();
         let cancel = button("Cancel all", |state: &mut NetworkPageState| {
             state.timers.clear();
-            state.armed_at = None;
             state.sink.emit("timers cancelled");
         })
         .style(ButtonStyle::Secondary)
@@ -456,6 +601,9 @@ impl NetworkPage {
             .child(marker_10)
             .child(guarded_10)
             .child(unguarded_10)
+            .child(refusal)
+            .child(save_shaped)
+            .child(verify)
             .child(sleeper)
             .child(cancel)
     }
