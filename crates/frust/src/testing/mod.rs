@@ -23,8 +23,14 @@
 //! A second touch contact reaches only a widget that opted into the gesture's other contacts;
 //! see [`gesture`].
 //!
-//! Time enters only through paint: there is no fake-async zone and no timer queue. A widget reads
-//! the clock from `PaintCtx::frame_time`, and a pump advances it by exactly the duration given.
+//! Time is virtual. A widget reads the clock from `PaintCtx::frame_time`, and every
+//! [`frust::time`](crate::time) sleep and `Timer` runs against a virtual clock the Tester
+//! installs before any user code runs, so a timer armed in `new_with`'s setup is virtual too.
+//! [`Tester::pump`] advances both by exactly the duration given and fires what comes due; a timer
+//! is measured from the pump after it was armed (see `pump`). Testers on one thread share one
+//! clock, so a pump on either advances it; Testers on separate threads have independent clocks.
+//! [`Tester::pump_until`] is the one real-time wait: its sleeps never move the virtual clock.
+//! Futures spawned with `frust::spawn` run on worker threads and are not reached by it.
 //!
 //! The one-shot helpers suit a single read of a stateless view: [`semantics_of`] returns the
 //! accessibility tree after one layout, and [`scene_of`] / [`scene_of_with`] return one recorded
