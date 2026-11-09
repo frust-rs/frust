@@ -21,7 +21,7 @@ off this index — read this plus the one that covers what you are touching:
   one function/module with a `# Safety` doc comment:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a raw
     `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`; `frust-render` only forwards it.
-  - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules — the FFI boundary
+  - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules (iOS's one exception: `background_task`'s single read of `UIBackgroundTaskInvalid`) — the FFI boundary
     (`extern "system"`/`extern "C"` exports, `Box::into_raw`/`from_raw`, the surface hand-off,
     `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` exports, and the
     render-thread split's `unsafe impl Send` for `SendableWindowPtr`/`SendableMetalLayer` plus the

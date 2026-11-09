@@ -34,6 +34,11 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `frust::BackgroundTask` (`begin`, `expired`, `is_granted`, `end`; dropping it ends the task exactly
+  once, from any thread). iOS takes a UIKit background-task assertion from Rust; Android, desktop and web
+  are no-ops. The sanctioned pattern: a `flush_on_background` callback calls `BackgroundTask::begin` on the
+  UI thread, then `spawn_blocking(write + drop(task))`. The playground Network page gains guarded and
+  unguarded write buttons.
 - `frust::time::{sleep, Timer, Duration}`: `sleep(duration)` is an awaitable wall-clock delay (a real
   browser `setTimeout` on web) and `Timer::new(duration, callback)` runs a callback once, with `cancel`,
   `is_active`, `fire_now` and `detach`. A `Timer` is cancelled when dropped and with its owner, and its
