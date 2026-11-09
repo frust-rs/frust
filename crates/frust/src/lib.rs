@@ -2132,9 +2132,15 @@ pub use frust_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
 /// }
 /// # let _ = PhotoViewer::new().thumbnails;
 /// ```
+///
+/// [`BackgroundTask`] keeps the process alive while short work finishes after the app
+/// backgrounds (Apple's background-execution assertion; a no-op elsewhere). The pattern:
+/// a [`Timer::flush_on_background`](crate::time::Timer::flush_on_background) callback
+/// calls `BackgroundTask::begin` on the UI thread, then
+/// `spawn_blocking(move || { write(); drop(task); })`.
 pub use frust_reactive::{
-    AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, MemoryPressure,
-    app_lifecycle, last_memory_pressure, push_app_lifecycle, push_memory_pressure,
+    AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, BackgroundTask,
+    MemoryPressure, app_lifecycle, last_memory_pressure, push_app_lifecycle, push_memory_pressure,
     request_app_exit,
 };
 
@@ -4049,6 +4055,18 @@ mod backdrop_blur_reexport {
             scene.commands()[0],
             Command::BackdropBlur { radius, .. } if radius == 8.0
         ));
+    }
+}
+
+/// Facade-level check that the background-task guard resolves through the `frust`
+/// facade. It names the type without beginning one, since `begin` is UI-thread-only.
+#[cfg(test)]
+mod background_task_reexport {
+    #[test]
+    fn background_task_resolves_through_facade() {
+        let name = std::any::type_name::<crate::BackgroundTask>();
+        assert!(name.ends_with("BackgroundTask"), "{name}");
+        let _begin: fn(&str) -> crate::BackgroundTask = crate::BackgroundTask::begin;
     }
 }
 
