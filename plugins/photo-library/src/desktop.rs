@@ -124,6 +124,23 @@ pub(crate) fn manage_limited_selection() -> Result<(), PhotoError> {
     Err(PhotoError::Unsupported)
 }
 
+// Originals and saving: desktop has no photo library.
+#[cfg(feature = "library")]
+pub(crate) fn export_original(
+    _id: &crate::AssetId,
+    _options: &crate::ExportOptions,
+) -> Result<crate::ExportedOriginal, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "save")]
+pub(crate) fn save(
+    _request: &crate::SaveRequest,
+    _kind: crate::MediaKind,
+) -> Result<crate::SavedAsset, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

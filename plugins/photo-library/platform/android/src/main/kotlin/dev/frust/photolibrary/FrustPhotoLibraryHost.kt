@@ -1,8 +1,11 @@
 package dev.frust.photolibrary
 
+import android.Manifest
 import android.app.Activity
 import android.app.Application
+import android.content.ContentResolver
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,12 +22,15 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContract
 import androidx.activity.result.contract.ActivityResultContracts
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The `frust-photo-library` plugin's Android host — the Kotlin half of the
@@ -36,7 +42,8 @@ import java.util.concurrent.Executors
  * This object's fully-qualified name (`dev.frust.photolibrary.FrustPhotoLibraryHost`)
  * and its `@JvmStatic` entry points are looked up by string from Rust through
  * the application classloader, and the mangled JNI symbols of
- * [nativeOnPickResult], [nativeOnPickError] and [nativeOnPickProgress] are
+ * [nativeOnPickResult], [nativeOnPickError], [nativeOnPickProgress],
+ * [nativeOnExportProgress], [nativeOnExportDone] and [nativeOnSaveDone] are
  * exported by that same module. **The class may never move and no signature may change without a
  * coordinated change on both sides.** The integer codes below are pinned
  * against their Rust twins by `plugins/photo-library/tests/kotlin_contract.rs`.
@@ -52,8 +59,32 @@ import java.util.concurrent.Executors
  * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult` | an [AssetsResult], same codes as `albums` |
  * | Rust → Kotlin | `thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] |
  * | Rust → Kotlin | `manageLimitedSelection(requestId: Long): Int` — `(J)I` | [PENDING] after posting the prompt, [NOT_LIMITED], [NO_ACTIVITY], [BUSY] or [NOT_INITIALIZED]; answered through [nativeOnPickResult] (three empty arrays) or [nativeOnPickError] |
+ * | Rust → Kotlin | `exportOriginal(requestId: Long, uri: String, destPath: String): Int` — `(JLjava/lang/String;Ljava/lang/String;)I` | [PENDING] after queuing the copy, [NOT_INITIALIZED], or [NOT_FOUND] for an id that is not a `MediaStore` image or video item on an external volume |
+ * | Rust → Kotlin | `cancelExport(requestId: Long)` — `(J)V` | nothing; an unknown or already-answered id is ignored |
+ * | Rust → Kotlin | `saveToLibrary(requestId: Long, sourcePath: String, isVideo: Boolean, displayName: String, album: String?): Int` — `(JLjava/lang/String;ZLjava/lang/String;Ljava/lang/String;)I` | [PENDING] after queuing the save, or [NOT_INITIALIZED] |
+ * | Kotlin → Rust | `nativeOnExportProgress(requestId: Long, done: Long, total: Long)` | bytes copied, once per chunk; absent when the size is unknown |
+ * | Kotlin → Rust | `nativeOnExportDone(requestId: Long, code: Int, mime: String?, name: String?)` | [OK] with the provider's MIME type and display name, or [CANCELLED], [NOT_FOUND], [PERMISSION_DENIED], [EXPORT_FAILED] |
+ * | Kotlin → Rust | `nativeOnSaveDone(requestId: Long, code: Int, uri: String?)` | [OK] with the new asset's URI, or [PERMISSION_DENIED], [SAVE_FAILED] |
  *
- * Every request that returned [PENDING] gets exactly one of the two answers.
+ * Every request that returned [PENDING] gets exactly one answer: a pick gets
+ * [nativeOnPickResult] or [nativeOnPickError], an export [nativeOnExportDone],
+ * a save [nativeOnSaveDone].
+ *
+ * ## Exports and saves
+ *
+ * [exportOriginal] copies one asset on [exportExecutor], in chunks of
+ * [EXPORT_CHUNK_BYTES] written to the Rust-chosen `destPath`. It is keyed by
+ * its own request map ([exports]), so it never takes the pick slot and an
+ * export runs while a pick does; several exports queue on that executor.
+ * [cancelExport] flips the export's flag, checked before every chunk; on a
+ * cancel or error the partial file is deleted before the answer. A still
+ * queued export is answered from [cancelExport] and never opens anything.
+ * The copy uses `MediaStore.setRequireOriginal` only when
+ * `ACCESS_MEDIA_LOCATION` is granted, so location EXIF is not redacted; its
+ * `UnsupportedOperationException` falls back to the plain URI, because an
+ * export never fails over location. `MediaStore` has no rendition split and
+ * its files are local, so the rendition and network options are ignored here.
+ * [saveToLibrary] runs in [MediaStoreWriter].
  *
  * ## Browsing
  *
@@ -149,6 +180,10 @@ object FrustPhotoLibraryHost {
     const val QUERY_FAILED = 10
     /** [manageLimitedSelection] had nothing to do: access is not limited. */
     const val NOT_LIMITED = 11
+    /** An export could not be copied. */
+    const val EXPORT_FAILED = 12
+    /** A save could not be written. */
+    const val SAVE_FAILED = 13
 
     // --- Filter codes: mirror `src/android.rs`.
 
@@ -184,6 +219,9 @@ object FrustPhotoLibraryHost {
 
     /** Minimum spacing of in-copy progress reports. */
     const val PROGRESS_INTERVAL_MS = 100L
+
+    /** Bytes per read of an export; the cancel flag is checked between chunks. */
+    const val EXPORT_CHUNK_BYTES = 1024 * 1024
 
     // --- Browse results: read field by field from Rust, nested here so the
     // module's `FrustPhotoLibraryHost$*` keep rule covers them.
@@ -249,6 +287,23 @@ object FrustPhotoLibraryHost {
     @Volatile
     private var progressUnavailable: Boolean = false
 
+    /** Exports not yet answered, by request id. Separate from the pick slot. */
+    private val exports = ConcurrentHashMap<Long, ExportFlight>()
+
+    /**
+     * One queued or running export. [cancelled] is checked before every
+     * chunk; [started] is claimed by whichever of the copy and a cancel gets
+     * there first, so a queued cancel and the copy answer exactly once.
+     */
+    private class ExportFlight {
+        val cancelled = AtomicBoolean(false)
+        val started = AtomicBoolean(false)
+    }
+
+    /** Set once [nativeOnExportProgress] is found missing, so it is not retried. */
+    @Volatile
+    private var exportProgressUnavailable: Boolean = false
+
     /** Guards a single [Application.registerActivityLifecycleCallbacks] call. */
     @Volatile
     private var lifecycleCallbacksRegistered: Boolean = false
@@ -260,6 +315,13 @@ object FrustPhotoLibraryHost {
     private val copyExecutor: ExecutorService by lazy {
         Executors.newSingleThreadExecutor { runnable ->
             Thread(runnable, "frust-photo-library-copy").apply { isDaemon = true }
+        }
+    }
+
+    /** Runs exports, in order, off [copyExecutor] and the main thread. */
+    private val exportExecutor: ExecutorService by lazy {
+        Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "frust-photo-library-export").apply { isDaemon = true }
         }
     }
 
@@ -351,6 +413,63 @@ object FrustPhotoLibraryHost {
         return PENDING
     }
 
+    /**
+     * Queue a copy of the original of [uri] (a `MediaStore` content URI, else
+     * [NOT_FOUND]) to [destPath] on [exportExecutor]. Any thread. Returns
+     * [PENDING]; the answer then arrives through [nativeOnExportDone]. Takes
+     * no pick slot (class doc, "Exports and saves").
+     */
+    @JvmStatic
+    fun exportOriginal(requestId: Long, uri: String, destPath: String): Int {
+        val ctx = appContext ?: return NOT_INITIALIZED
+        val source = Uri.parse(uri)
+        if (!isExportableId(source)) return NOT_FOUND
+        val flight = ExportFlight()
+        exports[requestId] = flight
+        exportExecutor.execute { runExport(ctx, requestId, source, File(destPath), flight) }
+        return PENDING
+    }
+
+    /**
+     * True for `content://media/<external volume>/images|video/media/<id>`, the
+     * shape [MediaStoreBrowser] reports, with no query or fragment; every other
+     * URI is not exportable.
+     */
+    internal fun isExportableId(uri: Uri): Boolean {
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY) return false
+        if (uri.query != null || uri.fragment != null) return false
+        val segments = uri.pathSegments
+        if (segments.size != 4) return false
+        val volume = segments[0]
+        return (volume == MediaStore.VOLUME_EXTERNAL || volume == MediaStore.VOLUME_EXTERNAL_PRIMARY) &&
+            (segments[1] == "images" || segments[1] == "video") &&
+            segments[2] == "media" &&
+            segments[3].isNotEmpty() && segments[3].all { it in '0'..'9' }
+    }
+
+    /** Cancels export [requestId] (class doc). Any thread; an unknown id is ignored. */
+    @JvmStatic
+    fun cancelExport(requestId: Long) {
+        val flight = exports[requestId] ?: return
+        flight.cancelled.set(true)
+        if (flight.started.compareAndSet(false, true)) {
+            exports.remove(requestId)
+            notifyExportDone(requestId, CANCELLED, null, null)
+        }
+    }
+
+    /**
+     * Save [sourcePath] into the library as a new row (class doc). Any
+     * thread. Returns [PENDING]; the answer then arrives through
+     * [nativeOnSaveDone]. Takes no pick slot.
+     */
+    @JvmStatic
+    fun saveToLibrary(requestId: Long, sourcePath: String, isVideo: Boolean, displayName: String, album: String?): Int {
+        val ctx = appContext ?: return NOT_INITIALIZED
+        MediaStoreWriter.save(ctx, requestId, File(sourcePath), isVideo, displayName, album)
+        return PENDING
+    }
+
     // --- Kotlin -> Rust -----------------------------------------------------
 
     /**
@@ -376,6 +495,18 @@ object FrustPhotoLibraryHost {
     /** Copy progress of the [pick] with the same [requestId]; [fraction] is 0.0..1.0. */
     @JvmStatic
     external fun nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)
+
+    /** Answers the [exportOriginal] that returned [PENDING] with the same [requestId]. */
+    @JvmStatic
+    external fun nativeOnExportDone(requestId: Long, code: Int, mime: String?, name: String?)
+
+    /** Bytes copied of the [exportOriginal] with the same [requestId]. */
+    @JvmStatic
+    external fun nativeOnExportProgress(requestId: Long, done: Long, total: Long)
+
+    /** Answers the [saveToLibrary] that returned [PENDING] with the same [requestId]. */
+    @JvmStatic
+    external fun nativeOnSaveDone(requestId: Long, code: Int, uri: String?)
 
     // Every native call is guarded: a missing symbol (an app that depends on
     // this Gradle module without the `frust-photo-library` Rust crate) must
@@ -413,6 +544,32 @@ object FrustPhotoLibraryHost {
         } catch (e: Throwable) {
             progressUnavailable = true
             Log.w(TAG, "frust-photo-library: nativeOnPickProgress unavailable", e)
+        }
+    }
+
+    private fun notifyExportDone(requestId: Long, code: Int, mime: String?, name: String?) {
+        try {
+            nativeOnExportDone(requestId, code, mime, name)
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-photo-library: nativeOnExportDone unavailable", e)
+        }
+    }
+
+    private fun notifyExportProgress(requestId: Long, done: Long, total: Long) {
+        if (exportProgressUnavailable) return
+        try {
+            nativeOnExportProgress(requestId, done, total)
+        } catch (e: Throwable) {
+            exportProgressUnavailable = true
+            Log.w(TAG, "frust-photo-library: nativeOnExportProgress unavailable", e)
+        }
+    }
+
+    internal fun notifySaveDone(requestId: Long, code: Int, uri: String?) {
+        try {
+            nativeOnSaveDone(requestId, code, uri)
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-photo-library: nativeOnSaveDone unavailable", e)
         }
     }
 
@@ -655,6 +812,76 @@ object FrustPhotoLibraryHost {
             null
         }
         return Meta(name, mime, size)
+    }
+
+    /**
+     * One export, on [exportExecutor]: claims the flight, copies, and answers
+     * Rust exactly once, deleting the partial file before a non-[OK] answer.
+     */
+    private fun runExport(ctx: Context, requestId: Long, uri: Uri, dest: File, flight: ExportFlight) {
+        if (!flight.started.compareAndSet(false, true)) return
+        var meta: Meta? = null
+        val code = try {
+            meta = describe(ctx, uri)
+            copyOriginal(ctx, requestId, uri, dest, meta.size?.takeIf { it > 0 }, flight)
+        } catch (e: SecurityException) {
+            PERMISSION_DENIED
+        } catch (e: Throwable) {
+            Log.w(TAG, "frust-photo-library: exporting an original failed: ${e.javaClass.name}")
+            EXPORT_FAILED
+        }
+        if (code != OK) dest.delete()
+        exports.remove(requestId)
+        val done = meta.takeIf { code == OK }
+        notifyExportDone(requestId, code, done?.mime, done?.name)
+    }
+
+    /**
+     * Copies [uri] to [dest] in [EXPORT_CHUNK_BYTES] chunks, checking the
+     * cancel flag before each. Reports [nativeOnExportProgress] when [total]
+     * is known. Export thread, no monitor held. [OK], [CANCELLED] or
+     * [NOT_FOUND].
+     */
+    private fun copyOriginal(ctx: Context, requestId: Long, uri: Uri, dest: File, total: Long?, flight: ExportFlight): Int {
+        if (flight.cancelled.get()) return CANCELLED
+        val input = try {
+            openOriginal(ctx, uri)
+        } catch (e: FileNotFoundException) {
+            return NOT_FOUND
+        }
+        input.use { source ->
+            FileOutputStream(dest).use { sink ->
+                if (total != null) notifyExportProgress(requestId, 0L, total)
+                val buffer = ByteArray(EXPORT_CHUNK_BYTES)
+                var done = 0L
+                while (true) {
+                    if (flight.cancelled.get()) return CANCELLED
+                    val read = source.read(buffer)
+                    if (read < 0) return OK
+                    sink.write(buffer, 0, read)
+                    done += read
+                    if (total != null) notifyExportProgress(requestId, done, total)
+                }
+            }
+        }
+    }
+
+    /**
+     * Opens [uri], asking for the unredacted bytes when `ACCESS_MEDIA_LOCATION`
+     * is held (class doc). A refused original falls back to the plain URI.
+     */
+    private fun openOriginal(ctx: Context, uri: Uri): InputStream {
+        val resolver = ctx.contentResolver
+        if (ctx.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            try {
+                resolver.openInputStream(MediaStore.setRequireOriginal(uri))?.let { return it }
+            } catch (e: UnsupportedOperationException) {
+                Log.i(TAG, "frust-photo-library: original unavailable, using the plain uri: ${e.javaClass.name}")
+            } catch (e: SecurityException) {
+                Log.i(TAG, "frust-photo-library: original unavailable, using the plain uri: ${e.javaClass.name}")
+            }
+        }
+        return resolver.openInputStream(uri) ?: throw IOException("no input stream")
     }
 
     /**

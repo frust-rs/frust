@@ -64,11 +64,18 @@
 #[cfg(feature = "library")]
 #[path = "apple_library.rs"]
 mod apple_library;
+#[cfg(any(feature = "library", feature = "save"))]
+#[path = "apple_originals.rs"]
+mod apple_originals;
 #[path = "apple_picker.rs"]
 mod apple_picker;
 
 #[cfg(feature = "library")]
 pub(crate) use apple_library::{albums, assets, manage_limited_selection, thumbnail};
+#[cfg(feature = "library")]
+pub(crate) use apple_originals::export_original;
+#[cfg(feature = "save")]
+pub(crate) use apple_originals::save;
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};

@@ -1,4 +1,4 @@
-//! Cooperative cancellation and throttled progress for a pick.
+//! Cooperative cancellation and throttled progress for a pick or an export.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,17 +14,19 @@ struct Inner {
     hook: Mutex<Option<Hook>>,
 }
 
-/// A handle that cancels an in-flight [`PhotoLibrary::pick`](crate::PhotoLibrary::pick).
+/// A handle that cancels an in-flight [`PhotoLibrary::pick`](crate::PhotoLibrary::pick) or
+/// [`PhotoLibrary::export_original`](crate::PhotoLibrary::export_original).
 ///
 /// Clones share one state. Hand a clone to [`PickOptions::cancel`](crate::PickOptions::cancel)
-/// and call [`cancel`](Self::cancel) from any thread. A token that is already cancelled makes
-/// the pick return [`PhotoError::Cancelled`](crate::PhotoError::Cancelled) at once.
+/// or [`ExportOptions::cancel`](crate::ExportOptions::cancel) and call
+/// [`cancel`](Self::cancel) from any thread. A token that is already cancelled makes the call
+/// return [`PhotoError::Cancelled`](crate::PhotoError::Cancelled) at once.
 #[derive(Clone)]
 pub struct CancelToken(Arc<Inner>);
 
 impl CancelToken {
     /// A fresh, uncancelled token. A token is single-use: once cancelled it stays cancelled,
-    /// so make a new one for each pick.
+    /// so make a new one for each call.
     pub fn new() -> Self {
         Self(Arc::new(Inner {
             cancelled: AtomicBool::new(false),
@@ -32,7 +34,7 @@ impl CancelToken {
         }))
     }
 
-    /// Cancels the pick. Runs the platform hook registered by the pick, if any, exactly once.
+    /// Cancels the call. Runs the platform hook registered by the call, if any, exactly once.
     pub fn cancel(&self) {
         self.0.cancelled.store(true, Ordering::SeqCst);
         let hook = lock(&self.0.hook).take();
@@ -46,7 +48,7 @@ impl CancelToken {
         self.0.cancelled.load(Ordering::SeqCst)
     }
 
-    /// Registers the platform hook for one pick. Runs `f` immediately (outside the lock) when
+    /// Registers the platform hook for one call. Runs `f` immediately (outside the lock) when
     /// the token is already cancelled.
     #[allow(dead_code)] // Used by the mobile arms.
     pub(crate) fn set_hook(&self, f: impl FnOnce() + Send + 'static) {
@@ -60,7 +62,7 @@ impl CancelToken {
         f();
     }
 
-    /// Drops the registered hook so a token reused across picks never fires a stale one.
+    /// Drops the registered hook so a token reused across calls never fires a stale one.
     #[allow(dead_code)] // Used by the mobile arms.
     pub(crate) fn clear_hook(&self) {
         lock(&self.0.hook).take();

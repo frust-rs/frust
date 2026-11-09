@@ -79,6 +79,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `set_thumbnail_cache_budget`, `clear_thumbnail_cache`), plus `manage_limited_selection` for Limited
   access. Browsing is read-only and never takes the pick guard; iOS picks carry `asset_id` under the
   feature, and the playground gains a Browse panel.
+  `PhotoLibrary::export_original(&AssetId, &ExportOptions)` (with `library`) writes an asset's untouched
+  bytes to a file: the original or the edited rendition, `allow_network`, progress ending at 1.0 on
+  success and a `CancelToken`; the default destination `<cache>/frust-photo-library/originals` is left
+  alone by `clear_pick_cache`. `PhotoLibrary::save(&SaveRequest)`, behind the new `save` cargo and
+  registry feature, files an image or video into the library (Photos on iOS, `MediaStore` on Android),
+  optionally into an album. New `PhotoError` variants: `NetworkRequired`, `MissingUsageDescription`,
+  `InvalidRequest`. Stored location is kept by Android browse + export with Media location granted and by
+  the iOS picker, and zeroed by the Android Photo Picker (see the
+  `photo-library-android-location-redacted` limitation). The playground gains an Originals panel.
 - `Share::files` and `Share::files_anchored` share one to 64 files: the Android chooser (through a
   `FileProvider` in the plugin's own Gradle module), the iOS activity sheet and a macOS sharing picker.
   Linux and Windows answer `ShareError::Unsupported`. On Android `Ok` means the share is enqueued: the
