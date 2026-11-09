@@ -37,10 +37,12 @@
 //! has no timeout, because an iCloud original can take minutes and the token is
 //! the way out; it wakes periodically to notice a cancel or a failed write.
 //! No header promises the completion block runs after a cancel, so the wait does
-//! not depend on it. The destination is claimed with `create_new`, so an export
-//! never replaces an existing file: a taken name gets a `-2`, `-3`, ... suffix.
-//! The open file sits behind a lock that the waiter empties before deleting the
-//! path, so a chunk arriving afterwards finds no file and is dropped.
+//! not depend on it. Bytes stream to a hidden staging file, and the final name is
+//! claimed only once the file is complete, so an interrupted export never looks
+//! finished. The claim never replaces an existing file: a taken name gets a `-2`,
+//! `-3`, ... suffix. The open file sits behind a lock that the waiter empties
+//! before deleting the path, so a chunk arriving afterwards finds no file and is
+//! dropped.
 //!
 //! # Save
 //!
@@ -121,6 +123,7 @@ mod export {
     };
 
     use super::{PHOTOS_ERROR_DOMAIN, is_granted, lock, refuse_main_thread, require_class};
+    use crate::cancel::ProgressThrottle;
     use crate::media_types::lookup;
     use crate::originals::{default_dest_dir, is_cancelled, report_fraction, throttled};
     use crate::pick_cache::sanitize_file_name;
@@ -209,7 +212,8 @@ mod export {
             // appears only once the file is complete.
             let (staging, file) = reserve_staging(&dir, &name)?;
 
-            let byte_len = match transfer(&resource, file, options) {
+            let throttle = options.progress.clone().map(|f| Arc::new(throttled(f)));
+            let byte_len = match transfer(&resource, file, options, throttle.as_ref()) {
                 Ok(byte_len) => byte_len,
                 Err(e) => {
                     let _ = fs::remove_file(&staging);
@@ -217,6 +221,10 @@ mod export {
                 }
             };
             let path = publish(&staging, &dir, &name)?;
+            // Only now: publishing can still fail, and `1.0` promises success.
+            if let Some(throttle) = &throttle {
+                report_fraction(throttle, 1.0);
+            }
             Ok(ExportedOriginal {
                 path,
                 file_name: (!raw_name.is_empty()).then_some(raw_name),
@@ -336,6 +344,7 @@ mod export {
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(_) if !path.exists() => {
                     // A volume without hard links: rename onto the free name.
+                    // Best effort, as a writer racing this check would be replaced.
                     fs::rename(staging, &path)?;
                     return Ok(path);
                 }
@@ -381,17 +390,17 @@ mod export {
         resource: &PHAssetResource,
         file: File,
         options: &ExportOptions,
+        throttle: Option<&Arc<ProgressThrottle>>,
     ) -> Result<u64, PhotoError> {
         let shared = Arc::new(Transfer {
             file: Mutex::new(Some(file)),
             write_error: Mutex::new(None),
         });
-        let throttle = options.progress.clone().map(|f| Arc::new(throttled(f)));
-        if let Some(throttle) = &throttle {
+        if let Some(throttle) = throttle {
             report_fraction(throttle, 0.0);
         }
 
-        let on_progress = throttle.clone().map(|throttle| {
+        let on_progress = throttle.cloned().map(|throttle| {
             RcBlock::new(move |fraction: f64| {
                 // Runs on a Photos queue: never unwind into its frame.
                 if catch_unwind(AssertUnwindSafe(|| {
@@ -507,9 +516,6 @@ mod export {
                 ));
             }
         };
-        if let Some(throttle) = &throttle {
-            report_fraction(throttle, 1.0);
-        }
         Ok(byte_len)
     }
 

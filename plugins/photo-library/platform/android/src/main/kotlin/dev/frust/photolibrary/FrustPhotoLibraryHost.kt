@@ -432,10 +432,12 @@ object FrustPhotoLibraryHost {
 
     /**
      * True for `content://media/<external volume>/images|video/media/<id>`, the
-     * shape [MediaStoreBrowser] reports; every other URI is not exportable.
+     * shape [MediaStoreBrowser] reports, with no query or fragment; every other
+     * URI is not exportable.
      */
     internal fun isExportableId(uri: Uri): Boolean {
         if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY) return false
+        if (uri.query != null || uri.fragment != null) return false
         val segments = uri.pathSegments
         if (segments.size != 4) return false
         val volume = segments[0]

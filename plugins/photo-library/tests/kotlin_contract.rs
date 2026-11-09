@@ -1393,6 +1393,7 @@ fn export_ids_are_media_store_image_and_video_items() {
     assert!(export.contains("if (!isExportableId(source)) return NOT_FOUND"));
     let check = function(&kotlin, "fun isExportableId(");
     assert!(check.contains("uri.authority != MediaStore.AUTHORITY"));
+    assert!(check.contains("uri.query != null || uri.fragment != null"));
     assert!(check.contains("segments.size != 4"));
     assert!(check.contains("MediaStore.VOLUME_EXTERNAL_PRIMARY"));
     assert!(check.contains("segments[1] == \"images\" || segments[1] == \"video\""));
