@@ -967,15 +967,27 @@ mod tests {
         .flush_on_background();
 
         // Registered after the flush listener, so it runs later in the same push.
+        let seen_at_inactive = Arc::new(AtomicUsize::new(usize::MAX));
         let seen_at_hide = Arc::new(AtomicUsize::new(usize::MAX));
-        let (seen, source) = (Arc::clone(&seen_at_hide), Arc::clone(&flushed));
-        let _observer = AppLifecycleListener::new().on_hide(move || {
-            seen.store(source.load(Ordering::SeqCst), Ordering::SeqCst);
-        });
+        let (seen_inactive, source_inactive) =
+            (Arc::clone(&seen_at_inactive), Arc::clone(&flushed));
+        let (seen_hide, source_hide) = (Arc::clone(&seen_at_hide), Arc::clone(&flushed));
+        let _observer = AppLifecycleListener::new()
+            .on_inactive(move || {
+                seen_inactive.store(source_inactive.load(Ordering::SeqCst), Ordering::SeqCst);
+            })
+            .on_hide(move || {
+                seen_hide.store(source_hide.load(Ordering::SeqCst), Ordering::SeqCst);
+            });
 
         // Resumed -> Paused is one push that walks Inactive, Hidden, Paused.
         push_app_lifecycle(AppLifecycleState::Paused);
         assert_eq!(flushed.load(Ordering::SeqCst), 1, "fired exactly once");
+        assert_eq!(
+            seen_at_inactive.load(Ordering::SeqCst),
+            1,
+            "already fired when the inactive observer runs"
+        );
         assert_eq!(
             seen_at_hide.load(Ordering::SeqCst),
             1,

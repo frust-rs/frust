@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How long to wait for the CLI to reach its Gradle invocation (i.e. for the
@@ -49,6 +50,10 @@ const FILE_APPEARS_TIMEOUT: Duration = Duration::from_secs(60);
 /// slowness — which is itself the regression to catch (a handler that blocks
 /// leaves a process a second Ctrl-C cannot kill).
 const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to wait for the reader threads to see EOF once the group is dead. A stray
+/// process that inherited a pipe and outlives the kill would otherwise hang the join.
+const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 const POLL: Duration = Duration::from_millis(20);
 
@@ -161,24 +166,26 @@ struct Build {
     child: Child,
     stdout: Arc<Mutex<Vec<u8>>>,
     stderr: Arc<Mutex<Vec<u8>>>,
+    readers: Vec<JoinHandle<()>>,
 }
 
 impl Build {
     fn spawn(project: &Path) -> Self {
         let mut child = spawn_release_build(project);
-        let stdout = Self::drain(child.stdout.take().expect("piped stdout"));
-        let stderr = Self::drain(child.stderr.take().expect("piped stderr"));
+        let (stdout, out_reader) = Self::drain(child.stdout.take().expect("piped stdout"));
+        let (stderr, err_reader) = Self::drain(child.stderr.take().expect("piped stderr"));
         Self {
             child,
             stdout,
             stderr,
+            readers: vec![out_reader, err_reader],
         }
     }
 
-    fn drain(mut pipe: impl Read + Send + 'static) -> Arc<Mutex<Vec<u8>>> {
+    fn drain(mut pipe: impl Read + Send + 'static) -> (Arc<Mutex<Vec<u8>>>, JoinHandle<()>) {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&buffer);
-        std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || {
             let mut chunk = [0u8; 4096];
             while let Ok(n) = pipe.read(&mut chunk) {
                 if n == 0 {
@@ -189,25 +196,37 @@ impl Build {
                     .extend_from_slice(&chunk[..n]);
             }
         });
-        buffer
+        (buffer, reader)
     }
 
     /// Kills the whole process group (so no `sleep 600` outlives the test),
     /// reaps the child, and returns a report of what it produced.
     fn kill_and_report(&mut self, elapsed: Duration) -> String {
         let status = self.child.try_wait().ok().flatten();
-        let _ = Command::new("sh")
-            .arg("-c")
-            .arg(format!("kill -KILL -{}", self.child.id()))
-            .status();
+        let _ = signal_group_id(self.child.id(), "KILL");
         let _ = self.child.wait();
-        // Give the readers a moment to flush what the dying group wrote.
-        std::thread::sleep(Duration::from_millis(100));
+        // The readers end at EOF once every pipe holder is dead. Bound the wait so a
+        // stray holder cannot hang the test; the output may then be partial.
+        let started = Instant::now();
+        while started.elapsed() < READER_JOIN_TIMEOUT
+            && !self.readers.iter().all(JoinHandle::is_finished)
+        {
+            std::thread::sleep(POLL);
+        }
+        let all_joined = self.readers.iter().all(JoinHandle::is_finished);
+        for reader in self.readers.drain(..).filter(JoinHandle::is_finished) {
+            let _ = reader.join();
+        }
+        let partial = if all_joined {
+            ""
+        } else {
+            " (a pipe holder survived the kill: the output below may be partial)"
+        };
         let text = |buffer: &Mutex<Vec<u8>>| {
             String::from_utf8_lossy(&buffer.lock().expect("capture buffer")).into_owned()
         };
         format!(
-            "after {elapsed:?}; status before kill: {status:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            "after {elapsed:?}; status before kill: {status:?}{partial}\n--- stdout ---\n{}\n--- stderr ---\n{}",
             text(&self.stdout),
             text(&self.stderr)
         )
@@ -243,12 +262,16 @@ fn wait_for(path: &Path, build: &mut Build, budget: Duration) {
 /// delivers Ctrl-C to a foreground job. Goes through `sh`'s `kill` builtin so
 /// the test needs no `libc` dependency of its own.
 fn signal_group(child: &Child, signal: &str) {
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(format!("kill -{signal} -{}", child.id()))
-        .status()
-        .expect("failed to spawn `kill`");
+    let status = signal_group_id(child.id(), signal).expect("failed to spawn `kill`");
     assert!(status.success(), "`kill -{signal}` failed: {status}");
+}
+
+/// Sends `signal` to the process group whose id is `pgid`.
+fn signal_group_id(pgid: u32, signal: &str) -> std::io::Result<std::process::ExitStatus> {
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("kill -{signal} -{pgid}"))
+        .status()
 }
 
 /// Waits for the signalled child to die, failing on a hang rather than blocking
