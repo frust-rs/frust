@@ -220,9 +220,11 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
     /// during this pump's frame is registered by the next pump's first step, at that pump's
     /// starting time.
     ///
-    /// The advance steps through each deadline in order, draining the queue at each, so
-    /// `pump(a + b)` behaves as `pump(a); pump(b)`: a chain of sleeps or a re-armed timer inside
-    /// `dt` fires at its own virtual time, each wait measured from the previous deadline. Only
+    /// The advance steps through each deadline in order, draining the queue at each, so a chain
+    /// of sleeps or a re-armed timer inside `dt` fires at its own virtual time, each wait measured
+    /// from the previous deadline. For work on the local task queue `pump(a + b)` therefore
+    /// behaves as `pump(a); pump(b)`; a timer armed by a rebuild depends on where the frames
+    /// fall, since each pump runs one frame after its advance. Only
     /// futures polled on this thread are stepped; `frust::spawn` and `use_task` fetch futures
     /// run elsewhere and stay on wall time.
     ///
