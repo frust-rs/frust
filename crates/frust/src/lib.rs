@@ -2249,8 +2249,9 @@ pub use frust_reactive::spawn_local_scoped;
 /// instead runs synchronously at the first of the app going inactive or
 /// hidden, which includes plain focus loss: it is one-shot, so do not flag a
 /// timer whose delay must be honoured while the app stays visible. Keep a flagged
-/// callback within the budget of 8 ms per callback and 16 ms per drain; debug builds
-/// log a warning when one is exceeded, and release builds do not measure.
+/// callback within the budget of 8 ms per callback and 16 ms per drain; debug builds on
+/// native targets log a warning when one is exceeded. That is a development aid, not a
+/// guarantee: release builds and the web do not measure.
 ///
 /// ```no_run
 /// use frust::time::{Duration, Timer};
@@ -4090,11 +4091,9 @@ mod background_task_reexport {
     fn background_task_begins_and_ends_through_facade() {
         frust_reactive::ReactiveRuntime::init(Arc::new(|| {}));
         let backend = Arc::new(Counting::default());
-        // Another test in this binary may have installed a backend first; the
-        // first installer wins, so only assert when this one took the slot.
-        if !frust_reactive::install_background_task_backend(backend.clone()) {
-            return;
-        }
+        // Nothing else in this test binary installs a backend, so this one takes the slot.
+        let installed = frust_reactive::install_background_task_backend(backend.clone());
+        assert!(installed, "no other test in this binary installs a backend");
         let task = crate::BackgroundTask::begin("save");
         assert!(task.is_granted() && !task.expired());
         assert_eq!(backend.begins.load(Ordering::SeqCst), 1);
