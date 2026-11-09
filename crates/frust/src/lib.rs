@@ -2248,7 +2248,9 @@ pub use frust_reactive::spawn_local_scoped;
 /// do not rely on either. A timer flagged [`time::Timer::flush_on_background`]
 /// instead runs synchronously at the first of the app going inactive or
 /// hidden, which includes plain focus loss: it is one-shot, so do not flag a
-/// timer whose delay must be honoured while the app stays visible.
+/// timer whose delay must be honoured while the app stays visible. Keep a flagged
+/// callback within the budget of 8 ms per callback and 16 ms per drain; debug builds
+/// log a warning when one is exceeded, and release builds do not measure.
 ///
 /// ```no_run
 /// use frust::time::{Duration, Timer};
@@ -4060,14 +4062,45 @@ mod backdrop_blur_reexport {
 }
 
 /// Facade-level check that the background-task guard resolves through the `frust`
-/// facade. It names the type without beginning one, since `begin` is UI-thread-only.
+/// facade and drives an installed backend: begin grants, end reaches the backend once.
 #[cfg(test)]
 mod background_task_reexport {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use frust_reactive::{BackgroundTaskBackend, TaskState};
+
+    #[derive(Default)]
+    struct Counting {
+        begins: AtomicUsize,
+        ends: Mutex<Vec<u64>>,
+    }
+
+    impl BackgroundTaskBackend for Counting {
+        fn begin(&self, _name: &str, _state: &Arc<TaskState>) -> u64 {
+            self.begins.fetch_add(1, Ordering::SeqCst);
+            42
+        }
+        fn end(&self, id: u64, _state: &Arc<TaskState>) {
+            self.ends.lock().unwrap().push(id);
+        }
+    }
+
     #[test]
-    fn background_task_resolves_through_facade() {
-        let name = std::any::type_name::<crate::BackgroundTask>();
-        assert!(name.ends_with("BackgroundTask"), "{name}");
-        let _begin: fn(&str) -> crate::BackgroundTask = crate::BackgroundTask::begin;
+    fn background_task_begins_and_ends_through_facade() {
+        frust_reactive::ReactiveRuntime::init(Arc::new(|| {}));
+        let backend = Arc::new(Counting::default());
+        // Another test in this binary may have installed a backend first; the
+        // first installer wins, so only assert when this one took the slot.
+        if !frust_reactive::install_background_task_backend(backend.clone()) {
+            return;
+        }
+        let task = crate::BackgroundTask::begin("save");
+        assert!(task.is_granted() && !task.expired());
+        assert_eq!(backend.begins.load(Ordering::SeqCst), 1);
+        assert!(backend.ends.lock().unwrap().is_empty());
+        task.end();
+        assert_eq!(*backend.ends.lock().unwrap(), vec![42]);
     }
 }
 

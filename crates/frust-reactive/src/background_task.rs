@@ -191,13 +191,32 @@ mod tests {
         g
     }
 
+    type Expiry = Box<dyn Fn() + Send + Sync>;
+
     #[derive(Default)]
     struct Mock {
         begins: Mutex<Vec<String>>,
         ends: Mutex<Vec<(u64, std::thread::ThreadId)>>,
         refuse: bool,
         next: AtomicU64,
-        last_state: Mutex<Option<Arc<TaskState>>>,
+        me: Mutex<std::sync::Weak<Mock>>,
+        /// Per-id expiry closures, built the way a real backend builds one.
+        expiries: Mutex<Vec<(u64, Expiry)>>,
+    }
+
+    impl Mock {
+        fn arc() -> Arc<Mock> {
+            let m = Arc::new(Mock::default());
+            *m.me.lock().unwrap() = Arc::downgrade(&m);
+            m
+        }
+
+        /// Run the platform-expiry handler for task `id`.
+        fn fire_expiry(&self, id: u64) {
+            let expiries = self.expiries.lock().unwrap();
+            let (_, handler) = expiries.iter().find(|(i, _)| *i == id).unwrap();
+            handler();
+        }
     }
 
     impl BackgroundTaskBackend for Mock {
@@ -206,8 +225,21 @@ mod tests {
             if self.refuse {
                 state.set_refused();
             }
-            *self.last_state.lock().unwrap() = Some(state.clone());
-            self.next.fetch_add(1, Ordering::SeqCst) + 7
+            let id = self.next.fetch_add(1, Ordering::SeqCst) + 7;
+            let state = state.clone();
+            let this = self.me.lock().unwrap().clone();
+            self.expiries.lock().unwrap().push((
+                id,
+                Box::new(move || {
+                    state.set_expired();
+                    if state.mark_ended()
+                        && let Some(m) = this.upgrade()
+                    {
+                        m.end(id, &state);
+                    }
+                }),
+            ));
+            id
         }
         fn end(&self, id: u64, _state: &Arc<TaskState>) {
             self.ends
@@ -228,7 +260,7 @@ mod tests {
     #[test]
     fn drop_and_explicit_end_each_end_once() {
         let _g = setup();
-        let m = Arc::new(Mock::default());
+        let m = Mock::arc();
         assert!(install_background_task_backend(m.clone()));
         let t = BackgroundTask::begin("save");
         assert_eq!(*m.begins.lock().unwrap(), vec!["save".to_owned()]);
@@ -243,24 +275,41 @@ mod tests {
     #[test]
     fn expiry_path_ends_once() {
         let _g = setup();
-        let m = Arc::new(Mock::default());
+        let m = Mock::arc();
         install_background_task_backend(m.clone());
         let t = BackgroundTask::begin("save");
-        let state = m.last_state.lock().unwrap().clone().unwrap();
-        state.set_expired();
-        if state.mark_ended() {
-            m.end(7, &state);
-        }
+        m.fire_expiry(7);
         assert!(t.expired());
+        assert_eq!(m.ends.lock().unwrap().len(), 1);
         drop(t);
         assert_eq!(m.ends.lock().unwrap().len(), 1);
     }
 
     #[test]
+    fn expiry_after_drop_is_a_no_op_and_drop_after_expiry_ends_nothing_twice() {
+        let _g = setup();
+        let m = Mock::arc();
+        install_background_task_backend(m.clone());
+
+        // Drop first: the late expiry finds `ended` already claimed.
+        drop(BackgroundTask::begin("first"));
+        assert_eq!(m.ends.lock().unwrap().len(), 1);
+        m.fire_expiry(7);
+        assert_eq!(m.ends.lock().unwrap().len(), 1);
+
+        // Expiry first: the later drop must not end again.
+        let t = BackgroundTask::begin("second");
+        m.fire_expiry(8);
+        assert_eq!(m.ends.lock().unwrap().len(), 2);
+        drop(t);
+        assert_eq!(m.ends.lock().unwrap().len(), 2);
+    }
+
+    #[test]
     fn install_keeps_first_set_replaces() {
         let _g = setup();
-        let a = Arc::new(Mock::default());
-        let b = Arc::new(Mock::default());
+        let a = Mock::arc();
+        let b = Mock::arc();
         assert!(install_background_task_backend(a.clone()));
         assert!(!install_background_task_backend(b.clone()));
         drop(BackgroundTask::begin("x"));
@@ -277,7 +326,7 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<BackgroundTask>();
         let _g = setup();
-        let m = Arc::new(Mock::default());
+        let m = Mock::arc();
         install_background_task_backend(m.clone());
         let t = BackgroundTask::begin("save");
         std::thread::spawn(move || drop(t)).join().unwrap();
