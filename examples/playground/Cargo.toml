@@ -77,6 +77,9 @@ frust-database = { path = "../../plugins/database" }
 frust-network-image = { path = "../../plugins/network-image" }
 frust-file-dialogs = { path = "../../plugins/file-dialogs" }
 
+# The Photos page's Folders panel keeps the picked folder's grant token between launches.
+frust-shared-preferences = { path = "../../plugins/shared-preferences" }
+
 # The Images page's on-demand loopback fixture server only (`pages/images_server.rs`); the plugin's
 # own tokio is dev-only, so this row is the playground's. Matches the root's `version = "1"` row.
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "io-util"] }

@@ -280,6 +280,8 @@
 					AVFoundation,
 					"-framework",
 					PhotosUI,
+					"-framework",
+					UniformTypeIdentifiers,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -328,6 +330,8 @@
 					AVFoundation,
 					"-framework",
 					PhotosUI,
+					"-framework",
+					UniformTypeIdentifiers,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -377,6 +381,8 @@
 					AVFoundation,
 					"-framework",
 					PhotosUI,
+					"-framework",
+					UniformTypeIdentifiers,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "it.f0x.playground";
 				PRODUCT_NAME = "$(TARGET_NAME)";

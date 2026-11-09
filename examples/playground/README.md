@@ -146,9 +146,15 @@ The sections, in order:
    `sliver_list`, a 4-column `sliver_grid` and `sliver_fill_remaining`, with
    `ScrollController` jump buttons; the reference surface for the sliver protocol.
 17. **Desktop** — `frust-file-dialogs` from real button presses (Open file / Open
-    files / Save as…, each run in `spawn_blocking` and delivered through
-    `use_task`; file names only, never contents or full paths; non-desktop
-    targets show "desktop only"), plus a window card with the live logical size
+    files / Save as… / Pick folder / Export file, each run in `spawn_blocking` and
+    delivered through `use_task`; file names only, never contents or full paths).
+    While a call runs the status line shows a loading line with progress and a
+    **Cancel** button fires the call's own token (a fresh one per press); the
+    buttons are disabled until it ends. Pick folder shows the folder's name and
+    file count; Export file copies a generated text file to the place you choose.
+    Open and export work on iOS and Android too (open copies the file into the
+    app); Save as stays desktop-only and shows "desktop only" elsewhere. Also a window card with the live
+    logical size
     and the persisted-state file location
     (`<data dir>/frust/window_state_<app>.txt`). A Window row adds Minimize,
     Maximize/Restore and Enter/Exit fullscreen buttons (they queue
@@ -241,7 +247,16 @@ The sections, in order:
     requested off the UI thread at 3x the cell size) loaded in pages of 60 by an
     explicit **Load more** button, with the loaded and total counts shown. When a
     picked item carries a library asset id (iOS) the Picker preview uses the same
-    native thumbnail path, so a HEIC pick previews. Deep link:
+    native thumbnail path, so a HEIC pick previews. A **Folders** panel below
+    Originals keeps a user-chosen folder: **Pick folder** stores the grant token in
+    shared preferences (key `playground.folder_token`) and the next launch restores
+    it, or says "Folder access was lost. Pick folder again." when the system no
+    longer honours it. **Scan** lists the folder's images and videos newest first
+    (name, kind, size) in pages of 50 with **Load more** and a **Recursive** toggle,
+    and decodes the first eight images (a content URI is copied into the app cache
+    first). **Release** gives the folder up and forgets the token. Pick folder shows
+    the picker's progress; a scan shows its phase; **Cancel** stops the running step
+    (a cancelled scan discards its page). Deep link:
     `frustplay://section/photos`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
@@ -359,6 +374,35 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Browse panel Manage selection (limited access) | iPhone | OWED |
 | Photos: Browse panel Manage selection (limited access) | Android device | OWED |
 | Photos: Picker preview of a HEIC pick through the native thumbnail | iPhone | OWED |
+| Desktop page: Open file / Open files copy the picked file into the app and list its name | iPhone | OWED |
+| Desktop page: Open file / Open files copy the picked file into the app and list its name | Android device | OWED |
+| Desktop page: Export file writes the generated text file through Files / the system save dialog | iPhone | OWED |
+| Desktop page: Export file writes the generated text file through Files / the system save dialog | Android device | OWED |
+| Desktop page: Export file and Pick folder | macOS | OWED |
+| Desktop page: Export file and Pick folder | Windows | OWED |
+| Desktop page: Export file and Pick folder | Linux | OWED |
+| Desktop page: Pick folder shows the folder name and file count | iPhone | OWED |
+| Desktop page: Pick folder shows the folder name and file count | Android device | OWED |
+| Desktop page: Cancel while a dialog or an export runs reads `Cancelled` | iPhone | OWED |
+| Desktop page: Cancel while a dialog or an export runs reads `Cancelled` | Android device | OWED |
+| Desktop page: Cancel while a dialog or an export runs reads `Cancelled` | Desktop (macOS, Windows, Linux) | OWED |
+| Photos: Folders panel Pick folder, then relaunch restores the folder without asking | iPhone | OWED |
+| Photos: Folders panel Pick folder, then relaunch (and reboot) restores the folder without asking | Android device | OWED |
+| Photos: Folders panel Pick folder, then relaunch restores the folder | macOS | OWED |
+| Photos: Folders panel Pick folder, then relaunch restores the folder | Windows | OWED |
+| Photos: Folders panel Pick folder, then relaunch restores the folder | Linux | OWED |
+| Photos: Folders panel after the folder is deleted or its grant revoked: "Pick folder again" message | iPhone | OWED |
+| Photos: Folders panel after the folder is deleted or its grant revoked: "Pick folder again" message | Android device | OWED |
+| Photos: Folders panel Scan (recursive toggle, Load more paging, first eight images decoded) | iPhone | OWED |
+| Photos: Folders panel Scan (recursive toggle, Load more paging, first eight images decoded) | Android device | OWED |
+| Photos: Folders panel Scan | macOS | OWED |
+| Photos: Folders panel Scan | Windows | OWED |
+| Photos: Folders panel Scan | Linux | OWED |
+| Photos: Folders panel Release (token forgotten, Scan disabled) | iPhone | OWED |
+| Photos: Folders panel Release (token forgotten, Scan disabled) | Android device | OWED |
+| Photos: Folders panel Cancel during Pick folder and during a large Scan | iPhone | OWED |
+| Photos: Folders panel Cancel during Pick folder and during a large Scan | Android device | OWED |
+| Photos: Folders panel Cancel during Pick folder and during a large Scan | Desktop (macOS, Windows, Linux) | OWED |
 
 ### Drag gate notes
 
