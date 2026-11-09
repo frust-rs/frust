@@ -145,12 +145,14 @@ Cancel). Every call runs in `spawn_blocking`; panels report file names only.
   window, `file-dialogs-windows-app-modal`).
 - **iPhone SE 2nd gen (iOS 26.7.1, profile build) and Pixel 5 (Android 14, debug build) — passed
   (2026-11-09):** open copies into the app cache; Export through Files / the system UI; Pick folder
-  and Scan with a relaunch that restores the folder without asking; Release; Cancel during a load.
-  Android also passed force-stop, reboot and lost access (folder deleted or grant revoked: "Pick
-  folder again"). Plain *Clear storage* removes the stored token, so a lost-access test must restore
+  and Scan with a relaunch that restores the folder without asking. Release on the iPhone, Cancel
+  during a load on the Pixel. Android also passed force-stop, reboot and lost access (grant revoked:
+  "Pick folder again"). Plain *Clear storage* removes the stored token, so a lost-access test must restore
   it. An iCloud pick waits inside the iOS picker (`file-dialogs-ios-icloud-download-in-picker`).
-- **Owed:** the desktop Export file, Pick folder, Scan and Cancel legs on Windows and Linux; GPS
-  through an Android folder read (`photo-library-android-location-redacted`).
+- **macOS and Windows — passed (2026-11-09):** Export file, Pick folder and Scan with a relaunch
+  that restores the folder.
+- **Owed:** Export file, Pick folder and Scan on Linux; Cancel on every desktop; GPS through an
+  Android folder read (`photo-library-android-location-redacted`).
 - **Compile tripwires:** `cargo check -p frust-file-dialogs` and, per [DEVELOPMENT.md](DEVELOPMENT.md)'s
   cross-target Prerequisites, the `aarch64-linux-android` and `aarch64-apple-ios-sim` targets; the
   web target compiles no backend and answers `Unsupported`.

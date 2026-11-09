@@ -162,8 +162,9 @@ calling thread.
 
 Round trips by hand on real hardware: Linux, macOS and Windows desktops (2026-10-18, open, open-multi and
 save-as), an iPhone SE 2nd gen (iOS 26.7.1) and a Pixel 5 (Android 14), 2026-11-09 (open copies, export,
-folder pick and restore across relaunch, release, cancel). Not measured: GPS location through an
-Android folder read; the desktop export, folder and cancel legs on Windows and Linux. Web only reports
+folder pick and restore across relaunch), with release on the iPhone and cancel on the Pixel; macOS and
+Windows export, folder pick and restore, 2026-11-09. Not measured: GPS location through an Android
+folder read; the export and folder legs on Linux; cancel on any desktop. Web only reports
 `Unsupported`. See the *File-dialogs manual test* in `docs/PLUGINS_DEVELOPMENT.md`.
 
 ## Security
