@@ -60,7 +60,7 @@ import java.util.concurrent.Executors
  * | Kotlin to Rust | `nativeOnPaths(requestId: Long, paths: Array<String>)` | the copies; an empty array means dismissed |
  * | Kotlin to Rust | `nativeOnTree(requestId: Long, uri: String?)` | the persisted tree URI; null means dismissed |
  * | Kotlin to Rust | `nativeOnListing(requestId: Long, names: Array<String>, relativePaths: Array<String>, sizes: LongArray, modified: LongArray, uris: Array<String>)` | the listed files, parallel arrays with [NO_VALUE] for unknown |
- * | Kotlin to Rust | `nativeOnCode(requestId: Long, code: Int)` | [SAVED], [DISMISSED], [CANCELLED], [ERROR], [ACCESS_LOST], [TOO_LARGE], [LAUNCH_FAILED] or [NO_ACTIVITY] |
+ * | Kotlin to Rust | `nativeOnCode(requestId: Long, code: Int)` | [SAVED], [DISMISSED], [CANCELLED], [ERROR], [ACCESS_LOST], [TOO_LARGE], [LAUNCH_FAILED], [NO_ACTIVITY] or [GRANT_FAILED] |
  * | Kotlin to Rust | `nativeOnProgress(requestId: Long, done: Int, items: Int, fraction: Double)` | copy progress, never an answer |
  *
  * Every request that returned [PENDING] gets exactly one answer.
@@ -133,6 +133,8 @@ object FrustFileDialogsHost {
     const val ACCESS_LOST = 9
     /** A document exceeded the copy's byte limit. */
     const val TOO_LARGE = 10
+    /** The system refused to persist the folder grant (for example the per-app cap). */
+    const val GRANT_FAILED = 11
 
     /** [nativeOnListing]'s marker for an unknown size or time. */
     const val NO_VALUE = -1L
@@ -157,6 +159,12 @@ object FrustFileDialogsHost {
 
     /** Longest copy name, leaving room below the 255-byte filesystem limit. */
     private const val MAX_NAME_BYTES = 200
+
+    /** Threads in [workExecutor]. */
+    private const val WORK_THREADS = 4
+
+    /** A listing visits at most this multiple of `maxEntries` folders and children. */
+    private const val WALK_VISIT_MULTIPLE = 16
 
     /** Which dialog holds the slot, so a destroyed Activity can answer it. */
     private enum class Flow { OPEN, EXPORT, TREE }
@@ -192,6 +200,9 @@ object FrustFileDialogsHost {
         var cancelled: Boolean = false
     }
 
+    /** The folder grant the latest tree answer newly took, for [releaseNewTree]. */
+    private var newTreeGrant: TreeGrant? = null
+
     /** Running background requests by id, separate from the dialog slot. */
     private val jobs = ConcurrentHashMap<Long, Job>()
 
@@ -206,9 +217,9 @@ object FrustFileDialogsHost {
     /** Runs every launch on the main thread. */
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    /** Runs every copy and listing off the main thread; each starts at once. */
+    /** Runs every copy and listing off the main thread: [WORK_THREADS] threads, the rest queued. */
     private val workExecutor: ExecutorService by lazy {
-        Executors.newCachedThreadPool { runnable ->
+        Executors.newFixedThreadPool(WORK_THREADS) { runnable ->
             Thread(runnable, "frust-file-dialogs-work").apply { isDaemon = true }
         }
     }
@@ -347,6 +358,29 @@ object FrustFileDialogsHost {
         } catch (e: Exception) {
             Log.w(TAG, "frust-file-dialogs: releasing a folder grant failed: ${e.javaClass.name}")
         }
+    }
+
+    /**
+     * Drop the persisted grant on [uri] only if the tree answer to [requestId]
+     * newly took it: a folder that was already granted keeps the permission an
+     * older grant holds. Any thread.
+     */
+    @JvmStatic
+    fun releaseNewTree(requestId: Long, uri: String) {
+        if (takeNewTreeGrant(requestId, uri)) releaseTree(uri)
+    }
+
+    @Synchronized
+    private fun takeNewTreeGrant(requestId: Long, uri: String): Boolean {
+        val grant = newTreeGrant ?: return false
+        if (grant.requestId != requestId || grant.uri != uri) return false
+        newTreeGrant = null
+        return true
+    }
+
+    @Synchronized
+    private fun recordNewTreeGrant(grant: TreeGrant?) {
+        newTreeGrant = grant
     }
 
     /**
@@ -669,15 +703,24 @@ object FrustFileDialogsHost {
             answer(flight) { notifyTree(requestId, null) }
             return
         }
+        val text = uri.toString()
+        val alreadyGranted = isTreeGranted(text)
         val persisted = try {
             ctx.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
             true
         } catch (e: Exception) {
+            // Typically the per-app cap on persisted grants; the reason is the class only.
             Log.w(TAG, "frust-file-dialogs: persisting the folder grant failed: ${e.javaClass.name}")
             false
         }
-        answer(flight, cleanup = { if (persisted) releaseTree(uri.toString()) }) {
-            if (persisted) notifyTree(requestId, uri.toString()) else notifyCode(requestId, ERROR)
+        val newlyTaken = persisted && !alreadyGranted
+        answer(flight, cleanup = { if (newlyTaken) releaseTree(uri.toString()) }) {
+            if (persisted) {
+                recordNewTreeGrant(if (newlyTaken) TreeGrant(requestId, text) else null)
+                notifyTree(requestId, text)
+            } else {
+                notifyCode(requestId, GRANT_FAILED)
+            }
         }
     }
 
@@ -841,6 +884,8 @@ object FrustFileDialogsHost {
         val uris = ArrayList<String>()
     }
 
+    private class TreeGrant(val requestId: Long, val uri: String)
+
     private class PendingDir(val documentId: String, val relative: String, val depth: Int)
 
     private class Child(
@@ -880,21 +925,32 @@ object FrustFileDialogsHost {
     private fun walkTree(ctx: Context, query: TreeQuery, job: Job, listing: Listing): Int? {
         val tree = query.tree
         val visited = HashSet<String>()
+        val budget = maxOf(query.maxEntries, 1).toLong() * WALK_VISIT_MULTIPLE
+        var seen = 0L
+        var skippedNames = 0
         val pending = ArrayDeque<PendingDir>()
         pending.addLast(PendingDir(DocumentsContract.getTreeDocumentId(tree), "", 0))
         while (true) {
             val dir = pending.removeLastOrNull() ?: return null
             if (job.cancelled) return CANCELLED
             if (!visited.add(dir.documentId)) continue
-            val children = readChildren(ctx, tree, dir.documentId, job) ?: if (dir.depth == 0) {
+            if (seen >= budget) return truncatedVisit(skippedNames)
+            seen += 1
+            val room = (budget - seen).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val children = readChildren(ctx, tree, dir.documentId, job, room) ?: if (dir.depth == 0) {
                 return ACCESS_LOST
             } else {
                 Log.w(TAG, "frust-file-dialogs: skipping an unreadable subfolder")
                 continue
             }
+            seen += children.size
             val subdirs = ArrayList<PendingDir>()
             for (child in children) {
                 if (job.cancelled) return CANCELLED
+                if (!isSafeEntryName(child.name)) {
+                    skippedNames += 1
+                    continue
+                }
                 if (!query.includeHidden && child.name.startsWith(".")) continue
                 val relative = if (dir.relative.isEmpty()) child.name else "${dir.relative}/${child.name}"
                 if (child.mime == DocumentsContract.Document.MIME_TYPE_DIR) {
@@ -916,8 +972,25 @@ object FrustFileDialogsHost {
                     listing.uris.add(DocumentsContract.buildDocumentUriUsingTree(tree, child.documentId).toString())
                 }
             }
+            if (children.size >= room) return truncatedVisit(skippedNames)
             for (subdir in subdirs.asReversed()) pending.addLast(subdir)
         }
+    }
+
+    /** The walk visited as many folders and children as it may: a truncated listing. Logs counts only. */
+    private fun truncatedVisit(skippedNames: Int): Int? {
+        Log.w(TAG, "frust-file-dialogs: listing truncated at the visit limit, $skippedNames unsafe names skipped")
+        return null
+    }
+
+    /**
+     * Whether a provider's display [name] is one path component: not empty, not
+     * `.` or `..`, and free of `/`, `\` and NUL (the rules [safeCopyName] applies).
+     */
+    internal fun isSafeEntryName(name: String): Boolean {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || trimmed == "." || trimmed == "..") return false
+        return name.none { it == '/' || it == '\\' || it == '\u0000' }
     }
 
     /** True when [extensions] is empty or holds [name]'s extension, in lower case. */
@@ -930,9 +1003,9 @@ object FrustFileDialogsHost {
     /**
      * The children of [documentId], in name order, or null when the provider
      * has no such folder (a `DocumentsProvider` answers a missing document
-     * with a null cursor). Empty once [job] is cancelled.
+     * with a null cursor). Empty once [job] is cancelled; at most [limit] children.
      */
-    private fun readChildren(ctx: Context, tree: Uri, documentId: String, job: Job): List<Child>? {
+    private fun readChildren(ctx: Context, tree: Uri, documentId: String, job: Job, limit: Int): List<Child>? {
         val uri = DocumentsContract.buildChildDocumentsUriUsingTree(tree, documentId)
         val columns = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -945,7 +1018,7 @@ object FrustFileDialogsHost {
         val cursor: Cursor = ctx.contentResolver.query(uri, columns, null, null, null) ?: return null
         val children = ArrayList<Child>()
         cursor.use {
-            while (!job.cancelled && it.moveToNext()) {
+            while (!job.cancelled && children.size < limit && it.moveToNext()) {
                 val id = it.getString(0) ?: continue
                 val name = it.getString(1) ?: continue
                 children.add(

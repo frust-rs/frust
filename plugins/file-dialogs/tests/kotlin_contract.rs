@@ -47,6 +47,7 @@ const SHARED_CODES: &[&str] = &[
     "DISMISSED",
     "ACCESS_LOST",
     "TOO_LARGE",
+    "GRANT_FAILED",
 ];
 
 fn read(rel: &str) -> String {
@@ -258,6 +259,11 @@ fn rust_calls_match_the_kotlin_declarations() {
             "releaseTree",
             "(Ljava/lang/String;)V",
             "fun releaseTree(uri: String)",
+        ),
+        (
+            "releaseNewTree",
+            "(JLjava/lang/String;)V",
+            "fun releaseNewTree(requestId: Long, uri: String)",
         ),
         (
             "mimesForExtensions",
@@ -599,5 +605,108 @@ fn folder_entries_are_content_uris_and_a_listing_answers_on_the_executor() {
     assert!(
         list.contains("sort_by"),
         "a listing is sorted by relative path"
+    );
+}
+
+#[test]
+fn a_listing_skips_unsafe_names_and_bounds_its_walk() {
+    let kotlin = read(KOTLIN_HOST);
+    let walk = function(&kotlin, "private fun walkTree(");
+    assert!(
+        walk.contains("isSafeEntryName(child.name)"),
+        "a provider's display name must be one safe component before it is listed"
+    );
+    let safe = function(&kotlin, "internal fun isSafeEntryName(");
+    assert!(
+        safe.contains("trimmed.isEmpty()")
+            && safe.contains("trimmed == \".\"")
+            && safe.contains("trimmed == \"..\"")
+            && safe.contains("it == '/'")
+            && safe.contains("it == '\\\\'")
+            && safe.contains("it == '\\u0000'"),
+        "empty, `.`, `..`, separators and NUL are refused"
+    );
+    assert!(
+        !walk.contains("child.name} skipped")
+            && function(&kotlin, "private fun truncatedVisit(")
+                .contains("$skippedNames unsafe names"),
+        "only a count of skipped names is logged"
+    );
+    assert!(
+        walk.contains("query.maxEntries") && walk.contains("WALK_VISIT_MULTIPLE"),
+        "the visit budget is a multiple of maxEntries"
+    );
+    assert!(
+        walk.contains("if (seen >= budget) return truncatedVisit(skippedNames)"),
+        "folders visited are bounded, not just entries returned"
+    );
+    assert!(
+        walk.contains("readChildren(ctx, tree, dir.documentId, job, room)")
+            && function(&kotlin, "private fun readChildren(").contains("children.size < limit"),
+        "one folder's children are bounded too"
+    );
+}
+
+#[test]
+fn the_work_pool_is_bounded() {
+    let kotlin = read(KOTLIN_HOST);
+    assert!(kotlin.contains("Executors.newFixedThreadPool(WORK_THREADS)"));
+    assert!(!kotlin.contains("newCachedThreadPool"));
+    assert!(kotlin.contains("private const val WORK_THREADS = 4"));
+}
+
+#[test]
+fn a_finished_export_stays_saved_through_a_cancel_race() {
+    let rust = code(&read(RUST_ANDROID));
+    let request = function(&rust, "fn run_request(");
+    assert!(
+        request.contains("&& !matches!(answer, Answer::Code(SAVED))"),
+        "a cancel racing the host's SAVED answer must not turn it into Cancelled"
+    );
+    assert!(function(&rust, "pub(crate) fn export_file(").contains("Answer::Code(SAVED) => {"));
+}
+
+#[test]
+fn a_cancel_race_releases_only_a_grant_the_request_newly_took() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = code(&read(RUST_ANDROID));
+    let request = function(&rust, "fn run_request(");
+    assert!(request.contains("release_new_tree(request_id, uri)"));
+    assert!(
+        !request.contains("release_tree("),
+        "the late-result path never releases an older grant"
+    );
+    let tree = function(&kotlin, "private fun onTree(");
+    assert!(tree.contains("val alreadyGranted = isTreeGranted(text)"));
+    assert!(tree.contains("val newlyTaken = persisted && !alreadyGranted"));
+    assert!(tree.contains("cleanup = { if (newlyTaken) releaseTree(uri.toString()) }"));
+    assert!(tree.contains("TreeGrant(requestId, text)"));
+    let release = function(&kotlin, "fun releaseNewTree(");
+    assert!(release.contains("takeNewTreeGrant(requestId, uri)"));
+    let take = function(&kotlin, "private fun takeNewTreeGrant(");
+    assert!(
+        take.contains("grant.requestId != requestId || grant.uri != uri"),
+        "only the request that took the grant may release it"
+    );
+}
+
+#[test]
+fn a_refused_persisted_grant_is_a_distinct_payload_free_outcome() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID);
+    let tree = function(&kotlin, "private fun onTree(");
+    assert!(
+        tree.contains("notifyCode(requestId, GRANT_FAILED)")
+            && !tree.contains("notifyCode(requestId, ERROR)"),
+        "a failed takePersistableUriPermission is neither a success nor a generic error"
+    );
+    let error = function(&rust, "fn error_for(");
+    assert!(
+        error.contains("GRANT_FAILED => {") && error.contains("FileDialogError::Platform"),
+        "it surfaces as Platform with a logged reason"
+    );
+    assert!(
+        !tree.contains("uri}") && !tree.contains("${e.message"),
+        "the log carries the exception class only"
     );
 }
