@@ -200,7 +200,15 @@ fn finish_export(
         remove_file(&path);
         return Err(err.into());
     }
-    let byte_len = fs::metadata(&path)?.len();
+    let byte_len = match fs::metadata(&path) {
+        Ok(meta) => meta.len(),
+        Err(err) => {
+            remove_file(&path);
+            return Err(err.into());
+        }
+    };
+    // The host's MIME (then the file extension) decides the kind; the URI shape
+    // only seeds the fallback when neither says.
     let filter = if id.as_str().contains("/video/") {
         MediaFilter::Videos
     } else {
