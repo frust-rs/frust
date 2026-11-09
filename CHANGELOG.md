@@ -546,9 +546,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   it to keep state across a font-size change.
 - `frust-material-i18n` depends on `frust-reactive`.
 - Docs: `clean-signals-frust` shows localized failure text through the helpers' closures.
+- `frust-shell-ios`: the C-ABI entry points `ios_app!` generates are `unsafe extern "C"` with Safety docs
+  (no ABI change: symbol names and signatures are the same). The iOS-target clippy run is clean, and CI
+  gained an advisory macOS `clippy-ios` job for the iOS simulator target.
 
 ### Fixed
 
+- Four load-sensitive tests are deterministic (`interrupt_e2e`, the Android hot-patch discovery-cancel
+  test, the TUI clipboard abandoned write, the engine retained parallel walk), and the `frust-reactive`
+  timer tests run on the virtual clock.
 - The motion-token conversions behind reduce-motion, navigation transitions, the switcher and presence
   no longer panic paint: each uses `Duration::try_from_secs_f64` and falls back on a negative,
   non-finite or too-large value (`MotionExtras::reduced_fade_duration` 120 ms, navigation transitions
