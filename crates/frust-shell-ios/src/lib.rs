@@ -164,17 +164,27 @@ macro_rules! ios_app {
     };
     ($(@pre_init $pre:expr;)? $state_ty:ty, $state_init:expr, $build:expr $(,)?) => {
         /// `frust_init`: create the native handle for the app's CAMetalLayer.
+        ///
+        /// # Safety
+        ///
+        /// `metal_layer` must be a live `CAMetalLayer*` (null is rejected and `frust_init`
+        /// returns null) that stays valid, owned and unreleased by the caller until
+        /// `frust_destroy` has returned: the handle retains it and the render thread builds the
+        /// surface from it. Call on the main thread.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub extern "C" fn frust_init(
+        pub unsafe extern "C" fn frust_init(
             metal_layer: *mut ::core::ffi::c_void,
             width: u32,
             height: u32,
             scale: f32,
         ) -> *mut ::core::ffi::c_void {
-            $crate::ffi_glue::init(metal_layer, width, height, scale, || { $(let () = $pre;)? }, || {
-                $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
-            })
+            // SAFETY: forwarded unchanged under this fn's documented contract.
+            unsafe {
+                $crate::ffi_glue::init(metal_layer, width, height, scale, || { $(let () = $pre;)? }, || {
+                    $crate::new_boxed_app_with::<$state_ty, _, _, _>($state_init, $build)
+                })
+            }
         }
 
         /// `frust_init_accessibility`: attach the accesskit adapter to the
@@ -189,9 +199,12 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+        /// `view` must be the app's live, unreleased `FrustView` (`UIView`) pointer, passed
+        /// on the main thread; a null `view` is ignored.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_init_accessibility(
@@ -208,9 +221,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_resize(
@@ -239,9 +253,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_render_frame(
@@ -265,9 +280,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_dispatch_touch(
@@ -291,9 +307,11 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+        /// `text` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_ime_apply(
@@ -316,9 +334,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_ime_state_json(
@@ -337,9 +356,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `s` must be null (a no-op) or a pointer returned by one of the string-returning
+        /// exports (`frust_ime_state_json`, `frust_take_clipboard_write`,
+        /// `frust_selection_toolbar_json`, `frust_platform_view_commands_json`) that has not
+        /// been freed already, and it must not be used after this call.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_string_free(s: *mut ::core::ffi::c_char) {
@@ -360,9 +380,11 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+        /// `text` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_edit_command(
@@ -384,9 +406,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_take_clipboard_write(
@@ -407,9 +430,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_take_paste_request(handle: *mut ::core::ffi::c_void) -> u8 {
@@ -428,9 +452,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_selection_toolbar_json(
@@ -447,9 +472,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_pause(handle: *mut ::core::ffi::c_void) {
@@ -464,9 +490,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_resume(handle: *mut ::core::ffi::c_void) {
@@ -482,9 +509,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_did_enter_background(handle: *mut ::core::ffi::c_void) {
@@ -499,9 +527,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_memory_warning(handle: *mut ::core::ffi::c_void) {
@@ -517,9 +546,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_will_enter_foreground(handle: *mut ::core::ffi::c_void) {
@@ -537,9 +567,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_sync_lifecycle(handle: *mut ::core::ffi::c_void, state: i32) {
@@ -550,10 +581,20 @@ macro_rules! ios_app {
         }
 
         /// `frust_destroy`: release the native handle (and its surface).
+        ///
+        /// # Safety
+        ///
+        /// `handle` must be null (a no-op) or a pointer returned by `frust_init` that has not
+        /// yet been passed to this function. Call it exactly once per handle, on the main
+        /// thread, with no other export active for that `handle`, on the stack or
+        /// concurrently; the handle must not be used afterwards.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub extern "C" fn frust_destroy(handle: *mut ::core::ffi::c_void) {
-            $crate::ffi_glue::destroy(handle)
+        pub unsafe extern "C" fn frust_destroy(handle: *mut ::core::ffi::c_void) {
+            // SAFETY: forwarded unchanged under this fn's documented contract.
+            unsafe {
+                $crate::ffi_glue::destroy(handle)
+            }
         }
 
         /// `frust_set_appearance`: flip the app's theme brightness (a
@@ -561,9 +602,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_set_appearance(handle: *mut ::core::ffi::c_void, dark: u8) {
@@ -580,9 +622,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_set_reduce_motion(handle: *mut ::core::ffi::c_void, reduce: u8) {
@@ -598,9 +641,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_set_text_scale(handle: *mut ::core::ffi::c_void, scale: f32) {
@@ -619,9 +663,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         #[allow(clippy::too_many_arguments)]
@@ -653,9 +698,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         #[allow(clippy::too_many_arguments)]
@@ -684,9 +730,11 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+        /// `url` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_on_deep_link(
@@ -703,10 +751,20 @@ macro_rules! ios_app {
         /// slot for `FrustViewController`'s per-frame poll — see
         /// `ffi_glue::system_ui_state`'s doc comment for the returned `u64`'s
         /// packing scheme and the iOS status-bar/home-indicator mapping table.
+        ///
+        /// # Safety
+        ///
+        /// `handle` is not read by this function (the slot it peeks is process-wide). The
+        /// parameter keeps the same contract as the other exports so a future read stays
+        /// sound: null, or a pointer returned by `frust_init` not yet passed to `frust_destroy`, on
+        /// the main thread.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub extern "C" fn frust_system_ui_state(handle: *mut ::core::ffi::c_void) -> u64 {
-            $crate::ffi_glue::system_ui_state(handle)
+        pub unsafe extern "C" fn frust_system_ui_state(handle: *mut ::core::ffi::c_void) -> u64 {
+            // SAFETY: forwarded unchanged under this fn's documented contract.
+            unsafe {
+                $crate::ffi_glue::system_ui_state(handle)
+            }
         }
 
         /// `frust_set_surface_mode`: latch the process-wide translucent-surface
@@ -729,9 +787,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_platform_view_commands_json(
@@ -768,9 +827,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_present_frame(handle: *mut ::core::ffi::c_void) {
@@ -786,9 +846,10 @@ macro_rules! ios_app {
         ///
         /// # Safety
         ///
-        /// `handle` must be a pointer returned by `frust_init` and not yet passed
-        /// to `frust_destroy`, valid for the duration of the call; any C string
-        /// argument must be null or NUL-terminated UTF-8 valid for the call.
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn frust_overlay_mode(handle: *mut ::core::ffi::c_void) -> u32 {
@@ -803,40 +864,72 @@ macro_rules! ios_app {
         /// the same one resized. Swift keeps the layer alive until
         /// `frust_overlay_take_released` hands it back (or `frust_destroy`
         /// returns; see `ffi_glue::overlay_attach`).
+        ///
+        /// # Safety
+        ///
+        /// `handle` must be null (the call is ignored) or satisfy the handle contract of
+        /// the other exports: a pointer returned by `frust_init` not yet passed to `frust_destroy`,
+        /// main thread, no other export active for it. `layer` must be null (ignored) or a
+        /// live `CAMetalLayer*` that the caller keeps alive until it is handed back through
+        /// `frust_overlay_take_released` or `frust_destroy` has returned.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub extern "C" fn frust_overlay_attach(
+        pub unsafe extern "C" fn frust_overlay_attach(
             handle: *mut ::core::ffi::c_void,
             overlay_id: u64,
             layer: *mut ::core::ffi::c_void,
             width: u32,
             height: u32,
         ) {
-            $crate::ffi_glue::overlay_attach(handle, overlay_id, layer, width, height)
+            // SAFETY: forwarded unchanged under this fn's documented contract.
+            unsafe {
+                $crate::ffi_glue::overlay_attach(handle, overlay_id, layer, width, height)
+            }
         }
 
         /// `frust_overlay_detach`: overlay `overlay_id`'s view is going away.
         /// Returns at once; the layer is handed back through
         /// `frust_overlay_take_released` once the surface on it is dropped
         /// (see `ffi_glue::overlay_detach`).
+        ///
+        /// # Safety
+        ///
+        /// `handle` must be null (only the parked-present drop is skipped) or a pointer
+        /// returned by `frust_init` not yet passed to `frust_destroy`. The call must be made on the
+        /// main thread, with no other export active for the same `handle`, on the stack or
+        /// concurrently.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub extern "C" fn frust_overlay_detach(handle: *mut ::core::ffi::c_void, overlay_id: u64) {
-            $crate::ffi_glue::overlay_detach(handle, overlay_id)
+        pub unsafe extern "C" fn frust_overlay_detach(handle: *mut ::core::ffi::c_void, overlay_id: u64) {
+            // SAFETY: forwarded unchanged under this fn's documented contract.
+            unsafe {
+                $crate::ffi_glue::overlay_detach(handle, overlay_id)
+            }
         }
 
         /// `frust_overlay_take_released`: write up to `capacity` overlay
         /// layers whose surface is gone into `layers`, oldest first, and
         /// answer how many — each now Swift's to release with its view (see
         /// `ffi_glue::overlay_take_released`).
+        ///
+        /// # Safety
+        ///
+        /// `layers` must be null (answered with `0`) or point to a buffer, writable for the
+        /// duration of the call, with room for `capacity` pointers (at most 64 are written).
+        /// `handle` is only tested for null (answered with `0`), not dereferenced; pass a
+        /// pointer returned by `frust_init` not yet passed to `frust_destroy`, or null. Call on the
+        /// main thread.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub extern "C" fn frust_overlay_take_released(
+        pub unsafe extern "C" fn frust_overlay_take_released(
             handle: *mut ::core::ffi::c_void,
             layers: *mut *mut ::core::ffi::c_void,
             capacity: u32,
         ) -> u32 {
-            $crate::ffi_glue::overlay_take_released(handle, layers, capacity)
+            // SAFETY: forwarded unchanged under this fn's documented contract.
+            unsafe {
+                $crate::ffi_glue::overlay_take_released(handle, layers, capacity)
+            }
         }
     };
 }
