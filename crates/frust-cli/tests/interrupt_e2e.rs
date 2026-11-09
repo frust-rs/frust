@@ -32,9 +32,11 @@
 
 #![cfg(unix)]
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long to wait for the CLI to reach its Gradle invocation (i.e. for the
@@ -152,27 +154,89 @@ fn spawn_release_build(project: &Path) -> Child {
     command.spawn().expect("failed to spawn `frust build`")
 }
 
+/// A running release build plus everything its pipes have produced so far.
+/// Reader threads drain both pipes from spawn time, so a full pipe can never
+/// stall the child and a failure can show what the CLI said.
+struct Build {
+    child: Child,
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Build {
+    fn spawn(project: &Path) -> Self {
+        let mut child = spawn_release_build(project);
+        let stdout = Self::drain(child.stdout.take().expect("piped stdout"));
+        let stderr = Self::drain(child.stderr.take().expect("piped stderr"));
+        Self {
+            child,
+            stdout,
+            stderr,
+        }
+    }
+
+    fn drain(mut pipe: impl Read + Send + 'static) -> Arc<Mutex<Vec<u8>>> {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&buffer);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = pipe.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock()
+                    .expect("capture buffer")
+                    .extend_from_slice(&chunk[..n]);
+            }
+        });
+        buffer
+    }
+
+    /// Kills the whole process group (so no `sleep 600` outlives the test),
+    /// reaps the child, and returns a report of what it produced.
+    fn kill_and_report(&mut self, elapsed: Duration) -> String {
+        let status = self.child.try_wait().ok().flatten();
+        let _ = Command::new("sh")
+            .arg("-c")
+            .arg(format!("kill -KILL -{}", self.child.id()))
+            .status();
+        let _ = self.child.wait();
+        // Give the readers a moment to flush what the dying group wrote.
+        std::thread::sleep(Duration::from_millis(100));
+        let text = |buffer: &Mutex<Vec<u8>>| {
+            String::from_utf8_lossy(&buffer.lock().expect("capture buffer")).into_owned()
+        };
+        format!(
+            "after {elapsed:?}; status before kill: {status:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            text(&self.stdout),
+            text(&self.stderr)
+        )
+    }
+}
+
 /// Blocks until `path` holds the signing properties, i.e. until the CLI has
 /// written the plaintext signing file and handed control to `gradlew`. Waiting
 /// on existence alone races the write: the file is created before its contents
-/// land. Fails loudly rather than signalling a process that never reached the
-/// window under test.
-fn wait_for(path: &Path, child: &mut Child) {
-    let deadline = Instant::now() + FILE_APPEARS_TIMEOUT;
-    while Instant::now() < deadline {
+/// land. On timeout the process group is killed first and the panic carries the
+/// captured output, so a failure is diagnosable and leaves no orphan.
+fn wait_for(path: &Path, build: &mut Build, budget: Duration) {
+    let started = Instant::now();
+    while started.elapsed() < budget {
         if std::fs::read_to_string(path).is_ok_and(|contents| contents.contains("storePassword=")) {
             return;
         }
-        if let Some(status) = child.try_wait().expect("polling the build") {
+        if let Some(status) = build.child.try_wait().expect("polling the build") {
+            let report = build.kill_and_report(started.elapsed());
             panic!(
                 "`frust build` exited ({status}) before writing `{}`; the fake toolchain no \
-                 longer satisfies preflight or the signing gate",
+                 longer satisfies preflight or the signing gate: {report}",
                 path.display()
             );
         }
         std::thread::sleep(POLL);
     }
-    panic!("`{}` never appeared", path.display());
+    let report = build.kill_and_report(started.elapsed());
+    panic!("`{}` never appeared: {report}", path.display());
 }
 
 /// Sends `signal` to the child's whole process group, the way a terminal
@@ -190,19 +254,18 @@ fn signal_group(child: &Child, signal: &str) {
 /// Waits for the signalled child to die, failing on a hang rather than blocking
 /// the test run forever. Returns its exit code, or `None` if it was terminated
 /// by a signal instead of exiting.
-fn wait_for_exit(child: &mut Child) -> Option<i32> {
-    let deadline = Instant::now() + EXIT_TIMEOUT;
-    while Instant::now() < deadline {
-        if let Some(status) = child.try_wait().expect("polling the build") {
+fn wait_for_exit(build: &mut Build) -> Option<i32> {
+    let started = Instant::now();
+    while started.elapsed() < EXIT_TIMEOUT {
+        if let Some(status) = build.child.try_wait().expect("polling the build") {
             return status.code();
         }
         std::thread::sleep(POLL);
     }
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(format!("kill -KILL -{}", child.id()))
-        .status();
-    panic!("the signalled `frust build` never exited — a handler that hangs is unkillable");
+    let report = build.kill_and_report(started.elapsed());
+    panic!(
+        "the signalled `frust build` never exited — a handler that hangs is unkillable: {report}"
+    );
 }
 
 /// The shared body: start a release build, wait until the plaintext signing
@@ -211,9 +274,9 @@ fn wait_for_exit(child: &mut Child) -> Option<i32> {
 fn interrupt_mid_build_leaves_no_secret(tag: &str, signal: &str) -> Option<i32> {
     let project = blocking_project(tag);
     let generated = generated_signing_file(&project);
-    let mut child = spawn_release_build(&project);
+    let mut build = Build::spawn(&project);
 
-    wait_for(&generated, &mut child);
+    wait_for(&generated, &mut build, FILE_APPEARS_TIMEOUT);
     // The window this whole feature is about: the passwords are on disk and
     // Gradle is running.
     let contents = std::fs::read_to_string(&generated).expect("reading the generated file");
@@ -222,8 +285,8 @@ fn interrupt_mid_build_leaves_no_secret(tag: &str, signal: &str) -> Option<i32> 
         "the file under test must really hold the plaintext password: {contents}"
     );
 
-    signal_group(&child, signal);
-    let code = wait_for_exit(&mut child);
+    signal_group(&build.child, signal);
+    let code = wait_for_exit(&mut build);
 
     assert!(
         !generated.exists(),

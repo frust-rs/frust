@@ -1762,33 +1762,30 @@ mod tests {
             FakeProcessRunner::new().with_hanging_stream(LOGCAT, ["I/app: starting"]),
         );
         let mut launch = launched(&runner);
-        let cancel = std::sync::Arc::new(AtomicBool::new(false));
-        let raiser = {
-            let cancel = std::sync::Arc::clone(&cancel);
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                cancel.store(true, Ordering::SeqCst);
-            })
-        };
+        // The cancel is raised from the per-line hook on the scripted
+        // non-discovery line, so the wait observes it deterministically on
+        // its next poll rather than racing a timer.
+        let cancel = AtomicBool::new(false);
         let attached = attach_launched(
             &runner,
             SERIAL,
             &mut launch,
             &FacadeKey::default(),
-            &mut |_| {},
+            &mut |_| cancel.store(true, Ordering::SeqCst),
             &cancel,
         )
         .expect("a cancel is not an error");
-        raiser.join().unwrap();
         assert!(attached.is_none());
         assert_eq!(runner.runs(), vec![FORCE_STOP]);
-        assert!(
-            matches!(
-                launch.stream.lines.try_recv(),
-                Err(crate::process::TryRecvError::Disconnected)
-            ),
-            "the logcat stream is killed"
-        );
+        // Lines buffered before the kill may still be queued; the stream is
+        // killed once they are drained and the channel reports closed.
+        let killed = loop {
+            match launch.stream.lines.try_recv() {
+                Ok(_) => continue,
+                Err(err) => break matches!(err, crate::process::TryRecvError::Disconnected),
+            }
+        };
+        assert!(killed, "the logcat stream is killed");
     }
 
     /// Criterion 1: a cancel landing during the `adb forward` (after the
