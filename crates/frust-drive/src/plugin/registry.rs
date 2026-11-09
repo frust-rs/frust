@@ -719,19 +719,32 @@ const QR: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
-/// `file-dialogs`' single base contribution: a Cargo dependency and nothing
-/// else. Desktop dialogs go through `rfd` (portal/zenity, NSOpenPanel,
-/// IFileDialog); no manifest permission, plist key, Gradle module or Swift
-/// package is involved, and Android/iOS report `Unsupported`.
-const FILE_DIALOGS_BASE: &[Contribution] = &[Contribution::CargoDep {
-    name: "frust-file-dialogs",
-}];
+/// `file-dialogs`' base contributions: the Cargo dependency, the plugin's own
+/// Android library module (the Storage Access Framework host under
+/// `plugins/file-dialogs/platform/android`) and the `UniformTypeIdentifiers`
+/// framework the iOS `UIDocumentPickerViewController` backend types its
+/// pickers with. Desktop dialogs go through `rfd` (portal/zenity, NSOpenPanel,
+/// IFileDialog) and add no manifest permission, plist key or Swift package.
+/// The web target reports `Unsupported`.
+const FILE_DIALOGS_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-file-dialogs",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-file-dialogs",
+        rel_path: "plugins/file-dialogs/platform/android",
+    },
+    Contribution::IosFramework {
+        name: "UniformTypeIdentifiers",
+    },
+];
 
 const FILE_DIALOGS: PluginSpec = PluginSpec {
     id: "file-dialogs",
-    summary: "Native file open/save dialogs on Linux, macOS and Windows via rfd \
-              (blocking calls: run them in spawn_blocking); Android, iOS and web \
-              report Unsupported.",
+    summary: "Native file open/save dialogs on Linux, macOS and Windows via rfd; \
+              Android (Storage Access Framework) and iOS (document picker) \
+              pickers; web reports Unsupported (blocking calls: run them in \
+              spawn_blocking).",
     crate_dir: "file-dialogs",
     base: FILE_DIALOGS_BASE,
     optional_features: &[],
@@ -1188,14 +1201,13 @@ mod tests {
     /// same single-contribution shape this test already checks, so it is
     /// grouped here rather than duplicated into its own test.
     #[test]
-    fn design_systems_url_launcher_and_file_dialogs_are_each_a_cargo_dep_and_nothing_else() {
+    fn design_systems_and_url_launcher_are_each_a_cargo_dep_and_nothing_else() {
         for (id, crate_name) in [
             ("glyph", "frust-glyph"),
             ("material", "frust-material"),
             ("cupertino", "frust-cupertino"),
             ("shadcn", "frust-shadcn"),
             ("url-launcher", "frust-url-launcher"),
-            ("file-dialogs", "frust-file-dialogs"),
         ] {
             let spec = find_plugin(id).unwrap();
             assert_eq!(spec.crate_dir, id);
@@ -1640,6 +1652,132 @@ mod tests {
 
         let after_first = snapshot_tree(&root);
         let second = add_plugin(&root, "photo-library", &[]).unwrap();
+        assert_eq!(second.items.len(), 3);
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The `file-dialogs` entry's base contributions: the Cargo dependency,
+    /// the Android library module and the `UniformTypeIdentifiers` framework;
+    /// no permission or plist entry and no optional feature.
+    #[test]
+    fn file_dialogs_base_contributions_match_the_final_accounting() {
+        let spec = find_plugin("file-dialogs").unwrap();
+        assert_eq!(spec.crate_dir, "file-dialogs");
+        assert!(spec.optional_features.is_empty());
+        assert_eq!(spec.requires_sibling, None);
+        assert_eq!(spec.base.len(), 3, "{:?}", spec.base);
+        assert!(matches!(
+            spec.base[0],
+            Contribution::CargoDep {
+                name: "frust-file-dialogs"
+            }
+        ));
+        assert!(matches!(
+            spec.base[1],
+            Contribution::GradleModule {
+                gradle_name: ":frust-file-dialogs",
+                rel_path: "plugins/file-dialogs/platform/android",
+            }
+        ));
+        assert!(matches!(
+            spec.base[2],
+            Contribution::IosFramework {
+                name: "UniformTypeIdentifiers"
+            }
+        ));
+        assert!(
+            !spec.base.iter().any(|c| matches!(
+                c,
+                Contribution::ManifestPermission { .. } | Contribution::PlistEntry { .. }
+            )),
+            "file-dialogs adds no ManifestPermission and no PlistEntry"
+        );
+    }
+
+    /// The `file-dialogs` Gradle module path must exist in this checkout: the
+    /// registry names it, and a typo would surface only as a Gradle failure
+    /// in a generated app.
+    #[test]
+    fn file_dialogs_gradle_module_path_exists_in_this_checkout() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let spec = find_plugin("file-dialogs").unwrap();
+        let modules: Vec<&str> = spec
+            .base
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::GradleModule { rel_path, .. } => Some(*rel_path),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(modules, ["plugins/file-dialogs/platform/android"]);
+        assert!(
+            repo_root
+                .join(modules[0])
+                .join("build.gradle.kts")
+                .is_file(),
+            "`{}` must be a Gradle module directory in this checkout",
+            modules[0]
+        );
+    }
+
+    /// `file-dialogs` applied twice: the Cargo dependency, Gradle wiring and
+    /// the `UniformTypeIdentifiers` link flag land in every build
+    /// configuration, and a re-apply leaves a byte-identical tree.
+    #[test]
+    fn file_dialogs_add_plugin_applies_every_contribution_and_reapply_is_idempotent() {
+        let root = scaffold_project("file-dialogs-idempotence");
+        let pre_plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+
+        let first = add_plugin(&root, "file-dialogs", &[]).unwrap();
+        assert_eq!(first.plugin_id, "file-dialogs");
+        assert_eq!(first.items.len(), 3, "{first:?}");
+        assert!(
+            first.items.iter().all(|i| i.outcome == AddOutcome::Applied),
+            "{first:?}"
+        );
+
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("frust-file-dialogs"), "{cargo}");
+        let settings = fs::read_to_string(root.join("android/settings.gradle.kts")).unwrap();
+        assert!(
+            settings.contains("include(\":frust-file-dialogs\")"),
+            "{settings}"
+        );
+        let app_build = fs::read_to_string(root.join("android/app/build.gradle.kts")).unwrap();
+        assert!(
+            app_build.contains("implementation(project(\":frust-file-dialogs\"))"),
+            "{app_build}"
+        );
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        let lists = pbxproj.matches("OTHER_LDFLAGS = (").count();
+        assert!(lists >= 2, "scaffold has {lists} OTHER_LDFLAGS lists");
+        assert_eq!(
+            pbxproj
+                .matches("\"-framework\",\n\t\t\t\t\tUniformTypeIdentifiers,\n")
+                .count(),
+            lists,
+            "{pbxproj}"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert_eq!(plist, pre_plist, "file-dialogs must add no Info.plist key");
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "file-dialogs", &[]).unwrap();
         assert_eq!(second.items.len(), 3);
         assert!(
             second
