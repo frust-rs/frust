@@ -87,7 +87,8 @@ mod virtual_clock {
     }
 
     // Clippy's `missing_const_for_thread_local` flags even an already-const initializer on
-    // the mobile targets, so the module is allow-scoped.
+    // the mobile targets, so this `tls` module is allow-scoped (as the flush-registry
+    // `tls` module further down is).
     #[allow(clippy::missing_const_for_thread_local)]
     mod tls {
         use super::*;
@@ -311,6 +312,9 @@ pub mod test_support {
     /// from it. A
     /// sleep armed inside the interval fires in the same call. Afterwards `now` is the
     /// target, `now + by` saturating at [`Duration::MAX`].
+    ///
+    /// The cost scales with the deadlines inside the interval: a self-re-arming timer whose
+    /// period is much shorter than `by` runs one iteration per period. That is intended.
     ///
     /// # Panics
     ///
@@ -666,8 +670,6 @@ mod tests {
 
     const SHORT: Duration = Duration::from_millis(10);
     const LONG: Duration = Duration::from_secs(10);
-    /// Comfortably past [`SHORT`], for the assertions that something did not happen.
-    const PAST_SHORT: Duration = Duration::from_millis(60);
     const DEADLINE: Duration = Duration::from_secs(5);
 
     #[derive(Clone)]
@@ -690,11 +692,6 @@ mod tests {
         }
     }
 
-    fn pump_for(rt: &ReactiveRuntime, duration: Duration) {
-        let start = Instant::now();
-        pump_until(rt, || start.elapsed() >= duration);
-    }
-
     fn counter() -> (Rc<Cell<u32>>, impl FnOnce() + 'static) {
         let count = Rc::new(Cell::new(0));
         let bump = Rc::clone(&count);
@@ -704,40 +701,51 @@ mod tests {
     #[test]
     fn a_timer_fires_once_after_its_deadline() {
         let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
         let (count, bump) = counter();
         let timer = Timer::new(SHORT, bump);
+        rt.pump_local();
         assert!(timer.is_active());
         assert_eq!(count.get(), 0, "arming must not run the callback");
 
-        pump_until(rt, || count.get() > 0);
+        advance(SHORT);
+        rt.pump_local();
         assert_eq!(count.get(), 1);
         assert!(!timer.is_active());
 
-        pump_for(rt, PAST_SHORT);
+        advance(LONG);
+        rt.pump_local();
         assert_eq!(count.get(), 1, "the callback runs exactly once");
     }
 
     #[test]
     fn cancel_stops_the_timer_at_once() {
         let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
         let (count, bump) = counter();
         let timer = Timer::new(SHORT, bump);
+        rt.pump_local();
         timer.cancel();
         assert!(!timer.is_active());
-        pump_for(rt, PAST_SHORT);
+        advance(LONG);
+        rt.pump_local();
         assert_eq!(count.get(), 0);
     }
 
     #[test]
     fn dropping_the_handle_cancels_and_detach_does_not() {
         let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
         let (dropped, bump_dropped) = counter();
         drop(Timer::new(SHORT, bump_dropped));
         let (detached, bump_detached) = counter();
         Timer::new(SHORT, bump_detached).detach();
+        rt.pump_local();
 
-        pump_until(rt, || detached.get() > 0);
-        pump_for(rt, PAST_SHORT);
+        advance(SHORT);
+        rt.pump_local();
+        advance(LONG);
+        rt.pump_local();
         assert_eq!(dropped.get(), 0, "a dropped handle cancels");
         assert_eq!(detached.get(), 1, "a detached handle keeps running");
     }
@@ -745,6 +753,7 @@ mod tests {
     #[test]
     fn owner_cleanup_cancels_held_and_detached_timers() {
         let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
         let (held, bump_held) = counter();
         let (detached, bump_detached) = counter();
         let (owner, timer) = rt.with_owner(|| {
@@ -755,11 +764,13 @@ mod tests {
             });
             (owner, timer)
         });
+        rt.pump_local();
         assert!(timer.is_active());
 
         owner.cleanup();
         assert!(!timer.is_active(), "inactive before the next poll");
-        pump_for(rt, PAST_SHORT);
+        advance(LONG);
+        rt.pump_local();
         assert_eq!(held.get(), 0);
         assert_eq!(
             detached.get(),
@@ -773,6 +784,7 @@ mod tests {
     #[test]
     fn the_callback_runs_under_the_arming_owner() {
         let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
         let seen = Rc::new(Cell::new(None));
         let write = Rc::clone(&seen);
         let owner = rt.with_owner(Owner::new);
@@ -782,13 +794,16 @@ mod tests {
                 write.set(use_context::<Marker>().map(|marker| marker.0));
             })
         });
-        pump_until(rt, || seen.get().is_some());
+        rt.pump_local();
+        advance(SHORT);
+        rt.pump_local();
         assert_eq!(seen.get(), Some(7));
     }
 
     #[test]
     fn spawn_local_scoped_keeps_the_owner_across_an_await_and_spawn_local_loses_it() {
         let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
         let scoped = Rc::new(Cell::new(None));
         let plain = Rc::new(Cell::new(None));
         let (scoped_write, plain_write) = (Rc::clone(&scoped), Rc::clone(&plain));
@@ -796,16 +811,18 @@ mod tests {
         owner.with(|| {
             provide_context(Marker(7));
             spawn_local_scoped(async move {
-                sleep(Duration::from_millis(5)).await;
+                sleep(SHORT).await;
                 scoped_write.set(Some(use_context::<Marker>().is_some()));
             });
             Executor::spawn_local(async move {
-                sleep(Duration::from_millis(5)).await;
+                sleep(SHORT).await;
                 plain_write.set(Some(use_context::<Marker>().is_some()));
             });
         });
 
-        pump_until(rt, || scoped.get().is_some() && plain.get().is_some());
+        rt.pump_local();
+        advance(SHORT);
+        rt.pump_local();
         assert_eq!(scoped.get(), Some(true));
         assert_eq!(plain.get(), Some(false));
     }
@@ -813,6 +830,7 @@ mod tests {
     #[test]
     fn owner_cleanup_aborts_spawn_local_scoped() {
         let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
         let (count, bump) = counter();
         let owner = rt.with_owner(Owner::new);
         owner.with(|| {
@@ -821,20 +839,24 @@ mod tests {
                 bump();
             });
         });
+        rt.pump_local();
         owner.cleanup();
-        pump_for(rt, PAST_SHORT);
+        advance(LONG);
+        rt.pump_local();
         assert_eq!(count.get(), 0);
     }
 
     #[test]
     fn fire_now_runs_in_the_caller_and_retires_the_deadline() {
         let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
         let (count, bump) = counter();
         let timer = Timer::new(SHORT, bump);
         timer.fire_now();
         assert_eq!(count.get(), 1, "fire_now is synchronous");
         assert!(!timer.is_active());
-        pump_for(rt, PAST_SHORT);
+        advance(LONG);
+        rt.pump_local();
         timer.fire_now();
         assert_eq!(
             count.get(),
@@ -931,6 +953,35 @@ mod tests {
         push_app_lifecycle(AppLifecycleState::Resumed);
         push_app_lifecycle(AppLifecycleState::Inactive);
         assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn a_direct_resumed_to_paused_push_flushes_a_flagged_timer_at_inactive() {
+        let (_guard, _rt) = setup();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        let flushed = Arc::new(AtomicUsize::new(0));
+        let write = Arc::clone(&flushed);
+        let timer = Timer::new(LONG, move || {
+            write.fetch_add(1, Ordering::SeqCst);
+        })
+        .flush_on_background();
+
+        // Registered after the flush listener, so it runs later in the same push.
+        let seen_at_hide = Arc::new(AtomicUsize::new(usize::MAX));
+        let (seen, source) = (Arc::clone(&seen_at_hide), Arc::clone(&flushed));
+        let _observer = AppLifecycleListener::new().on_hide(move || {
+            seen.store(source.load(Ordering::SeqCst), Ordering::SeqCst);
+        });
+
+        // Resumed -> Paused is one push that walks Inactive, Hidden, Paused.
+        push_app_lifecycle(AppLifecycleState::Paused);
+        assert_eq!(flushed.load(Ordering::SeqCst), 1, "fired exactly once");
+        assert_eq!(
+            seen_at_hide.load(Ordering::SeqCst),
+            1,
+            "already fired when the hide observer runs"
+        );
+        assert!(!timer.is_active());
     }
 
     #[test]
@@ -1078,24 +1129,26 @@ mod tests {
 
     use super::test_support::{self, advance, install_virtual_clock};
 
-    const MS: fn(u64) -> Duration = Duration::from_millis;
+    const fn ms(millis: u64) -> Duration {
+        Duration::from_millis(millis)
+    }
 
     #[test]
     fn virtual_timer_fires_exactly_at_its_deadline_once() {
         let (_guard, rt) = setup();
         let _clock = install_virtual_clock();
         let (count, bump) = counter();
-        let timer = Timer::new(MS(300), bump);
+        let timer = Timer::new(ms(300), bump);
         rt.pump_local();
-        advance(MS(299));
+        advance(ms(299));
         rt.pump_local();
         assert_eq!(count.get(), 0);
         assert!(timer.is_active());
-        advance(MS(1));
+        advance(ms(1));
         rt.pump_local();
         assert_eq!(count.get(), 1);
         assert!(!timer.is_active());
-        advance(MS(1000));
+        advance(ms(1000));
         rt.pump_local();
         assert_eq!(count.get(), 1);
         assert_eq!(test_support::pending_count(), 0);
@@ -1107,10 +1160,10 @@ mod tests {
         let _clock = install_virtual_clock();
         let order = Rc::new(RefCell::new(Vec::new()));
         let (a, b) = (Rc::clone(&order), Rc::clone(&order));
-        let _slow = Timer::new(MS(100), move || a.borrow_mut().push(100));
-        let _fast = Timer::new(MS(50), move || b.borrow_mut().push(50));
+        let _slow = Timer::new(ms(100), move || a.borrow_mut().push(100));
+        let _fast = Timer::new(ms(50), move || b.borrow_mut().push(50));
         rt.pump_local();
-        advance(MS(100));
+        advance(ms(100));
         rt.pump_local();
         assert_eq!(*order.borrow(), vec![50, 100]);
     }
@@ -1120,15 +1173,15 @@ mod tests {
         let (_guard, rt) = setup();
         let _clock = install_virtual_clock();
         let (count, bump) = counter();
-        let cancelled = Timer::new(MS(100), bump);
+        let cancelled = Timer::new(ms(100), bump);
         let (dropped_count, bump_dropped) = counter();
-        let dropped = Timer::new(MS(100), bump_dropped);
+        let dropped = Timer::new(ms(100), bump_dropped);
         rt.pump_local();
         assert_eq!(test_support::pending_count(), 2);
         cancelled.cancel();
         drop(dropped);
         rt.pump_local();
-        advance(MS(500));
+        advance(ms(500));
         rt.pump_local();
         assert_eq!(count.get(), 0);
         assert_eq!(dropped_count.get(), 0);
@@ -1141,14 +1194,14 @@ mod tests {
         let _clock = install_virtual_clock();
         let (count, bump) = counter();
         Executor::spawn_local(async move {
-            sleep(MS(20)).await;
+            sleep(ms(20)).await;
             bump();
         });
         rt.pump_local();
-        std::thread::sleep(MS(50));
+        std::thread::sleep(ms(50));
         rt.pump_local();
         assert_eq!(count.get(), 0, "wall time must not move a virtual sleep");
-        advance(MS(20));
+        advance(ms(20));
         rt.pump_local();
         assert_eq!(count.get(), 1);
     }
@@ -1173,8 +1226,8 @@ mod tests {
         let (owner, timer) = rt.with_owner(|| {
             let owner = Owner::new();
             let timer = owner.with(|| {
-                Timer::new(MS(10), bump_detached).detach();
-                Timer::new(MS(10), bump_held)
+                Timer::new(ms(10), bump_detached).detach();
+                Timer::new(ms(10), bump_held)
             });
             (owner, timer)
         });
@@ -1182,7 +1235,7 @@ mod tests {
         owner.cleanup();
         assert!(!timer.is_active());
         rt.pump_local();
-        advance(MS(10));
+        advance(ms(10));
         rt.pump_local();
         assert_eq!((held.get(), detached.get()), (0, 0));
         assert_eq!(test_support::pending_count(), 0);
@@ -1194,8 +1247,8 @@ mod tests {
         {
             let _clock = install_virtual_clock();
             assert!(test_support::is_virtual());
-            advance(MS(5));
-            assert_eq!(test_support::now(), MS(5));
+            advance(ms(5));
+            assert_eq!(test_support::now(), ms(5));
         }
         assert!(!test_support::is_virtual());
         let (count, bump) = counter();
@@ -1266,32 +1319,32 @@ mod tests {
         let flag = Rc::new(Cell::new(false));
         let set = Rc::clone(&flag);
         spawn(async move {
-            sleep(MS(50)).await;
-            sleep(MS(50)).await;
+            sleep(ms(50)).await;
+            sleep(ms(50)).await;
             set.set(true);
         });
         rt.pump_local();
-        advance(MS(100));
+        advance(ms(100));
         assert!(flag.get());
-        assert_eq!(test_support::now(), MS(100));
+        assert_eq!(test_support::now(), ms(100));
 
         let split = Rc::new(Cell::new(false));
         let set = Rc::clone(&split);
         spawn(async move {
-            sleep(MS(50)).await;
-            sleep(MS(50)).await;
+            sleep(ms(50)).await;
+            sleep(ms(50)).await;
             set.set(true);
         });
         rt.pump_local();
-        advance(MS(50));
+        advance(ms(50));
         rt.pump_local();
-        advance(MS(50));
+        advance(ms(50));
         assert!(split.get());
     }
 
     fn rearm(times: Rc<RefCell<Vec<Duration>>>, left: u32) {
         let next = Rc::clone(&times);
-        let timer = Timer::new(MS(100), move || {
+        let timer = Timer::new(ms(100), move || {
             next.borrow_mut().push(test_support::now());
             if left > 1 {
                 rearm(next, left - 1);
@@ -1307,8 +1360,8 @@ mod tests {
         let times = Rc::new(RefCell::new(Vec::new()));
         rearm(Rc::clone(&times), 10);
         rt.pump_local();
-        advance(MS(1000));
-        let expected: Vec<Duration> = (1..=10).map(|n| MS(100 * n)).collect();
+        advance(ms(1000));
+        let expected: Vec<Duration> = (1..=10).map(|n| ms(100 * n)).collect();
         assert_eq!(*times.borrow(), expected);
     }
 
@@ -1319,17 +1372,17 @@ mod tests {
         let log = Rc::new(RefCell::new(Vec::new()));
         let a = Rc::clone(&log);
         spawn(async move {
-            sleep(MS(10)).await;
-            sleep(MS(10)).await;
+            sleep(ms(10)).await;
+            sleep(ms(10)).await;
             a.borrow_mut().push("A");
         });
         let b = Rc::clone(&log);
         spawn(async move {
-            sleep(MS(30)).await;
+            sleep(ms(30)).await;
             b.borrow_mut().push("B");
         });
         rt.pump_local();
-        advance(MS(30));
+        advance(ms(30));
         assert_eq!(*log.borrow(), vec!["A", "B"]);
     }
 
@@ -1339,19 +1392,19 @@ mod tests {
         let _clock = install_virtual_clock();
         let seen = Rc::new(RefCell::new(Vec::new()));
         let (a, b) = (Rc::clone(&seen), Rc::clone(&seen));
-        let _t1 = Timer::new(MS(30), move || a.borrow_mut().push(test_support::now()));
-        let _t2 = Timer::new(MS(70), move || b.borrow_mut().push(test_support::now()));
+        let _t1 = Timer::new(ms(30), move || a.borrow_mut().push(test_support::now()));
+        let _t2 = Timer::new(ms(70), move || b.borrow_mut().push(test_support::now()));
         rt.pump_local();
-        advance(MS(100));
-        assert_eq!(*seen.borrow(), vec![MS(30), MS(70)]);
-        assert_eq!(test_support::now(), MS(100));
+        advance(ms(100));
+        assert_eq!(*seen.borrow(), vec![ms(30), ms(70)]);
+        assert_eq!(test_support::now(), ms(100));
     }
 
     #[test]
     fn an_unrepresentable_deadline_never_fires_and_does_not_panic() {
         let (_guard, rt) = setup();
         let _clock = install_virtual_clock();
-        advance(MS(5));
+        advance(ms(5));
         let (count, bump) = counter();
         let timer = Timer::new(Duration::MAX, bump);
         rt.pump_local();
@@ -1367,7 +1420,7 @@ mod tests {
     fn a_dropped_sleep_leaves_pending_count_at_once() {
         let (_guard, rt) = setup();
         let _clock = install_virtual_clock();
-        let (task, handle) = futures::future::abortable(sleep(MS(100)));
+        let (task, handle) = futures::future::abortable(sleep(ms(100)));
         spawn(async move {
             let _ = task.await;
         });
