@@ -1,38 +1,38 @@
-//! `frust-file-dialogs`: native file open/save dialogs on Linux, macOS and
-//! Windows, backed by the `rfd` crate.
+//! `frust-file-dialogs`: native file dialogs, persistable folder access and
+//! file export.
 //!
-//! This is a **platform plugin** (`docs/ARCHITECTURE.md`): it depends on
-//! platform crates only (no `frust-*` framework crate), and the `frust`
-//! facade does not re-export it. Android, iOS and web report
-//! [`FileDialogError::Unsupported`].
+//! A **platform plugin** (`docs/ARCHITECTURE.md`) the `frust` facade does not
+//! re-export. Linux, macOS and Windows go through `rfd`, Android through the
+//! Storage Access Framework and iOS through `UIDocumentPickerViewController`;
+//! any other target reports [`FileDialogError::Unsupported`]. On Android and iOS
+//! opening a file returns an app-private copy and [`FileDialog::save_file`] is
+//! unsupported: use [`FileDialog::export_file`].
 //!
 //! # Blocking contract
 //!
-//! Every terminal call ([`FileDialog::open_file`], [`FileDialog::open_files`],
-//! [`FileDialog::save_file`]) blocks the calling thread until the user
-//! dismisses the dialog. Run them inside `frust::spawn_blocking` and deliver
-//! the result through `use_task` / `AsyncValue`; never call them from a paint
-//! or event handler, and never write a signal from the background thread.
-//!
-//! Threading follows `rfd`. On macOS it marshals the panel to the main thread
-//! (`dispatch2::run_on_main`) when `NSApplication` is running, so calling from
-//! `frust::spawn_blocking` under the frust desktop shell is correct and the
-//! main thread blocks while the modal panel runs. On Windows it initialises
-//! COM per calling thread, so a worker thread is fine. On Linux the portal
-//! call blocks only the calling thread. The Linux leg was exercised on
-//! 2026-10-18; the macOS and Windows legs have not been run on this plugin yet.
-//!
-//! # Cancellation and failure
-//!
-//! `Ok(None)` / an empty `Vec` means the user cancelled. `rfd`'s synchronous
-//! API cannot report backend failures: on Linux, when neither an
-//! xdg-desktop-portal backend nor `zenity` is available it logs an error and
-//! returns no selection, which is indistinguishable from a cancel. On a
-//! zenity-only desktop `rfd` splits a multi-selection on `'|'`, so
-//! [`FileDialog::open_files`] loses a file name containing `|` (the relative
-//! fragments such a split leaves are dropped, never returned as paths).
+//! Every [`FileDialog`] terminal call blocks until the dialog closes, and
+//! [`FolderGrant`] and [`FolderEntry`] calls block on storage. Run them inside
+//! `frust::spawn_blocking` and deliver the result through `use_task` /
+//! `AsyncValue`; never call them from a paint or event handler or write a signal
+//! from the background thread. Android and iOS refuse a call on the UI thread
+//! with [`FileDialogError::UiThread`]. A cancel is `Ok(None)`, an empty `Vec` or
+//! [`ExportOutcome::Cancelled`]; `rfd` cannot report a missing desktop backend,
+//! which looks like a cancel (see the README).
 
+mod export;
 mod filter;
+mod folder;
+#[cfg(any(
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+mod walk;
 
 #[cfg(any(
     target_os = "linux",
@@ -45,7 +45,15 @@ mod filter;
 ))]
 #[path = "desktop.rs"]
 mod backend;
+#[cfg(target_os = "android")]
+#[path = "android.rs"]
+mod backend;
+#[cfg(target_os = "ios")]
+#[path = "ios.rs"]
+mod backend;
 #[cfg(not(any(
+    target_os = "android",
+    target_os = "ios",
     target_os = "linux",
     target_os = "macos",
     target_os = "windows",
@@ -61,15 +69,35 @@ use backend::show;
 
 use std::path::{Path, PathBuf};
 
+pub use export::ExportOutcome;
 pub use filter::FileFilter;
+pub use folder::{EntryLocation, FolderEntry, FolderGrant, ListOptions};
 
-/// Why a dialog call failed. Never carries paths.
+/// Why a dialog call failed. Never carries paths; the detail goes to the log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum FileDialogError {
     /// This target has no native file dialog backend.
     #[error("file dialogs are not supported on this platform")]
     Unsupported,
+    /// A blocking call ran on the Android or iOS UI thread and was refused.
+    #[error("file dialog calls block and cannot run on the UI thread")]
+    UiThread,
+    /// No foreground activity or view controller could present the dialog.
+    #[error("no foreground window is available to present the file dialog")]
+    NoPresenter,
+    /// The platform side of the plugin is not initialised in this process.
+    #[error("the file dialog platform integration is not initialized")]
+    PlatformNotInitialized,
+    /// A persisted folder grant is no longer honoured; ask the user again.
+    #[error("access to the folder is no longer available")]
+    AccessLost,
+    /// Reading, writing or copying a file failed.
+    #[error("a file operation failed")]
+    Io,
+    /// The platform dialog or storage API reported a failure.
+    #[error("the platform file dialog failed")]
+    Platform,
 }
 
 /// The dialog flavour a [`Request`] asks for.
@@ -78,6 +106,7 @@ pub(crate) enum Kind {
     OpenFile,
     OpenFiles,
     SaveFile,
+    PickFolder,
 }
 
 /// Everything a backend needs; built by [`FileDialog`], asserted in tests.
@@ -154,6 +183,34 @@ impl FileDialog {
         Ok(picked.pop())
     }
 
+    /// Picks a folder and holds access to it. Blocks; `Ok(None)` means
+    /// cancelled. Filters are ignored.
+    pub fn pick_folder(self) -> Result<Option<FolderGrant>, FileDialogError> {
+        backend::pick_folder(self.folder_request())
+    }
+
+    /// Lets the user choose where a copy of `source` goes, pre-filling
+    /// `suggested_name` or else `source`'s own name, and writes it. Blocks.
+    pub fn export_file(
+        self,
+        source: &Path,
+        suggested_name: Option<&str>,
+    ) -> Result<ExportOutcome, FileDialogError> {
+        backend::export_file(self.export_request(source, suggested_name), source)
+    }
+
+    fn folder_request(self) -> Request {
+        Request {
+            filters: Vec::new(),
+            ..self.request(Kind::PickFolder, None)
+        }
+    }
+
+    fn export_request(self, source: &Path, suggested_name: Option<&str>) -> Request {
+        let source_name = source.file_name().and_then(|name| name.to_str());
+        self.request(Kind::SaveFile, suggested_name.or(source_name))
+    }
+
     fn request(self, kind: Kind, file_name: Option<&str>) -> Request {
         Request {
             kind,
@@ -161,6 +218,48 @@ impl FileDialog {
             directory: self.directory,
             file_name: file_name.map(str::to_owned),
             filters: self.filters,
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_dir {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+
+    /// A unique directory under the system temp dir, removed on drop.
+    pub(crate) struct TestDir(PathBuf);
+
+    impl TestDir {
+        pub(crate) fn new() -> Self {
+            let unique = format!(
+                "frust-file-dialogs-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            );
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&path).expect("create test dir");
+            Self(path)
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+
+        /// Writes `bytes` at `relative`, creating parents, and returns the path.
+        pub(crate) fn write(&self, relative: &str, bytes: &[u8]) -> PathBuf {
+            let path = self.0.join(relative);
+            std::fs::create_dir_all(path.parent().expect("has a parent")).expect("create parent");
+            std::fs::write(&path, bytes).expect("write test file");
+            path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 }
@@ -190,6 +289,45 @@ mod tests {
         let req = FileDialog::new().request(Kind::OpenFile, None);
         assert!(req.title.is_none() && req.directory.is_none() && req.file_name.is_none());
         assert!(req.filters.is_empty());
+    }
+
+    #[test]
+    fn folder_request_drops_filters_and_keeps_title_and_directory() {
+        let req = FileDialog::new()
+            .title("Pick")
+            .directory("/tmp")
+            .filter(FileFilter::new("Images", &["png"]))
+            .folder_request();
+        assert_eq!(req.kind, Kind::PickFolder);
+        assert_eq!(req.title.as_deref(), Some("Pick"));
+        assert_eq!(req.directory.as_deref(), Some(Path::new("/tmp")));
+        assert!(req.filters.is_empty() && req.file_name.is_none());
+    }
+
+    #[test]
+    fn export_request_prefers_the_suggested_name_over_the_source_name() {
+        let source = Path::new("/data/report.pdf");
+        let named = FileDialog::new().export_request(source, Some("copy.pdf"));
+        assert_eq!(named.kind, Kind::SaveFile);
+        assert_eq!(named.file_name.as_deref(), Some("copy.pdf"));
+        let unnamed = FileDialog::new().export_request(source, None);
+        assert_eq!(unnamed.file_name.as_deref(), Some("report.pdf"));
+    }
+
+    #[test]
+    fn no_error_display_carries_a_path() {
+        for error in [
+            FileDialogError::Unsupported,
+            FileDialogError::UiThread,
+            FileDialogError::NoPresenter,
+            FileDialogError::PlatformNotInitialized,
+            FileDialogError::AccessLost,
+            FileDialogError::Io,
+            FileDialogError::Platform,
+        ] {
+            let text = error.to_string();
+            assert!(!text.is_empty() && !text.contains(['/', '\\']), "{text}");
+        }
     }
 
     #[test]
