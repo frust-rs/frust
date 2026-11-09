@@ -290,8 +290,10 @@ fn init_logger_once() {
 /// # Safety
 ///
 /// When non-null, `handle` must be a pointer previously returned by [`init`] and
-/// not yet passed to [`destroy`]. The returned reference must not outlive the
-/// current native call (it aliases the boxed handle the Swift side still owns).
+/// not yet passed to [`destroy`], used on the main thread with no other export
+/// active for the same handle, on the stack or concurrently (this builds a
+/// `&mut IosAppHandle`). The returned reference must not outlive the current
+/// native call (it aliases the boxed handle the Swift side still owns).
 unsafe fn handle_mut<'a>(handle: *mut c_void) -> Option<&'a mut IosAppHandle> {
     if crate::ffi_support::handle_is_null(handle) {
         return None;
@@ -350,7 +352,14 @@ fn report_device_memory() {
 /// on any failure (null layer, GPU init error, panic) returns null, matching
 /// Swift's "no native side yet" sentinel. `pre_init` is the macro's optional
 /// `@pre_init` hook (a no-op closure when absent); a panic in it also returns null.
-pub fn init(
+///
+/// # Safety
+///
+/// `metal_layer` must be a live `CAMetalLayer*` (null is rejected and `frust_init`
+/// returns null) that stays valid, owned and unreleased by the caller until
+/// [`destroy`] has returned: the handle retains it and the render thread builds the
+/// surface from it. Call on the main thread.
+pub unsafe fn init(
     metal_layer: *mut c_void,
     width: u32,
     height: u32,
@@ -432,9 +441,12 @@ pub fn init(
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+/// `view` must be the app's live, unreleased `FrustView` (`UIView`) pointer, passed
+/// on the main thread; a null `view` is ignored.
 pub unsafe fn init_accessibility(handle: *mut c_void, view: *mut c_void) {
     guard("frust_init_accessibility", (), || {
         if crate::ffi_support::handle_is_null(view) {
@@ -1492,9 +1504,10 @@ fn recover_surface(app: &mut IosAppHandle, physical: (u32, u32), scale: f32) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
     guard("frust_resize", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -1539,9 +1552,10 @@ pub unsafe fn resize(handle: *mut c_void, width: u32, height: u32, scale: f32) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
     // Benign default `FRAME_ALIVE` on a caught panic: a single frame's failure
     // must not stop the CADisplayLink — only a render-thread FATAL does.
@@ -1596,9 +1610,10 @@ pub unsafe fn render_frame(handle: *mut c_void, timestamp_ns: u64) -> u8 {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn dispatch_touch(handle: *mut c_void, phase: u32, pointer_id: u32, x: f32, y: f32) {
     guard("frust_dispatch_touch", (), || {
         // Cheap; keeps controller-driven updates fresh between CADisplayLink
@@ -1630,9 +1645,11 @@ pub unsafe fn dispatch_touch(handle: *mut c_void, phase: u32, pointer_id: u32, x
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+/// `text` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
 pub unsafe fn ime_apply(
     handle: *mut c_void,
     text: *const c_char,
@@ -1673,9 +1690,10 @@ pub unsafe fn ime_apply(
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn ime_state_json(handle: *mut c_void) -> *mut c_char {
     guard("frust_ime_state_json", std::ptr::null_mut(), || {
         // Cheap; keeps controller-driven updates fresh between frames.
@@ -1722,9 +1740,11 @@ pub unsafe fn ime_state_json(handle: *mut c_void) -> *mut c_char {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+/// `text` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
 pub unsafe fn edit_command(handle: *mut c_void, cmd: u8, text: *const c_char) {
     guard("frust_edit_command", (), || {
         // Cheap; keeps controller-driven updates fresh between frames (mirrors
@@ -1774,8 +1794,10 @@ pub unsafe fn edit_command(handle: *mut c_void, cmd: u8, text: *const c_char) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn take_clipboard_write(handle: *mut c_void) -> *mut c_char {
     guard("frust_take_clipboard_write", std::ptr::null_mut(), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -1825,9 +1847,10 @@ pub unsafe fn take_clipboard_write(handle: *mut c_void) -> *mut c_char {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn take_paste_request(handle: *mut c_void) -> u8 {
     guard("frust_take_paste_request", 0, || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -1871,9 +1894,10 @@ pub unsafe fn take_paste_request(handle: *mut c_void) -> u8 {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn selection_toolbar_json(handle: *mut c_void) -> *mut c_char {
     guard("frust_selection_toolbar_json", std::ptr::null_mut(), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -1919,17 +1943,18 @@ pub unsafe fn selection_toolbar_json(handle: *mut c_void) -> *mut c_char {
 ///
 /// # Safety
 ///
-/// `s` must be null or a pointer returned by one of the string-returning
-/// exports listed above and not yet freed; it must not be used after this call.
+/// `s` must be null (a no-op) or a pointer returned by one of the string-returning
+/// exports (`frust_ime_state_json`, `frust_take_clipboard_write`,
+/// `frust_selection_toolbar_json`, `frust_platform_view_commands_json`) that has not
+/// been freed already, and it must not be used after this call.
 pub unsafe fn string_free(s: *mut c_char) {
     guard("frust_string_free", (), || {
         if s.is_null() {
             return;
         }
-        // SAFETY: `s` was produced by `CString::into_raw` in one of this
-        // module's string-returning exports (see this fn's doc) and is
-        // reclaimed exactly once here (the Swift side calls this exactly once
-        // per non-null result, via `defer`).
+        // SAFETY: by this fn's contract `s` is non-null here, came from
+        // `CString::into_raw` in one of the string-returning exports, and has not
+        // been freed, so it is reclaimed exactly once here.
         drop(unsafe { CString::from_raw(s) });
     });
 }
@@ -2050,9 +2075,10 @@ fn ime_state_to_json(state: Option<ImeState>) -> String {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn pause(handle: *mut c_void) {
     guard("frust_pause", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2069,9 +2095,10 @@ pub unsafe fn pause(handle: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn resume(handle: *mut c_void) {
     guard("frust_resume", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2099,9 +2126,10 @@ pub unsafe fn resume(handle: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn did_enter_background(handle: *mut c_void) {
     guard("frust_did_enter_background", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2124,9 +2152,10 @@ pub unsafe fn did_enter_background(handle: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn memory_warning(handle: *mut c_void) {
     guard("frust_memory_warning", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2190,9 +2219,10 @@ pub(crate) fn phys_footprint_bytes() -> Option<u64> {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn will_enter_foreground(handle: *mut c_void) {
     guard("frust_will_enter_foreground", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2215,9 +2245,10 @@ pub unsafe fn will_enter_foreground(handle: *mut c_void) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn sync_lifecycle(handle: *mut c_void, state: i32) {
     guard("frust_sync_lifecycle", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2247,9 +2278,10 @@ pub unsafe fn sync_lifecycle(handle: *mut c_void, state: i32) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn set_appearance(handle: *mut c_void, dark: u8) {
     guard("frust_set_appearance", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2274,9 +2306,10 @@ pub unsafe fn set_appearance(handle: *mut c_void, dark: u8) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn set_reduce_motion(handle: *mut c_void, reduce: u8) {
     guard("frust_set_reduce_motion", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2298,9 +2331,10 @@ pub unsafe fn set_reduce_motion(handle: *mut c_void, reduce: u8) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn set_text_scale(handle: *mut c_void, scale: f32) {
     guard("frust_set_text_scale", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2325,9 +2359,10 @@ pub unsafe fn set_text_scale(handle: *mut c_void, scale: f32) {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn set_insets(
     handle: *mut c_void,
@@ -2371,9 +2406,10 @@ pub unsafe fn set_insets(
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn set_corner_insets(
     handle: *mut c_void,
@@ -2420,9 +2456,11 @@ pub unsafe fn set_corner_insets(
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+/// `url` must be null or a NUL-terminated C string valid for the duration of the call; invalid UTF-8 is replaced lossily.
 pub unsafe fn on_deep_link(handle: *mut c_void, url: *const c_char) {
     guard("frust_on_deep_link", (), || {
         // Cheap; keeps controller-driven updates fresh between frames.
@@ -2574,9 +2612,10 @@ fn present_sync_enabled() -> bool {
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn present_frame(handle: *mut c_void) {
     guard("frust_present_frame", (), || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2707,9 +2746,10 @@ pub(crate) fn record_overlay_presents(delta: std::time::Duration, overlays: usiz
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn overlay_mode(handle: *mut c_void) -> u32 {
     guard("frust_overlay_mode", 0, || {
         // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
@@ -2737,7 +2777,15 @@ pub unsafe fn overlay_mode(handle: *mut c_void) -> u32 {
 /// through `frust_overlay_take_released`. The render thread builds (or
 /// resizes) the surface before its next frame, and a frame is requested so
 /// that frame comes at once. Never waits on the render thread.
-pub fn overlay_attach(
+///
+/// # Safety
+///
+/// `handle` must be null (the call is ignored) or satisfy the handle contract of
+/// the other exports: a pointer returned by [`init`] not yet passed to [`destroy`],
+/// main thread, no other export active for it. `layer` must be null (ignored) or a
+/// live `CAMetalLayer*` that the caller keeps alive until it is handed back through
+/// `frust_overlay_take_released` or [`destroy`] has returned.
+pub unsafe fn overlay_attach(
     handle: *mut c_void,
     overlay_id: u64,
     layer: *mut c_void,
@@ -2754,7 +2802,8 @@ pub fn overlay_attach(
         let current = table.layer(overlay_id);
         if current.is_some_and(|current| current != layer) {
             // A surface replaced at rest drops now: its parked present first.
-            drop_parked_overlay(handle, overlay_id);
+            // SAFETY: `handle` meets this fn's contract (see `handle_mut`).
+            unsafe { drop_parked_overlay(handle, overlay_id) };
         }
         if !table.attach(overlay_id, layer, size) {
             return;
@@ -2777,7 +2826,11 @@ pub fn overlay_attach(
 /// Drop overlay `overlay_id`'s parked present-sync frame, if any, through the
 /// handle's handoff — its surface (and the drawable the frame holds) is about
 /// to go.
-fn drop_parked_overlay(handle: *mut c_void, overlay_id: u64) {
+///
+/// # Safety
+///
+/// `handle` must satisfy [`handle_mut`]'s contract.
+unsafe fn drop_parked_overlay(handle: *mut c_void, overlay_id: u64) {
     // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
     if let Some(app) = unsafe { handle_mut(handle) } {
         app.drop_parked_overlay(overlay_id);
@@ -2789,10 +2842,18 @@ fn drop_parked_overlay(handle: *mut c_void, overlay_id: u64) {
 /// land of the frame drawing it — and only then is its layer handed back
 /// through `frust_overlay_take_released`, when Swift may release the view. A
 /// no-op for an unknown id.
-pub fn overlay_detach(handle: *mut c_void, overlay_id: u64) {
+///
+/// # Safety
+///
+/// `handle` must be null (only the parked-present drop is skipped) or a pointer
+/// returned by [`init`] not yet passed to [`destroy`]. The call must be made on the
+/// main thread, with no other export active for the same `handle`, on the stack or
+/// concurrently.
+pub unsafe fn overlay_detach(handle: *mut c_void, overlay_id: u64) {
     guard("frust_overlay_detach", (), || {
         let mut table = overlay_table();
-        drop_parked_overlay(handle, overlay_id);
+        // SAFETY: `handle` meets this fn's contract (see `handle_mut`).
+        unsafe { drop_parked_overlay(handle, overlay_id) };
         match table.detach(overlay_id) {
             frust_shell_common::overlay::Withdraw::Released(_) => {
                 log::info!("frust-overlay: overlay {overlay_id} detached");
@@ -2818,11 +2879,19 @@ const RELEASED_PER_CALL: usize = 64;
 /// surface is gone into `layers`, oldest first, and answer how many. Each is
 /// a `CAMetalLayer*` Swift handed to `frust_overlay_attach`, now Swift's to
 /// release with its view. `0` for a null buffer or handle, or nothing pending.
-#[allow(
-    clippy::not_unsafe_ptr_arg_deref,
-    reason = "a C-ABI entry point: Swift's buffer contract, stated at the write, is the safety argument"
-)]
-pub fn overlay_take_released(handle: *mut c_void, layers: *mut *mut c_void, capacity: u32) -> u32 {
+///
+/// # Safety
+///
+/// `layers` must be null (answered with `0`) or point to a buffer, writable for the
+/// duration of the call, with room for `capacity` pointers (at most 64 are written).
+/// `handle` is only tested for null (answered with `0`), not dereferenced; pass a
+/// pointer returned by [`init`] not yet passed to [`destroy`], or null. Call on the
+/// main thread.
+pub unsafe fn overlay_take_released(
+    handle: *mut c_void,
+    layers: *mut *mut c_void,
+    capacity: u32,
+) -> u32 {
     guard("frust_overlay_take_released", 0, || {
         if layers.is_null() || crate::ffi_support::handle_is_null(handle) {
             return 0;
@@ -2830,8 +2899,8 @@ pub fn overlay_take_released(handle: *mut c_void, layers: *mut *mut c_void, capa
         let capacity = (capacity as usize).min(RELEASED_PER_CALL);
         let mut taken = [SendableMetalLayer::new(std::ptr::null_mut()); RELEASED_PER_CALL];
         let count = overlay_table().take_released(&mut taken[..capacity]);
-        // SAFETY: Swift passes a buffer of at least `capacity` pointers,
-        // writable for the length of this call, and `count <= capacity`.
+        // SAFETY: the caller's contract gives `layers` room for `capacity`
+        // pointers, writable for this call, and `count <= capacity`.
         let out = unsafe { std::slice::from_raw_parts_mut(layers, count) };
         for (slot, layer) in out.iter_mut().zip(&taken[..count]) {
             *slot = layer.as_ptr();
@@ -3073,9 +3142,10 @@ pub(crate) fn land_frame_overlays(overlays: FrameOverlays, present: &PresentHand
 ///
 /// # Safety
 ///
-/// `handle` must be a pointer returned by [`init`] and not yet passed to
-/// [`destroy`], and it must stay valid for the duration of this call. Any C
-/// string argument must be null or NUL-terminated UTF-8 valid for the call.
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
 pub unsafe fn platform_view_commands_json(handle: *mut c_void, ack_generation: u64) -> *mut c_char {
     guard(
         "frust_platform_view_commands_json",
@@ -3102,14 +3172,21 @@ pub unsafe fn platform_view_commands_json(handle: *mut c_void, ack_generation: u
 /// `frust_destroy`: reclaim and drop the boxed handle (which drops the surface;
 /// the Swift-owned layer is released separately, afterwards). Idempotent from
 /// Swift's side because it nulls its handle right after calling this.
-pub fn destroy(handle: *mut c_void) {
+///
+/// # Safety
+///
+/// `handle` must be null (a no-op) or a pointer returned by [`init`] that has not
+/// yet been passed to this function. Call it exactly once per handle, on the main
+/// thread, with no other export active for that `handle`, on the stack or
+/// concurrently; the handle must not be used afterwards.
+pub unsafe fn destroy(handle: *mut c_void) {
     guard("frust_destroy", (), || {
         if crate::ffi_support::handle_is_null(handle) {
             return;
         }
-        // SAFETY: `handle` was produced by `Box::into_raw` in `create_handle` and
-        // is reclaimed exactly once here; the Swift side nulls its copy afterwards
-        // so it is never passed back in.
+        // SAFETY: by this fn's contract `handle` is non-null here, was produced by
+        // `Box::into_raw` in `create_handle`, and has not been passed here before,
+        // so it is reclaimed exactly once; the caller does not use it afterwards.
         drop(unsafe { Box::from_raw(handle as *mut IosAppHandle) });
         // The render thread that drew the overlays is joined: forget their
         // surfaces and layers before Swift releases the overlay views.
