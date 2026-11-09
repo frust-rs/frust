@@ -7,8 +7,7 @@
 //! "Open file", "Open files", "Save as\u{2026}", "Pick folder" and "Export file" each run the
 //! blocking dialog inside [`frust::spawn_blocking`], delivered through [`use_task`]: the
 //! result lands in an [`AsyncValue`] written on the UI thread by the task
-//! coordinator (the page never sets a signal from the background thread). The
-//! state reads `Loading` while the dialog is up. Only file *names* are listed
+//! coordinator. The state reads `Loading` while the dialog is up. Only file *names* are listed
 //! (no contents, no full paths).
 //!
 //! While a call runs the status line reads `Waiting for the dialog...` until the first
@@ -19,7 +18,9 @@
 //! Picker panel).
 //!
 //! **Pick folder** shows the folder's name and how many files it holds (the count is a
-//! cancellable listing), then releases the grant; the Photos page's Folders panel is the one
+//! cancellable listing), then drops the grant without calling `release()`: a release gives the
+//! folder up (on Android it revokes the persisted permission), which would also cut off the
+//! access the Photos page's Folders panel may hold on the same folder. That panel is the one
 //! that keeps a folder. **Export file** writes a small generated text file into the app's
 //! cache directory and hands it to `export_file`, which copies it to the place the user
 //! chooses. Open and export work on iOS and Android too (open copies the file into the app);
@@ -204,8 +205,9 @@ fn run_dialog(
                         || "(folder)".to_string(),
                         |name| name.to_string_lossy().into_owned(),
                     );
+                // Not released: `release()` is the call that gives the folder up (on Android it
+                // revokes the persisted permission), and dropping the grant does not make it.
                 let listed = grant.list(&ListOptions::new().cancel(cancel.clone()));
-                grant.release();
                 let count = listed?.len();
                 vec![format!("Folder: {name}"), format!("{count} file(s) inside")]
             }
@@ -260,8 +262,9 @@ impl Component for DesktopPage {
             async move {
                 let poll = sink.clone();
                 let mut handle = spawn_blocking(move || run_dialog(request, &cancel, &sink));
-                // The callback only writes the cell; copy it into the signal on the UI side
-                // and stop once the page is gone.
+                // The callback only writes the cell. This future runs on the tokio runtime, not
+                // the UI thread, so it copies changes into the signal from there, and stops once
+                // the page is gone.
                 while !handle.is_finished() {
                     let latest = *poll.lock().expect("progress cell poisoned");
                     let Some(current) = progress.try_get_untracked() else {
