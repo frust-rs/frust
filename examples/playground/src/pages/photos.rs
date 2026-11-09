@@ -73,14 +73,20 @@ use frust::{
     Theme, UseTask, View, button, colored_box, column, component, decode_image_async, either, row,
     spawn_blocking, text, use_context, use_task,
 };
+use frust_file_dialogs::{
+    CancelToken as FolderCancel, FileDialog, FileDialogError, FileProgress, FolderGrant,
+};
 use frust_permissions::{
     Permission, PermissionError, PermissionStatus, PhotoAccess, open_settings, request, status,
 };
+use frust_photo_library::folder::{EntryLocation, FolderEntry};
 use frust_photo_library::{
     Album, AlbumId, Asset, AssetId, AssetPage, AssetQuery, AssetVersion, CancelToken,
-    ExportOptions, ExportedOriginal, MediaFilter, MediaKind, PhotoError, PhotoLibrary, PickOptions,
-    PickProgress, PickedItem, SaveRequest, ThumbnailMode, ThumbnailRequest,
+    ExportOptions, ExportedOriginal, FolderMedia, FolderPage, FolderScan, MediaFilter, MediaKind,
+    PhotoError, PhotoLibrary, PickOptions, PickProgress, PickedItem, SaveRequest, ThumbnailMode,
+    ThumbnailRequest,
 };
+use frust_shared_preferences::SharedPreferences;
 
 use frust_share::{Share, ShareAnchor};
 
@@ -179,7 +185,9 @@ impl Component for PhotosPage {
                 .child(component(OriginalsPanel {
                     selected: shared.selected,
                     picked: shared.picked,
-                })),
+                }))
+                .child(SizedBox(None, Some(16.0)))
+                .child(component(FoldersPanel)),
         )
     }
 }
@@ -1883,6 +1891,582 @@ fn save_button(
     .small()
 }
 
+/// The shared-preferences key holding the picked folder's grant token.
+const FOLDER_TOKEN_KEY: &str = "playground.folder_token";
+
+/// Files per scan page; **Load more** fetches the next page.
+const FOLDER_PAGE: u32 = 50;
+
+/// Images decoded for the preview strip after the first page of a scan.
+const FOLDER_PREVIEWS: usize = 8;
+
+/// The largest file read for a preview.
+const MAX_PREVIEW_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The preview tile's edge in logical points.
+const PREVIEW_TILE: f64 = 64.0;
+
+/// The folder's name for display: its last path component, `folder` where the platform has no path.
+fn folder_name(grant: &FolderGrant) -> String {
+    grant.local_path().and_then(Path::file_name).map_or_else(
+        || "folder".to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// The grant the panel currently holds, shared with the background steps.
+type GrantCell = Arc<Mutex<Option<Arc<FolderGrant>>>>;
+
+/// What a press asks the background step to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FoldersAction {
+    /// The mount-time step: bring back the stored folder, if any.
+    Restore,
+    Pick,
+    Scan {
+        offset: u64,
+        recursive: bool,
+    },
+    Release,
+}
+
+/// What a background step produced, applied to the signals on the UI side.
+enum FoldersStep {
+    /// A status line; `clear` also empties the listing and previews.
+    Message { text: String, clear: bool },
+    /// A scan page and the offset it started at.
+    Page { page: FolderPage, offset: u64 },
+}
+
+impl FoldersStep {
+    fn message(text: impl Into<String>) -> Self {
+        Self::Message {
+            text: text.into(),
+            clear: false,
+        }
+    }
+
+    fn cleared(text: impl Into<String>) -> Self {
+        Self::Message {
+            text: text.into(),
+            clear: true,
+        }
+    }
+}
+
+/// The status line for a folder step that failed.
+fn folder_error_text(err: &PhotoError) -> String {
+    match err {
+        PhotoError::Cancelled => "Cancelled".to_string(),
+        PhotoError::PermissionDenied => "Folder access was lost. Pick folder again.".to_string(),
+        other => format!("error: {other}"),
+    }
+}
+
+/// Stores `grant`'s token. A restored grant may carry a new token, so this runs after every
+/// pick and every restore.
+fn persist_token(prefs: &SharedPreferences, grant: &FolderGrant) -> Result<(), String> {
+    prefs
+        .set_string(FOLDER_TOKEN_KEY, grant.token())
+        .map_err(|err| format!("could not store the folder: {err}"))
+}
+
+/// Brings back the stored folder into `grants`: the status line to show.
+fn restore_step(prefs: &SharedPreferences, grants: &GrantCell) -> FoldersStep {
+    let Some(token) = prefs.get_string(FOLDER_TOKEN_KEY) else {
+        return FoldersStep::message("No folder picked yet.");
+    };
+    match FolderGrant::restore(&token) {
+        Ok(grant) => {
+            let stored = persist_token(prefs, &grant);
+            let name = folder_name(&grant);
+            *grants.lock().expect("grant cell poisoned") = Some(Arc::new(grant));
+            FoldersStep::message(match stored {
+                Ok(()) => format!("Restored folder {name}. Scan to list it."),
+                Err(text) => format!("Restored folder {name}, but {text}."),
+            })
+        }
+        Err(FileDialogError::AccessLost) => {
+            let _ = prefs.remove(FOLDER_TOKEN_KEY);
+            FoldersStep::cleared("Folder access was lost. Pick folder again.")
+        }
+        Err(err) => FoldersStep::message(format!("error: {err}")),
+    }
+}
+
+/// The picker, then the store (call inside `spawn_blocking`).
+fn pick_step(
+    prefs: &SharedPreferences,
+    grants: &GrantCell,
+    cancel: &FolderCancel,
+    sink: &Arc<Mutex<Option<FileProgress>>>,
+) -> FoldersStep {
+    let sink = sink.clone();
+    let picked = FileDialog::new()
+        .title("Pick folder")
+        .on_progress(move |progress| {
+            *sink.lock().expect("progress cell poisoned") = Some(progress);
+        })
+        .cancel(cancel.clone())
+        .pick_folder();
+    match picked {
+        Ok(Some(grant)) => {
+            let stored = persist_token(prefs, &grant);
+            let name = folder_name(&grant);
+            // The previous grant is dropped, not released: on Android a release would revoke
+            // the persisted permission, which is the same one when the same folder is picked.
+            *grants.lock().expect("grant cell poisoned") = Some(Arc::new(grant));
+            FoldersStep::cleared(match stored {
+                Ok(()) => format!("Picked folder {name}. Scan to list it."),
+                Err(text) => format!("Picked folder {name}, but {text}."),
+            })
+        }
+        Ok(None) => FoldersStep::message("Nothing picked."),
+        Err(FileDialogError::Cancelled) => FoldersStep::message("Cancelled"),
+        Err(err) => FoldersStep::message(format!("error: {err}")),
+    }
+}
+
+/// One scan page (call inside `spawn_blocking`). The scan itself has no cancel hook, so a
+/// cancel during it discards the page once it returns.
+fn scan_step(
+    grants: &GrantCell,
+    offset: u64,
+    recursive: bool,
+    cancel: &FolderCancel,
+) -> FoldersStep {
+    let grant = grants.lock().expect("grant cell poisoned").clone();
+    let Some(grant) = grant else {
+        return FoldersStep::message("Pick a folder first.");
+    };
+    let scan = FolderScan::new()
+        .recursive(recursive)
+        .offset(offset)
+        .limit(FOLDER_PAGE);
+    let result = PhotoLibrary::scan_folder(&grant, &scan);
+    if cancel.is_cancelled() {
+        return FoldersStep::message("Cancelled");
+    }
+    match result {
+        Ok(page) => FoldersStep::Page { page, offset },
+        Err(err) => FoldersStep::message(folder_error_text(&err)),
+    }
+}
+
+/// Gives the folder up and forgets its token (call inside `spawn_blocking`).
+fn release_step(prefs: &SharedPreferences, grants: &GrantCell) -> FoldersStep {
+    let grant = grants.lock().expect("grant cell poisoned").take();
+    let _ = prefs.remove(FOLDER_TOKEN_KEY);
+    match grant.map(Arc::try_unwrap) {
+        None => FoldersStep::cleared("No folder to release."),
+        Some(Ok(grant)) => {
+            grant.release();
+            FoldersStep::cleared("Released the folder and forgot its token.")
+        }
+        Some(Err(_)) => FoldersStep::cleared("Forgot the folder token (a scan still held it)."),
+    }
+}
+
+/// Runs one action (call inside `spawn_blocking`).
+fn run_folders_action(
+    action: FoldersAction,
+    grants: &GrantCell,
+    cancel: &FolderCancel,
+    sink: &Arc<Mutex<Option<FileProgress>>>,
+) -> FoldersStep {
+    let prefs = match SharedPreferences::standard() {
+        Ok(prefs) => prefs,
+        Err(err) => return FoldersStep::message(format!("preferences unavailable: {err}")),
+    };
+    match action {
+        FoldersAction::Restore => restore_step(&prefs, grants),
+        FoldersAction::Pick => pick_step(&prefs, grants, cancel, sink),
+        FoldersAction::Scan { offset, recursive } => scan_step(grants, offset, recursive, cancel),
+        FoldersAction::Release => release_step(&prefs, grants),
+    }
+}
+
+/// One listed file as the panel shows it.
+fn media_line(media: &FolderMedia) -> String {
+    let kind = match media.kind {
+        MediaKind::Image => "image",
+        MediaKind::Video => "video",
+        _ => "other",
+    };
+    let size = media
+        .entry
+        .size
+        .map_or_else(|| "size unknown".to_string(), |b| format!("{b} bytes"));
+    format!("{} | {kind} | {size}", media.entry.relative_path)
+}
+
+/// The count line under the listing.
+fn folder_count_line(loaded: usize, total: u64) -> String {
+    format!("Showing {loaded} of {total} file(s)")
+}
+
+/// The bytes of a listed image: a content URI is copied into the cache first, a path is read.
+fn read_entry(entry: &FolderEntry) -> Result<Vec<u8>, String> {
+    if matches!(entry.location, EntryLocation::ContentUri(_)) {
+        let dir = frust::paths::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("frust-playground-folder");
+        let copy = entry.copy_to(&dir).map_err(|err| err.to_string())?;
+        let bytes = std::fs::read(&copy).map_err(|err| err.to_string());
+        let _ = std::fs::remove_file(&copy);
+        bytes
+    } else {
+        entry
+            .read_to_vec(MAX_PREVIEW_BYTES)
+            .map_err(|err| err.to_string())
+    }
+}
+
+/// One preview tile: the file name and its decode result.
+#[derive(Clone)]
+struct PreviewTile {
+    name: String,
+    image: Result<ImageSource, String>,
+}
+
+/// The first [`FOLDER_PREVIEWS`] images of `items`, decoded off the UI thread. Stops at a cancel
+/// or once `phase` (the status line) is gone with the panel.
+async fn decode_previews(
+    items: &[FolderMedia],
+    cancel: &FolderCancel,
+    phase: RwSignal<String>,
+) -> Vec<PreviewTile> {
+    let images: Vec<&FolderMedia> = items
+        .iter()
+        .filter(|media| media.kind == MediaKind::Image)
+        .take(FOLDER_PREVIEWS)
+        .collect();
+    let mut tiles = Vec::new();
+    for (index, media) in images.iter().enumerate() {
+        if cancel.is_cancelled() || phase.try_get_untracked().is_none() {
+            break;
+        }
+        phase.set(format!("Decoding image {} of {}", index + 1, images.len()));
+        let entry = media.entry.clone();
+        let image = match spawn_blocking(move || read_entry(&entry)).await {
+            Ok(Ok(bytes)) => decode_image_async(bytes)
+                .await
+                .map_err(|err| format!("decode error: {err}")),
+            Ok(Err(text)) => Err(format!("read error: {text}")),
+            Err(err) => Err(err.to_string()),
+        };
+        tiles.push(PreviewTile {
+            name: media.entry.name.clone(),
+            image,
+        });
+    }
+    tiles
+}
+
+/// The Folders panel's signals, copied into the task future.
+#[derive(Clone, Copy)]
+struct FoldersSignals {
+    /// The status line shown while a step runs.
+    phase: RwSignal<String>,
+    /// The last step's result line.
+    status: RwSignal<String>,
+    lines: RwSignal<Vec<String>>,
+    total: RwSignal<u64>,
+    previews: RwSignal<Vec<PreviewTile>>,
+    holds_grant: RwSignal<bool>,
+    progress: RwSignal<Option<FileProgress>>,
+}
+
+impl FoldersSignals {
+    /// Applies a finished step (UI side only).
+    async fn apply(self, step: FoldersStep, cancel: &FolderCancel) {
+        match step {
+            FoldersStep::Message { text, clear } => {
+                self.status.set(text);
+                if clear {
+                    self.lines.set(Vec::new());
+                    self.total.set(0);
+                    self.previews.set(Vec::new());
+                }
+            }
+            FoldersStep::Page { page, offset } => {
+                let mut lines = if offset == 0 {
+                    Vec::new()
+                } else {
+                    self.lines.get_untracked()
+                };
+                lines.extend(page.items.iter().map(media_line));
+                self.status.set(folder_count_line(lines.len(), page.total));
+                self.total.set(page.total);
+                self.lines.set(lines);
+                if offset == 0 {
+                    self.previews.set(Vec::new());
+                    let tiles = decode_previews(&page.items, cancel, self.phase).await;
+                    if cancel.is_cancelled() {
+                        let text = self.status.get_untracked();
+                        self.status.set(format!("{text} (previews cancelled)"));
+                    }
+                    self.previews.set(tiles);
+                }
+            }
+        }
+    }
+}
+
+/// The status line while a step runs: the pick's progress once it reports, else the phase.
+fn folders_busy_text(phase: &str, progress: Option<FileProgress>) -> String {
+    match progress {
+        Some(p) => loading_text(Some((p.done, p.items, p.fraction))),
+        None => phase.to_string(),
+    }
+}
+
+/// The phase a press starts in.
+fn start_phase(action: FoldersAction) -> &'static str {
+    match action {
+        FoldersAction::Restore => "Restoring the folder\u{2026}",
+        FoldersAction::Pick => "Waiting for the picker\u{2026}",
+        FoldersAction::Scan { .. } => "Scanning the folder\u{2026}",
+        FoldersAction::Release => "Releasing the folder\u{2026}",
+    }
+}
+
+struct FoldersPanel;
+
+struct FoldersPanelState {
+    /// Whether a scan descends into subfolders; written by its toggle only.
+    recursive: RwSignal<bool>,
+    /// The pending action; a press replaces it.
+    action: Arc<Mutex<FoldersAction>>,
+    work: UseTask<()>,
+    /// The running step's token; Cancel fires it, each press replaces it.
+    token: Arc<Mutex<FolderCancel>>,
+    /// Written by the pick's progress callback on a background thread.
+    progress_cell: Arc<Mutex<Option<FileProgress>>>,
+    signals: FoldersSignals,
+}
+
+impl Component for FoldersPanel {
+    type State = FoldersPanelState;
+
+    fn init(&self) -> FoldersPanelState {
+        let grants: GrantCell = Arc::new(Mutex::new(None));
+        let action = Arc::new(Mutex::new(FoldersAction::Restore));
+        let token = Arc::new(Mutex::new(FolderCancel::new()));
+        let progress_cell: Arc<Mutex<Option<FileProgress>>> = Arc::new(Mutex::new(None));
+        let signals = FoldersSignals {
+            phase: RwSignal::new(start_phase(FoldersAction::Restore).to_string()),
+            status: RwSignal::new(String::new()),
+            lines: RwSignal::new(Vec::new()),
+            total: RwSignal::new(0),
+            previews: RwSignal::new(Vec::new()),
+            holds_grant: RwSignal::new(false),
+            progress: RwSignal::new(None),
+        };
+        let (action_in, token_in, cell_in) = (action.clone(), token.clone(), progress_cell.clone());
+        let work = use_task(move || {
+            // The mount-time run restores; every later run is a press.
+            let requested = std::mem::replace(
+                &mut *action_in.lock().expect("action cell poisoned"),
+                FoldersAction::Restore,
+            );
+            let cancel = token_in.lock().expect("token cell poisoned").clone();
+            let (grants, cell) = (grants.clone(), cell_in.clone());
+            async move {
+                let (blocking_grants, blocking_cancel, sink) =
+                    (grants.clone(), cancel.clone(), cell.clone());
+                let mut handle = spawn_blocking(move || {
+                    run_folders_action(requested, &blocking_grants, &blocking_cancel, &sink)
+                });
+                // The pick's callback only writes the cell; copy it into the signal here and
+                // stop once the panel is gone.
+                while !handle.is_finished() {
+                    let latest = *cell.lock().expect("progress cell poisoned");
+                    let Some(current) = signals.progress.try_get_untracked() else {
+                        break;
+                    };
+                    if latest != current {
+                        signals.progress.set(latest);
+                    }
+                    let _ = spawn_blocking(move || std::thread::sleep(PROGRESS_POLL)).await;
+                }
+                let step = (&mut handle)
+                    .await
+                    .map_err(|err| JoinFailure(err.to_string()))?;
+                if signals.status.try_get_untracked().is_none() {
+                    return Ok::<(), JoinFailure>(());
+                }
+                signals.apply(step, &cancel).await;
+                signals
+                    .holds_grant
+                    .set(grants.lock().expect("grant cell poisoned").is_some());
+                signals.progress.set(None);
+                Ok(())
+            }
+        });
+        FoldersPanelState {
+            recursive: RwSignal::new(false),
+            action,
+            work,
+            token,
+            progress_cell,
+            signals,
+        }
+    }
+
+    fn build(&self, state: &mut FoldersPanelState) -> impl View<FoldersPanelState> {
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+        let scheme = theme.scheme();
+        let (accent, muted) = (scheme.primary, scheme.on_surface_variant);
+
+        let signals = state.signals;
+        let busy = matches!(state.work.signal().get(), AsyncValue::Loading(_));
+        let holds = signals.holds_grant.get();
+        let recursive = state.recursive.get();
+        let loaded = signals.lines.get();
+        let more = has_more(loaded.len(), signals.total.get());
+        let status = if busy {
+            folders_busy_text(&signals.phase.get(), signals.progress.get())
+        } else {
+            signals.status.get()
+        };
+
+        let mut listing = column();
+        for line in &loaded {
+            listing = listing.child(text(line.clone()).size(11.0));
+        }
+        let mut tiles = row();
+        for tile in signals.previews.get() {
+            tiles = tiles.child(match tile.image {
+                Ok(source) => column()
+                    .child(
+                        SizedBox(Some(PREVIEW_TILE), Some(PREVIEW_TILE))
+                            .child(Image(source).fit(ImageFit::Cover)),
+                    )
+                    .child(text(tile.name).size(9.0).color(muted)),
+                Err(message) => column().child(text(message).size(9.0).color(muted)),
+            });
+            tiles = tiles.child(SizedBox(Some(GAP), None));
+        }
+
+        column()
+            .child(text("Folders").size(13.0).color(accent))
+            .child(
+                text(
+                    "Pick folder keeps a grant on a folder and stores its token in shared \
+                     preferences; the next launch restores it (or asks to pick again when \
+                     access was lost). Scan lists its images and videos newest first and \
+                     decodes the first eight images. Release gives the folder up.",
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                row()
+                    .child(press_button(
+                        "Pick folder",
+                        FoldersAction::Pick,
+                        state,
+                        busy,
+                        false,
+                    ))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(press_button(
+                        "Scan",
+                        FoldersAction::Scan {
+                            offset: 0,
+                            recursive,
+                        },
+                        state,
+                        busy,
+                        !holds,
+                    ))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(recursive_button(state, recursive))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(press_button(
+                        "Release",
+                        FoldersAction::Release,
+                        state,
+                        busy,
+                        !holds,
+                    ))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(folders_cancel_button(state, busy)),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(text(status).size(12.0).color(muted))
+            .child(tiles)
+            .child(listing)
+            .child(row().child(press_button(
+                "Load more",
+                FoldersAction::Scan {
+                    offset: loaded.len() as u64,
+                    recursive,
+                },
+                state,
+                busy,
+                !more,
+            )))
+    }
+}
+
+/// A button that starts `action` with a fresh token and cleared progress.
+fn press_button(
+    label: &'static str,
+    action: FoldersAction,
+    state: &FoldersPanelState,
+    busy: bool,
+    unavailable: bool,
+) -> impl View<FoldersPanelState> {
+    let (cell, token, progress_cell, work, signals) = (
+        state.action.clone(),
+        state.token.clone(),
+        state.progress_cell.clone(),
+        state.work.clone(),
+        state.signals,
+    );
+    button(label, move |_state: &mut FoldersPanelState| {
+        *token.lock().expect("token cell poisoned") = FolderCancel::new();
+        *progress_cell.lock().expect("progress cell poisoned") = None;
+        signals.progress.set(None);
+        signals.phase.set(start_phase(action).to_string());
+        *cell.lock().expect("action cell poisoned") = action;
+        work.restart();
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(busy || unavailable)
+    .small()
+}
+
+/// The recursive toggle for the next scan.
+fn recursive_button(state: &FoldersPanelState, recursive: bool) -> impl View<FoldersPanelState> {
+    let signal = state.recursive;
+    button(
+        if recursive {
+            "Recursive: on"
+        } else {
+            "Recursive: off"
+        },
+        move |_state: &mut FoldersPanelState| signal.set(!signal.get_untracked()),
+    )
+    .style(selector_style(recursive))
+    .small()
+}
+
+/// Fires the running step's token; enabled only while a step runs.
+fn folders_cancel_button(state: &FoldersPanelState, busy: bool) -> impl View<FoldersPanelState> {
+    let token = state.token.clone();
+    button("Cancel", move |_state: &mut FoldersPanelState| {
+        let current = token.lock().expect("token cell poisoned").clone();
+        current.cancel();
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(!busy)
+    .small()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2160,5 +2744,155 @@ mod tests {
             copy: true,
         };
         assert_eq!(row.line(), "a.png | image | image/png | 12 bytes | copy");
+    }
+
+    /// A fresh directory under the temp dir, removed on drop.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "frust-playground-folders-{name}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create scratch dir");
+            Self(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn no_grants() -> GrantCell {
+        Arc::new(Mutex::new(None))
+    }
+
+    fn message_of(step: &FoldersStep) -> &str {
+        match step {
+            FoldersStep::Message { text, .. } => text,
+            FoldersStep::Page { .. } => "(page)",
+        }
+    }
+
+    #[test]
+    fn restore_without_a_token_asks_for_a_pick() {
+        let prefs = SharedPreferences::in_memory();
+        let grants = no_grants();
+        let step = restore_step(&prefs, &grants);
+        assert_eq!(message_of(&step), "No folder picked yet.");
+        assert!(grants.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn restore_brings_back_the_stored_folder_and_stores_its_token_again() {
+        let dir = Scratch::new("restore");
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        let step = restore_step(&prefs, &grants);
+        assert!(
+            message_of(&step).starts_with("Restored folder"),
+            "{}",
+            message_of(&step)
+        );
+        assert!(grants.lock().unwrap().is_some());
+        assert!(prefs.get_string(FOLDER_TOKEN_KEY).is_some());
+    }
+
+    #[test]
+    fn restore_of_lost_access_forgets_the_token_and_asks_again() {
+        let prefs = SharedPreferences::in_memory();
+        let gone = std::env::temp_dir().join("frust-playground-folders-gone-never-created");
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, gone.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        let step = restore_step(&prefs, &grants);
+        assert!(matches!(step, FoldersStep::Message { clear: true, .. }));
+        assert!(message_of(&step).contains("Pick folder again"));
+        assert_eq!(prefs.get_string(FOLDER_TOKEN_KEY), None);
+        assert!(grants.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn release_drops_the_grant_and_the_stored_token() {
+        let dir = Scratch::new("release");
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        restore_step(&prefs, &grants);
+        let step = release_step(&prefs, &grants);
+        assert!(matches!(step, FoldersStep::Message { clear: true, .. }));
+        assert!(grants.lock().unwrap().is_none());
+        assert_eq!(prefs.get_string(FOLDER_TOKEN_KEY), None);
+    }
+
+    #[test]
+    fn scan_without_a_folder_says_so() {
+        let step = scan_step(&no_grants(), 0, false, &FolderCancel::new());
+        assert_eq!(message_of(&step), "Pick a folder first.");
+    }
+
+    #[test]
+    fn scan_lists_the_media_of_the_folder() {
+        let dir = Scratch::new("scan");
+        std::fs::write(dir.0.join("a.png"), b"x").unwrap();
+        std::fs::write(dir.0.join("notes.txt"), b"x").unwrap();
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        restore_step(&prefs, &grants);
+        match scan_step(&grants, 0, false, &FolderCancel::new()) {
+            FoldersStep::Page { page, offset } => {
+                assert_eq!((offset, page.total, page.items.len()), (0, 1, 1));
+                assert_eq!(media_line(&page.items[0]), "a.png | image | 1 bytes");
+            }
+            other => panic!("expected a page, got {}", message_of(&other)),
+        }
+    }
+
+    #[test]
+    fn a_cancel_during_the_scan_discards_the_page() {
+        let dir = Scratch::new("scan-cancel");
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        restore_step(&prefs, &grants);
+        let cancel = FolderCancel::new();
+        cancel.cancel();
+        let step = scan_step(&grants, 0, false, &cancel);
+        assert_eq!(message_of(&step), "Cancelled");
+    }
+
+    #[test]
+    fn folder_errors_read_plainly() {
+        assert_eq!(folder_error_text(&PhotoError::Cancelled), "Cancelled");
+        assert!(folder_error_text(&PhotoError::PermissionDenied).contains("Pick folder again"));
+        assert!(folder_error_text(&PhotoError::Busy).starts_with("error: "));
+    }
+
+    #[test]
+    fn busy_text_prefers_the_pick_progress_over_the_phase() {
+        assert_eq!(
+            folders_busy_text("Scanning the folder\u{2026}", None),
+            "Scanning the folder\u{2026}"
+        );
+        assert_eq!(
+            start_phase(FoldersAction::Pick),
+            "Waiting for the picker\u{2026}"
+        );
+        assert_eq!(folder_count_line(50, 120), "Showing 50 of 120 file(s)");
     }
 }

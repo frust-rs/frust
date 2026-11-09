@@ -1612,6 +1612,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-shared-preferences"
+version = "0.6.5"
+dependencies = [
+ "frust-paths",
+ "frust-plugin",
+ "jni 0.22.4",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "frust-shell-android"
 version = "0.6.5"
 dependencies = [
@@ -4218,6 +4231,7 @@ dependencies = [
  "frust-reactive",
  "frust-scene",
  "frust-share",
+ "frust-shared-preferences",
  "frust-text",
  "frust-ui",
  "frust-url-launcher",
