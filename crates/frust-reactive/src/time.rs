@@ -45,8 +45,233 @@ use crate::executor::is_ui_thread;
 /// Completes once `duration` of wall time has passed. Await it in `spawn_local`,
 /// [`spawn_local_scoped`] or `spawn`; on wasm the future is `!Send`, so `spawn_local` only.
 /// Calling this never panics: nothing happens until the first poll.
+///
+/// With a virtual clock installed on the polling thread (`test-support` feature or this
+/// crate's own tests, see [`test_support`]) the wait is for virtual time instead.
 pub async fn sleep(duration: Duration) {
+    #[cfg(any(test, feature = "test-support"))]
+    if test_support::is_virtual() {
+        return virtual_clock::VirtualSleep::new(duration).await;
+    }
     imp::sleep(duration).await;
+}
+
+#[cfg(any(test, feature = "test-support"))]
+mod virtual_clock {
+    use std::cell::RefCell;
+    use std::cmp::Reverse;
+    use std::collections::{BinaryHeap, HashMap};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
+    pub(super) struct Entry {
+        waker: Option<Waker>,
+        alive: Arc<AtomicBool>,
+    }
+
+    #[derive(Default)]
+    pub(super) struct VirtualClock {
+        pub(super) now: Duration,
+        next_seq: u64,
+        heap: BinaryHeap<Reverse<(Duration, u64)>>,
+        pub(super) entries: HashMap<u64, Entry>,
+    }
+
+    pub(super) enum Source {
+        Real,
+        Virtual(VirtualClock),
+    }
+
+    // Allow-scoped like `tls` below.
+    #[allow(clippy::missing_const_for_thread_local)]
+    mod tls {
+        use super::*;
+        thread_local! {
+            pub(in crate::time) static SOURCE: RefCell<Source> = const { RefCell::new(Source::Real) };
+        }
+    }
+    pub(super) use tls::SOURCE;
+
+    impl VirtualClock {
+        /// Moves time forward and returns the wakers of the live sleeps that came due, in
+        /// (deadline, registration) order. Stale entries (dropped sleeps) are discarded.
+        pub(super) fn advance(&mut self, by: Duration) -> Vec<Waker> {
+            self.now += by;
+            let mut due = Vec::new();
+            while let Some(Reverse((deadline, seq))) = self.heap.peek().copied() {
+                if deadline > self.now {
+                    break;
+                }
+                self.heap.pop();
+                if let Some(entry) = self.entries.remove(&seq)
+                    && entry.alive.load(Ordering::Relaxed)
+                    && let Some(waker) = entry.waker
+                {
+                    due.push(waker);
+                }
+            }
+            due
+        }
+    }
+
+    /// A sleep on the thread's virtual clock; registered on first poll.
+    pub(super) struct VirtualSleep {
+        duration: Duration,
+        registered: Option<(Duration, u64)>,
+        alive: Arc<AtomicBool>,
+    }
+
+    impl VirtualSleep {
+        pub(super) fn new(duration: Duration) -> Self {
+            Self {
+                duration,
+                registered: None,
+                alive: Arc::new(AtomicBool::new(true)),
+            }
+        }
+    }
+
+    impl Future for VirtualSleep {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            SOURCE.with_borrow_mut(|source| {
+                let Source::Virtual(clock) = source else {
+                    // The clock was uninstalled under a pending sleep: nothing can wake it.
+                    return Poll::Pending;
+                };
+                let (deadline, seq) = match self.registered {
+                    Some(registered) => registered,
+                    None => {
+                        let deadline = clock.now + self.duration;
+                        let seq = clock.next_seq;
+                        clock.next_seq += 1;
+                        if deadline > clock.now {
+                            clock.heap.push(Reverse((deadline, seq)));
+                            clock.entries.insert(
+                                seq,
+                                Entry {
+                                    waker: None,
+                                    alive: Arc::clone(&self.alive),
+                                },
+                            );
+                        }
+                        self.registered = Some((deadline, seq));
+                        (deadline, seq)
+                    }
+                };
+                if clock.now >= deadline {
+                    return Poll::Ready(());
+                }
+                if let Some(entry) = clock.entries.get_mut(&seq) {
+                    entry.waker = Some(cx.waker().clone());
+                }
+                Poll::Pending
+            })
+        }
+    }
+
+    impl Drop for VirtualSleep {
+        fn drop(&mut self) {
+            self.alive.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+/// A virtual clock for tests (`test-support` feature, or this crate's own tests).
+///
+/// [`install_virtual_clock`] makes every [`sleep`] and [`Timer`] polled on the installing
+/// thread wait for virtual time, which the test moves with [`advance`]; real shells never
+/// install one and are unchanged. Time is a [`Duration`](std::time::Duration) offset from
+/// the install, raw and unscaled (it ignores the animation time scale).
+///
+/// A sleep takes its deadline (`now + duration`) at its first poll, so pump once after
+/// arming a timer and before advancing. `advance` wakes the due sleeps; the caller then
+/// pumps the UI-thread queue, which polls them. Futures spawned with `frust::spawn` run on
+/// tokio workers, not this thread, and are NOT reached.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::virtual_clock::{SOURCE, Source, VirtualClock};
+    use std::time::Duration;
+
+    /// Uninstalls the virtual clock on drop, restoring wall time and discarding pending
+    /// entries.
+    #[must_use = "the virtual clock is uninstalled when the guard drops"]
+    pub struct VirtualClockGuard {
+        _not_send: std::marker::PhantomData<*const ()>,
+    }
+
+    /// Installs a virtual clock on this thread, starting at zero.
+    ///
+    /// # Panics
+    ///
+    /// Panics if one is already installed on this thread.
+    pub fn install_virtual_clock() -> VirtualClockGuard {
+        SOURCE.with_borrow_mut(|source| {
+            assert!(
+                matches!(source, Source::Real),
+                "frust-reactive: a virtual clock is already installed on this thread; drop its \
+                 guard before installing another"
+            );
+            *source = Source::Virtual(VirtualClock::default());
+        });
+        VirtualClockGuard {
+            _not_send: std::marker::PhantomData,
+        }
+    }
+
+    impl Drop for VirtualClockGuard {
+        fn drop(&mut self) {
+            // Dropped outside the borrow: dropping wakers can run arbitrary code.
+            let old = SOURCE
+                .try_with(|source| std::mem::replace(&mut *source.borrow_mut(), Source::Real));
+            drop(old);
+        }
+    }
+
+    /// Moves virtual time forward by `by` and wakes every live sleep that is now due, in
+    /// deadline order. Pump the UI-thread queue afterwards to run them.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no virtual clock is installed on this thread.
+    pub fn advance(by: Duration) {
+        let due = SOURCE.with_borrow_mut(|source| match source {
+            Source::Virtual(clock) => clock.advance(by),
+            Source::Real => {
+                panic!("frust-reactive: advance called with no virtual clock installed")
+            }
+        });
+        for waker in due {
+            waker.wake();
+        }
+    }
+
+    /// The virtual time elapsed since install, or zero when none is installed.
+    pub fn now() -> Duration {
+        SOURCE.with_borrow(|source| match source {
+            Source::Virtual(clock) => clock.now,
+            Source::Real => Duration::ZERO,
+        })
+    }
+
+    /// Whether this thread has a virtual clock installed.
+    pub fn is_virtual() -> bool {
+        SOURCE.with_borrow(|source| matches!(source, Source::Virtual(_)))
+    }
+
+    /// Registered sleeps not yet due or discarded (stale entries of dropped sleeps stay
+    /// until their deadline is passed by [`advance`]).
+    pub fn pending_count() -> usize {
+        SOURCE.with_borrow(|source| match source {
+            Source::Virtual(clock) => clock.entries.len(),
+            Source::Real => 0,
+        })
+    }
 }
 
 mod imp {
@@ -722,5 +947,170 @@ mod tests {
         std::thread::spawn(|| drop(Timer::new(SHORT, || {})))
             .join()
             .unwrap_or_else(|e| std::panic::resume_unwind(e));
+    }
+
+    // ---- virtual clock ----
+
+    use super::test_support::{self, advance, install_virtual_clock};
+
+    const MS: fn(u64) -> Duration = Duration::from_millis;
+
+    #[test]
+    fn virtual_timer_fires_exactly_at_its_deadline_once() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let (count, bump) = counter();
+        let timer = Timer::new(MS(300), bump);
+        rt.pump_local();
+        advance(MS(299));
+        rt.pump_local();
+        assert_eq!(count.get(), 0);
+        assert!(timer.is_active());
+        advance(MS(1));
+        rt.pump_local();
+        assert_eq!(count.get(), 1);
+        assert!(!timer.is_active());
+        advance(MS(1000));
+        rt.pump_local();
+        assert_eq!(count.get(), 1);
+        assert_eq!(test_support::pending_count(), 0);
+    }
+
+    #[test]
+    fn virtual_timers_fire_in_deadline_order() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let (a, b) = (Rc::clone(&order), Rc::clone(&order));
+        let _slow = Timer::new(MS(100), move || a.borrow_mut().push(100));
+        let _fast = Timer::new(MS(50), move || b.borrow_mut().push(50));
+        rt.pump_local();
+        advance(MS(100));
+        rt.pump_local();
+        assert_eq!(*order.borrow(), vec![50, 100]);
+    }
+
+    #[test]
+    fn virtual_cancelled_and_dropped_timers_leave_no_entry() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let (count, bump) = counter();
+        let cancelled = Timer::new(MS(100), bump);
+        let (dropped_count, bump_dropped) = counter();
+        let dropped = Timer::new(MS(100), bump_dropped);
+        rt.pump_local();
+        assert_eq!(test_support::pending_count(), 2);
+        cancelled.cancel();
+        drop(dropped);
+        rt.pump_local();
+        advance(MS(500));
+        rt.pump_local();
+        assert_eq!(count.get(), 0);
+        assert_eq!(dropped_count.get(), 0);
+        assert_eq!(test_support::pending_count(), 0);
+    }
+
+    #[test]
+    fn virtual_sleep_resolves_only_after_advance() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let (count, bump) = counter();
+        Executor::spawn_local(async move {
+            sleep(MS(20)).await;
+            bump();
+        });
+        rt.pump_local();
+        std::thread::sleep(MS(50));
+        rt.pump_local();
+        assert_eq!(count.get(), 0, "wall time must not move a virtual sleep");
+        advance(MS(20));
+        rt.pump_local();
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn virtual_fire_now_and_owner_cleanup_behave_as_on_wall_time() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        let (count, bump) = counter();
+        let timer = Timer::new(LONG, bump);
+        rt.pump_local();
+        timer.fire_now();
+        assert_eq!(count.get(), 1);
+        assert!(!timer.is_active());
+        advance(LONG);
+        rt.pump_local();
+        timer.fire_now();
+        assert_eq!(count.get(), 1);
+
+        let (held, bump_held) = counter();
+        let (detached, bump_detached) = counter();
+        let (owner, timer) = rt.with_owner(|| {
+            let owner = Owner::new();
+            let timer = owner.with(|| {
+                Timer::new(MS(10), bump_detached).detach();
+                Timer::new(MS(10), bump_held)
+            });
+            (owner, timer)
+        });
+        rt.pump_local();
+        owner.cleanup();
+        assert!(!timer.is_active());
+        rt.pump_local();
+        advance(MS(10));
+        rt.pump_local();
+        assert_eq!((held.get(), detached.get()), (0, 0));
+        assert_eq!(test_support::pending_count(), 0);
+    }
+
+    #[test]
+    fn virtual_clock_guard_restores_wall_time_and_double_install_panics() {
+        let (_guard, rt) = setup();
+        {
+            let _clock = install_virtual_clock();
+            assert!(test_support::is_virtual());
+            advance(MS(5));
+            assert_eq!(test_support::now(), MS(5));
+        }
+        assert!(!test_support::is_virtual());
+        let (count, bump) = counter();
+        Executor::spawn_local(async move {
+            sleep(SHORT).await;
+            bump();
+        });
+        pump_until(rt, || count.get() > 0);
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "already installed")]
+    fn installing_a_second_virtual_clock_panics() {
+        let (_guard, _rt) = setup();
+        let _first = install_virtual_clock();
+        let _second = install_virtual_clock();
+    }
+
+    /// `frust::spawn` needs a `Send` future, so the virtual arm must not cost `sleep` that.
+    #[test]
+    fn sleep_stays_send_with_the_virtual_clock_compiled_in() {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(sleep(SHORT));
+    }
+
+    #[test]
+    fn a_flagged_virtual_timer_still_flushes_at_inactive() {
+        let (_guard, rt) = setup();
+        let _clock = install_virtual_clock();
+        push_app_lifecycle(AppLifecycleState::Resumed);
+        let (count, bump) = counter();
+        let timer = Timer::new(LONG, bump).flush_on_background();
+        rt.pump_local();
+        push_app_lifecycle(AppLifecycleState::Inactive);
+        assert_eq!(count.get(), 1);
+        assert!(!timer.is_active());
+        rt.pump_local();
+        advance(LONG);
+        rt.pump_local();
+        assert_eq!(count.get(), 1);
     }
 }
