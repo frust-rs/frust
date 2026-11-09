@@ -338,6 +338,18 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Picker panel Clear cache | Android device | OWED |
 | Photos: Picker panel Cancel while an iCloud item downloads | iPhone | OWED |
 | Photos: Picker panel Cancel during a large video copy | Android device | OWED |
+| Photos: Originals panel Export (Original, HEIC `ftypheic` / DNG `II*` header bytes) | iPhone | OWED |
+| Photos: Originals panel Export (Original, HEIC `ftypheic` / DNG `II*` header bytes) | Android device | OWED |
+| Photos: Originals panel Export with network on: iCloud-only original download with progress | iPhone | OWED |
+| Photos: Originals panel Export with network off on a cloud-only asset (NetworkRequired) | iPhone | OWED |
+| Photos: Originals panel Cancel mid-download leaves no partial file | iPhone | OWED |
+| Photos: Originals panel Cancel mid-download leaves no partial file | Android device | OWED |
+| Photos: Originals panel Export version Current on an edited asset | iPhone | OWED |
+| Photos: Originals panel Export version Current on an edited asset | Android device | OWED |
+| Photos: Originals panel Save copy back into album `Frust Playground` | iPhone | OWED |
+| Photos: Originals panel Save copy back into album `Frust Playground` | Android device | OWED |
+| Photos: Originals panel Save (no album) | iPhone | OWED |
+| Photos: Originals panel Save (no album) | Android device | OWED |
 | Photos: Browse panel Refresh (access line, albums, first page of thumbnails) | iPhone | OWED |
 | Photos: Browse panel Refresh (access line, albums, first page of thumbnails) | Android device | OWED |
 | Photos: Browse panel Load more (next page, counts update) | iPhone | OWED |
