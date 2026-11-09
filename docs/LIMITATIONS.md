@@ -9378,6 +9378,127 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ---
 
+### `photo-library-live-photo-still-only` — exporting a Live Photo returns its still, not the paired video
+
+**Observed**: `export_original` on an iOS Live Photo writes the still image resource only; the paired video resource is never selected, so the exported file is a plain photo with no motion.
+
+**Applies to**: iOS apps exporting Live Photos.
+
+**Workaround**: none in the plugin; the paired video is not reachable through it.
+
+**Why accepted**: one call returns one file, and an `ExportedOriginal` has no slot for a second resource.
+
+**Trigger for removal**: an export result that carries more than one resource.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/src/apple_originals.rs` (*Choosing the resource*).
+
+---
+
+### `photo-library-addonly-no-album` — an iOS save into an album needs read-write access
+
+**Observed**: `save` with `SaveRequest::album` returns `PhotoError::PermissionDenied` under add-only access, because add-only access cannot read or change albums. An album save needs read-write access and `NSPhotoLibraryUsageDescription` (the `library` registry feature writes it); a missing key returns `MissingUsageDescription`. Limited access allows an album save, but the fetch sees only what the user shared, so an existing album of that name may not be found and a new one is created. A bare save needs add-only or read-write access.
+
+**Applies to**: iOS; apps that file saves into an album while holding only add-only access. Android has no such split.
+
+**Workaround**: request read-write access (`permissions` `photos`) and add the `library` feature when saving into an album, or save without an album. iOS Settings lists *Add Photos Only* for an app only if its first Photos request was add-only.
+
+**Why accepted**: the platform offers no album write under add-only authorization.
+
+**Trigger for removal**: iOS lets add-only access change albums.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/src/apple_originals.rs` (*Save*); iPhone SE 2nd gen (iOS 26.7.1) device gate.
+
+---
+
+### `photo-library-android-location-redacted` — stored location survives only some routes on Android
+
+**Observed**: whether an image's stored GPS location survives depends on the route, measured on a Pixel 5 (Android 14) with a camera photo and on an iPhone SE 2nd gen (iOS 26.7.1):
+
+| Route | Location |
+|---|---|
+| Android browse + `export_original`, Media location granted | kept, byte-identical to the camera file |
+| Android browse + `export_original`, Media location not granted | latitude, longitude and GPS date zeroed in place, same file size |
+| Android Photo Picker (`pick`), even with Media location granted | latitude, longitude and GPS date zeroed |
+| iOS `PHPicker` (`pick`), default options | kept |
+
+Media location has no user-facing switch on Android 14: it is granted along with Photos.
+
+**Applies to**: Android apps that need stored location from a pick, or from an export without Media location.
+
+**Workaround**: browse and export (`library`), with `permissions`' `media-location` feature requested and granted. An app can tell its user that picked photos lose their location on Android and that the library route keeps it.
+
+**Why accepted**: Android redacts the location of Photo Picker items and of items opened without `ACCESS_MEDIA_LOCATION`; the export host falls back to the plain URI instead of failing when redaction is refused.
+
+**Trigger for removal**: the Photo Picker stops redacting location, or the plugin gains a location-preserving pick.
+
+**Evidence**: (2026-11-09) Pixel 5 (Android 14) and iPhone SE 2nd gen (iOS 26.7.1) device gates; `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/FrustPhotoLibraryHost.kt` (*Exports and saves*). A manual denied test needs `adb shell pm revoke <app> android.permission.ACCESS_MEDIA_LOCATION`.
+
+---
+
+### `photo-library-android-no-rendition-split` — Android export ignores the version and network options
+
+**Observed**: on Android `AssetVersion::Current` and `ExportOptions::allow_network` are ignored: `MediaStore` has no edited-rendition split and its files are local. Original and Current give identical bytes, and an export never fails with `NetworkRequired`.
+
+**Applies to**: Android apps that expect an edited rendition or a cloud-download refusal.
+
+**Workaround**: none; branch on the platform when the distinction matters.
+
+**Why accepted**: `MediaStore` exposes one file per row.
+
+**Trigger for removal**: a platform API for edited renditions on Android.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/src/android_originals.rs` (module docs); Pixel 5 (Android 14) device gate. A DNG export on a phone has not been run.
+
+---
+
+### `photo-library-android-save-no-deadline` — one stuck Android save blocks later saves and its caller
+
+**Observed**: saves run one at a time on a single executor and the Rust wait has no deadline, because the host answers every request exactly once. A save stuck in a slow or hung provider write blocks the saves queued behind it and the thread that called `save`; there is no cancel and no deadline.
+
+**Applies to**: Android; apps that save large videos or save while storage is stalled.
+
+**Workaround**: call `save` from a task the UI can abandon, and do not queue saves behind a large one.
+
+**Why accepted**: a `MediaStore` row cannot be half-published safely, and a deadline would have to abandon a write the provider may still complete.
+
+**Trigger for removal**: a cancel or deadline for `save`.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreWriter.kt`; `plugins/photo-library/src/android_originals.rs` (module docs).
+
+---
+
+### `photo-library-android-serial-exports` — Android exports run one at a time
+
+**Observed**: all Android exports share one executor, so a slow export (a large video) holds the exports queued behind it. A cancelled queued export is answered at once without opening anything.
+
+**Applies to**: Android; apps that export several assets in parallel.
+
+**Workaround**: export the small assets first, or cancel the slow one.
+
+**Why accepted**: one worker bounds memory and provider load; no measured need for more.
+
+**Trigger for removal**: a measured case that needs parallel exports.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/FrustPhotoLibraryHost.kt` (`exportExecutor`).
+
+---
+
+### `photo-library-originals-no-cleanup` — exported originals accumulate until the app removes them
+
+**Observed**: `export_original` writes into `<cache_dir>/frust-photo-library/originals` by default. `clear_pick_cache` does not touch it and the plugin has no cleanup API, so exports grow the directory until the app deletes them. On iOS a process kill during an export can also leave a hidden `.<name>.part` file in the destination. An Android save interrupted before publishing leaves a pending `MediaStore` row that MediaStore removes after its `DATE_EXPIRES`; the plugin runs no sweep.
+
+**Applies to**: apps exporting many or large originals.
+
+**Workaround**: delete exported files (and stale `.part` files) in the destination yourself, or pass a `dest_dir` you manage.
+
+**Why accepted**: the app decides how long an exported file must live, and a sweep could delete files it did not create.
+
+**Trigger for removal**: a cleanup API for exported originals.
+
+**Evidence**: (2026-11-09) `plugins/photo-library/src/originals.rs` (`ExportOptions::dest_dir`); `plugins/photo-library/src/apple_originals.rs` (*Cancel and cleanup*).
+
+---
+
 ### `time-no-firing-while-backgrounded` — a `frust::time::Timer` gets no regular ticks while the app is backgrounded (Android, iOS)
 
 **Observed**: Android removes its frame callback at `onPause` and pumps nothing at `onPause`/`onStop`; iOS
