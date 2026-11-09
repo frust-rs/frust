@@ -751,20 +751,10 @@ macro_rules! ios_app {
         /// slot for `FrustViewController`'s per-frame poll — see
         /// `ffi_glue::system_ui_state`'s doc comment for the returned `u64`'s
         /// packing scheme and the iOS status-bar/home-indicator mapping table.
-        ///
-        /// # Safety
-        ///
-        /// `handle` is not read by this function (the slot it peeks is process-wide). The
-        /// parameter keeps the same contract as the other exports so a future read stays
-        /// sound: null, or a pointer returned by `frust_init` not yet passed to `frust_destroy`, on
-        /// the main thread.
         #[cfg(target_os = "ios")]
         #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn frust_system_ui_state(handle: *mut ::core::ffi::c_void) -> u64 {
-            // SAFETY: forwarded unchanged under this fn's documented contract.
-            unsafe {
-                $crate::ffi_glue::system_ui_state(handle)
-            }
+        pub extern "C" fn frust_system_ui_state(handle: *mut ::core::ffi::c_void) -> u64 {
+            $crate::ffi_glue::system_ui_state(handle)
         }
 
         /// `frust_set_surface_mode`: latch the process-wide translucent-surface

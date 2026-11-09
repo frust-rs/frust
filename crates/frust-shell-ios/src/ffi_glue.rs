@@ -2511,14 +2511,7 @@ pub unsafe fn on_deep_link(handle: *mut c_void, url: *const c_char) {
 /// (not the app) decides when a swipe re-reveals it (see
 /// `frust_shell_common::system_ui`'s module docs, "Platform behavior
 /// differences").
-///
-/// # Safety
-///
-/// `handle` is not read by this function (the slot it peeks is process-wide). The
-/// parameter keeps the same contract as the other exports so a future read stays
-/// sound: null, or a pointer returned by [`init`] not yet passed to [`destroy`], on
-/// the main thread.
-pub unsafe fn system_ui_state(handle: *mut c_void) -> u64 {
+pub fn system_ui_state(handle: *mut c_void) -> u64 {
     guard("frust_system_ui_state", 0, || {
         let _ = handle;
         frust_shell_common::encoded_state()
