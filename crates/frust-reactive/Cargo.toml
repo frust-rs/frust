@@ -11,6 +11,10 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+[features]
+# Virtual clock for tests: `time::test_support`. Off in shipped builds.
+test-support = []
+
 [dependencies]
 # Do NOT add the `effects` feature (docs/DEVELOPMENT.md's Version-Pin Policy): the frame path is a
 # custom subscriber, not `RenderEffect`.
