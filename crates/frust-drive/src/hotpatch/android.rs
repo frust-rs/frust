@@ -1777,12 +1777,20 @@ mod tests {
         .expect("a cancel is not an error");
         assert!(attached.is_none());
         assert_eq!(runner.runs(), vec![FORCE_STOP]);
-        // Lines buffered before the kill may still be queued; the stream is
-        // killed once they are drained and the channel reports closed.
+        // Lines buffered before the kill may still be queued, and the
+        // channel may be momentarily empty before the kill lands: drain and
+        // retry on `Empty` until the channel reports closed, within a bound.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let killed = loop {
             match launch.stream.lines.try_recv() {
                 Ok(_) => continue,
-                Err(err) => break matches!(err, crate::process::TryRecvError::Disconnected),
+                Err(crate::process::TryRecvError::Disconnected) => break true,
+                Err(crate::process::TryRecvError::Empty) => {
+                    if std::time::Instant::now() >= deadline {
+                        break false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
             }
         };
         assert!(killed, "the logcat stream is killed");

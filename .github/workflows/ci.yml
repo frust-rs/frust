@@ -423,10 +423,11 @@ jobs:
         env:
           BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
         run: |
-          # The iOS shell and the crates it builds against: the lockfile, the
-          # manifests, the toolchain pin, the reactive, core and plugin crates, and
-          # this workflow.
-          paths=(Cargo.lock Cargo.toml rust-toolchain.toml crates/frust-shell-ios crates/frust-reactive crates/frust-core crates/frust-plugin .github/workflows/ci.yml)
+          # The iOS shell and the crates it builds against on the iOS target, dev
+          # dependencies included (`cargo tree -p frust-shell-ios --target
+          # aarch64-apple-ios-sim -e normal,dev`): the lockfile, the manifests, the
+          # toolchain pin, those crates, and this workflow.
+          paths=(Cargo.lock Cargo.toml rust-toolchain.toml crates/frust-core crates/frust-engine crates/frust-gpu crates/frust-paths crates/frust-reactive crates/frust-render crates/frust-scene crates/frust-shell-common crates/frust-shell-ios crates/frust-text crates/frust-theme crates/frust-widgets .github/workflows/ci.yml)
           # An unusable base (a new branch's all-zero `before`) runs the leg.
           if changed="$(git diff --name-only "$BASE" HEAD -- "${paths[@]}" 2>/dev/null)" && [ -z "$changed" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
