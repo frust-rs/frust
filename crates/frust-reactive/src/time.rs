@@ -58,18 +58,19 @@ pub async fn sleep(duration: Duration) {
 
 #[cfg(any(test, feature = "test-support"))]
 mod virtual_clock {
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::cmp::Reverse;
     use std::collections::{BinaryHeap, HashMap};
     use std::future::Future;
     use std::pin::Pin;
-    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::{Context, Poll, Waker};
     use std::time::Duration;
 
     pub(super) struct Entry {
         waker: Option<Waker>,
-        alive: Rc<Cell<bool>>,
+        alive: Arc<AtomicBool>,
     }
 
     #[derive(Default)]
@@ -107,7 +108,7 @@ mod virtual_clock {
                 }
                 self.heap.pop();
                 if let Some(entry) = self.entries.remove(&seq)
-                    && entry.alive.get()
+                    && entry.alive.load(Ordering::Relaxed)
                     && let Some(waker) = entry.waker
                 {
                     due.push(waker);
@@ -121,7 +122,7 @@ mod virtual_clock {
     pub(super) struct VirtualSleep {
         duration: Duration,
         registered: Option<(Duration, u64)>,
-        alive: Rc<Cell<bool>>,
+        alive: Arc<AtomicBool>,
     }
 
     impl VirtualSleep {
@@ -129,7 +130,7 @@ mod virtual_clock {
             Self {
                 duration,
                 registered: None,
-                alive: Rc::new(Cell::new(true)),
+                alive: Arc::new(AtomicBool::new(true)),
             }
         }
     }
@@ -155,7 +156,7 @@ mod virtual_clock {
                                 seq,
                                 Entry {
                                     waker: None,
-                                    alive: Rc::clone(&self.alive),
+                                    alive: Arc::clone(&self.alive),
                                 },
                             );
                         }
@@ -176,7 +177,7 @@ mod virtual_clock {
 
     impl Drop for VirtualSleep {
         fn drop(&mut self) {
-            self.alive.set(false);
+            self.alive.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -1087,6 +1088,13 @@ mod tests {
         let (_guard, _rt) = setup();
         let _first = install_virtual_clock();
         let _second = install_virtual_clock();
+    }
+
+    /// `frust::spawn` needs a `Send` future, so the virtual arm must not cost `sleep` that.
+    #[test]
+    fn sleep_stays_send_with_the_virtual_clock_compiled_in() {
+        fn assert_send<T: Send>(_: T) {}
+        assert_send(sleep(SHORT));
     }
 
     #[test]
