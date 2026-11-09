@@ -9411,7 +9411,7 @@ desktop a plain timer fired on time (10001 ms measured). `examples/playground/sr
 
 **Observed**: on Android, desktop and web `frust::BackgroundTask` is a no-op that reports itself granted and unexpired,
 and Android documents no equivalent, so a write begun there when the app leaves the foreground races process death as
-before. On iOS Apple documents no numeric budget (about 30 s per Apple DTS), and the system may revoke the assertion
+before; `spawn_blocking` panics on web, so the flush pattern does not apply there. On iOS Apple documents no numeric budget (about 30 s per Apple DTS), and the system may revoke the assertion
 early; `expired()` reports that loss, and also a refusal.
 
 **Applies to**: Android, desktop, web (no protection); iOS (unspecified, revocable budget).

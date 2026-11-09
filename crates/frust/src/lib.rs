@@ -2137,7 +2137,8 @@ pub use frust_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
 /// backgrounds (Apple's background-execution assertion; a no-op elsewhere). The pattern:
 /// a [`Timer::flush_on_background`](crate::time::Timer::flush_on_background) callback
 /// calls `BackgroundTask::begin` on the UI thread, then
-/// `spawn_blocking(move || { write(); drop(task); })`.
+/// `spawn_blocking(move || { write(); drop(task); })`. Not on web, where `spawn_blocking`
+/// panics.
 pub use frust_reactive::{
     AppExitResponse, AppLifecycle, AppLifecycleListener, AppLifecycleState, BackgroundTask,
     MemoryPressure, app_lifecycle, last_memory_pressure, push_app_lifecycle, push_memory_pressure,

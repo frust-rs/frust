@@ -4,7 +4,8 @@
 //! (`beginBackgroundTask`/`endBackgroundTask`) behind a portable face — not a
 //! scheduler. It does not run anything; it asks the platform not to suspend the process
 //! until the guard ends. Android, desktop and web install no backend by default, so
-//! there the guard is a harmless no-op that reports itself granted and unexpired.
+//! there the guard is a no-op that reports itself granted and unexpired: nothing refused it,
+//! and nothing protects the work either.
 //!
 //! # The sanctioned flush pattern
 //!
@@ -20,6 +21,9 @@
 //!     drop(task); // or task.end()
 //! });
 //! ```
+//!
+//! The pattern needs [`spawn_blocking`](crate::spawn_blocking), which panics on wasm32, so a
+//! web build must not use it: do the work some other way there.
 //!
 //! Apple publishes no numeric budget for the assertion (about 30 s per Apple DTS), so
 //! keep the work short. The platform may revoke the assertion early; [`BackgroundTask::expired`]
@@ -150,7 +154,8 @@ impl BackgroundTask {
         self.state.expired.load(Ordering::SeqCst) || !self.is_granted()
     }
 
-    /// Whether the platform granted the assertion.
+    /// Whether the platform did not refuse the assertion. On a platform with no backend this
+    /// reads `true` although nothing protects the work.
     pub fn is_granted(&self) -> bool {
         self.state.granted.load(Ordering::SeqCst)
     }

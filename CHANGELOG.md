@@ -37,7 +37,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `frust::BackgroundTask` (`begin`, `expired`, `is_granted`, `end`; dropping it ends the task exactly
   once, from any thread). iOS takes a UIKit background-task assertion from Rust; Android, desktop and web
   are no-ops. The sanctioned pattern: a `flush_on_background` callback calls `BackgroundTask::begin` on the
-  UI thread, then `spawn_blocking(write + drop(task))`. The playground Network page gains guarded and
+  UI thread, then `spawn_blocking(write + drop(task))` (not on web, where `spawn_blocking` panics). The
+  playground Network page gains guarded and
   unguarded write buttons.
 - `frust-reactive`'s `test-support` feature (forwarded by the facade's `test-support`) adds
   `time::test_support::{install_virtual_clock, advance, now}`. `frust::testing::Tester` installs a
