@@ -1145,6 +1145,12 @@ fn create_handle(
     // regardless of a signal write, so the waker is a no-op (mirrors Android).
     let rt = ReactiveRuntime::init(no_op_waker());
 
+    // Replace, not install-if-absent: a relaunched shell re-owns the slot. Must follow
+    // `ReactiveRuntime::init`, which claims this thread as the UI thread the setter asserts.
+    frust_reactive::set_background_task_backend(Arc::new(
+        crate::background_task::IosBackgroundTasks,
+    ));
+
     // Selection toolbar: LOCK the policy to `Native` rather than merely
     // setting it, so an app's own later call can never win here. This is the
     // platform's requirement, not a preference: a paste is exempt from iOS's
