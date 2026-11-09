@@ -625,11 +625,21 @@ fn register_flush(inner: &Rc<TimerInner>) {
     });
     FLUSH_LISTENER.with_borrow_mut(|listener| {
         listener.get_or_insert_with(|| {
+            let owner = std::thread::current().id();
             AppLifecycleListener::new()
-                .on_inactive(drain_flush_registry)
-                .on_hide(drain_flush_registry)
+                .on_inactive(move || drain_on_owner(owner))
+                .on_hide(move || drain_on_owner(owner))
         });
     });
+}
+
+/// The listener table is process-wide and the registry is per thread, so only the thread
+/// that installed a listener may drain through it. Otherwise a listener whose thread is
+/// still exiting would drain the pushing thread's registry a second time.
+fn drain_on_owner(owner: std::thread::ThreadId) {
+    if std::thread::current().id() == owner {
+        drain_flush_registry();
+    }
 }
 
 /// Empties the registry before firing. A flagged timer armed by a callback during the
@@ -947,6 +957,26 @@ mod tests {
         assert_eq!(count.get(), 0);
         assert!(timer.is_active());
         push_app_lifecycle(AppLifecycleState::Inactive);
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn another_threads_listener_does_not_drain_this_threads_registry() {
+        let (_guard, _rt) = setup();
+        let (count, bump) = counter();
+        let _timer = Timer::new(LONG, bump).flush_on_background();
+        let other = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .expect("id thread");
+
+        drain_on_owner(other);
+        assert_eq!(
+            count.get(),
+            0,
+            "a foreign listener must not fire this timer"
+        );
+
+        drain_on_owner(std::thread::current().id());
         assert_eq!(count.get(), 1);
     }
 

@@ -3,13 +3,15 @@
 //! - **Android, iOS:** the system photo picker (no photo-library permission needed to pick).
 //! - **Linux, macOS, Windows:** a native file dialog through `frust-file-dialogs`, filtered to
 //!   image and video extensions.
+//! - **Any folder the user granted** (all of the above, not web): [`PhotoLibrary::scan_folder`]
+//!   pages through its images and videos, newest first.
 //!
 //! # Charter: a platform plugin
 //!
 //! Like `frust-permissions`, this is a **platform plugin**: an app adds it to its own
 //! `Cargo.toml` alongside `frust`; the `frust` facade does not re-export it. Its only
 //! `frust-*` dependencies are `frust-paths` (the pick cache location), `frust-file-dialogs`
-//! on desktop and `frust-plugin` on Android.
+//! on desktop, Android and iOS, and `frust-plugin` on Android.
 //!
 //! # Threading
 //!
@@ -50,6 +52,18 @@
 //! ```
 
 mod cancel;
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+mod folder_scan;
 mod library;
 mod originals;
 mod types;
@@ -67,6 +81,18 @@ mod pixels;
 mod thumb_cache;
 
 pub use cancel::CancelToken;
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+pub use folder_scan::{FolderMedia, FolderPage, FolderScan};
 pub use library::{
     Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE,
     Thumbnail, ThumbnailMode, ThumbnailRequest,
@@ -77,6 +103,23 @@ pub use originals::{
 pub use types::{
     AssetId, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
 };
+
+/// The folder types [`PhotoLibrary::scan_folder`] takes and returns, from `frust-file-dialogs`,
+/// so an app need not depend on that crate to name them. Absent on web.
+#[cfg(any(
+    target_os = "android",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "windows",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+pub mod folder {
+    pub use frust_file_dialogs::{EntryLocation, FolderEntry, FolderGrant};
+}
 
 #[cfg(target_os = "ios")]
 mod apple;

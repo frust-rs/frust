@@ -1016,8 +1016,8 @@ fn bounds_of<S: 'static, V: View<S>>(root: &RenderRoot<S, V>, name: &str) -> Rec
 /// process-global, so another test draining it at the same time would race.
 static WINDOW_COMMANDS_LOCK: Mutex<()> = Mutex::new(());
 
-/// The `n`-th laid-out `ButtonWidget` in tree order (the Desktop page's six
-/// buttons: three dialog buttons, then the Window row).
+/// The `n`-th laid-out `ButtonWidget` in tree order (the Desktop page's nine
+/// buttons: three dialog buttons, Pick folder, Export file and Cancel, then the Window row).
 fn button_bounds<S: 'static, V: View<S>>(root: &RenderRoot<S, V>, n: usize) -> Rect {
     root.inspect()
         .iter()
@@ -1053,11 +1053,11 @@ fn desktop_page_window_buttons_push_their_commands() {
             .iter()
             .filter(|node| node.type_name.contains("ButtonWidget"))
             .count(),
-        6,
-        "the Desktop page has three dialog buttons and three window buttons"
+        9,
+        "the Desktop page has six dialog-row buttons and three window buttons"
     );
 
-    for n in [3, 4, 5] {
+    for n in [6, 7, 8] {
         let at = button_bounds(&root, n).center();
         for phase in [PointerPhase::Down, PointerPhase::Up] {
             root.event(

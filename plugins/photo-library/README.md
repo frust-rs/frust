@@ -18,6 +18,10 @@ More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 | Linux, macOS, Windows | native file dialog (`frust-file-dialogs`), original files returned |
 | web | none: `PhotoError::Unsupported` |
 
+`PhotoLibrary::scan_folder(&FolderGrant, &FolderScan)` pages through the images and videos of a folder the user
+granted (`frust_photo_library::folder::FolderGrant`, from `frust-file-dialogs`), newest first, on Android (a tree URI),
+iOS (a bookmarked folder) and desktop. It is not available on web.
+
 ## Browse the library
 
 With the `library` cargo feature (`frust-photo-library = { version = "0.6", features = ["library"] }`, or the TUI's

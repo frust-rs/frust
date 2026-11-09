@@ -190,3 +190,17 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("../build/android/frust-share"))
     }
 }
+
+// frust-file-dialogs: the same include/projectDir/build-dir-redirect trio as
+// `:frust-share` above. The module supplies the Storage Access Framework host
+// (`FrustFileDialogsHost`) and its process-start init provider, and declares no
+// permission.
+include(":frust-file-dialogs")
+project(":frust-file-dialogs").projectDir =
+    file("../../../plugins/file-dialogs/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-file-dialogs") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-file-dialogs"))
+    }
+}
