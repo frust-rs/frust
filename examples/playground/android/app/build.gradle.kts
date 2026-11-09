@@ -222,6 +222,9 @@ dependencies {
     // frust-share: the file-share host (`FrustShareHost`) + its FileProvider
     // subclass, serving copies under cacheDir/frust-share.
     implementation(project(":frust-share"))
+    // frust-file-dialogs: the Storage Access Framework host
+    // (`FrustFileDialogsHost`) + its process-start init provider.
+    implementation(project(":frust-file-dialogs"))
 }
 
 // Per-ABI versionCode offsets, applied only when splits are enabled so each
