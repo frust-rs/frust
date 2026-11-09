@@ -23,6 +23,7 @@
 //! | `cancel` | `(long requestId) -> void` | nothing; an unknown or already-answered id is ignored |
 //! | `isTreeGranted` | `(String uri) -> boolean` | whether a persisted read grant covers `uri` |
 //! | `releaseTree` | `(String uri) -> void` | nothing; drops the persisted grant |
+//! | `releaseNewTree` | `(long requestId, String uri) -> void` | nothing; drops the persisted grant only if the answer to `requestId` newly took it |
 //! | `mimesForExtensions` | `(String[] extensions) -> String[]` | the MIME types to filter by (`*/*` when any extension is unknown) |
 //! | `mimeForName` | `(String name) -> String` | the MIME type for a new document of that name |
 //! | `cacheRoot` | `() -> String` | the app cache directory, or null before initialisation |
@@ -144,6 +145,8 @@ const DISMISSED: jint = 8;
 const ACCESS_LOST: jint = 9;
 /// A document exceeded the copy's byte limit.
 const TOO_LARGE: jint = 10;
+/// The system refused to persist the folder grant (for example the per-app cap).
+const GRANT_FAILED: jint = 11;
 
 /// `copyDocument`'s `maxBytes` when there is no limit.
 const NO_LIMIT: jlong = -1;
@@ -507,10 +510,14 @@ fn run_request(
     if let Some(token) = cancel {
         token.clear_hook();
     }
-    // A cancel that raced the host's answer still wins.
-    if cancel.is_some_and(CancelToken::is_cancelled) {
+    // A cancel that raced the host's answer still wins, except over a finished
+    // export: once the host reported `SAVED` the document exists, so that stays
+    // the outcome (as on iOS).
+    if cancel.is_some_and(CancelToken::is_cancelled) && !matches!(answer, Answer::Code(SAVED)) {
         if let Answer::Tree(Some(uri)) = &answer {
-            release_tree(uri);
+            // Only a permission this request newly took: a re-picked folder
+            // keeps the grant an older `FolderGrant` holds.
+            release_new_tree(request_id, uri);
         }
         return Ok(Answer::Cancelled);
     }
@@ -642,6 +649,10 @@ fn error_for(code: jint) -> FileDialogError {
         TOO_LARGE => {
             log::warn!("frust-file-dialogs: the document exceeds the read limit");
             FileDialogError::Io
+        }
+        GRANT_FAILED => {
+            log::warn!("frust-file-dialogs: the system refused to persist the folder grant");
+            FileDialogError::Platform
         }
         BUSY => {
             log::warn!("frust-file-dialogs: another file dialog is already in flight");
@@ -916,6 +927,26 @@ fn release_tree(uri: &str) {
     });
     if let Err(err) = released {
         log::warn!("frust-file-dialogs: releasing the folder grant failed: {err}");
+    }
+}
+
+/// Drops the persisted grant on `uri` only if the host's answer to `request_id`
+/// newly took it; a failure is only logged.
+fn release_new_tree(request_id: u64, uri: &str) {
+    let released = with_host(|env, class| {
+        run_jni(env, "FrustFileDialogsHost.releaseNewTree", |env| {
+            let uri = env.new_string(uri)?;
+            env.call_static_method(
+                class,
+                jni_str!("releaseNewTree"),
+                jni_sig!("(JLjava/lang/String;)V"),
+                &[JValue::Long(request_id as jlong), JValue::Object(&uri)],
+            )?
+            .v()
+        })
+    });
+    if let Err(err) = released {
+        log::warn!("frust-file-dialogs: releasing the new folder grant failed: {err}");
     }
 }
 
