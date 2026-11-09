@@ -422,16 +422,27 @@ fn retention_keeps_the_parallel_walk_byte_identical() {
     let a = sequential
         .compile(&scene, Affine::IDENTITY, VIEWPORT)
         .expect("compiles");
-    let b = parallel
-        .compile(&scene, Affine::IDENTITY, VIEWPORT)
-        .expect("compiles");
-    assert_eq!(a.strip_buf(), b.strip_buf());
-    assert_eq!(a.alphas(), b.alphas());
-    assert_eq!(a.retained, b.retained);
-    assert_eq!(a.recorder.layers.len(), b.recorder.layers.len());
+    // Helper draws race the sequential walk, so a given frame may merge none.
+    // Re-compile (each compile rebuilds the frame from scratch) until a frame
+    // merges a helper run; every frame must still be byte-identical.
+    const MAX_ATTEMPTS: u32 = 50;
+    let mut merged_on = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let b = parallel
+            .compile(&scene, Affine::IDENTITY, VIEWPORT)
+            .expect("compiles");
+        assert_eq!(a.strip_buf(), b.strip_buf());
+        assert_eq!(a.alphas(), b.alphas());
+        assert_eq!(a.retained, b.retained);
+        assert_eq!(a.recorder.layers.len(), b.recorder.layers.len());
+        if b.parallel_draws > 0 {
+            merged_on = Some(attempt);
+            break;
+        }
+    }
     assert!(
-        b.parallel_draws > 0,
-        "precondition: helpers really generated runs"
+        merged_on.is_some(),
+        "precondition: helpers really generated runs (no frame merged a helper run in {MAX_ATTEMPTS} attempts)"
     );
 }
 
