@@ -122,7 +122,7 @@ mod virtual_clock {
                     None => {}
                 }
             }
-            group.map(|_| taken)
+            (!taken.is_empty()).then_some(taken)
         }
 
         /// The sleeps registered and not dropped.
@@ -306,8 +306,9 @@ pub mod test_support {
 
     /// Moves virtual time forward by `by`, stepping through each intervening deadline in
     /// order. For each deadline it sets `now` to it, wakes the live sleeps due there in
-    /// registration order, then drains this thread's local task queue (when a runtime
-    /// exists) so continuations run at that time and new sleeps are measured from it. A
+    /// registration order, then drains the local task queue (when this is the UI thread of
+    /// an initialized runtime) so continuations run at that time and new sleeps are measured
+    /// from it. A
     /// sleep armed inside the interval fires in the same call. Afterwards `now` is the
     /// target, `now + by` saturating at [`Duration::MAX`].
     ///
@@ -331,7 +332,10 @@ pub mod test_support {
             for entry in entries {
                 entry.wake_if_live();
             }
-            if let Some(runtime) = ReactiveRuntime::get() {
+            // Only the UI thread owns the local queue; `pump_local` asserts that.
+            if crate::executor::is_ui_thread()
+                && let Some(runtime) = ReactiveRuntime::get()
+            {
                 runtime.pump_local();
             }
         }
@@ -1186,6 +1190,22 @@ mod tests {
     fn sleep_stays_send_with_the_virtual_clock_compiled_in() {
         fn assert_send<T: Send>(_: T) {}
         assert_send(sleep(SHORT));
+    }
+
+    #[test]
+    fn advance_off_the_ui_thread_wakes_without_draining() {
+        let (_guard, _rt) = setup();
+        std::thread::spawn(|| {
+            let _clock = test_support::install_virtual_clock();
+            let mut wait = Box::pin(sleep(SHORT));
+            let waker = futures::task::noop_waker();
+            let mut cx = std::task::Context::from_waker(&waker);
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+            test_support::advance(SHORT);
+            assert!(wait.as_mut().poll(&mut cx).is_ready());
+        })
+        .join()
+        .expect("advance must not assert off the UI thread");
     }
 
     #[test]

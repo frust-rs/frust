@@ -70,8 +70,9 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
   virtual time), advances the clock by `dt`, drains again (firing what came due), then paints the
   frame. A sleep takes its deadline at its first poll, so a timer armed before a pump is measured
   from that pump's start. The advance steps through each deadline in order, draining the queue at
-  each, so `pump(a + b)` matches `pump(a); pump(b)`: a chain of sleeps or a re-armed timer inside
-  `dt` fires at its own virtual time.
+  each, so a chain of sleeps or a re-armed timer inside `dt` fires at its own virtual time, and for
+  work on the local task queue `pump(a + b)` matches `pump(a); pump(b)`. A timer armed by a rebuild
+  depends on where the frames fall: each pump runs one frame, after its advance.
 - A deferred callback delivered by the rebuild's housekeeping flush asks for its redraw on the
   frame after, so it still costs two pumps to settle (`pump_and_settle` waits for two quiet pumps).
 - `pump_until(what, timeout, predicate)` is the only real-time wait, for `spawn_blocking` or
