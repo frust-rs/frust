@@ -15,10 +15,18 @@
 //! `frust::spawn_blocking` and deliver the result through `use_task` /
 //! `AsyncValue`; never call them from a paint or event handler or write a signal
 //! from the background thread. Android and iOS refuse a call on the UI thread
-//! with [`FileDialogError::UiThread`]. A cancel is `Ok(None)`, an empty `Vec` or
-//! [`ExportOutcome::Cancelled`]; `rfd` cannot report a missing desktop backend,
-//! which looks like a cancel (see the README).
+//! with [`FileDialogError::UiThread`]. A user dismissing the dialog is `Ok(None)`, an empty
+//! `Vec` or [`ExportOutcome::Cancelled`]; `rfd` cannot report a missing desktop backend,
+//! which looks like that (see the README).
+//!
+//! # Cancel and progress
+//!
+//! [`FileDialog::cancel`] and [`ListOptions::cancel`] take a [`CancelToken`] that another
+//! thread fires; the call then returns [`FileDialogError::Cancelled`], which is distinct from
+//! the user dismissing a dialog. [`FileDialog::on_progress`] reports [`FileProgress`] while
+//! chosen items load or a file is exported.
 
+mod cancel;
 mod export;
 mod filter;
 mod folder;
@@ -67,8 +75,11 @@ mod backend;
 
 use backend::show;
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+pub use cancel::CancelToken;
 pub use export::ExportOutcome;
 pub use filter::FileFilter;
 pub use folder::{EntryLocation, FolderEntry, FolderGrant, ListOptions};
@@ -98,6 +109,57 @@ pub enum FileDialogError {
     /// The platform dialog or storage API reported a failure.
     #[error("the platform file dialog failed")]
     Platform,
+    /// The call's [`CancelToken`] fired. A user dismissing a dialog is not this: it keeps
+    /// its own result (`Ok(None)`, an empty `Vec` or [`ExportOutcome::Cancelled`]).
+    #[error("the file dialog call was cancelled")]
+    Cancelled,
+}
+
+/// Loading progress of a call, delivered to [`FileDialog::on_progress`].
+///
+/// The first call means the dialog has closed and the chosen items are loading (on desktop,
+/// that an export has begun copying). `done` items are finished; `fraction` is `0.0..=1.0`
+/// across all items. Callbacks may run on any thread: never call them while holding a lock
+/// the callback might re-enter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct FileProgress {
+    /// Number of items chosen.
+    pub items: usize,
+    /// Number of items finished loading.
+    pub done: usize,
+    /// Overall progress, `0.0..=1.0`.
+    pub fraction: f64,
+}
+
+pub(crate) type ProgressCallback = Arc<dyn Fn(FileProgress) + Send + Sync>;
+
+/// The progress callback and cancel token of one call; carried by [`Request`] to the backends.
+#[derive(Clone, Default)]
+pub(crate) struct CallOptions {
+    #[allow(dead_code)] // Read by the desktop arm and the mobile arms.
+    pub progress: Option<ProgressCallback>,
+    #[allow(dead_code)] // Read by the desktop arm and the mobile arms.
+    pub cancel: Option<CancelToken>,
+}
+
+impl CallOptions {
+    /// `Err(Cancelled)` once the token has fired.
+    pub(crate) fn check(&self) -> Result<(), FileDialogError> {
+        match &self.cancel {
+            Some(token) if token.is_cancelled() => Err(FileDialogError::Cancelled),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl fmt::Debug for CallOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CallOptions")
+            .field("progress", &self.progress.is_some())
+            .field("cancel", &self.cancel.is_some())
+            .finish()
+    }
 }
 
 /// The dialog flavour a [`Request`] asks for.
@@ -110,13 +172,14 @@ pub(crate) enum Kind {
 }
 
 /// Everything a backend needs; built by [`FileDialog`], asserted in tests.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct Request {
     pub kind: Kind,
     pub title: Option<String>,
     pub directory: Option<PathBuf>,
     pub file_name: Option<String>,
     pub filters: Vec<FileFilter>,
+    pub options: CallOptions,
 }
 
 /// Builder for a native file dialog.
@@ -129,11 +192,24 @@ pub(crate) struct Request {
 ///     .filter(FileFilter::new("Images", &["png", "jpg"]))
 ///     .open_file(); // blocks: call inside `frust::spawn_blocking`
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct FileDialog {
     title: Option<String>,
     directory: Option<PathBuf>,
     filters: Vec<FileFilter>,
+    options: CallOptions,
+}
+
+impl fmt::Debug for FileDialog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileDialog")
+            .field("title", &self.title)
+            .field("directory", &self.directory)
+            .field("filters", &self.filters)
+            .field("progress", &self.options.progress.is_some())
+            .field("cancel", &self.options.cancel.is_some())
+            .finish()
+    }
 }
 
 impl FileDialog {
@@ -162,9 +238,30 @@ impl FileDialog {
         self
     }
 
+    /// Reports loading progress after the dialog closes. See [`FileProgress`].
+    ///
+    /// Desktop dialogs return the user's own files, so only
+    /// [`export_file`](Self::export_file) reports there.
+    pub fn on_progress(mut self, f: impl Fn(FileProgress) + Send + Sync + 'static) -> Self {
+        self.options.progress = Some(Arc::new(f));
+        self
+    }
+
+    /// Lets the caller cancel the call through `token`.
+    ///
+    /// A token that is already cancelled makes every terminal call return
+    /// [`FileDialogError::Cancelled`] before any dialog appears. A native desktop dialog
+    /// cannot be closed from another thread, so a token fired while it shows takes effect
+    /// when it closes; likewise on Android a system dialog already showing stays open.
+    pub fn cancel(mut self, token: CancelToken) -> Self {
+        self.options.cancel = Some(token);
+        self
+    }
+
     /// Picks one file. Blocks; see the crate-level blocking contract.
     /// `Ok(None)` means the user cancelled.
     pub fn open_file(self) -> Result<Option<PathBuf>, FileDialogError> {
+        self.options.check()?;
         let mut picked = show(self.request(Kind::OpenFile, None))?;
         picked.truncate(1);
         Ok(picked.pop())
@@ -172,12 +269,14 @@ impl FileDialog {
 
     /// Picks any number of files. Blocks; an empty `Vec` means cancelled.
     pub fn open_files(self) -> Result<Vec<PathBuf>, FileDialogError> {
+        self.options.check()?;
         show(self.request(Kind::OpenFiles, None))
     }
 
     /// Chooses a save destination, pre-filling `file_name` when given.
     /// Blocks; `Ok(None)` means cancelled. The file is not created.
     pub fn save_file(self, file_name: Option<&str>) -> Result<Option<PathBuf>, FileDialogError> {
+        self.options.check()?;
         let mut picked = show(self.request(Kind::SaveFile, file_name))?;
         picked.truncate(1);
         Ok(picked.pop())
@@ -186,6 +285,7 @@ impl FileDialog {
     /// Picks a folder and holds access to it. Blocks; `Ok(None)` means
     /// cancelled. Filters are ignored.
     pub fn pick_folder(self) -> Result<Option<FolderGrant>, FileDialogError> {
+        self.options.check()?;
         backend::pick_folder(self.folder_request())
     }
 
@@ -196,6 +296,7 @@ impl FileDialog {
         source: &Path,
         suggested_name: Option<&str>,
     ) -> Result<ExportOutcome, FileDialogError> {
+        self.options.check()?;
         backend::export_file(self.export_request(source, suggested_name), source)
     }
 
@@ -218,6 +319,7 @@ impl FileDialog {
             directory: self.directory,
             file_name: file_name.map(str::to_owned),
             filters: self.filters,
+            options: self.options,
         }
     }
 }
@@ -324,10 +426,45 @@ mod tests {
             FileDialogError::AccessLost,
             FileDialogError::Io,
             FileDialogError::Platform,
+            FileDialogError::Cancelled,
         ] {
             let text = error.to_string();
             assert!(!text.is_empty() && !text.contains(['/', '\\']), "{text}");
         }
+    }
+
+    #[test]
+    fn builder_plumbs_progress_and_cancel_and_debug_shows_only_flags() {
+        let token = CancelToken::new();
+        let dialog = FileDialog::new().on_progress(|_| {}).cancel(token.clone());
+        let text = format!("{dialog:?}");
+        assert!(
+            text.contains("progress: true") && text.contains("cancel: true"),
+            "{text}"
+        );
+        let req = dialog.request(Kind::OpenFile, None);
+        assert!(req.options.progress.is_some());
+        assert_eq!(req.options.cancel, Some(token));
+        let plain = format!("{:?}", FileDialog::new());
+        assert!(plain.contains("progress: false") && plain.contains("cancel: false"));
+    }
+
+    #[test]
+    fn an_already_cancelled_token_fails_every_call_before_any_dialog() {
+        let token = CancelToken::new();
+        token.cancel();
+        let dialog = || FileDialog::new().cancel(token.clone());
+        assert_eq!(dialog().open_file(), Err(FileDialogError::Cancelled));
+        assert_eq!(dialog().open_files(), Err(FileDialogError::Cancelled));
+        assert_eq!(dialog().save_file(None), Err(FileDialogError::Cancelled));
+        assert!(matches!(
+            dialog().pick_folder(),
+            Err(FileDialogError::Cancelled)
+        ));
+        assert_eq!(
+            dialog().export_file(Path::new("a.txt"), None),
+            Err(FileDialogError::Cancelled)
+        );
     }
 
     #[test]

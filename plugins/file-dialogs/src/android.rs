@@ -1,5 +1,8 @@
 //! Android backend. Every call answers [`FileDialogError::Unsupported`]: the
 //! Storage Access Framework host is not wired in.
+//!
+//! `Request::options` and `ListOptions::cancel_token` carry the caller's progress callback and
+//! cancel token for the Storage Access Framework arm to honour.
 
 use std::path::{Path, PathBuf};
 

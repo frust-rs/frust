@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::{EntryLocation, FileDialogError, FolderEntry, ListOptions};
+use crate::{CancelToken, EntryLocation, FileDialogError, FolderEntry, ListOptions};
 
 struct PendingDir {
     path: PathBuf,
@@ -23,6 +23,14 @@ pub(crate) fn list(
     options: &ListOptions,
 ) -> Result<Vec<FolderEntry>, FileDialogError> {
     let max_entries = usize::try_from(options.max_entries).unwrap_or(usize::MAX);
+    let cancelled = || {
+        options
+            .cancel_token()
+            .is_some_and(CancelToken::is_cancelled)
+    };
+    if cancelled() {
+        return Err(FileDialogError::Cancelled);
+    }
     let mut found = Vec::new();
     let mut pending = vec![PendingDir {
         path: root.to_path_buf(),
@@ -31,6 +39,9 @@ pub(crate) fn list(
     }];
 
     'walk: while let Some(dir) = pending.pop() {
+        if cancelled() {
+            return Err(FileDialogError::Cancelled);
+        }
         let children = match sorted_children(&dir.path) {
             Ok(children) => children,
             Err(err) if dir.depth == 0 => return Err(root_error(err)),
@@ -41,6 +52,9 @@ pub(crate) fn list(
         };
         let mut subdirs = Vec::new();
         for path in children {
+            if cancelled() {
+                return Err(FileDialogError::Cancelled);
+            }
             let Ok(metadata) = fs::symlink_metadata(&path) else {
                 continue;
             };
@@ -269,6 +283,25 @@ mod tests {
         symlink(&outside_file, dir.path().join("linked-file.txt")).unwrap();
         let entries = list(dir.path(), &ListOptions::new().recursive(true)).unwrap();
         assert_eq!(relative_paths(&entries), ["real.txt"]);
+    }
+
+    #[test]
+    fn an_already_cancelled_walk_returns_cancelled() {
+        let dir = tree();
+        let token = CancelToken::new();
+        token.cancel();
+        let options = ListOptions::new().recursive(true).cancel(token);
+        assert_eq!(list(dir.path(), &options), Err(FileDialogError::Cancelled));
+    }
+
+    #[test]
+    fn a_token_lists_normally_until_it_fires() {
+        let dir = tree();
+        let token = CancelToken::new();
+        let options = ListOptions::new().recursive(true).cancel(token.clone());
+        assert_eq!(list(dir.path(), &options).unwrap().len(), 6);
+        token.cancel();
+        assert_eq!(list(dir.path(), &options), Err(FileDialogError::Cancelled));
     }
 
     #[test]

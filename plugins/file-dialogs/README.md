@@ -95,6 +95,38 @@ skipped, at most 8 levels and 10 000 entries when those caps apply; a listing
 that reaches `max_entries` is cut short. `local_path()` is `None` on Android,
 where `FolderEntry::location` is `EntryLocation::ContentUri`.
 
+### Cancel and progress
+
+`FileDialog::cancel(token)` and `ListOptions::cancel(token)` take a `CancelToken`
+(clone it, hand one clone to the call and fire the other from any thread). A
+cancelled call returns `FileDialogError::Cancelled`, which is distinct from the
+user dismissing a dialog (`Ok(None)`, an empty `Vec`, `ExportOutcome::Cancelled`).
+A token is single-use; a token that is already cancelled fails every call before
+any dialog appears.
+
+`FileDialog::on_progress(|p| ...)` reports `FileProgress { items, done, fraction }`
+(at most about 20 calls per second; the first and final calls always arrive;
+callbacks may run on any thread). The first call means the dialog has closed and
+the chosen items are loading.
+
+```rust
+let token = CancelToken::new();
+let stop = token.clone(); // fire `stop.cancel()` from a Cancel button
+let outcome = FileDialog::new()
+    .cancel(token)
+    .on_progress(|p| set_fraction(p.fraction))
+    .export_file(&report, Some("report.pdf"));
+```
+
+| Platform | Token semantics |
+|----------|-----------------|
+| Desktop | A native dialog cannot be closed from another thread: the token is checked before the dialog shows and again when it closes. `export_file` copies in chunks, checks the token between them and reports progress; a cancelled or failed copy removes its partial file and never touches an existing destination. `ListOptions::cancel` is checked between entries. |
+| Android | The token cancels the wait and any copy, but cannot close a system dialog that is already showing. |
+| iOS | The token cancels the wait and any copy. |
+
+Desktop `open_file`, `open_files`, `save_file` and `pick_folder` return the user's
+own paths and report no progress.
+
 ## Blocking contract
 
 Every terminal call blocks the calling thread until the dialog closes, and
