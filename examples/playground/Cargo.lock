@@ -1693,6 +1693,8 @@ dependencies = [
  "accesskit",
  "accesskit_ios",
  "anyhow",
+ "block2 0.6.2",
+ "dispatch2",
  "frust-core",
  "frust-reactive",
  "frust-render",
@@ -1704,6 +1706,8 @@ dependencies = [
  "libc",
  "log",
  "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
  "peniko",
  "pollster",
 ]

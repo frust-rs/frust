@@ -52,6 +52,11 @@
 //! .await??;
 //! ```
 //!
+//! For a write that must finish when the app leaves the foreground, take a
+//! `frust::BackgroundTask::begin(..)` guard on the UI thread, move it into the
+//! `spawn_blocking` closure and drop it when the write completes (see the facade
+//! docs). It protects the write only on iOS.
+//!
 //! Unlike `secure-storage`'s biometric gate or `camera`'s permission/
 //! capture calls, this crate has **no code-level UI-thread guard** — there
 //! is no shared guard helper in this codebase, and adding one here would

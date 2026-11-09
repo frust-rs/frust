@@ -28,6 +28,7 @@
 
 mod app_lifecycle;
 mod back;
+mod background_task;
 mod deep_link;
 mod executor;
 mod menu;
@@ -45,6 +46,10 @@ pub use app_lifecycle::{
 pub use back::{
     BackPresses, CanPopRegistration, back_presses, clear_can_pop_provider, handles_back,
     push_back_press, set_can_pop_provider, set_handles_back,
+};
+pub use background_task::{
+    BackgroundTask, BackgroundTaskBackend, TaskState, install_background_task_backend,
+    set_background_task_backend,
 };
 pub use deep_link::{DeepLink, DeepLinks, deep_links, push_deep_link};
 pub use menu::{MenuEvent, MenuEvents, menu_events, push_menu_event};

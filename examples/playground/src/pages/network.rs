@@ -36,17 +36,25 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use frust::paths::{atomic_write, data_dir};
 use frust::time::{Duration, Timer, sleep};
 use frust::{
-    AppExitResponse, AppLifecycleListener, ButtonStyle, Component, EdgeInsets, Get, Padding,
-    RwSignal, Set, SizedBox, Theme, Update, View, app_lifecycle, button, checkbox, column,
+    AppExitResponse, AppLifecycleListener, BackgroundTask, ButtonStyle, Component, EdgeInsets, Get,
+    Padding, RwSignal, Set, SizedBox, Theme, Update, View, app_lifecycle, button, checkbox, column,
     component, spawn_blocking, spawn_local, spawn_local_scoped, text, use_context,
 };
 use frust_connectivity::{Connectivity, ConnectivityEvent, ListenerHandle, NetworkPath};
+use frust_database::{Database, DatabaseError, Value};
 
 /// Most rows the log keeps; the oldest fall off the end.
 const LOG_CAP: usize = 50;
 
 /// File name of the marker the flagged-write timer leaves in the data dir.
 const MARKER_NAME: &str = "timer-marker.txt";
+
+/// Creates the table the flush-write buttons log into.
+const FLUSH_LOG_DDL: &str = "CREATE TABLE IF NOT EXISTS flush_log \
+     (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, at INTEGER NOT NULL)";
+
+/// The `flush_log.kind` values, in the order their evidence rows are emitted.
+const FLUSH_KINDS: [&str; 2] = ["guarded", "plain"];
 
 /// The grep prefix every row carries in the platform log.
 const LOG_PREFIX: &str = "frust-gate network:";
@@ -100,6 +108,7 @@ impl Component for NetworkPage {
         let log = RwSignal::new(Vec::new());
 
         sink.emit(&Self::marker_row());
+        Self::report_flush_rows(&sink);
         let lifecycle = Self::lifecycle(&sink, &block_exit);
         // Registered before the first `Connectivity::current()` read, so the
         // monitor's `initial: true` report reaches this listener.
@@ -273,6 +282,62 @@ impl NetworkPage {
         }
     }
 
+    /// Emit the newest `flush_log` row of each kind, read off the UI thread. These
+    /// rows are the evidence a gate reads after a relaunch.
+    fn report_flush_rows(sink: &RowSink) {
+        let sink = sink.clone();
+        drop(spawn_blocking(move || {
+            let rows = Self::newest_flush_rows().unwrap_or_else(|e| {
+                sink.emit(&format!("flush_log read failed: {e}"));
+                Vec::new()
+            });
+            for (kind, at) in rows {
+                match at {
+                    Some(at) => sink.emit(&format!("last flush row ({kind}): {at}")),
+                    None => sink.emit(&format!("last flush row ({kind}): none")),
+                }
+            }
+        }));
+    }
+
+    /// Blocking: ensure the table exists and read the newest `at` per kind.
+    fn newest_flush_rows() -> Result<Vec<(&'static str, Option<i64>)>, DatabaseError> {
+        let db = Database::open("playground")?;
+        db.execute(FLUSH_LOG_DDL, ())?;
+        let mut out = Vec::new();
+        for kind in FLUSH_KINDS {
+            let rows = db.query(
+                "SELECT at FROM flush_log WHERE kind = ?1 ORDER BY id DESC LIMIT 1",
+                [kind],
+            )?;
+            let at = rows
+                .first()
+                .and_then(|row| row.get(0))
+                .and_then(|value| match value {
+                    Value::Integer(n) => Some(*n),
+                    _ => None,
+                });
+            out.push((kind, at));
+        }
+        Ok(out)
+    }
+
+    /// Blocking: insert one `flush_log` row of `kind` stamped with epoch-ms.
+    fn write_flush_row(kind: &str) -> Result<(), DatabaseError> {
+        let at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        let db = Database::open("playground")?;
+        db.execute(FLUSH_LOG_DDL, ())?;
+        db.transaction(|txn| {
+            txn.execute(
+                "INSERT INTO flush_log (kind, at) VALUES (?1, ?2)",
+                [Value::Text(kind.to_string()), Value::Integer(at)],
+            )?;
+            Ok(())
+        })
+    }
+
     /// A button that arms a timer and stores its handle on the page state.
     fn arm_button(
         label: &'static str,
@@ -327,6 +392,40 @@ impl NetworkPage {
             })
             .flush_on_background()
         });
+        let guarded_10 = Self::arm_button("Arm 10 s (flush + task + DB write)", |sink, _| {
+            let sink = sink.clone();
+            Timer::new(Duration::from_secs(10), move || {
+                // Begun on the UI thread; the write below never needs the UI queue.
+                let task = BackgroundTask::begin("playground-save");
+                let sink = sink.clone();
+                drop(spawn_blocking(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    let result = Self::write_flush_row("guarded");
+                    let lost = task.expired();
+                    drop(task);
+                    match (result, lost) {
+                        (Ok(()), false) => sink.emit("flush write done (guarded)"),
+                        (Ok(()), true) => sink.emit("flush write done (guarded, task expired)"),
+                        (Err(e), _) => sink.emit(&format!("flush write failed (guarded): {e}")),
+                    }
+                }));
+            })
+            .flush_on_background()
+        });
+        let unguarded_10 = Self::arm_button("Arm 10 s (flush + DB write, no guard)", |sink, _| {
+            let sink = sink.clone();
+            Timer::new(Duration::from_secs(10), move || {
+                let sink = sink.clone();
+                drop(spawn_blocking(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    match Self::write_flush_row("plain") {
+                        Ok(()) => sink.emit("flush write done (plain)"),
+                        Err(e) => sink.emit(&format!("flush write failed (plain): {e}")),
+                    }
+                }));
+            })
+            .flush_on_background()
+        });
         let sleeper = button(
             "Sleep 2 s (spawn_local_scoped)",
             |state: &mut NetworkPageState| {
@@ -355,6 +454,8 @@ impl NetworkPage {
             .child(flagged_10)
             .child(plain_10)
             .child(marker_10)
+            .child(guarded_10)
+            .child(unguarded_10)
             .child(sleeper)
             .child(cancel)
     }
