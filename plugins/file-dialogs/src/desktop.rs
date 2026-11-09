@@ -3,22 +3,33 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::export::copy_file;
-use crate::{ExportOutcome, FileDialogError, FolderEntry, FolderGrant, Kind, ListOptions, Request};
+use crate::cancel::ProgressThrottle;
+use crate::export::copy_file_with;
+use crate::{
+    ExportOutcome, FileDialogError, FileProgress, FolderEntry, FolderGrant, Kind, ListOptions,
+    Request,
+};
 
 /// A desktop grant holds nothing beyond its path.
 pub(crate) struct GrantState;
 
-/// Shows the dialog and blocks; an empty result means the user cancelled.
+/// Shows the dialog and blocks; an empty result means the user dismissed it.
+///
+/// A native dialog cannot be closed from another thread, so the token is checked before it
+/// shows and again once it returns.
 pub(crate) fn show(request: Request) -> Result<Vec<PathBuf>, FileDialogError> {
+    request.options.check()?;
     let kind = request.kind;
+    let options = request.options.clone();
     let dialog = build(request);
-    Ok(match kind {
+    let picked = match kind {
         Kind::OpenFile => dialog.pick_file().into_iter().collect(),
         Kind::OpenFiles => absolute_only(dialog.pick_files().unwrap_or_default()),
         Kind::SaveFile => dialog.save_file().into_iter().collect(),
         Kind::PickFolder => dialog.pick_folder().into_iter().collect(),
-    })
+    };
+    options.check()?;
+    Ok(picked)
 }
 
 pub(crate) fn pick_folder(request: Request) -> Result<Option<FolderGrant>, FileDialogError> {
@@ -45,7 +56,8 @@ pub(crate) fn list_folder(
 pub(crate) fn release_folder(_state: GrantState, _token: &str) {}
 
 /// Refuses a bad `source` before asking the user anything, then copies it to the
-/// chosen destination.
+/// chosen destination. The copy runs in chunks, checks the token between them and reports
+/// progress.
 pub(crate) fn export_file(
     request: Request,
     source: &Path,
@@ -54,10 +66,36 @@ pub(crate) fn export_file(
         log::warn!("frust-file-dialogs: the export source is not a readable file");
         return Err(FileDialogError::Io);
     }
-    match show(request)?.pop() {
-        Some(destination) => copy_file(source, &destination).map(|()| ExportOutcome::Saved),
-        None => Ok(ExportOutcome::Cancelled),
-    }
+    let options = request.options.clone();
+    let Some(destination) = show(request)?.pop() else {
+        return Ok(ExportOutcome::Cancelled);
+    };
+    let throttle = options.progress.map(ProgressThrottle::new);
+    let report = |done: usize, fraction: f64| {
+        if let Some(throttle) = &throttle {
+            throttle.report(FileProgress {
+                items: 1,
+                done,
+                fraction,
+            });
+        }
+    };
+    report(0, 0.0);
+    copy_file_with(
+        source,
+        &destination,
+        options.cancel.as_ref(),
+        &mut |copied, total| {
+            let fraction = if total == 0 {
+                0.0
+            } else {
+                copied as f64 / total as f64
+            };
+            report(0, fraction);
+        },
+    )?;
+    report(1, 1.0);
+    Ok(ExportOutcome::Saved)
 }
 
 pub(crate) fn copy_content_uri(_uri: &str, _destination: &Path) -> Result<(), FileDialogError> {
@@ -126,6 +164,7 @@ mod tests {
             directory: Some("/tmp".into()),
             file_name: Some("a.txt".into()),
             filters: vec![FileFilter::new("Text", &["txt"])],
+            options: Default::default(),
         });
     }
 
@@ -194,10 +233,29 @@ mod tests {
             directory: None,
             file_name: None,
             filters: Vec::new(),
+            options: Default::default(),
         };
         assert_eq!(
             export_file(request, &dir.path().join("missing.txt")),
             Err(FileDialogError::Io)
         );
+    }
+
+    #[test]
+    fn show_refuses_a_cancelled_token_before_any_dialog() {
+        let token = crate::CancelToken::new();
+        token.cancel();
+        let request = Request {
+            kind: Kind::OpenFile,
+            title: None,
+            directory: None,
+            file_name: None,
+            filters: Vec::new(),
+            options: crate::CallOptions {
+                progress: None,
+                cancel: Some(token),
+            },
+        };
+        assert_eq!(show(request), Err(FileDialogError::Cancelled));
     }
 }

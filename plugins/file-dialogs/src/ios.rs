@@ -1,5 +1,8 @@
 //! iOS backend. Every dialog call answers [`FileDialogError::Unsupported`]: the
 //! document picker is not wired in. Listing is the shared `walk`.
+//!
+//! `Request::options` and `ListOptions::cancel_token` carry the caller's progress callback and
+//! cancel token for the picker arm to honour.
 
 use std::path::{Path, PathBuf};
 

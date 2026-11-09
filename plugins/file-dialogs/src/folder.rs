@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::backend::{self, GrantState};
 use crate::export::{copy_file, io_error};
-use crate::{FileDialogError, FileFilter};
+use crate::{CancelToken, FileDialogError, FileFilter};
 
 const DEFAULT_MAX_DEPTH: u32 = 8;
 const DEFAULT_MAX_ENTRIES: u32 = 10_000;
@@ -96,6 +96,8 @@ pub struct ListOptions {
     pub extensions: Vec<String>,
     /// Includes hidden files and descends into hidden folders. Off by default.
     pub include_hidden: bool,
+    #[allow(dead_code)] // Read by the walk and the mobile arms.
+    pub(crate) cancel: Option<CancelToken>,
 }
 
 impl Default for ListOptions {
@@ -106,6 +108,7 @@ impl Default for ListOptions {
             max_entries: DEFAULT_MAX_ENTRIES,
             extensions: Vec::new(),
             include_hidden: false,
+            cancel: None,
         }
     }
 }
@@ -144,6 +147,20 @@ impl ListOptions {
     pub fn include_hidden(mut self, include_hidden: bool) -> Self {
         self.include_hidden = include_hidden;
         self
+    }
+
+    /// Lets the caller cancel the listing through `token`: the walk checks it between entries
+    /// and returns [`FileDialogError::Cancelled`]. A token already cancelled fails the call
+    /// at once.
+    pub fn cancel(mut self, token: CancelToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
+    /// The token set by [`cancel`](Self::cancel), for the platform listings.
+    #[allow(dead_code)] // Read by the walk and the mobile arms.
+    pub(crate) fn cancel_token(&self) -> Option<&CancelToken> {
+        self.cancel.as_ref()
     }
 
     /// A copy whose `extensions` are normalised even when the field was set directly.
