@@ -205,15 +205,18 @@ mod export {
             };
             fs::create_dir_all(&dir)?;
             let name = sanitize_file_name(&raw_name, 0, extension.unwrap_or(""));
-            let (path, file) = reserve_file(&dir, &name)?;
+            // The bytes land in a dot-prefixed staging file; the final name
+            // appears only once the file is complete.
+            let (staging, file) = reserve_staging(&dir, &name)?;
 
             let byte_len = match transfer(&resource, file, options) {
                 Ok(byte_len) => byte_len,
                 Err(e) => {
-                    let _ = fs::remove_file(&path);
+                    let _ = fs::remove_file(&staging);
                     return Err(e);
                 }
             };
+            let path = publish(&staging, &dir, &name)?;
             Ok(ExportedOriginal {
                 path,
                 file_name: (!raw_name.is_empty()).then_some(raw_name),
@@ -293,13 +296,49 @@ mod export {
         })
     }
 
-    /// Claims a new file in `dir`, never replacing one that exists.
-    fn reserve_file(dir: &Path, name: &str) -> Result<(PathBuf, File), PhotoError> {
+    /// Claims a new staging file in `dir` for an export that will be named
+    /// `name`, never replacing a file that exists.
+    fn reserve_staging(dir: &Path, name: &str) -> Result<(PathBuf, File), PhotoError> {
         for attempt in 1..=MAX_NAME_ATTEMPTS {
-            let path = dir.join(candidate_name(name, attempt));
+            let path = dir.join(staging_name(name, attempt));
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(file) => return Ok((path, file)),
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(PhotoError::Io(io::ErrorKind::AlreadyExists))
+    }
+
+    /// The hidden staging name for the `attempt`th candidate of `name`.
+    fn staging_name(name: &str, attempt: u32) -> String {
+        format!(".{}.part", candidate_name(name, attempt))
+    }
+
+    /// Moves a complete staging file to the first free final name, never
+    /// replacing a file that exists, and returns that path. A failure removes
+    /// the staging file.
+    fn publish(staging: &Path, dir: &Path, name: &str) -> Result<PathBuf, PhotoError> {
+        let result = claim_final_name(staging, dir, name);
+        // The hard link leaves the staging name behind, and a failure leaves
+        // the file unpublished; either way the staging name goes.
+        let _ = fs::remove_file(staging);
+        result
+    }
+
+    fn claim_final_name(staging: &Path, dir: &Path, name: &str) -> Result<PathBuf, PhotoError> {
+        for attempt in 1..=MAX_NAME_ATTEMPTS {
+            let path = dir.join(candidate_name(name, attempt));
+            // A hard link fails when the name is taken, which a rename would
+            // not, so an earlier export is never overwritten.
+            match fs::hard_link(staging, &path) {
+                Ok(()) => return Ok(path),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(_) if !path.exists() => {
+                    // A volume without hard links: rename onto the free name.
+                    fs::rename(staging, &path)?;
+                    return Ok(path);
+                }
                 Err(e) => return Err(e.into()),
             }
         }
@@ -621,14 +660,35 @@ mod export {
         }
 
         #[test]
+        fn staging_names_are_hidden_and_keep_the_suffix_scheme() {
+            assert_eq!(staging_name("IMG_1.HEIC", 1), ".IMG_1.HEIC.part");
+            assert_eq!(staging_name("IMG_1.HEIC", 2), ".IMG_1-2.HEIC.part");
+        }
+
+        #[test]
+        fn a_complete_file_appears_only_under_its_final_name() {
+            let dir = scratch("publish");
+            let (staging, mut file) = reserve_staging(&dir, "a.jpg").unwrap();
+            file.write_all(b"new").unwrap();
+            assert!(!dir.join("a.jpg").exists());
+            let path = publish(&staging, &dir, "a.jpg").unwrap();
+            assert_eq!(path.file_name().unwrap(), "a.jpg");
+            assert_eq!(fs::read(&path).unwrap(), b"new");
+            assert!(!staging.exists());
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
         fn a_taken_name_gets_a_suffix_and_keeps_the_old_file() {
             let dir = scratch("reserve");
-            let (first, mut file) = reserve_file(&dir, "a.jpg").unwrap();
-            file.write_all(b"old").unwrap();
-            let (second, _) = reserve_file(&dir, "a.jpg").unwrap();
-            assert_eq!(first.file_name().unwrap(), "a.jpg");
+            fs::write(dir.join("a.jpg"), b"old").unwrap();
+            let (staging, mut file) = reserve_staging(&dir, "a.jpg").unwrap();
+            file.write_all(b"new").unwrap();
+            let second = publish(&staging, &dir, "a.jpg").unwrap();
             assert_eq!(second.file_name().unwrap(), "a-2.jpg");
-            assert_eq!(fs::read(&first).unwrap(), b"old");
+            assert_eq!(fs::read(dir.join("a.jpg")).unwrap(), b"old");
+            assert_eq!(fs::read(&second).unwrap(), b"new");
+            assert!(!staging.exists());
             let _ = fs::remove_dir_all(&dir);
         }
 

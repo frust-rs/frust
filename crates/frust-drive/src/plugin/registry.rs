@@ -1034,7 +1034,9 @@ const PHOTO_LIBRARY_FEATURES: &[FeatureSpec] = &[
         summary: "Saving originals into the library: enables the Cargo feature \
                   and adds NSPhotoLibraryAddUsageDescription and the Photos \
                   framework. Add `permissions` with its `photos-add` feature \
-                  to request add-only access.",
+                  to request add-only access. Saving into an album on iOS \
+                  needs read-write access and the `library` feature's usage \
+                  string; add-only access returns PermissionDenied.",
         contributions: PHOTO_LIBRARY_SAVE,
     },
 ];
