@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This module declares NO permission. The Storage Access Framework's system
+  dialogs run in their own process and hand the app access to exactly what the
+  user chose, so opening, exporting and folder access need no storage
+  permission at all.
+
+  The provider below is how `FrustFileDialogsHost` obtains an application
+  `Context`, and registers its Activity lifecycle callbacks, before any
+  Activity exists: a no-op `ContentProvider` whose `onCreate` runs at process
+  start. `${applicationId}` is substituted at manifest-merge time, so the
+  authority is unique per consuming app; `exported="false"` because it exposes
+  no data and nothing outside the app may reach it.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.filedialogs`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <provider
+            android:name="dev.frust.filedialogs.FrustFileDialogsInitProvider"
+            android:authorities="${applicationId}.frustfiledialogsinit"
+            android:exported="false"
+            android:multiprocess="false" />
+    </application>
+
+</manifest>
