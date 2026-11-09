@@ -46,6 +46,41 @@ Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibra
   (`photo-library-limited-alert-plist-manual`). Android pages cost a count and a sort per page
   (`photo-library-android-paging-cost`).
 
+## Export originals and save
+
+`PhotoLibrary::export_original(&AssetId, &ExportOptions)` (the `library` feature) writes an asset's
+untouched bytes to a file: no transcode, no metadata strip. `ExportOptions` takes `version`
+(`AssetVersion::Original` or `Current`, the edited rendition), `allow_network` (when `false`, an
+iCloud-only original fails with `PhotoError::NetworkRequired`), `dest_dir`, `on_progress` (a fraction,
+throttled, ending at 1.0 only on success) and a `CancelToken` (a cancelled export leaves no partial
+file). The default destination is `<cache_dir>/frust-photo-library/originals`: `clear_pick_cache` leaves it
+alone and the plugin has no cleanup API (`photo-library-originals-no-cleanup` in
+[LIMITATIONS.md](../../docs/LIMITATIONS.md)). Export and save block, refuse the mobile UI thread and
+take no pick guard, so they run while a pick does.
+
+`PhotoLibrary::save(&SaveRequest)` (the `save` cargo and registry feature) files a local image or video
+into the library and returns the new asset's id when the platform reports one. A bad file name, album name
+or media kind is `PhotoError::InvalidRequest` before any platform call. The registry feature repeats
+`permissions`' `photos-add` usage string and `Photos` link, so the two compose; request access with
+`permissions` (`photos-add`).
+
+- **iOS:** export needs read-write access (Limited counts) and streams to a hidden `.<name>.part` file that
+  takes its final name only once complete, never replacing an existing file (a taken name gets `-2`,
+  `-3`). A Live Photo exports its still only (`photo-library-live-photo-still-only`). A bare save needs
+  add-only or read-write access; a save into an album needs read-write access and
+  `NSPhotoLibraryUsageDescription` (the `library` feature writes it), and add-only access with an album
+  returns `PermissionDenied` (`photo-library-addonly-no-album`). iOS ends the app when its Photos access
+  changes.
+- **Android:** export reads `content://media/<external|external_primary>/<images|video>/media/<digits>`
+  ids on its own executor (`photo-library-android-serial-exports`); `AssetVersion` and `allow_network`
+  are ignored (`photo-library-android-no-rendition-split`). Save inserts through `MediaStore` into
+  `Pictures/<album or app label>/` (`Movies/...` for video) with no permission; a stuck save has no
+  cancel or deadline (`photo-library-android-save-no-deadline`).
+- **Location:** a stored GPS location is kept by Android browse + export with Media location granted
+  (byte-identical to the camera file) and by the iOS picker with default options. It is zeroed (latitude,
+  longitude, GPS date) by the Android Photo Picker even when granted, and by export without Media location
+  (`photo-library-android-location-redacted`). Browse + export is the route that keeps location.
+
 ## Add the dependency
 
 ```toml
@@ -101,7 +136,8 @@ impl Component for Gallery {
 
 | Platform | Result |
 |---|---|
+| iPhone SE 2nd gen, iOS 26.7.1 | passed (export, save, album save, location through the picker) |
 | iPhone 13 mini, iOS 27.2 | passed (pick, loading progress, cancel, swipe-down, share picked, clear cache; browsing: albums, paging, thumbnails, Limited and Manage selection) |
-| Pixel 5, Android 14 | passed, browsing included; Xiaomi 12 (Android 17) passed the picker and share legs on an earlier build |
+| Pixel 5, Android 14 | passed, browsing, export and save included; Xiaomi 12 (Android 17) passed the picker and share legs on an earlier build |
 | macOS | passed through the file dialog |
-| Android 10/11 fallback picker, Linux, Windows | not device-tested (the API 29/30 leg is owed; so are API 29 paging and a second API 31+ device for browsing) |
+| Android 10/11 fallback picker, Linux, Windows, DNG export on a phone | not device-tested (the API 29/30 leg is owed; so are API 29 paging and a second API 31+ device for browsing) |

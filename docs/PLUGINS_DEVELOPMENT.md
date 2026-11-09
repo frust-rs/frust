@@ -267,7 +267,7 @@ section (deep link `frustplay://section/memory`): press *Query* and compare the 
 
 A device gate for `frust-photo-library` (`plugins/photo-library`), against the playground's **Photos**
 section (deep link `frustplay://section/photos`), Picker panel: filter and limit selectors, *Pick*,
-*Share picked*, *Clear cache*, *Cancel*, a status line.
+*Share picked*, *Clear cache*, *Cancel*, a status line; plus the Browse and Originals panels below.
 
 - **Pick and list:** *Pick* opens the system picker (a file dialog on desktop); the chosen items list with
   kind, name and `is_copy` (true on mobile). No permission prompt appears on either mobile OS.
@@ -286,6 +286,17 @@ section (deep link `frustplay://section/photos`), Picker panel: filter and limit
     It is refused while a pick is open (`Busy`); browsing itself works while a pick is open.
   - **Denied:** with access revoked in system settings, *Refresh* reads Denied and browsing answers `PermissionDenied`, not stale thumbnails.
   - **Not run:** API 29 paging, and a second API 31+ device.
+- **Originals and save** (Originals panel, `library` + `save`; select an asset in the Browse grid, grant read/write first):
+  *Export* writes the original into the app cache and the result line shows name, mime, size and first bytes; a version button
+  picks Original or Current (Android gives the same bytes for both); *Cancel* mid-download ends with `Cancelled` and no file.
+  *Save copy back* and *Save (no album)* file the exported copy into the library (the newest file of an earlier run counts, because iOS
+  ends the app when its Photos access changes and add-only access cannot export). Check the saved copy in Photos or Files/Gallery.
+  - **Location:** a camera photo with GPS exports byte-identical on iOS and on Android with Media location granted; on Android
+    `adb shell pm revoke <app> android.permission.ACCESS_MEDIA_LOCATION` (the Android 14 settings have no switch) then export zeroes latitude,
+    longitude and GPS date; a Photo Picker pick has them zeroed even when granted (`photo-library-android-location-redacted`).
+  - **iOS access:** Settings lists *Add Photos Only* only for an app whose first Photos request was add-only; an album save with add-only
+    access reads `PermissionDenied`.
+  - **Not run:** a DNG export on a phone (none available). Gate devices: iPhone SE 2nd gen (iOS 26.7.1), Pixel 5 (Android 14).
 - **Open:** the API 29/30 emulator leg (the `ACTION_OPEN_DOCUMENT` fallback picker) has not been run
   (`photo-library-android-picker-fallback-untested` in [LIMITATIONS.md](LIMITATIONS.md)).
 

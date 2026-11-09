@@ -170,9 +170,18 @@ pub enum PhotoError {
     /// This platform has no picker.
     #[error("photo picking is not supported on this platform")]
     Unsupported,
-    /// The pick was cancelled through its [`CancelToken`].
-    #[error("the pick was cancelled")]
+    /// The call was cancelled through its [`CancelToken`].
+    #[error("the call was cancelled")]
     Cancelled,
+    /// The original lives in the cloud and the export did not allow network access.
+    #[error("the original is not on this device and network access was not allowed")]
+    NetworkRequired,
+    /// The app's `Info.plist` lacks a usage-description string the OS requires for the call.
+    #[error("missing usage description `{key}`")]
+    MissingUsageDescription {
+        /// The `Info.plist` key to add.
+        key: &'static str,
+    },
     /// The asset or album no longer exists (a stale identifier).
     #[error("asset not found")]
     NotFound,
@@ -183,6 +192,12 @@ pub enum PhotoError {
     /// A filesystem error while preparing the pick cache.
     #[error("filesystem error: {0:?}")]
     Io(std::io::ErrorKind),
+    /// The request is malformed, for example a bad file name, album or media kind.
+    #[error("invalid request: {reason}")]
+    InvalidRequest {
+        /// What is wrong with the request.
+        reason: &'static str,
+    },
     /// Any other platform failure.
     #[error("platform error: {0}")]
     Platform(String),

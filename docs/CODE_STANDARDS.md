@@ -55,7 +55,7 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-share`'s `apple` backend — `SAFETY`-noted `MainThreadMarker::new_unchecked()`, `UIActivityViewController`
     init and the `respondsToSelector`-guarded subject `setValue_forKey`; its `macos` arm the same for `NSSharingServicePicker`.
   - `frust-photo-library`'s `apple` backend — `new_unchecked()`, the `define_class!` picker/delegate, item-provider `msg_send!`/`NSProgress`;
-    `apple_library`: PhotoKit fetches, three hand-sent messages, `CGBitmapContext`, the `TargetSize` `Encode` impl; `android`: only JNI `#[unsafe(no_mangle)]`.
+    `apple_library`: PhotoKit fetches, three hand-sent messages, `CGBitmapContext`, `TargetSize` `Encode`; `apple_originals`: resource-manager export, hand-sent change requests; `android`: only JNI `#[unsafe(no_mangle)]`.
   - `frust-url-launcher`'s `apple` backend (`new_unchecked()`, one `openURL:` call; `desktop`: `ShellExecuteW`) and `frust-haptics`'s (`new_unchecked()`).
   - `frust-gpu`'s Android `import` zone — the hand-opened Vulkan device (`open_with_callback` +
     `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`create_texture_from_hal`,

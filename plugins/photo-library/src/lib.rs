@@ -51,6 +51,7 @@
 
 mod cancel;
 mod library;
+mod originals;
 mod types;
 
 // Desktop uses only part of these; mobile targets keep the dead-code lint.
@@ -69,6 +70,9 @@ pub use cancel::CancelToken;
 pub use library::{
     Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE,
     Thumbnail, ThumbnailMode, ThumbnailRequest,
+};
+pub use originals::{
+    AssetVersion, ExportOptions, ExportedOriginal, ProgressFn, SaveRequest, SavedAsset,
 };
 pub use types::{
     AssetId, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
@@ -233,6 +237,56 @@ impl PhotoLibrary {
         }
     }
 
+    /// Copies an asset's original file (or its edited rendition) into `options.dest_dir`.
+    /// Blocks; needs the `library` feature and photo access, and takes neither the pick guard
+    /// nor the pick in-flight slot.
+    ///
+    /// The default destination is `<cache_dir>/frust-photo-library/originals/`. The app owns it:
+    /// [`clear_pick_cache`](Self::clear_pick_cache) does not touch it. Progress and cancellation
+    /// work as for [`pick`](Self::pick): a cancelled export returns
+    /// `Err(`[`PhotoError::Cancelled`]`)` and leaves no partial file. A cloud-only original with
+    /// [`ExportOptions::allow_network`] off returns [`PhotoError::NetworkRequired`]. Android has
+    /// no rendition split or network distinction, so [`AssetVersion::Current`] and
+    /// `allow_network` are ignored there.
+    pub fn export_original(
+        id: &AssetId,
+        options: &ExportOptions,
+    ) -> Result<ExportedOriginal, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            if originals::is_cancelled(options) {
+                return Err(PhotoError::Cancelled);
+            }
+            platform::export_original(id, options)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = (id, options);
+            Err(library_disabled())
+        }
+    }
+
+    /// Saves a file into the photo library, optionally into a named album. Blocks; needs the
+    /// `save` feature. The request is validated first: the source must exist and its kind must
+    /// be given or inferable from the extension, and a bad file name, album or kind returns
+    /// [`PhotoError::InvalidRequest`]. On iOS an album save needs read-write Photos access and
+    /// `NSPhotoLibraryUsageDescription` (the `library` feature provides the key), while a plain
+    /// save needs only the add-only key the `save` feature provides; add-only access with an
+    /// album returns [`PhotoError::PermissionDenied`], and a missing key returns
+    /// [`PhotoError::MissingUsageDescription`].
+    pub fn save(request: &SaveRequest) -> Result<SavedAsset, PhotoError> {
+        #[cfg(feature = "save")]
+        {
+            let kind = originals::validate_save(request)?;
+            platform::save(request, kind)
+        }
+        #[cfg(not(feature = "save"))]
+        {
+            let _ = request;
+            Err(PhotoError::FeatureDisabled { feature: "save" })
+        }
+    }
+
     /// Empties the in-memory thumbnail cache, so the next [`thumbnail`](Self::thumbnail) of every
     /// asset goes back to the platform. Non-blocking, and safe on a UI thread. A thumbnail
     /// still loading when this runs is returned to its caller but not cached. Does nothing
@@ -289,6 +343,47 @@ fn library_disabled() -> PhotoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "save"))]
+    #[test]
+    fn save_is_feature_gated() {
+        assert_eq!(
+            PhotoLibrary::save(&SaveRequest::new("a.jpg")),
+            Err(PhotoError::FeatureDisabled { feature: "save" })
+        );
+    }
+
+    #[cfg(not(feature = "library"))]
+    #[test]
+    fn export_original_is_feature_gated() {
+        assert_eq!(
+            PhotoLibrary::export_original(&AssetId::from_raw("a"), &ExportOptions::new()),
+            Err(PhotoError::FeatureDisabled { feature: "library" })
+        );
+    }
+
+    #[cfg(feature = "library")]
+    #[test]
+    fn export_original_honours_a_cancelled_token_before_the_platform() {
+        let token = CancelToken::new();
+        token.cancel();
+        assert_eq!(
+            PhotoLibrary::export_original(
+                &AssetId::from_raw("a"),
+                &ExportOptions::new().cancel(token)
+            ),
+            Err(PhotoError::Cancelled)
+        );
+    }
+
+    #[cfg(feature = "save")]
+    #[test]
+    fn save_validates_before_the_platform() {
+        assert_eq!(
+            PhotoLibrary::save(&SaveRequest::new("/nonexistent/frust/a.jpg")),
+            Err(PhotoError::NotFound)
+        );
+    }
 
     #[cfg(not(feature = "library"))]
     #[test]
