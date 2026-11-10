@@ -97,7 +97,8 @@ is additional or different for a plugin.
   <https://developer.apple.com/forums/thread/744965>, a forum report, not Apple documentation).
 - **Play-policy-sensitive permissions are app-side `ManifestPermission` contributions inside a
   `FeatureSpec`, never declared in a plugin's module manifest** (`frust-permissions`' module manifest
-  declares no `uses-permission`). A plugin host launches Activity Result contracts through the resumed
+  declares no `uses-permission`). `background-task` is the explicit exception: `FOREGROUND_SERVICE` is the plugin's core
+  function and merges only into apps that opt in, and apps can remove it with `tools:node="remove"`. A plugin host launches Activity Result contracts through the resumed
   `ComponentActivity`'s `activityResultRegistry`, under a plugin-prefixed key.
 - **Content a plugin picks or shares is staged in a plugin-named cache subdirectory** (`frust-photo-library` picks, `frust-share/<uuid>/`
   copies), never linked to the original. A plugin's `FileProvider` is a subclass with its own authority that exposes only that
