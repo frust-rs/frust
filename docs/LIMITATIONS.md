@@ -6922,7 +6922,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 **Applies to**: `AuthSession::start`'s platform backends only — Android, iOS, macOS (the in-app browser-tab path). `LoopbackSession` is unaffected: it exposes `LoopbackCancel::cancel` plus a mandatory `LoopbackOptions::timeout`, so a desktop loopback session always has a programmatic way out.
 
-**Why accepted**: v1 scope — the one-session `Busy` guard (this crate's *Exactly one live session* doc section) means a stuck session still cannot wedge a later one forever, even with no cancel path and no forced cleanup — dropping the future frees the slot for a new session. Neither this crate's originating task nor its gate script called for a programmatic cancel on the platform-backend side.
+**Why accepted**: v1 scope — the one-session `Busy` guard (this crate's *Exactly one live session* doc section) means a stuck session still cannot wedge a later one forever, even with no cancel path and no forced cleanup — dropping the future frees the slot for a new session.
 
 **Trigger for removal**: `AuthSession::cancel` exists (dismissing `ASWebAuthenticationSession` via `-cancel`, finishing the Android Custom Tab activity), resolving the live session with `AuthSessionOutcome::Cancelled`.
 
@@ -7038,7 +7038,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 **Why accepted**: the cache keys on the URL (plus a digest of the request headers) and treats a successful fetch as immutable, which is right for the content-addressed and versioned URLs the plugin targets; revalidation needs a conditional-request path through the `ImageFetcher` seam.
 
-**Trigger for removal**: a card adding conditional requests (`If-None-Match`/`If-Modified-Since`) and expiry to the disk cache.
+**Trigger for removal**: conditional requests (`If-None-Match`/`If-Modified-Since`) and expiry are added to the disk cache.
 
 **Evidence**: `plugins/network-image/src/disk_cache.rs` (index stores only size and last-access time) and `src/fetch.rs` (`FetchedBytes` carries bytes and content type only).
 

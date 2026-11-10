@@ -11,11 +11,11 @@ and `RouteNavigator::go` now make the stack exactly the matched chain, `frust-sh
 non-default `gpu` feature replaces `install_gpu_handle` and `gpu_handle` with `GpuPublisher`,
 `with_gpu_handle` and `gpu_handle_generation`, and the `frust-shell-ios` `ffi_glue` functions that
 dereference a caller's pointers are now `pub unsafe fn`, with `init` also taking a `pre_init`
-closure. Narrow source breaks are marked in Changed
-with their migrations: new `MainAxisAlignment` and `PathStyle` variants, `PageParity::SpillPool`
-with `MAX_LIVE_PAGES` raised to 5, `#[non_exhaustive]` `TextStyle`, the new `InspectNode::detail`
-field, and added variants or fields on `Capability`, `Method`, `RenderCommand`, `RenderEvent` and
-`CompiledFrame`. Behaviour changes to published APIs are marked there too:
+closure. Narrow source breaks are marked in Changed with their migrations: new `MainAxisAlignment`
+and `PathStyle` variants, `PageParity::SpillPool` with `MAX_LIVE_PAGES` raised to 5,
+`#[non_exhaustive]` `TextStyle`, the new `InspectNode::detail` field, the `pre_init` parameter on
+Android's `native_init`, and added variants or fields on `Capability`, `Method`, `RenderCommand`,
+`RenderEvent` and `CompiledFrame`. Behaviour changes to published APIs are marked there too:
 `AnimationController::reverse()` at 0.0, `PaintCtx::frame_time()`, `frust::gpu::with_context`, the
 facade's default `complex-scripts` feature (about 3 MB per app), the OS text scale on default-size
 `Text`, `frust_paths::atomic_write` and `data_dir`, and `frust-i18n` locale negotiation. The release
@@ -401,10 +401,12 @@ fonts (PingFang) now draw from the glyph atlas.
   the arms or a wildcard; a `CompiledFrame` struct literal or pattern adds the fields or `..`.
 - **Breaking (narrow):** `frust_shell_android::jni_glue::native_init` gains a required
   `pre_init: impl FnOnce()` parameter between `cache_dir` and `make_app`; it stays a safe function.
-  It runs first, inside the panic guard and before the GPU device exists, and a panic in it makes
-  `nativeInit` return 0. `android_app!` users are unaffected, since the macro passes the closure.
-  Migration: a hand-written embedder passes `|| {}`, or a closure that runs early setup such as
-  `frust::gpu::request_optional_features(..)`.
+  It runs first, inside the panic guard and before the shell adopts the GPU device built at library
+  load, and a panic in it makes `nativeInit` return 0. `android_app!` users are unaffected, since
+  the macro passes the closure. Migration: a hand-written embedder passes `|| {}`, or a closure that
+  runs early setup such as `frust::gpu::request_optional_features(..)`; if the pre-built device
+  lacks a requested feature its adapter offers, the shell rebuilds it, a synchronous device build
+  at that launch.
 - **Behaviour change:** `AnimationController::reverse()` at exactly 0.0 settles `Dismissed` where it
   settled `Completed`. `forward()` always settles `Completed` and `reverse()` always `Dismissed`,
   whatever the start value (it can lie outside 0..=1 after `spring_to`); `animate_to` settles by
