@@ -55,7 +55,9 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-share`'s `apple` backend — `SAFETY`-noted `MainThreadMarker::new_unchecked()`, `UIActivityViewController`
     init and the `respondsToSelector`-guarded subject `setValue_forKey`; its `macos` arm the same for `NSSharingServicePicker`.
   - `frust-photo-library`'s `apple` backend — `new_unchecked()`, the `define_class!` picker/delegate, item-provider `msg_send!`/`NSProgress`;
-    `apple_library`: PhotoKit fetches, three hand-sent messages, `CGBitmapContext`, `TargetSize` `Encode`; `apple_originals`: resource-manager export, hand-sent change requests; `android`: only JNI `#[unsafe(no_mangle)]`.
+    `apple_library`: PhotoKit fetches, three hand-sent messages, `CGBitmapContext`, `TargetSize` `Encode`; `apple_originals`: resource-manager export, hand-sent change requests;
+    `apple_decode`: the hand-declared ImageIO `extern` block, the bitmap-context draw, CF casts; `android`: only JNI `#[unsafe(no_mangle)]`;
+    `android_decode`: one `NewDirectByteBuffer` over a Rust `Vec`.
   - `frust-url-launcher`'s `apple` backend (`new_unchecked()`, one `openURL:` call; `desktop`: `ShellExecuteW`) and `frust-haptics`'s (`new_unchecked()`).
   - `frust-gpu`'s Android `import` zone — the hand-opened Vulkan device (`open_with_callback` +
     `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`create_texture_from_hal`,
@@ -95,18 +97,15 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-iap`'s `apple` backend — one untyped `msg_send![class, shared]` resolving the Swift
     glue's singleton by runtime-only class name, plus two `RcBlock` completion blocks receiving raw
     `NSString` pointers whose validity only the glue's contract establishes; each site is
-    `SAFETY`-noted and `catch_unwind`-wrapped. Its `android` backend holds only its two JNI exports'
-    `#[unsafe(no_mangle)]` attributes.
-  - `frust-background-task`'s `apple` backend reads the `UIBackgroundTaskInvalid` constant; its `android` backend holds only a JNI export's `#[unsafe(no_mangle)]`.
+    `SAFETY`-noted and `catch_unwind`-wrapped. Its `android` holds only two JNI `#[unsafe(no_mangle)]`.
+  - `frust-background-task`'s `apple` backend reads `UIBackgroundTaskInvalid`; its `android` holds only a JNI `#[unsafe(no_mangle)]`.
   - `frust-auth-session`'s `apple` backend — the `objc2-authentication-services` calls (the
     deprecated `ASWebAuthenticationSession` initializer, its setters, `-start`), the completion
     handler's raw `NSURL`/`NSError` derefs and error-domain `extern` static, the `define_class!`
     presentation-anchor class, one `MainThreadMarker::new_unchecked()`; each is `SAFETY`-noted, the
-    completion body under `catch_unwind`. Its `android` backend, like `frust-iap`'s, holds only a
-    JNI export's `#[unsafe(no_mangle)]`.
-  - `frust-permissions`'s `apple` backend — AVFoundation request calls, `msg_send!` on `PHPhotoLibrary`,
-    `NSBundle` usage-string reads and `UIApplication` open-settings, each `SAFETY`-noted; its `android`
-    backend holds only its JNI export's `#[unsafe(no_mangle)]`.
+    completion body under `catch_unwind`. Its `android`, like `frust-iap`'s, holds only a JNI `#[unsafe(no_mangle)]`.
+  - `frust-permissions`'s `apple` backend — AVFoundation requests, `msg_send!` on `PHPhotoLibrary`, `NSBundle`
+    usage-string reads, `UIApplication` open-settings (`SAFETY`-noted); its `android`: a JNI `#[unsafe(no_mangle)]`.
   - `frust-hotpatch` — `patch.rs` (`load_patch_library` via `libloading`, so only a library built
     for this process; `apply_patch`; the leaked, Release-published `get_jump_table`), `hot_fn.rs`
     (table address to hot-fn signature), `anchor.rs`, `android.rs` (memfd + `android_dlopen_ext`).

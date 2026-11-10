@@ -18,6 +18,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `frust-photo-library` `decode` feature: `PhotoLibrary::decode_file(path, &DecodeOptions)` and
+  `decode_asset(&AssetId, &DecodeOptions, &ExportOptions)` (with `library`) decode an image at full
+  resolution, capped to `DecodeOptions::max_dimension`, into a `DecodedImage` of straight-alpha RGBA8
+  with its `ImageColorSpace` and optional `ExifData`. iOS and macOS decode through ImageIO (HEIC
+  included) and Android through `ImageDecoder`; Linux and Windows return `Unsupported`, and a device
+  with no decoder for the format returns `Unsupported`. The call blocks, refuses the mobile UI thread
+  and checks its `CancelToken` between stages. Without the feature both calls return
+  `FeatureDisabled`.
+- The plugin registry's `photo-library` entry gains a `decode` option (`frust plugin add photo-library
+  --feature decode`, or the TUI's Add Plugin dialog): it enables the Cargo feature and links ImageIO
+  on iOS, with no permission or plist string.
 - `frust_i18n::fmt::device_time_zone()` and `device_offset_seconds(unix_seconds)` (the `formatting`
   feature): the device's current IANA zone name and its UTC offset at an instant, read from the
   platform on every call through the `iana-time-zone` crate. Both return `None` when the platform

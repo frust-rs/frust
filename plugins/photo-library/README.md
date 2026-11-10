@@ -85,6 +85,80 @@ or media kind is `PhotoError::InvalidRequest` before any platform call. The regi
   longitude, GPS date) by the Android Photo Picker even when granted, and by export without Media location
   (`photo-library-android-location-redacted`). Browse + export is the route that keeps location.
 
+## Decode a photo natively
+
+With the `decode` cargo feature (`frust-photo-library = { version = "0.6", features = ["decode"] }`, or the
+TUI's Add Plugin `decode` option, which also links `ImageIO` on iOS) `PhotoLibrary::decode_file(&Path,
+&DecodeOptions)` decodes an image at full resolution, HEIC included, into a `DecodedImage`: straight-alpha
+RGBA8 (ready for `ImageSource::from_rgba8`), its size and the source size, an `ImageColorSpace` and optional
+`ExifData`. `decode_asset(&AssetId, &DecodeOptions, &ExportOptions)` (also needs `library`) exports an asset,
+decodes it and deletes the exported file.
+
+- `DecodeOptions::new(max_dimension)` has no uncapped form: larger images are downscaled to fit, and zero is
+  `PhotoError::InvalidRequest`. `.srgb()` converts to sRGB (Display P3 is kept for wide-gamut images otherwise);
+  `.cancel(token)` is checked between stages, but a decode already running cannot be interrupted
+  (`photo-library-decode-not-interruptible` in [LIMITATIONS.md](../../docs/LIMITATIONS.md)).
+- iOS and macOS use ImageIO and Android uses `ImageDecoder`; Linux and Windows return `Unsupported`, and so does
+  an Android device with no decoder for the format, notably HEIF (`photo-library-decode-unsupported-desktop`,
+  `photo-library-android-heif-device-optional`). A file truncated inside its pixel data decodes with the missing
+  part blank on iOS and macOS (`photo-library-apple-decode-truncated-pixels`). Without the feature both calls
+  return `PhotoError::FeatureDisabled`.
+- Calls block and refuse the mobile UI thread (`PhotoError::UiThread`); macOS runs on any thread. A full-size
+  decode is large (a 48 MP image is about 192 MB of RGBA8, and on Android the platform bitmap is held beside
+  it), so cap `max_dimension` to what you display.
+
+```rust
+use frust::{
+    Component, Get, RwSignal, Set, View, button, column, spawn_blocking, spawn_local, text,
+};
+use frust_photo_library::{DecodeOptions, PhotoLibrary};
+
+#[derive(Default)]
+struct Viewer;
+
+struct ViewerState {
+    status: RwSignal<String>,
+}
+
+impl Component for Viewer {
+    type State = ViewerState;
+
+    fn init(&self) -> ViewerState {
+        ViewerState {
+            status: RwSignal::new(String::from("Nothing decoded")),
+        }
+    }
+
+    fn build(&self, state: &mut ViewerState) -> impl View<ViewerState> {
+        column()
+            .child(text(state.status.get()))
+            .child(Self::decode_button())
+    }
+}
+
+impl Viewer {
+    fn decode_button() -> impl View<ViewerState> {
+        button("Decode", |state: &mut ViewerState| {
+            let status = state.status;
+            spawn_local(async move {
+                // `path` is a `PickedItem.path` from `PhotoLibrary::pick`.
+                let path = std::path::PathBuf::from("picked.heic");
+                let options = DecodeOptions::new(2048).srgb();
+                // `decode_file` blocks: run it off the UI thread.
+                let result = spawn_blocking(move || PhotoLibrary::decode_file(&path, &options)).await;
+                status.set(match result {
+                    Ok(Ok(image)) => format!("{}x{} decoded", image.width, image.height),
+                    Ok(Err(err)) => format!("error: {err}"),
+                    Err(err) => format!("error: {err}"),
+                });
+            });
+        })
+    }
+}
+
+frust::app!(Viewer);
+```
+
 ## Add the dependency
 
 ```toml
@@ -163,7 +237,8 @@ frust::app!(Gallery);
   during a pick. On mobile `pick` refuses the UI thread (`PhotoError::UiThread`).
 - On mobile each pick is a copy (`PickedItem::is_copy`) that grows the cache until
   `PhotoLibrary::clear_pick_cache()`; paths from earlier picks are invalid after a clear. Picked bytes are
-  untranscoded (an iPhone HEIC stays HEIC, which `decode_image_async` cannot read).
+  untranscoded (an iPhone HEIC stays HEIC, which `decode_image_async` cannot read; the `decode` feature's
+  `decode_file` can).
 - `PickedItem::file_name` is untrusted display text; never build a path from it.
 
 ## Tested platforms
@@ -173,5 +248,5 @@ frust::app!(Gallery);
 | iPhone SE 2nd gen, iOS 26.7.1 | passed (export, save, album save, location through the picker) |
 | iPhone 13 mini, iOS 27.2 | passed (pick, loading progress, cancel, swipe-down, share picked, clear cache; browsing: albums, paging, thumbnails, Limited and Manage selection) |
 | Pixel 5, Android 14 | passed, browsing, export and save included; Xiaomi 12 (Android 17) passed the picker and share legs on an earlier build |
-| macOS | passed through the file dialog |
-| Android 10/11 fallback picker, Linux, Windows, DNG export on a phone | not device-tested (the API 29/30 leg is owed; so are API 29 paging and a second API 31+ device for browsing) |
+| macOS | passed through the file dialog; `decode` has a host test that encoded and decoded a HEIC through ImageIO |
+| `decode` on iOS and Android devices, Android 10/11 fallback picker, Linux, Windows, DNG export on a phone | not device-tested (the API 29/30 leg is owed; so are API 29 paging and a second API 31+ device for browsing) |
