@@ -59,7 +59,7 @@
 
 use frust::{
     Axis, Color, CrossAxisAlignment, EdgeInsets, FlexView, Orientation, Padding, SizedBox, Theme,
-    View, WindowMetrics, column, inflexible, row, text, use_context,
+    View, WindowMetrics, column, inflexible, row, text, use_context, wrap,
 };
 
 use crate::PlaygroundState;
@@ -216,6 +216,28 @@ fn wide_layout(muted: Color) -> impl View<PlaygroundState> {
     row().flex(1, master_pane()).flex(2, detail_pane(muted))
 }
 
+/// Number of chips in the [`chip_wrap`] demo.
+const CHIP_COUNT: usize = 20;
+
+/// A wrapping run of about twenty chips: on a narrow window they flow onto
+/// several lines, on a wide one onto fewer.
+fn chip_wrap(muted: Color) -> impl View<PlaygroundState> {
+    let mut chips = wrap::<PlaygroundState>().spacing(8.0).run_spacing(8.0);
+    for index in 1..=CHIP_COUNT {
+        chips = chips.child(Padding(
+            EdgeInsets::symmetric(10.0, 4.0),
+            text(format!("Chip {index}")).size(11.0).color(muted),
+        ));
+    }
+    Padding(
+        EdgeInsets::symmetric(16.0, 8.0),
+        column()
+            .child(text("Wrap").size(13.0))
+            .child(chips)
+            .cross_axis(CrossAxisAlignment::Start),
+    )
+}
+
 /// See the page-fn contract in [`crate::pages`].
 pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
     // Live theme read for the muted caption color, the same pattern every
@@ -264,5 +286,6 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
             || wide_layout(muted),
             || narrow_layout(muted),
         ))
+        .child(chip_wrap(muted))
         .cross_axis(CrossAxisAlignment::Start)
 }
