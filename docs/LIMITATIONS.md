@@ -7935,7 +7935,7 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 ### `photo-library-heic-preview-needs-native-decode` — `frust::decode_image_async` cannot read a picked HEIC original
 
-**Observed**: picked bytes are the untranscoded original, so an iPhone HEIC photo arrives as HEIC. `frust::decode_image_async` decodes PNG and JPEG only and fails on HEIC (and on WebP and GIF). With the `library` feature, native thumbnails show HEIC on both platforms (the Browse grid) and, on iOS, a pick that carries an asset id previews through one. The playground's Picker panel still previews through `decode_image_async`, so a picked HEIC with no asset id (Android) or no Photos access (iOS) shows a decode error there.
+**Observed**: picked bytes are the untranscoded original, so an iPhone HEIC photo arrives as HEIC. `frust::decode_image_async` decodes PNG and JPEG only and fails on HEIC (and on WebP and GIF). With the `library` feature, native thumbnails show HEIC on both platforms (the Browse grid) and, on iOS, a pick that carries an asset id previews through one.
 
 **Applies to**: apps that pass a picked file's bytes to `decode_image_async`, chiefly HEIC from iOS libraries.
 
@@ -7943,9 +7943,9 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 **Why accepted**: `decode_image_async` is the facade's portable PNG/JPEG decoder and gains no native codecs; a transcoding pick would change the bytes the user chose.
 
-**Trigger for removal**: `decode_image_async` reads HEIC, or the playground previews picks through `decode_file`.
+**Trigger for removal**: `decode_image_async` reads HEIC.
 
-**Evidence**: (2026-11-11) `plugins/photo-library/src/lib.rs` (`decode_file`); `examples/playground/src/pages/photos.rs` (Picker panel text, which does not call `decode_file`); `crates/frust/src/image_async.rs`. Earlier device gates on iPhone 13 mini and Pixel 5 covered the pre-`decode` behaviour only.
+**Evidence**: (2026-11-11) `plugins/photo-library/src/lib.rs` (`decode_file`); `examples/playground/src/pages/photos.rs` (the Picker preview, which falls back to `decode_file` when `decode_image_async` fails); `crates/frust/src/image_async.rs`. Earlier device gates on iPhone 13 mini and Pixel 5 covered the pre-`decode` behaviour only.
 
 ---
 
