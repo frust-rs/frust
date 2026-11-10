@@ -31,8 +31,10 @@
 //! that cell and copies changes into a signal. **Share picked** passes the
 //! picked files to `Share::files_anchored` with a fixed anchor rectangle, and
 //! **Clear cache** calls `PhotoLibrary::clear_pick_cache`. Only the PNG and JPEG
-//! decoders are compiled in, so a HEIC, WebP or GIF preview shows a decode
-//! error.
+//! decoders are compiled in, so the preview first tries them; when that fails it falls back to
+//! `PhotoLibrary::decode_file` (the plugin's `decode` feature: ImageIO on iOS and macOS,
+//! `ImageDecoder` on Android), so a picked HEIC previews there. Other desktops report
+//! `Unsupported` from the fallback, and the preview then shows the original decode error.
 //!
 //! A Browse panel below the Picker lists the library through the same plugin's `library`
 //! feature: an access line (the Photos read/write status, read on **Refresh**), a
@@ -44,8 +46,7 @@
 //! [`THUMB_SCALE`] times the cell size. Browsing is read-only and never takes the pick guard,
 //! so it works while a pick is open; Manage selection presents system UI and does take it.
 //! When a picked item carries an asset id (iOS), the Picker preview tries the native thumbnail
-//! first and decodes the copied file only when that fails. A HEIC pick therefore previews when
-//! the library grants access, and otherwise shows the file's decode error.
+//! first and decodes the copied file only when that fails.
 //!
 //! An Originals panel below Browse acts on one asset: the thumbnail tapped in the Browse grid
 //! (it insets while selected) or, without a selection, the Picker's most recent asset id.
@@ -58,6 +59,13 @@
 //! `ftypheic` (HEIC) or `II*` (DNG) is visible. **Save copy back** files the exported copy
 //! through `PhotoLibrary::save` into the album `Frust Playground`; **Save (no album)** is the
 //! add-only variant. Neither export nor save takes the pick guard.
+//!
+//! **Decode (2048)** and **Decode (full, cap 16384)** call `PhotoLibrary::decode_asset` on the
+//! same target, in [`frust::spawn_blocking`] behind their own [`use_task`] (the call refuses the
+//! UI thread on iOS and Android). The decoded pixels become one [`ImageSource`] inside the
+//! background step, and the task's value carries it with the source and output sizes, the colour
+//! space and an EXIF summary, so `build` never creates an image and no signal is set inside the
+//! future. A failed decode shows the typed error. **Cancel decode** cancels the decode's token.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -82,9 +90,9 @@ use frust_permissions::{
 use frust_photo_library::folder::FolderEntry;
 use frust_photo_library::{
     Album, AlbumId, Asset, AssetId, AssetPage, AssetQuery, AssetVersion, CancelToken,
-    ExportOptions, ExportedOriginal, FolderMedia, FolderPage, FolderScan, MediaFilter, MediaKind,
-    PhotoError, PhotoLibrary, PickOptions, PickProgress, PickedItem, SaveRequest, ThumbnailMode,
-    ThumbnailRequest,
+    DecodeOptions, ExifData, ExportOptions, ExportedOriginal, FolderMedia, FolderPage, FolderScan,
+    ImageColorSpace, MediaFilter, MediaKind, PhotoError, PhotoLibrary, PickOptions, PickProgress,
+    PickedItem, SaveRequest, ThumbnailMode, ThumbnailRequest,
 };
 use frust_shared_preferences::SharedPreferences;
 
@@ -465,16 +473,35 @@ fn falls_back_to_file(thumbnail: &Result<ImageSource, String>) -> bool {
 }
 
 /// The preview decoded from the picked file: read off the UI thread, then decoded off it too.
+/// When that decode fails, the native `decode_file` gets the file before the error is shown, so a
+/// HEIC pick previews where the platform decodes it.
 async fn file_preview(path: PathBuf) -> Result<Result<ImageSource, String>, JoinFailure> {
-    let bytes = spawn_blocking(move || std::fs::read(path))
+    let read_path = path.clone();
+    let bytes = spawn_blocking(move || std::fs::read(read_path))
         .await
         .map_err(|err| JoinFailure(err.to_string()))?;
     Ok(match bytes {
-        Ok(bytes) => decode_image_async(bytes)
-            .await
-            .map_err(|err| format!("preview decode error: {err}")),
+        Ok(bytes) => match decode_image_async(bytes).await {
+            Ok(source) => Ok(source),
+            Err(err) => {
+                let native = spawn_blocking(move || native_preview(&path))
+                    .await
+                    .map_err(|err| JoinFailure(err.to_string()))?;
+                native.map_err(|_| format!("preview decode error: {err}"))
+            }
+        },
         Err(err) => Err(format!("preview read error: {err}")),
     })
+}
+
+/// The longest side of a native-decoded preview, in pixels.
+const PREVIEW_DECODE_CAP: u32 = 1024;
+
+/// The picked file decoded natively and capped at [`PREVIEW_DECODE_CAP`] (call inside
+/// `spawn_blocking`).
+fn native_preview(path: &Path) -> Result<ImageSource, PhotoError> {
+    PhotoLibrary::decode_file(path, &DecodeOptions::new(PREVIEW_DECODE_CAP))
+        .map(|image| ImageSource::from_rgba8(image.rgba, image.width, image.height))
 }
 
 /// The preview's thumbnail box edge in pixels: the 160 point box at [`THUMB_SCALE`].
@@ -1613,6 +1640,133 @@ impl OriginalsSignals {
     }
 }
 
+/// The cap of the capped decode button, in pixels.
+const DECODE_CAP: u32 = 2048;
+
+/// The cap of the full-size decode button, in pixels. There is no unbounded mode, so this is the
+/// largest side a result may have.
+const DECODE_FULL_CAP: u32 = 16384;
+
+/// A pending decode: the asset, the cap and the token **Cancel decode** cancels.
+struct DecodeAction {
+    id: AssetId,
+    max_dimension: u32,
+    export: ExportOptions,
+    cancel: CancelToken,
+}
+
+/// A finished decode as the panel shows it. The image source is made once, in the background
+/// step, and cloned (a pointer copy) by every build.
+#[derive(Clone)]
+struct DecodeShown {
+    source: ImageSource,
+    lines: Vec<String>,
+}
+
+/// A decode's outcome: the shown result, or the typed error as a line.
+type DecodeOutcome = Result<DecodeShown, String>;
+
+/// The colour space as a label.
+fn color_space_text(space: ImageColorSpace) -> &'static str {
+    match space {
+        ImageColorSpace::Srgb => "sRGB",
+        ImageColorSpace::DisplayP3 => "Display P3",
+        _ => "other",
+    }
+}
+
+/// The source and output sizes against the cap.
+fn decode_size_line(output: (u32, u32), source: (u32, u32), cap: u32) -> String {
+    let scaled = if output == source {
+        "not downscaled"
+    } else {
+        "downscaled"
+    };
+    format!(
+        "Source {}x{}, output {}x{} (cap {cap}, {scaled})",
+        source.0, source.1, output.0, output.1
+    )
+}
+
+/// The EXIF fields the file carried as one line, or a note that it had none.
+fn exif_summary(exif: Option<&ExifData>) -> String {
+    let Some(exif) = exif else {
+        return "EXIF: none".to_string();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let camera = [exif.camera_make.as_deref(), exif.camera_model.as_deref()]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !camera.is_empty() {
+        parts.push(camera);
+    }
+    if let Some(lens) = &exif.lens {
+        parts.push(lens.clone());
+    }
+    if let Some(time) = &exif.capture_time {
+        parts.push(time.clone());
+    }
+    if let Some(iso) = exif.iso {
+        parts.push(format!("ISO {iso}"));
+    }
+    if let Some(seconds) = exif.exposure_seconds {
+        parts.push(format!("{seconds:.4}s"));
+    }
+    if let Some(aperture) = exif.aperture {
+        parts.push(format!("f/{aperture:.1}"));
+    }
+    if let Some(focal) = exif.focal_length_mm {
+        parts.push(format!("{focal:.1}mm"));
+    }
+    if let (Some(lat), Some(lon)) = (exif.gps_latitude, exif.gps_longitude) {
+        parts.push(format!("GPS {lat:.4}, {lon:.4}"));
+    }
+    if parts.is_empty() {
+        "EXIF: present, no summary fields".to_string()
+    } else {
+        format!("EXIF: {}", parts.join(" | "))
+    }
+}
+
+/// A failed decode as one line: the display text and the variant.
+fn decode_error_text(err: &PhotoError) -> String {
+    match err {
+        PhotoError::Cancelled => "Cancelled".to_string(),
+        other => format!("decode error: {other} ({other:?})"),
+    }
+}
+
+/// Runs one decode (call inside `spawn_blocking`). `None` is the mount-time fetch: nothing asked.
+fn run_decode(action: Option<DecodeAction>) -> Option<DecodeOutcome> {
+    let action = action?;
+    let options = DecodeOptions::new(action.max_dimension).cancel(action.cancel);
+    Some(
+        match PhotoLibrary::decode_asset(&action.id, &options, &action.export) {
+            Ok(image) => {
+                let lines = vec![
+                    decode_size_line(
+                        (image.width, image.height),
+                        (image.source_width, image.source_height),
+                        action.max_dimension,
+                    ),
+                    format!("Colour space: {}", color_space_text(image.color_space)),
+                    exif_summary(image.exif.as_ref()),
+                ];
+                Ok(DecodeShown {
+                    source: ImageSource::from_rgba8(image.rgba, image.width, image.height),
+                    lines,
+                })
+            }
+            Err(err) => Err(decode_error_text(&err)),
+        },
+    )
+}
+
+/// The decode edge of the decoded image's display box, in logical points.
+const DECODE_BOX: f64 = 240.0;
+
 struct OriginalsPanel {
     /// The Browse grid's selection.
     selected: RwSignal<Option<AssetId>>,
@@ -1643,6 +1797,12 @@ struct OriginalsPanelState {
     exported: RwSignal<Option<PathBuf>>,
     /// The last save result line.
     saved: RwSignal<String>,
+    /// The pending decode; `None` resolves to nothing.
+    decode_action: Arc<Mutex<Option<DecodeAction>>>,
+    /// The latest decode; its value carries the result, nothing sets a signal in the future.
+    decode: UseTask<Option<DecodeOutcome>>,
+    /// The running decode's token; Cancel decode takes it, each press replaces it.
+    decode_token: Arc<Mutex<Option<CancelToken>>>,
 }
 
 impl Component for OriginalsPanel {
@@ -1687,6 +1847,16 @@ impl Component for OriginalsPanel {
                 Ok::<(), JoinFailure>(())
             }
         });
+        let decode_action: Arc<Mutex<Option<DecodeAction>>> = Arc::new(Mutex::new(None));
+        let decode_cell = decode_action.clone();
+        let decode = use_task(move || {
+            let requested = decode_cell.lock().expect("decode cell poisoned").take();
+            async move {
+                spawn_blocking(move || run_decode(requested))
+                    .await
+                    .map_err(|err| JoinFailure(err.to_string()))
+            }
+        });
         OriginalsPanelState {
             selected: self.selected,
             picked: self.picked,
@@ -1700,6 +1870,9 @@ impl Component for OriginalsPanel {
             result: signals.result,
             exported: signals.exported,
             saved: signals.saved,
+            decode_action,
+            decode,
+            decode_token: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1717,6 +1890,8 @@ impl Component for OriginalsPanel {
         let result = state.result.get();
         let saved = state.saved.get();
         let can_save = state.exported.get().is_some() && !busy;
+        let decoded = state.decode.signal().get();
+        let decoding = matches!(decoded, AsyncValue::Loading(_));
 
         let mut versions = row();
         for (index, (label, _)) in VERSIONS.iter().enumerate() {
@@ -1771,6 +1946,30 @@ impl Component for OriginalsPanel {
             body = body.child(bar);
         }
 
+        let mut decode_body = column();
+        match &decoded {
+            AsyncValue::Loading(_) => {
+                decode_body = decode_body.child(text("Decoding\u{2026}").size(12.0).color(muted));
+            }
+            AsyncValue::Ready(Some(Ok(shown))) => {
+                for line in &shown.lines {
+                    decode_body = decode_body.child(text(line.clone()).size(11.0));
+                }
+                decode_body = decode_body.child(SizedBox(None, Some(4.0))).child(
+                    SizedBox(Some(DECODE_BOX), Some(DECODE_BOX))
+                        .child(Image(shown.source.clone()).fit(ImageFit::Contain)),
+                );
+            }
+            AsyncValue::Ready(Some(Err(line))) => {
+                decode_body = decode_body.child(text(line.clone()).size(11.0).color(muted));
+            }
+            AsyncValue::Error(err) => {
+                decode_body = decode_body.child(text(err.to_string()).size(11.0).color(muted));
+            }
+            _ => {}
+        }
+        let decode_target = target.as_ref().map(|(id, _)| id.clone());
+
         column()
             .child(text("Originals").size(13.0).color(accent))
             .child(
@@ -1809,7 +2008,84 @@ impl Component for OriginalsPanel {
                     .child(save_button(state, "Save (no album)", false, can_save)),
             )
             .child(text(saved).size(11.0).color(muted))
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                row()
+                    .child(decode_button(
+                        state,
+                        "Decode (2048)",
+                        DECODE_CAP,
+                        decode_target.clone(),
+                        busy || decoding,
+                    ))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(decode_button(
+                        state,
+                        "Decode (full, cap 16384)",
+                        DECODE_FULL_CAP,
+                        decode_target,
+                        busy || decoding,
+                    ))
+                    .child(SizedBox(Some(8.0), None))
+                    .child(decode_cancel_button(state, decoding)),
+            )
+            .child(SizedBox(None, Some(4.0)))
+            .child(decode_body)
     }
+}
+
+fn decode_button(
+    state: &OriginalsPanelState,
+    label: &'static str,
+    max_dimension: u32,
+    target: Option<AssetId>,
+    busy: bool,
+) -> impl View<OriginalsPanelState> {
+    let (action, decode, token) = (
+        state.decode_action.clone(),
+        state.decode.clone(),
+        state.decode_token.clone(),
+    );
+    let (version, network) = (state.version, state.network);
+    let disabled = busy || target.is_none();
+    button(label, move |_state: &mut OriginalsPanelState| {
+        let Some(id) = target.clone() else {
+            return;
+        };
+        // A fresh token for every decode; the export step reads the same one.
+        let cancel = CancelToken::new();
+        *token.lock().expect("decode token cell poisoned") = Some(cancel.clone());
+        let export = ExportOptions::new()
+            .version(VERSIONS[version.get_untracked()].1)
+            .allow_network(network.get_untracked())
+            .cancel(cancel.clone());
+        *action.lock().expect("decode cell poisoned") = Some(DecodeAction {
+            id,
+            max_dimension,
+            export,
+            cancel,
+        });
+        decode.restart();
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(disabled)
+    .small()
+}
+
+fn decode_cancel_button(
+    state: &OriginalsPanelState,
+    decoding: bool,
+) -> impl View<OriginalsPanelState> {
+    let token = state.decode_token.clone();
+    button("Cancel decode", move |_state: &mut OriginalsPanelState| {
+        let current = token.lock().expect("decode token cell poisoned").clone();
+        if let Some(current) = current {
+            current.cancel();
+        }
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(!decoding)
+    .small()
 }
 
 fn export_button(
@@ -2488,6 +2764,50 @@ fn folders_cancel_button(state: &FoldersPanelState, busy: bool) -> impl View<Fol
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_decode_resolves_to_nothing() {
+        assert!(run_decode(None).is_none());
+    }
+
+    #[test]
+    fn colour_space_labels() {
+        assert_eq!(color_space_text(ImageColorSpace::Srgb), "sRGB");
+        assert_eq!(color_space_text(ImageColorSpace::DisplayP3), "Display P3");
+    }
+
+    #[test]
+    fn size_line_reports_both_sizes_and_the_cap() {
+        assert_eq!(
+            decode_size_line((2048, 1536), (4032, 3024), 2048),
+            "Source 4032x3024, output 2048x1536 (cap 2048, downscaled)"
+        );
+        assert!(decode_size_line((10, 10), (10, 10), 2048).ends_with("not downscaled)"));
+    }
+
+    #[test]
+    fn exif_summary_lists_present_fields() {
+        assert_eq!(exif_summary(None), "EXIF: none");
+        let mut exif = ExifData::default();
+        assert_eq!(
+            exif_summary(Some(&exif)),
+            "EXIF: present, no summary fields"
+        );
+        exif.camera_make = Some("Apple".into());
+        exif.camera_model = Some("iPhone".into());
+        exif.iso = Some(100);
+        exif.aperture = Some(1.8);
+        assert_eq!(
+            exif_summary(Some(&exif)),
+            "EXIF: Apple iPhone | ISO 100 | f/1.8"
+        );
+    }
+
+    #[test]
+    fn decode_errors_are_typed_lines() {
+        assert_eq!(decode_error_text(&PhotoError::Cancelled), "Cancelled");
+        assert!(decode_error_text(&PhotoError::Unsupported).contains("Unsupported"));
+    }
 
     #[test]
     fn no_target_resolves_to_nothing() {
