@@ -141,8 +141,17 @@ pub(crate) fn save(
     Err(PhotoError::Unsupported)
 }
 
-// Decode: desktop has no native decoder arm yet.
-#[cfg(feature = "decode")]
+// Decode: macOS uses the shared ImageIO decoder, on any thread (desktop has no UI-thread
+// refusal, as for `pick`). The other desktops have no native decoder.
+#[cfg(all(feature = "decode", target_os = "macos"))]
+pub(crate) fn decode_file(
+    path: &std::path::Path,
+    options: &crate::DecodeOptions,
+) -> Result<crate::DecodedImage, PhotoError> {
+    crate::apple_decode::decode_file(path, options)
+}
+
+#[cfg(all(feature = "decode", not(target_os = "macos")))]
 pub(crate) fn decode_file(
     _path: &std::path::Path,
     _options: &crate::DecodeOptions,

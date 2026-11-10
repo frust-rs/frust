@@ -473,13 +473,17 @@ fn anchor_window(mtm: MainThreadMarker) -> Option<Retained<UIWindow>> {
     fallback
 }
 
-// Decode: the real arm lands with the shared Apple decoder in a following change.
+// Decode: the shared ImageIO decoder, after the same main-thread refusal as browsing (a
+// full-resolution decode can take long enough to stall the UI).
 #[cfg(feature = "decode")]
 pub(crate) fn decode_file(
-    _path: &std::path::Path,
-    _options: &crate::DecodeOptions,
+    path: &std::path::Path,
+    options: &crate::DecodeOptions,
 ) -> Result<crate::DecodedImage, PhotoError> {
-    Err(PhotoError::Unsupported)
+    if MainThreadMarker::new().is_some() {
+        return Err(PhotoError::UiThread);
+    }
+    crate::apple_decode::decode_file(path, options)
 }
 
 #[cfg(test)]
