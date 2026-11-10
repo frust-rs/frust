@@ -38,8 +38,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
-- New plugin `frust-background-task`: `frust add background-task`, then `frust_background_task::install()`
-  in the app's setup. It backs `frust::BackgroundTask` with an iOS background-task assertion, or on
+- New plugin `frust-background-task`: add it from the `frust` TUI's Add Plugin dialog, then call
+  `frust_background_task::install()` in the app's setup. It backs `frust::BackgroundTask` with an iOS background-task assertion, or on
   Android a `shortService` foreground service (the `FOREGROUND_SERVICE` permission, a low-priority
   notification, and no `POST_NOTIFICATIONS` request). A refused start degrades to the no-op guard with
   `is_granted()` false. A watchdog of about 150 s bounds the service; `expired()` is the app's signal to
