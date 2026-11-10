@@ -46,6 +46,10 @@ pub fn zone_offset_seconds(unix_seconds: i64, iana: &str) -> Result<i32, I18nErr
 /// when the platform cannot report a zone or reports one the database does
 /// not know. Callers must handle `None`.
 ///
+/// Each call reads the platform. Code formatting many instants should read the
+/// zone once with this function and pass it to [`zone_offset_seconds`] for each
+/// instant instead of calling [`device_offset_seconds`] in a loop.
+///
 /// Re-read on resume to notice a change, by reading the lifecycle state in
 /// `build` so the view rebuilds when the app returns to the foreground:
 ///
@@ -67,7 +71,9 @@ pub fn device_time_zone() -> Option<String> {
 /// instant `unix_seconds`; `None` when [`device_time_zone`] is `None` or the
 /// instant is outside the range the zone database represents.
 ///
-/// Like [`device_time_zone`] this reads the platform on every call.
+/// Like [`device_time_zone`] this reads the platform on every call. To format
+/// many instants, read the zone once with [`device_time_zone`] and call
+/// [`zone_offset_seconds`] with it.
 #[must_use]
 pub fn device_offset_seconds(unix_seconds: i64) -> Option<i32> {
     let zone = device_time_zone()?;

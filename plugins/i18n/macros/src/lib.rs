@@ -60,9 +60,9 @@ use parse::LocaleDir;
 ///   takes that argument positionally; a message with two or more takes a
 ///   single generated `<PascalKey>Args` struct with one named field per
 ///   variable (`editor_notice(&res, EditorNoticeArgs { working: 60, full: 50 })`),
-///   so a transposed pair is a compile error. A typo'd key is a missing function, i.e. a
-///   compile error; a resolution failure at runtime logs a warning and
-///   renders the key itself.
+///   so a transposed pair is a compile error. A typo'd key is a missing
+///   function, i.e. a compile error; a resolution failure at runtime logs a
+///   warning and renders the key itself.
 ///
 /// # Compile-time validation
 ///
