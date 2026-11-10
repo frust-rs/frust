@@ -9725,18 +9725,21 @@ to OS work managers.
 **Evidence**: (2026-11-09) device gate on an iPhone SE and a Pixel 5: a 200 ms database write begun from a flush
 callback finished and survived killing the process about 5 s after backgrounding, on the iPhone with the guard and with
 no `task expired`. A control without the guard also survived, because a write this short fits the normal suspension
-delay, so the gate shows the guard works rather than that this write needed it. `examples/playground/src/pages/network.rs`
-(Timers block); `plugins/background-task`.
+delay, so the gate shows the guard works rather than that this write needed it. (2026-11-10) iPhone SE with the plugin: a
+40 s guarded write begun at Home read `task expired` and finished only when the app resumed at about 48 s, so the budget
+ended before 40 s; the unguarded twin also finished only on resume. `examples/playground/src/pages/network.rs` (Timers
+block); `plugins/background-task`.
 
 ---
 
 ### `background-task-android-refusal-cases` — Android refuses or limits the `BackgroundTask` foreground service
 
 **Observed**: the Android backend is a `shortService` foreground service. A flush-on-background callback normally runs at
-the Inactive edge (`onPause`, app still visible), where a start is expected to be allowed. A timer armed while already
-Inactive, or armed by an Inactive flush, runs at the Hidden edge (`onStop`), where a start is expected to be refused on
-targetSdk 31+ (unverified until the device gate records it); `begin` then reports `is_granted() == false`, never
-throws, and the work proceeds unprotected. API 29-33 have no system `onTimeout`, so only the plugin's watchdog (about
+the Inactive edge (`onPause`, app still visible), where a start was allowed. A timer armed while already Inactive, or
+armed by an Inactive flush, runs at the Hidden edge (`onStop`); a start there right after leaving the foreground was also
+allowed, under the system's `ACTIVITY_VISIBILITY_GRACE_PERIOD`. Later than that a start is expected to be refused on
+targetSdk 31+ (not exercised); `begin` then reports `is_granted() == false`, never throws, and the work proceeds
+unprotected. API 29-33 have no system `onTimeout`, so only the plugin's watchdog (about
 150 s) ends the service there. On Android 12+ a short guard normally shows no notification (display may be deferred up to
 10 s, not guaranteed); on API 29-30 a brief one may flash. Apps targeting Android 14+ must declare the foreground service
 type in the Play Console.
@@ -9748,6 +9751,14 @@ type in the Play Console.
 
 **Why accepted**: the restrictions are platform policy; the plugin degrades to the no-op guard rather than failing the app.
 
-**Evidence**: device evidence is pending. `plugins/background-task`.
+**Evidence**: (2026-11-10) Pixel 5, Android 14, targetSdk 36, debug and profile builds. A 40 s write begun in `onPause`
+was granted and finished with the service foreground (`types=0x800`). A begin in `onStop` was granted. Twenty 25 ms
+save-shaped legs plus twenty rapid ones and ten shade pulls were all granted, with no `ForegroundServiceDidNotStartInTime`,
+`RemoteServiceException` or ANR. `begin` took p50 3.6 ms, max 17.1 ms in profile. A 200 s write expired at 150.04 s, the
+service stopped, no ANR. `am force-stop`, `cmd activity stop-app` and `kill -9` during an in-transaction hold left
+`integrity_check` ok and no row. Unguarded, 20 of 20 25 ms writes and a 40 s write also landed on this phone, so the sample
+shows the guard works, not that it was needed. Notification display was not observed: the test app does not declare
+`POST_NOTIFICATIONS`, so none can appear on API 33+. API 29-33 and a start after the grace period were not exercised.
+`plugins/background-task`.
 
 ---
