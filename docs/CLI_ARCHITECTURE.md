@@ -300,7 +300,7 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   turn start `frust_mcp::serve_embedded` and/or `frust_dap::serve_embedded` over its own
   sessions — the only path an MCP or DAP client reaches a Frust app through in this unit (see
   [LIMITATIONS.md](LIMITATIONS.md)).
-- Plugin add (library only — there is no `frust plugin` subcommand; the TUI's Add Plugin dialog is the caller): `frust-drive::plugin::add_plugin`/`add_plugin_with` looks up a `PluginSpec` and applies its
+- Plugin add (two callers: the `frust plugin add <id> [--feature <f>]...` subcommand and the TUI's Add Plugin dialog): `frust-drive::plugin::add_plugin`/`add_plugin_with` looks up a `PluginSpec` and applies its
   `Contribution`s as idempotent, format-preserving edits to a generated project (see
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md) for the plugins this distributes); a plugin's
   native module location is written through `platform_wiring` (`frust.plugin.<module>.dir`,

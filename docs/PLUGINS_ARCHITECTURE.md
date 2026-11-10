@@ -473,6 +473,9 @@ Design-System Contract for the toolkit they all build against). Their shared cha
 - `i18n`'s detection (`system_locales`) re-queries the OS on every call — no cache, no
   platform-change event plumbing — so an app that wants to react to a live system-locale change
   polls it itself (e.g. on resume) and re-negotiates through `I18n::set_locale`.
+- `i18n`'s `formatting` feature reads the device zone through `iana-time-zone` (`device_time_zone`,
+  `device_offset_seconds`): no cache and no native arm, the name is checked against the bundled
+  `jiff` database (`None` when unreadable or unknown), and an app re-reads it on resume.
 - `i18n`'s reactive `I18n` handle holds the active locale in a tracked `RwSignal`; `set_locale`
   re-negotiates and writes it, waking the shell through the normal signal-write → `FrameWaker`
   path like any other app-state change — a coarse, whole-subscribed-tree rebuild, the same shape

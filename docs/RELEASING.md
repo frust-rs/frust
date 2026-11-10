@@ -11,7 +11,9 @@ aggregate `ci-ok`).
 - Before 1.0, a minor version (0.x) may break API. A patch release (0.x.y) may carry a narrow source
   break — a new enum variant, a new struct field, a dropped derive, an enum made `#[non_exhaustive]`
   — only when the CHANGELOG's Changed list marks each one with its migration and the release
-  summary names them; a change that removes or reshapes an API waits for the next minor version. A
+  summary names them; a change that removes or reshapes an API waits for the next minor version, except
+  that while the project is in its alpha a patch may reshape an API when the CHANGELOG lists it
+  under Breaking with its migration and the release summary names it. A
   surface that exists only for embedders (shell glue such as `frust-shell-ios`'s `ffi_glue` or
   `frust-shell-common`'s `gpu` feature) may be reshaped in a patch, and a behaviour change to a
   published API may ship in a patch, when the CHANGELOG lists each under Breaking with its migration

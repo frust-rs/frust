@@ -6,6 +6,28 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+### Breaking
+
+- `frust-i18n` typed keys (`locales!`'s `keys` module): a message with two or more `$variable`s now
+  takes one generated `<PascalKey>Args` struct with a named field per variable, instead of
+  positional arguments, so two values of the same type cannot be swapped at a call site. A message
+  with zero or one variable is unchanged. Migration: for `editor-notice = Working: { $working },
+  full: { $full }`, replace `keys::editor_notice(&resolver, 50, 60)` (variables in name order, `full` then `working`) with
+  `keys::editor_notice(&resolver, keys::EditorNoticeArgs { working: 60, full: 50 })`.
+
+### Added
+
+- `frust_i18n::fmt::device_time_zone()` and `device_offset_seconds(unix_seconds)` (the `formatting`
+  feature): the device's current IANA zone name and its UTC offset at an instant, read from the
+  platform on every call through the `iana-time-zone` crate. Both return `None` when the platform
+  reports no zone or one the bundled database does not know.
+- `frust plugin add <id> [--feature <f>]...`: adds a plugin to the project in the current
+  directory with the same edits as the TUI's Add Plugin dialog. It is idempotent, and an unknown
+  id or feature lists the valid ones.
+- `wrap()` (`WrapView`, `WrapWidget`, `WrapAlignment`, `WrapCrossAlignment`, re-exported from
+  `frust`): a layout widget whose children flow along a main axis and break into runs, like
+  Flutter's `Wrap`, with `spacing`, `run_spacing` and alignment setters.
+
 ## 0.6.6 — 2026-11-11
 
 A patch release (the 0.6.x line continues) with three breaks, listed under Breaking: `Router::go`
