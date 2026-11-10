@@ -121,7 +121,7 @@ pub fn install_background_task_backend(b: Arc<dyn BackgroundTaskBackend>) -> boo
     true
 }
 
-/// Replace the installed backend (a relaunched shell re-owns it). UI-thread-only once
+/// Replace the installed backend, for an app that supplies its own. UI-thread-only once
 /// the runtime exists.
 pub fn set_background_task_backend(b: Arc<dyn BackgroundTaskBackend>) {
     assert_ui_thread("set_background_task_backend");

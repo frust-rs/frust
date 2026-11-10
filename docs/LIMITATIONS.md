@@ -9689,7 +9689,7 @@ no foreground exit: losing window focus on desktop and web, the notification sha
 the unfocused half of split-screen on Android, Control Center or a call on iOS. It is one-shot and is
 consumed, so do not flag a timer whose delay must be honoured while the app stays visible. Only
 synchronous work in the callback is guaranteed to complete before suspension, work it spawns is not,
-and only an iOS `BackgroundTask` extends it. On desktop a window that lost focus keeps running, so a
+and only a `BackgroundTask` with the plugin installed extends it (best effort on Android). On desktop a window that lost focus keeps running, so a
 plain timer fires on time.
 
 **Applies to**: Android, iOS.
