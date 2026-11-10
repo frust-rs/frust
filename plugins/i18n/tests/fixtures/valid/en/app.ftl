@@ -9,6 +9,8 @@ cart-items =
        *[other] { $count } items
     }
 
+editor-notice = Working { $working } of { $full }
+
 only-en = English only
 
 save = Save
