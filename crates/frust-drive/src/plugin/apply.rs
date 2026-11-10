@@ -436,9 +436,9 @@ pub fn desktop_contributions(
 
 /// [`desktop_contributions`]'s pure inner logic, parameterized over the
 /// registry list and the parsed `Cargo.toml` doc so a test can inject
-/// synthetic [`PluginSpec`]s — the real registry carries zero desktop-lane
-/// rows today (this is the seam, not a backfill), which would otherwise
-/// make the detection logic itself untestable.
+/// synthetic [`PluginSpec`]s, so the detection logic is testable independently
+/// of which desktop-lane rows (`MacosPlistEntry`, `MacosEntitlement`) the
+/// real registry carries at any given time.
 fn desktop_contributions_for(specs: &[PluginSpec], doc: &DocumentMut) -> Vec<DesktopContribution> {
     specs
         .iter()

@@ -78,8 +78,8 @@
 //! - **No pointer-type branch, so no tap-dismisser.** Upstream reads
 //!   `gesture.pointerType` to tell a finger from a mouse: a *touch* expansion
 //!   arms an outside-tap dismisser, because a finger never "leaves". frust's
-//!   `PointerEvent` carries no pointer type (the gap
-//!   [`crate::components::context_menu`] records for its long-press), so both
+//!   `PointerEvent` does carry a `PointerSource` (mouse or touch), but this
+//!   component does not read it yet, so both
 //!   gestures take the mouse path: press to expand, press again to follow
 //!   `on_view_all` or collapse. A touch user is never stranded — the second tap
 //!   still closes it — they simply cannot close it by tapping elsewhere.

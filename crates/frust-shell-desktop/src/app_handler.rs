@@ -3456,7 +3456,8 @@ where
             // `PinchGesture` docs). Winit never emits this variant on
             // Linux/Windows at this winit pin, so a trackpad pinch there has
             // no desktop `Scale` source yet — only the ctrl/⌘+wheel mapping
-            // above (a `docs/LIMITATIONS.md` row to add, not yet recorded).
+            // above (recorded as `desktop-pinch-linux-windows-unavailable` in
+            // `docs/LIMITATIONS.md`).
             // `delta` is already the multiplicative increment winit reports
             // (positive magnifies), so `scale_delta = 1.0 + delta` turns it
             // into the same "multiply the running scale" contract the wheel

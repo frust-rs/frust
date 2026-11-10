@@ -41,9 +41,11 @@
 //!
 //! Upstream's release rules have two arms each: a distance arm and a velocity
 //! arm (`OPEN_VELOCITY = 720`, `CLOSE_VELOCITY = 320`, plus a `FLING_DISTANCE`
-//! floor so a flick still needs 14px of travel). frust's `PointerEvent` carries
-//! no velocity — the gap [`crate::components::animated_toast_stack`] records for
-//! its own swipe — so **only the distance arms are ported**, exactly:
+//! floor so a flick still needs 14px of travel). frust's `PointerEvent` itself
+//! carries no velocity, though a drag-end report (`DragEndDetails`) does; this
+//! component does not use it yet — the same choice
+//! [`crate::components::animated_toast_stack`] records for its own swipe — so
+//! **only the distance arms are ported**, exactly:
 //!
 //! | upstream | here |
 //! |---|---|

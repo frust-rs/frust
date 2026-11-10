@@ -61,8 +61,9 @@
 //!   bounds its retained launch records at [`MCP_RECORD_CAP`] the same way
 //!   `frust-mcp`'s own `TERMINAL_SESSION_CAP` bounds its sessions —
 //!   oldest-terminal evicted first, a live session's record never touched —
-//!   but `AppState::sessions` has no eviction of its own: no tab-close
-//!   mechanism exists in the workbench to build one on. An agent driving
+//!   but `AppState::sessions` has no eviction of its own: the workbench can
+//!   close a tab (`Message::CloseTab` / `Message::CloseActiveTab`), but only
+//!   on user request, and record eviction does not trigger it. An agent driving
 //!   many short-lived launches over hours will eventually see a session's
 //!   *tab* survive after its *record* is gone; `restart_app` on that id then
 //!   reports [`EmbeddedError::NoSuchSession`] — the same typed refusal a
