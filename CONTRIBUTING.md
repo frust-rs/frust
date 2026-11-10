@@ -34,7 +34,8 @@ requests are squash-merged; maintainers may land a multi-commit feature branch w
 See [docs/RELEASING.md](docs/RELEASING.md) for the release process.
 
 - All crates share one version.
-- Before 1.0, a minor version (0.x) may break API and a patch release may not.
+- Before 1.0, a minor version (0.x) may break API. A patch may carry only the marked breaks
+  [docs/RELEASING.md](docs/RELEASING.md) allows.
 - Releases are tags `vX.Y.Z` on `main`. A `release/X.Y` branch exists only when a patch release is
   needed after `main` has moved on; fixes land on `main` first and are cherry-picked (label
   `backport`).

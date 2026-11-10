@@ -11,7 +11,11 @@ aggregate `ci-ok`).
 - Before 1.0, a minor version (0.x) may break API. A patch release (0.x.y) may carry a narrow source
   break — a new enum variant, a new struct field, a dropped derive, an enum made `#[non_exhaustive]`
   — only when the CHANGELOG's Changed list marks each one with its migration and the release
-  summary names them; a change that removes or reshapes an API waits for the next minor version.
+  summary names them; a change that removes or reshapes an API waits for the next minor version. A
+  surface that exists only for embedders (shell glue such as `frust-shell-ios`'s `ffi_glue` or
+  `frust-shell-common`'s `gpu` feature) may be reshaped in a patch, and a behaviour change to a
+  published API may ship in a patch, when the CHANGELOG lists each under Breaking with its migration
+  and the release summary names it.
 - The minimum supported Rust version is the workspace `rust-version`; raising it is a minor-version
   change. The pinned development toolchain in `rust-toolchain.toml` is a separate, newer setting.
 - Version pins on third-party dependencies are governed by
