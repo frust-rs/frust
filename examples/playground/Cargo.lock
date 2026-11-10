@@ -1268,6 +1268,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-background-task"
+version = "0.6.5"
+dependencies = [
+ "block2 0.6.2",
+ "dispatch2",
+ "frust-plugin",
+ "frust-reactive",
+ "jni 0.22.4",
+ "log",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "objc2-ui-kit 0.3.2",
+]
+
+[[package]]
 name = "frust-camera"
 version = "0.6.5"
 dependencies = [
@@ -4215,6 +4230,7 @@ name = "playground"
 version = "0.1.0"
 dependencies = [
  "frust-auth-session",
+ "frust-background-task",
  "frust-camera",
  "frust-connectivity",
  "frust-core",

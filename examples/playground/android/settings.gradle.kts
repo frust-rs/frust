@@ -191,6 +191,20 @@ gradle.lifecycle.beforeProject {
     }
 }
 
+// frust-background-task: the same include/projectDir/build-dir-redirect trio as
+// `:frust-share` above, and exactly what `frust-drive::plugin::apply_gradle_module`
+// writes for this plugin's `Contribution::GradleModule`. The module supplies the
+// short foreground service and its host; its manifest declares FOREGROUND_SERVICE.
+include(":frust-background-task")
+project(":frust-background-task").projectDir =
+    file("../../../plugins/background-task/platform/android")
+
+gradle.lifecycle.beforeProject {
+    if (path == ":frust-background-task") {
+        layout.buildDirectory.set(rootDir.resolve("../build/android/frust-background-task"))
+    }
+}
+
 // frust-file-dialogs: the same include/projectDir/build-dir-redirect trio as
 // `:frust-share` above. The module supplies the Storage Access Framework host
 // (`FrustFileDialogsHost`) and its process-start init provider, and declares no

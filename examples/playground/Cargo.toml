@@ -64,6 +64,10 @@ frust-url-launcher = { path = "../../plugins/url-launcher" }
 frust-share = { path = "../../plugins/share" }
 frust-qr = { path = "../../plugins/qr" }
 
+# The Network page's background-work leg: `frust::BackgroundTask` keeps a short write alive
+# through a short foreground service (Android) or a UIKit background assertion (iOS).
+frust-background-task = { path = "../../plugins/background-task" }
+
 frust-auth-session = { path = "../../plugins/auth-session" }
 
 # PKCE and callback builders behind the Auth page's desktop `LoopbackSession`.
