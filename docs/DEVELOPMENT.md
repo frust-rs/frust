@@ -336,7 +336,7 @@ cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ign
 cargo check --target aarch64-linux-android \
   -p frust-ui -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
   -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player \
-  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions -p frust-photo-library
+  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions -p frust-photo-library -p frust-background-task
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
 # --all-targets also compiles cfg(test), which the plain checks above skip:
@@ -347,7 +347,7 @@ cargo check --all-targets --target aarch64-linux-android -p frust-shell-android 
 cargo check --target aarch64-apple-ios-sim \
   -p frust-ui -p frust-shared-preferences -p frust-secure-storage -p frust-camera -p frust-network-image \
   -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player \
-  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions -p frust-photo-library
+  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions -p frust-photo-library -p frust-background-task
 cargo check --target aarch64-apple-ios -p frust-secure-storage -p frust-share
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 

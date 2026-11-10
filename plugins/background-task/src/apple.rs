@@ -22,14 +22,13 @@
 //! `Drop` calls `mark_ended` before `end`, so the handler and the drop path never both end
 //! one assertion.
 //!
+//! An expiry that arrives after `Drop` has claimed `ended` is skipped by the handler,
+//! while the main-queue release `Drop` queued ends the task one turn later. That is safe:
+//! UIKit tolerates it. The shell installs no backend of its own; this plugin does.
+//!
 //! An id of `0` means no assertion was taken (UIKit refused, or `begin` ran off the main
-//! thread), and `end` does nothing for it.
-//!
-//! # Not used by the shell itself yet
-//!
-//! This backend serves app code through `BackgroundTask::begin`. The shell's own font-cache
-//! flush on entering the background (`BACKGROUND_FLUSH` in `app::executor`) does not take
-//! an assertion yet.
+//! thread), and `end` does nothing for it. The shell's own font-cache flush on entering the
+//! background (`BACKGROUND_FLUSH` in the iOS shell's `app::executor`) takes no assertion.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,7 +40,7 @@ use objc2::MainThreadMarker;
 use objc2_foundation::NSString;
 use objc2_ui_kit::{UIApplication, UIBackgroundTaskIdentifier, UIBackgroundTaskInvalid};
 
-/// The backend installed by `ffi_glue::init`. Stateless: each task's state travels in its
+/// The backend [`install`] registers. Stateless: each task's state travels in its
 /// `TaskState` and its expiration block.
 pub(crate) struct IosBackgroundTasks;
 
@@ -104,4 +103,9 @@ fn end_on_main(id: UIBackgroundTaskIdentifier) {
             UIApplication::sharedApplication(mtm).endBackgroundTask(id);
         }
     });
+}
+
+/// Register the UIKit backend if none is installed yet; an app-installed backend is kept.
+pub(crate) fn install() -> bool {
+    frust_reactive::install_background_task_backend(Arc::new(IosBackgroundTasks))
 }

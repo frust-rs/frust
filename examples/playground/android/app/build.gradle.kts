@@ -222,6 +222,9 @@ dependencies {
     // frust-share: the file-share host (`FrustShareHost`) + its FileProvider
     // subclass, serving copies under cacheDir/frust-share.
     implementation(project(":frust-share"))
+    // frust-background-task: the short foreground service host the Network page's
+    // background-work leg (`frust::BackgroundTask`) runs under.
+    implementation(project(":frust-background-task"))
     // frust-file-dialogs: the Storage Access Framework host
     // (`FrustFileDialogsHost`) + its process-start init provider.
     implementation(project(":frust-file-dialogs"))

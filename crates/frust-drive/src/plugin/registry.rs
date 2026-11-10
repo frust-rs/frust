@@ -1,4 +1,4 @@
-//! The static plugin registry (v1) — twenty-seven entries mirroring `plugins/`:
+//! The static plugin registry (v1) — twenty-eight entries mirroring `plugins/`:
 //! `shared-preferences` (dependency only), `secure-storage` (dependency plus
 //! an optional `biometric-gate` feature wiring in the plugin's own Android
 //! library module and the iOS plist key its README documents),
@@ -1078,6 +1078,31 @@ const PHOTO_LIBRARY: PluginSpec = PluginSpec {
     requires_sibling: None,
 };
 
+/// `background-task`'s base contributions: a Cargo dependency and the
+/// plugin's own Android library module (the short foreground service and its
+/// manifest entries ride the module, folded in by the manifest merger). The
+/// iOS background-task assertion needs only UIKit, which is already linked.
+const BACKGROUND_TASK_BASE: &[Contribution] = &[
+    Contribution::CargoDep {
+        name: "frust-background-task",
+    },
+    Contribution::GradleModule {
+        gradle_name: ":frust-background-task",
+        rel_path: "plugins/background-task/platform/android",
+    },
+];
+
+const BACKGROUND_TASK: PluginSpec = PluginSpec {
+    id: "background-task",
+    summary: "Keeps a short write alive after the app leaves the foreground: iOS \
+              background-task assertion, Android short foreground service; call \
+              frust_background_task::install() in setup",
+    crate_dir: "background-task",
+    base: BACKGROUND_TASK_BASE,
+    optional_features: &[],
+    requires_sibling: None,
+};
+
 /// The v1 static plugin registry (Vec-factory convention). A caller (the CLI
 /// or the TUI Add Plugin dialog) enumerates this to drive selection without
 /// hardcoding plugin ids.
@@ -1110,6 +1135,7 @@ pub fn known_plugins() -> Vec<PluginSpec> {
         DEVICE_INFO,
         PERMISSIONS,
         PHOTO_LIBRARY,
+        BACKGROUND_TASK,
     ]
 }
 
@@ -1129,7 +1155,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[test]
-    fn registry_lists_the_twenty_seven_v1_plugins() {
+    fn registry_lists_the_twenty_eight_v1_plugins() {
         let ids: Vec<&str> = known_plugins().iter().map(|p| p.id).collect();
         assert_eq!(
             ids,
@@ -1161,6 +1187,7 @@ mod tests {
                 "device-info",
                 "permissions",
                 "photo-library",
+                "background-task",
             ]
         );
     }

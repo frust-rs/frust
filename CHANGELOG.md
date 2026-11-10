@@ -8,6 +8,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Breaking
 
+- `frust::BackgroundTask` is a no-op on every platform until the `frust-background-task` plugin is
+  installed. The iOS backend moved out of `frust-shell-ios`, so an app that relied on it adds the plugin.
+  The plugin installs only when no backend is set (the iOS shell used to replace one), and on Android and
+  iOS a `begin` with no backend logs one warning.
 - `Router::go` and `RouteNavigator::go` now make the stack exactly the matched chain, as their docs
   said and as go_router defines `go`. They used to replace only the top page, so pages below it
   survived. To keep a page below a shell or another page, make it a parent in the route table:
@@ -34,11 +38,19 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- New plugin `frust-background-task`: `frust add background-task`, then `frust_background_task::install()`
+  in the app's setup. It backs `frust::BackgroundTask` with an iOS background-task assertion, or on
+  Android a `shortService` foreground service (the `FOREGROUND_SERVICE` permission, a low-priority
+  notification, and no `POST_NOTIFICATIONS` request). A refused start degrades to the no-op guard with
+  `is_granted()` false. A watchdog of about 150 s bounds the service; `expired()` is the app's signal to
+  cut work short. Apps targeting Android 14+ must make a Play Console declaration; an app can opt out
+  with `tools:node="remove"`. Android protection is best effort and depends on the lifecycle edge the
+  guard begins at; Android device behaviour is not yet verified.
 - Native debug builds log a warning when a flush-on-background callback runs over 8 ms, or a whole drain over
   16 ms, because the OS lifecycle callback is blocked meanwhile. Release and web builds do not measure.
 - `frust::BackgroundTask` (`begin`, `expired`, `is_granted`, `end`; dropping it ends the task exactly
-  once, from any thread). iOS takes a UIKit background-task assertion from Rust; Android, desktop and web
-  are no-ops. The sanctioned pattern: a `flush_on_background` callback calls `BackgroundTask::begin` on the
+  once, from any thread). It is a no-op until the `frust-background-task` plugin provides a backend, on iOS
+  and Android only. The sanctioned pattern: a `flush_on_background` callback calls `BackgroundTask::begin` on the
   UI thread, then `spawn_blocking(write + drop(task))` (not on web, where `spawn_blocking` panics). The
   playground Network page gains guarded and
   unguarded write buttons.

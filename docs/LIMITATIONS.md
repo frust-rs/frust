@@ -8995,7 +8995,7 @@ covered. A crashed writer's temp file from another process lingers up to 24 hour
 liveness check (this process's own are swept after 10 minutes). A desktop window that is merely behind another is
 neither minimized nor occluded, so winit reports no hide and nothing flushes until it is. On Wayland the compositor
 reports no occlusion and no minimized state, so the desktop hide flush fires only on suspend (the exit flush still
-covers quit). iOS flushes inside UIKit's background grace, and the shell's own background flush still runs without the `BackgroundTask` assertion that apps now have (follow-up noted): a first write measured 14.3 ms on
+covers quit). iOS flushes inside UIKit's background grace, and the shell's own background flush still runs without a `BackgroundTask` assertion (the shell installs no backend): a first write measured 14.3 ms on
 an iPhone 13 mini (iOS 27.2), then 0.1 ms. The web tier has no persistent font cache, so nothing persists across page
 loads. Two live copies of one cache file exist only after a stamp or font-directory change mid-process; between them
 the last writer wins, so a copy whose write was replaced still reports clean and its answers miss the disk until it
@@ -9689,7 +9689,7 @@ no foreground exit: losing window focus on desktop and web, the notification sha
 the unfocused half of split-screen on Android, Control Center or a call on iOS. It is one-shot and is
 consumed, so do not flag a timer whose delay must be honoured while the app stays visible. Only
 synchronous work in the callback is guaranteed to complete before suspension, work it spawns is not,
-and only an iOS `BackgroundTask` extends it. On desktop a window that lost focus keeps running, so a
+and only a `BackgroundTask` with the plugin installed extends it (best effort on Android). On desktop a window that lost focus keeps running, so a
 plain timer fires on time.
 
 **Applies to**: Android, iOS.
@@ -9705,25 +9705,49 @@ desktop a plain timer fired on time (10001 ms measured). `examples/playground/sr
 
 ---
 
-### `background-task-no-op-platforms` — `BackgroundTask` protects work only on iOS
+### `background-task-no-op-platforms` — `BackgroundTask` protects work only with the plugin, on iOS and Android
 
-**Observed**: on Android, desktop and web `frust::BackgroundTask` is a no-op that reports itself granted and unexpired,
-and Android documents no equivalent, so a write begun there when the app leaves the foreground races process death as
-before; `spawn_blocking` panics on web, so the flush pattern does not apply there. On iOS Apple documents no numeric budget (about 30 s per Apple DTS), and the system may revoke the assertion
-early; `expired()` reports that loss, and also a refusal.
+**Observed**: without the `frust-background-task` plugin installed, `frust::BackgroundTask` is a no-op on every platform
+that reports itself granted and unexpired, so a write begun when the app leaves the foreground races process death.
+With the plugin it is real on iOS and Android and still a no-op on desktop and web (`install()` returns `false`);
+`spawn_blocking` panics on web, so the flush pattern does not apply there. On iOS Apple documents no numeric budget
+(about 30 s per Apple DTS), and the system may revoke the assertion early; `expired()` reports that loss, and also a refusal.
+Android limits are in `background-task-android-refusal-cases`.
 
-**Applies to**: Android, desktop, web (no protection); iOS (unspecified, revocable budget).
+**Applies to**: all platforms without the plugin; desktop, web (no protection even with it); iOS (unspecified, revocable budget).
 
-**Workaround**: keep the guarded write short, write it atomically (`frust::paths`' atomic write), and check
-`expired()` when the work can be abandoned or retried.
+**Workaround**: install the plugin, keep the guarded write short, write it atomically (`frust::paths`' atomic write), and
+check `expired()` when the work can be abandoned or retried.
 
-**Why accepted**: only Apple offers an in-process assertion of this kind; background execution elsewhere belongs to OS
-work managers.
+**Why accepted**: only iOS and Android offer an in-process mechanism of this kind; background execution elsewhere belongs
+to OS work managers.
 
 **Evidence**: (2026-11-09) device gate on an iPhone SE and a Pixel 5: a 200 ms database write begun from a flush
 callback finished and survived killing the process about 5 s after backgrounding, on the iPhone with the guard and with
 no `task expired`. A control without the guard also survived, because a write this short fits the normal suspension
 delay, so the gate shows the guard works rather than that this write needed it. `examples/playground/src/pages/network.rs`
-(Timers block); `crates/frust-shell-ios/src/background_task.rs`.
+(Timers block); `plugins/background-task`.
+
+---
+
+### `background-task-android-refusal-cases` — Android refuses or limits the `BackgroundTask` foreground service
+
+**Observed**: the Android backend is a `shortService` foreground service. A flush-on-background callback normally runs at
+the Inactive edge (`onPause`, app still visible), where a start is expected to be allowed. A timer armed while already
+Inactive, or armed by an Inactive flush, runs at the Hidden edge (`onStop`), where a start is expected to be refused on
+targetSdk 31+ (unverified until the device gate records it); `begin` then reports `is_granted() == false`, never
+throws, and the work proceeds unprotected. API 29-33 have no system `onTimeout`, so only the plugin's watchdog (about
+150 s) ends the service there. On Android 12+ a short guard normally shows no notification (display may be deferred up to
+10 s, not guaranteed); on API 29-30 a brief one may flash. Apps targeting Android 14+ must declare the foreground service
+type in the Play Console.
+
+**Applies to**: Android (start refusal on targetSdk 31+; watchdog-only on API 29-33; Play declaration on targetSdk 34+).
+
+**Workaround**: begin the guard while the app is still visible (the Resumed-to-Inactive edge), check `is_granted()` and
+`expired()`, and keep the guarded work short and atomic.
+
+**Why accepted**: the restrictions are platform policy; the plugin degrades to the no-op guard rather than failing the app.
+
+**Evidence**: device evidence is pending. `plugins/background-task`.
 
 ---

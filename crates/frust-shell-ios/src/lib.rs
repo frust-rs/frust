@@ -57,8 +57,7 @@
 //! the frame/lifecycle runtime — contains no `unsafe`; the only `unsafe fn`
 //! declaration outside `ffi_glue` is `IosA11yAdapter::new`, and its sole call
 //! site is `ffi_glue::init_accessibility`. Apart from the macro's forwarding blocks,
-//! the `unsafe` blocks outside `ffi_glue` are the one in that function and
-//! `background_task`'s read of UIKit's `UIBackgroundTaskInvalid` constant.
+//! the one `unsafe` block outside `ffi_glue` is the one in that function.
 
 // The iOS-specific pure helpers (the null-handle sentinel and the paused/ready
 // frame gate), consumed by the (iOS-only) FFI layer and by host unit tests. In a
@@ -71,8 +70,6 @@ mod ffi_support;
 mod accessibility;
 #[cfg(target_os = "ios")]
 mod app;
-#[cfg(target_os = "ios")]
-mod background_task;
 #[cfg(target_os = "ios")]
 pub mod ffi_glue;
 

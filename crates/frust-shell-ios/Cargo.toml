@@ -41,13 +41,6 @@ anyhow = { workspace = true }
 # The render thread acquires the drawable off the main thread, which has no autorelease pool; each frame's GPU work is wrapped
 # in `objc2::rc::autoreleasepool` or `CAMetalDrawable`s exhaust the layer's drawable pool (hard stall).
 objc2 = { workspace = true }
-# `background_task`'s UIKit assertion. Not `{ workspace = true }`: inheritance can't override `default-features`, so these
-# repeat the workspace version with minimal features. `UIApplication` does not enable `UIResponder`, which gates the struct.
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIResponder", "UIApplication", "block2"] }
-block2 = { version = "0.6", default-features = false, features = ["std"] }
-# `background_task` hands `endBackgroundTask` to the main queue when the guard drops on a blocking thread.
-dispatch2 = { workspace = true }
 # Render-thread QoS boost (`pthread_set_qos_class_self_np`) in the sanctioned-unsafe `ffi_glue` zone.
 libc = { workspace = true }
 # Never compiled on this host (no macOS, see docs/DEVELOPMENT.md).

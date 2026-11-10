@@ -21,7 +21,7 @@ off this index — read this plus the one that covers what you are touching:
   one function/module with a `# Safety` doc comment:
   - `frust-gpu`'s `create_android_surface`/`create_metal_surface` (`lifecycle.rs`) — turn a raw
     `ANativeWindow*`/`CAMetalLayer*` into a `wgpu::Surface`; `frust-render` only forwards it.
-  - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules (iOS's exceptions: `background_task`'s read of `UIBackgroundTaskInvalid` and `IosA11yAdapter::new`'s block) — the FFI boundary
+  - `frust-shell-android`'s `jni_glue` and `frust-shell-ios`'s `ffi_glue` modules (iOS's exception: `IosA11yAdapter::new`'s block; the `ios_app!` wrappers forward into `ffi_glue` from one `unsafe` block each) — the FFI boundary
     (`extern "system"`/`extern "C"` exports, `Box::into_raw`/`from_raw`, the surface hand-off,
     `nativeInitPlatform`'s `JavaVM` stash), the `android_app!`/`ios_app!` exports, and the
     render-thread split's `unsafe impl Send` for `SendableWindowPtr`/`SendableMetalLayer` plus the
@@ -97,6 +97,7 @@ off this index — read this plus the one that covers what you are touching:
     `NSString` pointers whose validity only the glue's contract establishes; each site is
     `SAFETY`-noted and `catch_unwind`-wrapped. Its `android` backend holds only its two JNI exports'
     `#[unsafe(no_mangle)]` attributes.
+  - `frust-background-task`'s `apple` backend reads the `UIBackgroundTaskInvalid` constant; its `android` backend holds only a JNI export's `#[unsafe(no_mangle)]`.
   - `frust-auth-session`'s `apple` backend — the `objc2-authentication-services` calls (the
     deprecated `ASWebAuthenticationSession` initializer, its setters, `-start`), the completion
     handler's raw `NSURL`/`NSError` derefs and error-domain `extern` static, the `define_class!`

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The foreground service behind `frust::BackgroundTask`. Merged only into apps
+  that add this plugin.
+
+  Google Play: an app targeting Android 14+ must declare every foreground
+  service type it uses in the Play Console, and `shortService` has no listed
+  exemption, so an app shipping this service files that declaration.
+
+  Opt-out: an app that adds the plugin but wants no service removes both
+  entries from its own manifest with `tools:node="remove"` (naming the service
+  as `dev.frust.backgroundtask.FrustBackgroundTaskService`). `begin` is then
+  refused and the work runs unprotected.
+
+  No `package` attribute: AGP takes the module's package from
+  `android.namespace` in `build.gradle.kts` (`dev.frust.backgroundtask`).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <application>
+        <service
+            android:name=".FrustBackgroundTaskService"
+            android:foregroundServiceType="shortService"
+            android:exported="false" />
+    </application>
+
+</manifest>

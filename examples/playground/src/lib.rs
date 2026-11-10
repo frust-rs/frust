@@ -877,6 +877,7 @@ frust::app!(
     setup = {
         frust::set_default_theme(frust_material::baseline());
         frust_network_image::NetworkImages::install();
+        let _ = frust_background_task::install();
     }
 );
 
