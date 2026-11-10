@@ -192,6 +192,7 @@ pub use frust_widgets::{
 // here so an app calling `scroll_to_item` through this facade can name the
 // alignment argument without depending on `frust-widgets` directly.
 pub use frust_widgets::scroll_controller::ItemAlignment;
+pub use frust_widgets::{WrapAlignment, WrapCrossAlignment, WrapView, WrapWidget, wrap};
 
 /// The overlay portal's own vocabulary, flat-re-exported from `frust-core`:
 /// which z-band a floated surface sits in, whether the pointer reaches it, and

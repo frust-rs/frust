@@ -75,6 +75,7 @@ mod textinput;
 mod texture_view;
 mod viewport;
 mod window_drag_region;
+mod wrap;
 
 use std::hash::{Hash, Hasher};
 
@@ -188,6 +189,7 @@ pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
 pub use texture_view::{TextureFit, TextureView, TextureWidget, texture_fit_rect, texture_view};
 pub use viewport::{CustomScrollView, DEFAULT_CACHE_EXTENT, ViewportWidget, custom_scroll_view};
 pub use window_drag_region::{WindowDragRegionView, WindowDragRegionWidget, window_drag_region};
+pub use wrap::{WrapAlignment, WrapCrossAlignment, WrapView, WrapWidget, wrap};
 
 /// A stable identity for a list child, so a container's reconciliation can match
 /// a child to its live widget *by key* across reorders/inserts instead of by
