@@ -176,14 +176,14 @@ pub use frust_widgets::{
     SliverPaddingView, SliverPersistentHeaderDelegate, SliverPersistentHeaderView, SourceFeedback,
     SpanView, SpringDescription, Stack, StackView, StrokedIconSource, TapDownDetails, TapUpDetails,
     TextInput, TextInputView, TextView, Timing, Tolerance, TransitionSpec, TransitionState,
-    VisibilityCallback, WindowDragRegionView, auto_scroll_zone, button, checkbox, colored_box,
-    column, container, custom_scroll_view, divider, drag_target, draggable, flexible,
-    glass_surface, hero, icon, icon_button, indexed_stack, inflexible, keep_alive, keyed,
-    list_view, overlay_portal, page_view, radio, reorderable_list, repaint_boundary, rich_text,
-    row, safe_area, scaffold, scroll_view, shortcuts, slider, sliver_box, sliver_fill_remaining,
-    sliver_fixed_extent_list, sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed,
-    sliver_list, sliver_padding, sliver_persistent_header, span, stack, text, text_input,
-    window_drag_region,
+    VisibilityCallback, WindowDragRegionView, WrapAlignment, WrapCrossAlignment, WrapView,
+    WrapWidget, auto_scroll_zone, button, checkbox, colored_box, column, container,
+    custom_scroll_view, divider, drag_target, draggable, flexible, glass_surface, hero, icon,
+    icon_button, indexed_stack, inflexible, keep_alive, keyed, list_view, overlay_portal,
+    page_view, radio, reorderable_list, repaint_boundary, rich_text, row, safe_area, scaffold,
+    scroll_view, shortcuts, slider, sliver_box, sliver_fill_remaining, sliver_fixed_extent_list,
+    sliver_fixed_extent_list_keyed, sliver_grid, sliver_grid_keyed, sliver_list, sliver_padding,
+    sliver_persistent_header, span, stack, text, text_input, window_drag_region, wrap,
 };
 // [`ItemAlignment`] (the alignment `ScrollController::scroll_to_item` lands a
 // row at) is not in `frust_widgets`'s own flat re-export list, so the block
@@ -192,7 +192,6 @@ pub use frust_widgets::{
 // here so an app calling `scroll_to_item` through this facade can name the
 // alignment argument without depending on `frust-widgets` directly.
 pub use frust_widgets::scroll_controller::ItemAlignment;
-pub use frust_widgets::{WrapAlignment, WrapCrossAlignment, WrapView, WrapWidget, wrap};
 
 /// The overlay portal's own vocabulary, flat-re-exported from `frust-core`:
 /// which z-band a floated surface sits in, whether the pointer reaches it, and

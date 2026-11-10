@@ -259,12 +259,17 @@ impl I18nDemoPage {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(0));
-        let zone = fmt::device_time_zone().unwrap_or_else(|| "unknown".to_owned());
-        let local_date = fmt::device_offset_seconds(now)
+        // One zone read serves both the label and the offset, so the two
+        // always describe the same zone.
+        let zone = fmt::device_time_zone();
+        let zone_label = zone.as_deref().unwrap_or("unknown");
+        let local_date = zone
+            .as_deref()
+            .and_then(|zone| fmt::zone_offset_seconds(now, zone).ok())
             .and_then(|offset| fmt::civil_at_offset(now, offset).ok())
             .and_then(|(date, _)| fmt::date(format_locale, date, DateLength::Medium).ok())
             .unwrap_or_else(|| "unavailable".to_owned());
-        format!("zone: {zone}  |  local date: {local_date}")
+        format!("zone: {zone_label}  |  local date: {local_date}")
     }
 }
 
