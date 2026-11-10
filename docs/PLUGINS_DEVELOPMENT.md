@@ -307,6 +307,8 @@ section (deep link `frustplay://section/photos`), Picker panel: filter and limit
   - **iOS access:** Settings lists *Add Photos Only* only for an app whose first Photos request was add-only; an album save with add-only
     access reads `PermissionDenied`.
   - **Not run:** a DNG export on a phone (none available). Gate devices: iPhone SE 2nd gen (iOS 26.7.1), Pixel 5 (Android 14).
+- **Decode** (`decode` feature; no playground panel): **not run on a device**, Android or iOS. The only recorded run is a macOS host test that encoded and decoded a HEIC through ImageIO. A device gate decodes a HEIC and a JPEG with `decode_file` off the UI thread, checks `UiThread` on the main one, and on Android checks a device with no HEIF decoder answers `Unsupported` (`photo-library-android-heif-device-optional`).
+  - **Mac host tests:** a `DYLD_LIBRARY_PATH` that contains Homebrew's `lib` directory makes ImageIO load Homebrew's `libpng`/`libjpeg` and crash on the first decode. When it is set, the photo-library ImageIO tests re-run themselves in a child process without it.
 - **Open:** the API 29/30 emulator leg (the `ACTION_OPEN_DOCUMENT` fallback picker) has not been run.
 
 ## Permissions manual test (Android + iOS + macOS)

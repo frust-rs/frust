@@ -7933,19 +7933,19 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 ---
 
-### `photo-library-heic-preview-needs-native-decode` — a picked HEIC original cannot be decoded by frust's image decoding
+### `photo-library-heic-preview-needs-native-decode` — `frust::decode_image_async` cannot read a picked HEIC original
 
-**Observed**: picked bytes are the untranscoded original, so an iPhone HEIC photo arrives as HEIC. `frust::decode_image_async` decodes PNG and JPEG only and fails on HEIC (and on WebP and GIF). With the `library` feature, native thumbnails show HEIC on both platforms (the Browse grid) and, on iOS, a pick that carries an asset id previews through one; what still fails is `decode_image_async` on a picked HEIC with no asset id (Android) or no Photos access (iOS).
+**Observed**: picked bytes are the untranscoded original, so an iPhone HEIC photo arrives as HEIC. `frust::decode_image_async` decodes PNG and JPEG only and fails on HEIC (and on WebP and GIF). With the `library` feature, native thumbnails show HEIC on both platforms (the Browse grid) and, on iOS, a pick that carries an asset id previews through one. The playground's Picker panel still previews through `decode_image_async`, so a picked HEIC with no asset id (Android) or no Photos access (iOS) shows a decode error there.
 
-**Applies to**: apps decoding a picked file themselves, chiefly HEIC from iOS libraries.
+**Applies to**: apps that pass a picked file's bytes to `decode_image_async`, chiefly HEIC from iOS libraries.
 
-**Workaround**: send the file as is (share or upload), preview through `PhotoLibrary::thumbnail`, or convert it outside frust before decoding.
+**Workaround**: with the `decode` feature, `PhotoLibrary::decode_file` decodes the picked path natively into RGBA8 (HEIC on iOS, macOS and on Android devices with a HEIF decoder; see `photo-library-decode-unsupported-desktop` and `photo-library-android-heif-device-optional`), ready for `ImageSource::from_rgba8`; or preview through `PhotoLibrary::thumbnail`, send the file as is, or convert it outside frust.
 
-**Why accepted**: a transcoding pick would change the bytes the user chose; native thumbnails cover display, not file decoding.
+**Why accepted**: `decode_image_async` is the facade's portable PNG/JPEG decoder and gains no native codecs; a transcoding pick would change the bytes the user chose.
 
-**Trigger for removal**: a HEIC decode path for picked files ships.
+**Trigger for removal**: `decode_image_async` reads HEIC, or the playground previews picks through `decode_file`.
 
-**Evidence**: (2026-11-08) `examples/playground/src/pages/photos.rs` (Picker panel text); iPhone 13 mini and Pixel 5 device gates.
+**Evidence**: (2026-11-11) `plugins/photo-library/src/lib.rs` (`decode_file`); `examples/playground/src/pages/photos.rs` (Picker panel text, which does not call `decode_file`); `crates/frust/src/image_async.rs`. Earlier device gates on iPhone 13 mini and Pixel 5 covered the pre-`decode` behaviour only.
 
 ---
 
@@ -8132,6 +8132,70 @@ Media location has no user-facing switch on Android 14: it is granted along with
 **Trigger for removal**: a cleanup API for exported originals.
 
 **Evidence**: (2026-11-09) `plugins/photo-library/src/originals.rs` (`ExportOptions::dest_dir`); `plugins/photo-library/src/apple_originals.rs` (*Cancel and cleanup*).
+
+---
+
+### `photo-library-decode-unsupported-desktop` — native image decode answers `Unsupported` on Linux and Windows
+
+**Observed**: with the `decode` feature, `PhotoLibrary::decode_file` and `decode_asset` return `PhotoError::Unsupported` on Linux, Windows and web; only iOS, macOS and Android decode. The `decode_asset` call also needs the `library` feature, and its export step answers `Unsupported` on desktop.
+
+**Applies to**: Linux, Windows and the browser tier; apps that decode HEIC or other non-PNG/JPEG picks natively.
+
+**Workaround**: on those targets decode PNG and JPEG with `frust::decode_image_async`, or convert the file outside frust.
+
+**Why accepted**: decode is a mobile-first feature and the plugin carries no desktop codec; each arm wraps a system decoder.
+
+**Trigger for removal**: a Linux or Windows decode arm ships.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/desktop.rs` and `unsupported.rs` (the `decode_file` arms). Not run on Linux or Windows.
+
+---
+
+### `photo-library-android-heif-device-optional` — Android HEIF decoding depends on the device
+
+**Observed**: the Android arm decodes through `ImageDecoder`. A format with no installed decoder returns `PhotoError::Unsupported`, and HEIF additionally needs an HEVC decoder in `MediaCodecList`. HEIF decoding is optional on a device, so the same HEIC file can decode on one phone and answer `Unsupported` on another.
+
+**Applies to**: Android devices without a HEIF or HEVC decoder; apps decoding HEIC from iOS libraries.
+
+**Workaround**: treat `Unsupported` as "show a placeholder or send the file as is".
+
+**Why accepted**: the platform decides which codecs exist, and the plugin bundles none.
+
+**Trigger for removal**: a bundled HEIF decoder, or a minimum Android version that guarantees one.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/android_decode.rs` (*Errors*); `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/ImageDecodeHost.kt` (*Missing decoders*). No Android device has run this feature yet.
+
+---
+
+### `photo-library-decode-not-interruptible` — a started decode cannot be cancelled mid-flight
+
+**Observed**: a `CancelToken` on `DecodeOptions` is checked before the call and between stages, but the platform decode itself cannot be interrupted. On iOS and macOS a cancel that lands during the ImageIO decode takes effect when it returns. On Android the token reaches the host, which checks between the decode and the pixel copy, so the call still waits for the running `ImageDecoder` decode.
+
+**Applies to**: apps that cancel a decode of a large image (for example when the user scrolls away).
+
+**Workaround**: cap the work with `DecodeOptions::max_dimension`, and drop the result when the request is stale.
+
+**Why accepted**: neither ImageIO nor `ImageDecoder` offers an abort for a decode in progress.
+
+**Trigger for removal**: a platform decode API with an abort.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_decode.rs` (*Cancel*); `plugins/photo-library/src/android_decode.rs` (*Cancel*).
+
+---
+
+### `photo-library-apple-decode-truncated-pixels` — on iOS and macOS a file cut inside its pixel data decodes with the missing part blank
+
+**Observed**: ImageIO reports a file whose pixel data stops early as a complete source, so `decode_file` returns an image with the missing part left blank instead of an error. Only a file cut inside its headers, or one with no image, is `PhotoError::Platform`. The behaviour is documented for JPEG, PNG and HEIC in the decoder's module docs.
+
+**Applies to**: iOS and macOS; apps that decode partly downloaded or damaged files.
+
+**Workaround**: check the file's length or checksum against its source before decoding.
+
+**Why accepted**: telling a short file apart from a complete one needs a per-format container check that the plugin does not do.
+
+**Trigger for removal**: a container-length check in the Apple arm.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_decode.rs` (module docs, *Errors*); `plugins/photo-library/src/lib.rs` (`decode_file` rustdoc).
 
 ---
 
