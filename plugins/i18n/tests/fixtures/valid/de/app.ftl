@@ -9,3 +9,5 @@ cart-items =
         [one] ein Artikel
        *[other] { $count } Artikel
     }
+
+editor-notice = Arbeit { $working } von { $full }

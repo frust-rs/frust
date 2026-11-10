@@ -56,8 +56,11 @@ use parse::LocaleDir;
 /// - `engine()` — the same set, built once into a shared
 ///   `&'static frust_i18n::Engine`.
 /// - `keys` — one function per message of the fallback locale, taking the
-///   resolver to format through plus one argument per `$variable` the
-///   message references. A typo'd key is a missing function, i.e. a
+///   resolver to format through. A message with zero or one `$variable`
+///   takes that argument positionally; a message with two or more takes a
+///   single generated `<PascalKey>Args` struct with one named field per
+///   variable (`editor_notice(&res, EditorNoticeArgs { working: 60, full: 50 })`),
+///   so a transposed pair is a compile error. A typo'd key is a missing function, i.e. a
 ///   compile error; a resolution failure at runtime logs a warning and
 ///   renders the key itself.
 ///

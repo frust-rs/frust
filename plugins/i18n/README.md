@@ -241,7 +241,17 @@ keys::cart_items(&resolver, 5);      // "5 items" — `$count` is isolated too
 ```
 
 Each generated function's parameters are typed from the message's own `$variable`
-references — direct references only; a variable reached indirectly through `{ other-message
+references. A message with zero or one variable takes it positionally (as above). A message
+with **two or more** takes one generated `<PascalKey>Args` struct with a named field per
+variable, so two values of the same type cannot be swapped at the call site, and a missing or
+misnamed field is a compile error:
+
+```rust
+// editor-notice = Working: { $working }, full: { $full }
+keys::editor_notice(&resolver, keys::EditorNoticeArgs { working: 60, full: 50 });
+```
+
+Only direct references count; a variable reached indirectly through `{ other-message
 }` is not part of the signature. A resolution failure softens the same way `t`/`t_args` does:
 a warn-level log plus the key rendered as its own text.
 
