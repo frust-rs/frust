@@ -24,19 +24,19 @@ save = []
 [dependencies]
 thiserror = { workspace = true }
 log = { workspace = true }
-frust-paths = { path = "../../crates/frust-paths", version = "0.6.5" }
+frust-paths = { path = "../../crates/frust-paths", version = "0.6.6" }
 
 # Plugin->plugin edge (docs/PLUGINS_CODE_STANDARDS.md): the desktop picker is the native file
 # dialog, and folder scans reuse its `FolderGrant` on mobile too. The desktop cfg list is
 # `frust-file-dialogs`' own; target-gated so wasm never sees the edge.
 [target.'cfg(any(target_os = "android", target_os = "ios", target_os = "linux", target_os = "macos", target_os = "windows", target_os = "freebsd", target_os = "dragonfly", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
-frust-file-dialogs = { path = "../file-dialogs", version = "0.6.5" }
+frust-file-dialogs = { path = "../file-dialogs", version = "0.6.6" }
 
 # `jni` for the plugin's own JNI export; `frust-plugin` (the only other `frust-*` dependency a
 # platform plugin may have, docs/PLUGINS_CODE_STANDARDS.md) for `with_jni_env`. Android-only.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.5" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.6" }
 
 # iOS arm: PHPicker, item-provider file copies and the main-queue bounce. Literals narrow the
 # feature lists of the root rows (only a non-workspace row may set `default-features = false`).

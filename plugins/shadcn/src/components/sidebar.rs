@@ -2642,6 +2642,7 @@ mod tests {
     use frust::authoring::{
         KeyEvent, Modifiers, PointerButton, PointerEvent, Rect, scene::GlyphRun,
     };
+    #[cfg(feature = "bundled-fonts")]
     use frust::column;
     use frust::{Brightness, CursorIcon, FrameTime};
     use frust_core::RenderRoot;

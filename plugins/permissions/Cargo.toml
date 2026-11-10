@@ -28,7 +28,7 @@ log = { workspace = true }
 # plugin may have, docs/PLUGINS_CODE_STANDARDS.md) for `with_jni_env`. Android-only.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true }
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.5" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.6" }
 
 # Apple arm: Objective-C runtime, Foundation strings/bundle/URL, AVCaptureDevice, and the blocks
 # and queues the permission prompts report on. Literals narrow the feature lists of the root rows.

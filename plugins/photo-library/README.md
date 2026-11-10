@@ -98,24 +98,54 @@ On Android the plugin ships its own Gradle module; the frust TUI's **Add Plugin*
 ## Use
 
 ```rust
-use frust::prelude::*;
+use frust::{
+    Component, Get, RwSignal, Set, View, button, column, spawn_blocking, spawn_local, text,
+};
 use frust_photo_library::{MediaFilter, PhotoLibrary, PickOptions};
 
+#[derive(Default)]
 struct Gallery;
 
-impl Component for Gallery {
-    fn build(&self, cx: &mut Cx) -> impl View {
-        let pick = use_task(cx, || {
-            // `pick` blocks until the user chooses: it runs off the UI thread here.
-            PhotoLibrary::pick(&PickOptions::new().filter(MediaFilter::Images).limit(1))
-        });
+struct GalleryState {
+    picked: RwSignal<String>,
+}
 
-        column![
-            button("Choose photo").on_tap(move |_| pick.run()),
-            // Decode a picked `PickedItem.path` with `frust::decode_image_async`.
-        ]
+impl Component for Gallery {
+    type State = GalleryState;
+
+    fn init(&self) -> GalleryState {
+        GalleryState {
+            picked: RwSignal::new(String::from("Nothing picked")),
+        }
+    }
+
+    fn build(&self, state: &mut GalleryState) -> impl View<GalleryState> {
+        column()
+            .child(text(state.picked.get()))
+            .child(Self::choose_button())
     }
 }
+
+impl Gallery {
+    fn choose_button() -> impl View<GalleryState> {
+        button("Choose photo", |state: &mut GalleryState| {
+            let picked = state.picked;
+            spawn_local(async move {
+                let options = PickOptions::new().filter(MediaFilter::Images).limit(1);
+                // `pick` blocks until the user chooses: run it off the UI thread.
+                let result = spawn_blocking(move || PhotoLibrary::pick(&options)).await;
+                picked.set(match result {
+                    // Decode a picked `PickedItem.path` with `frust::decode_image_async`.
+                    Ok(Ok(items)) => format!("{} picked", items.len()),
+                    Ok(Err(err)) => format!("error: {err}"),
+                    Err(err) => format!("error: {err}"),
+                });
+            });
+        })
+    }
+}
+
+frust::app!(Gallery);
 ```
 
 ## Loading, cancel and copies

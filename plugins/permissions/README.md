@@ -32,26 +32,59 @@ frust-permissions = { version = "0.6", features = ["camera"] }
 ## Use
 
 ```rust
-use frust::prelude::*;
-use frust_permissions::{open_settings, request, status, Permission, PermissionStatus};
+use frust::{
+    Component, Get, RwSignal, Set, View, button, column, spawn_blocking, spawn_local, text,
+};
+use frust_permissions::{Permission, open_settings, request, status};
 
+#[derive(Default)]
 struct CameraGate;
 
-impl Component for CameraGate {
-    fn build(&self, cx: &mut Cx) -> impl View {
-        let state = use_signal(cx, || status(Permission::Camera).ok());
-        // `request` blocks until the OS answers: run it off the UI thread.
-        let ask = use_task(cx, move || request(Permission::Camera));
+struct GateState {
+    label: RwSignal<String>,
+}
 
-        column![
-            text(format!("{:?}", state.get())),
-            button("Allow camera").on_tap(move |_| ask.run()),
-            button("Settings").on_tap(|_| {
-                let _ = open_settings();
-            }),
-        ]
+impl Component for CameraGate {
+    type State = GateState;
+
+    fn init(&self) -> GateState {
+        GateState {
+            label: RwSignal::new(format!("{:?}", status(Permission::Camera))),
+        }
+    }
+
+    fn build(&self, state: &mut GateState) -> impl View<GateState> {
+        column()
+            .child(text(state.label.get()))
+            .child(Self::allow_button())
+            .child(Self::settings_button())
     }
 }
+
+impl CameraGate {
+    fn allow_button() -> impl View<GateState> {
+        button("Allow camera", |state: &mut GateState| {
+            let label = state.label;
+            spawn_local(async move {
+                // `request` blocks until the OS answers: run it off the UI thread.
+                let answer = spawn_blocking(|| request(Permission::Camera)).await;
+                label.set(match answer {
+                    Ok(Ok(status)) => format!("{status:?}"),
+                    Ok(Err(err)) => format!("error: {err}"),
+                    Err(err) => format!("error: {err}"),
+                });
+            });
+        })
+    }
+
+    fn settings_button() -> impl View<GateState> {
+        button("Settings", |_state: &mut GateState| {
+            let _ = open_settings();
+        })
+    }
+}
+
+frust::app!(CameraGate);
 ```
 
 Writes to signals happen in event handlers or task completions, never in

@@ -13,11 +13,11 @@ readme = "README.md"
 
 [dependencies]
 # Implements the `BackgroundTaskBackend` seam; a leaf crate, unlike the `frust` facade.
-frust-reactive = { path = "../../crates/frust-reactive", version = "0.6.5" }
+frust-reactive = { path = "../../crates/frust-reactive", version = "0.6.6" }
 log = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.5" }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.6" }
 jni = { workspace = true }
 
 [target.'cfg(target_os = "ios")'.dependencies]
