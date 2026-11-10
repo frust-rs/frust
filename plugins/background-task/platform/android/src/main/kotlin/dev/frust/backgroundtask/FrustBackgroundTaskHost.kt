@@ -43,17 +43,18 @@ object FrustBackgroundTaskHost {
     fun begin(context: Context, id: Long, name: String): Boolean {
         val covered = tasks.isNotEmpty()
         tasks[id] = name
+        var failure: Exception? = null
         val started = try {
             context.startForegroundService(
                 Intent(context, FrustBackgroundTaskService::class.java),
             ) != null
         } catch (e: Exception) {
-            logRefusal("startForegroundService", e)
+            failure = e
             false
         }
         if (started || covered) return true
         tasks.remove(id)
-        logRefusal("startForegroundService", null)
+        logRefusal("startForegroundService", failure)
         return false
     }
 

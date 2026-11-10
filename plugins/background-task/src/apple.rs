@@ -27,11 +27,8 @@
 //! UIKit tolerates it. The shell installs no backend of its own; this plugin does.
 //!
 //! An id of `0` means no assertion was taken (UIKit refused, or `begin` ran off the main
-//! thread), and `end` does nothing for it.
-//!
-//!
-//! The shell's own font-cache flush on entering the background (`BACKGROUND_FLUSH` in
-//! the iOS shell's `app::executor`) takes no assertion.
+//! thread), and `end` does nothing for it. The shell's own font-cache flush on entering the
+//! background (`BACKGROUND_FLUSH` in the iOS shell's `app::executor`) takes no assertion.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -6,7 +6,13 @@
 //! `install` is the core no-op.
 //!
 //! - **Android**: a `shortService` foreground service holds the process while any guard
-//!   is live. Adding this plugin puts `FOREGROUND_SERVICE` and the service in the app's
+//!   is live. Protection is best effort and not yet device-verified. A flush-on-background
+//!   callback normally runs at the Inactive edge (`onPause`, app still visible), where a
+//!   foreground-service start is expected to be allowed. A timer armed while already
+//!   Inactive, or armed by an Inactive flush, runs at the Hidden edge (`onStop`), where a
+//!   start is expected to be refused on targetSdk 31+; then `is_granted()` is false and
+//!   the work runs unprotected. The task name may appear in a notification, so keep user
+//!   data out of it. Adding this plugin puts `FOREGROUND_SERVICE` and the service in the app's
 //!   manifest, so the Play Console needs a foreground-service declaration. An app can
 //!   strip both with `tools:node="remove"`; `begin` is then refused and the work runs
 //!   unprotected. See the README.
