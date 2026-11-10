@@ -2175,6 +2175,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "frust-background-task"
+version = "0.6.5"
+dependencies = [
+ "frust-plugin",
+ "frust-reactive",
+ "jni 0.22.4",
+ "log",
+]
+
+[[package]]
 name = "frust-beui"
 version = "0.6.5"
 dependencies = [
