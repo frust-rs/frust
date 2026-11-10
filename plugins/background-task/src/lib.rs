@@ -10,6 +10,8 @@
 //!   manifest, so the Play Console needs a foreground-service declaration. An app can
 //!   strip both with `tools:node="remove"`; `begin` is then refused and the work runs
 //!   unprotected. See the README.
+//! - **iOS**: `beginBackgroundTask`/`endBackgroundTask` hold a UIKit assertion per guard;
+//!   nothing is added to the app's manifest or `Info.plist`.
 //! - **Everything else**: [`install`] returns `false`.
 //!
 //! `BackgroundTask::expired` is the app's signal on Android. It reads `true` when the
@@ -28,9 +30,14 @@ mod android;
 #[cfg(target_os = "android")]
 use android as platform;
 
-#[cfg(not(target_os = "android"))]
+#[cfg(target_os = "ios")]
+mod apple;
+#[cfg(target_os = "ios")]
+use apple as platform;
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod unsupported;
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use unsupported as platform;
 
 /// Install this platform's `frust::BackgroundTask` backend. Returns whether it was

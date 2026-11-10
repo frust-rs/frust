@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Background-work plugin for Frust apps: backs frust::BackgroundTask with an Android short foreground service, so a short write survives the app leaving the screen."
+description = "Background-work plugin for Frust apps: backs frust::BackgroundTask with an Android short foreground service or an iOS UIKit background assertion, so a short write survives the app leaving the screen."
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -19,3 +19,12 @@ log = { workspace = true }
 [target.'cfg(target_os = "android")'.dependencies]
 frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.5" }
 jni = { workspace = true }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = { workspace = true }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+# `UIApplication` does not enable `UIResponder`, which gates the struct.
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIResponder", "UIApplication", "block2"] }
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+# `endBackgroundTask` goes to the main queue when the guard drops on a blocking thread.
+dispatch2 = { workspace = true }

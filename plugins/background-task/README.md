@@ -2,7 +2,7 @@
 
 Keeps a short piece of work alive after your app leaves the screen. Backs
 `frust::BackgroundTask` with a real platform service; without this plugin the
-guard is a no-op on Android.
+guard is a no-op.
 
 More about Frust: <https://frust.dev> and <https://github.com/frust-rs/frust>.
 
@@ -15,7 +15,7 @@ Like every frust **platform plugin**, this crate is added to your app's own
 frust add background-task
 ```
 
-That adds the Cargo dependency and wires the Android Gradle module. Then call
+That adds the Cargo dependency and, on Android, wires the Gradle module. Then call
 `install()` once, from the app's setup block or the root `Component::init`:
 
 ```rust
@@ -45,7 +45,8 @@ spawn_blocking(move || {
 | Platform | `install()` | Backend |
 |---|---|---|
 | Android | `true` | a `shortService` foreground service |
-| iOS, desktop, web | `false` | none: the guard stays the core no-op |
+| iOS | `true` | a UIKit background-task assertion per guard |
+| desktop, web | `false` | none: the guard stays the core no-op |
 
 ## Android
 
