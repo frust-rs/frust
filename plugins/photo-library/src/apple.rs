@@ -473,6 +473,15 @@ fn anchor_window(mtm: MainThreadMarker) -> Option<Retained<UIWindow>> {
     fallback
 }
 
+// Decode: the real arm lands with the shared Apple decoder in a following change.
+#[cfg(feature = "decode")]
+pub(crate) fn decode_file(
+    _path: &std::path::Path,
+    _options: &crate::DecodeOptions,
+) -> Result<crate::DecodedImage, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,13 +698,4 @@ mod tests {
         assert_eq!(overall_fraction(&[false, false, false, false], &odd), 0.375);
         assert_eq!(overall_fraction(&[true, true, true, true], &odd), 1.0);
     }
-}
-
-// Decode: the real arm lands with the shared Apple decoder in a following change.
-#[cfg(feature = "decode")]
-pub(crate) fn decode_file(
-    _path: &std::path::Path,
-    _options: &crate::DecodeOptions,
-) -> Result<crate::DecodedImage, PhotoError> {
-    Err(PhotoError::Unsupported)
 }
