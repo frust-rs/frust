@@ -52,8 +52,8 @@ cross-unit callers are also covered in the index. On macOS, `data_dir()`/`cache_
 `~/Library` (XDG vars never override it) and read through, never migrating, to the legacy XDG
 location when only it holds the app's `app_stem()` directory; the two differently-shaped in-repo
 callers (`plugins/database`, the desktop pipeline cache) use the public
-`legacy_data_dir()`/`legacy_cache_dir()` for their own file-level read-through (runtime status:
-`paths-macos-legacy-fallback-runtime-unverified` in [LIMITATIONS.md](LIMITATIONS.md)). On Android
+`legacy_data_dir()`/`legacy_cache_dir()` for their own file-level read-through (only the database
+site has run against a real `~/Library` tree; the other read-through is unit-tested). On Android
 they resolve the slot the shell installs at `nativeInitPlatform` (`install_android_dirs`,
 first-wins, absolute paths only) and answer `None` before it; `HOME`/`XDG_*` are never consulted
 there. The facade's dependency on `frust-widgets`/`frust-theme` (WIDGETS) and the shell crates

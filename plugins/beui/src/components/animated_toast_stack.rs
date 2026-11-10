@@ -74,9 +74,9 @@
 //! - **No timer.** Upstream's auto-dismiss lives in its `useAnimatedToastStack`
 //!   *hook*, not in the component, and it stays with the owner here for the same
 //!   reason plus a harder one: a countdown expiring during `paint` has no route
-//!   to `&mut State` — the facade publishes no housekeeping-flush seam — so a
-//!   widget-side timer could only fire on the user's next input event, which is
-//!   exactly when a toast must *not* need one. `duration` is therefore not
+//!   to `&mut State`, so a widget-side timer could only fire on the user's next
+//!   input event, which is exactly when a toast must *not* need one. The
+//!   owner can use `frust::time::Timer`; this component does not. `duration` is therefore not
 //!   carried as a field; an owner drives its own timeout and drops the entry,
 //!   and the exit plays from there.
 //! - **Text, not nodes.** Upstream's `title`/`description`/`icon`/`action.label`
@@ -97,7 +97,8 @@
 //!   staged transitions.
 //! - **Swipe is distance-only.** Upstream dismisses on
 //!   `|offset.x| > 72 || |velocity.x| > 520`. A `PointerEvent` carries no
-//!   velocity, so only the distance arm is ported; a fast flick shorter than the
+//!   velocity (a drag-end report does, but this component does not use it yet),
+//!   so only the distance arm is ported; a fast flick shorter than the
 //!   threshold springs back instead of dismissing.
 //! - **No portal knobs.** `portal`/`portalRoot`/`placement`/`fixed` all pick
 //!   *where in the document* the stack renders. frust has no portal — the mount

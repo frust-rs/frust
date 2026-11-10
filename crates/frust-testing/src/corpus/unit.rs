@@ -1556,7 +1556,7 @@ fn fs_main() -> @location(0) vec4<f32> {
 "#;
 
 /// `Command::ShaderQuad`, rendered by the engine but scored by neither golden
-/// arm — see `docs/LIMITATIONS.md` `engine-shader-quad-goldens-uncomparable`.
+/// arm, because the CPU golden arms cannot render a shader program.
 ///
 /// The engine renders the program in a pre-pass and draws the result as an
 /// external texture, but the engine oracle encodes straight through the

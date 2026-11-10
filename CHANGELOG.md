@@ -6,614 +6,507 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+A patch release (the 0.6.x line continues) with three breaks, listed under Breaking: `Router::go`
+and `RouteNavigator::go` now make the stack exactly the matched chain, `frust-shell-common`'s
+non-default `gpu` feature replaces `install_gpu_handle` and `gpu_handle` with `GpuPublisher`,
+`with_gpu_handle` and `gpu_handle_generation`, and the `frust-shell-ios` `ffi_glue` functions that
+dereference a caller's pointers are now `pub unsafe fn`, with `init` also taking a `pre_init`
+closure. Narrow source breaks are marked in Changed with their migrations: new `MainAxisAlignment`
+and `PathStyle` variants, `PageParity::SpillPool` with `MAX_LIVE_PAGES` raised to 5,
+`#[non_exhaustive]` `TextStyle`, the new `InspectNode::detail` field, the `pre_init` parameter on
+Android's `native_init`, and added variants or fields on `Capability`, `Method`, `RenderCommand`,
+`RenderEvent` and `CompiledFrame`. Behaviour changes to published APIs are marked there too:
+`AnimationController::reverse()` at 0.0, `PaintCtx::frame_time()`, `frust::gpu::with_context`, the
+facade's default `complex-scripts` feature (about 3 MB per app), the OS text scale on default-size
+`Text`, `frust_paths::atomic_write` and `data_dir`, and `frust-i18n` locale negotiation. The release
+adds four plugin crates (`frust-background-task`, `frust-device-info`, `frust-permissions` and
+`frust-photo-library`), file and photo access on Android and iOS, `frust::time`, the
+`frust::testing::Tester` driver, `frust::motion::presence` and snap-point detents, `glass_surface`,
+stroke caps and joins, rich text spans, and font features and decorations. Apple's hvgl-only system
+fonts (PingFang) now draw from the glyph atlas.
+
 ### Breaking
 
-- `frust::BackgroundTask` is a no-op on every platform until the `frust-background-task` plugin is
-  installed. The iOS backend moved out of `frust-shell-ios`, so an app that relied on it adds the plugin.
-  The plugin installs only when no backend is set (the iOS shell used to replace one), and on Android and
-  iOS a `begin` with no backend logs one warning.
 - `Router::go` and `RouteNavigator::go` now make the stack exactly the matched chain, as their docs
   said and as go_router defines `go`. They used to replace only the top page, so pages below it
-  survived. To keep a page below a shell or another page, make it a parent in the route table:
-  `Route::new("/", ..).child(shell_route(..))`. A hand-written pop to the root before `go` can go.
-  What follows from it:
-  - A page whose matched path is unchanged keeps its state and takes the new params, rather than
-    rebuilding. A shell page survives any `go` whose chain crosses it.
-  - A warm deep link replaces the stack, since `handle_location` is a `go`, and one matching no route
-    makes it one error page. An app receiving links no route is for, such as an OAuth callback delivered
-    as a deep link, declares a route for them or handles them before `track()`.
-  - `go` closes route-less overlays, including a non-dismissable one over a page it keeps, whether
-    the `go` came from app code or a link. A security gate must be a route redirect.
-  - A parent page in a matched chain publishes its own path in `route_stack`, not the leaf's location.
-    A `push` placing a shell from its parent page stacks only the shell.
-  - A removed page's `on_result` fires once with an empty result, on the `go`'s own frame.
-  - Only the top page animates, with its route's transition or the navigator's default. Removed pages
-    stay alive until the transition settles, though depth and back already report the new stack.
-  - A `go` applied in a navigator's first build starts no transition, so a cold start shows its page
-    at once instead of animating from the root page.
-  - When several `go` calls land in one frame, the last one wins and the earlier pages are not built.
+  survived. Migration: to keep a page below a shell or another page, make it a parent in the route
+  table (`Route::new("/", ..).child(shell_route(..))`); a hand-written pop to the root before `go`
+  can go. What follows from it:
+  - A page whose matched path is unchanged keeps its state and takes the new params, and a shell
+    page survives any `go` whose chain crosses it. A parent page in a matched chain publishes its
+    own path in `route_stack`, and a `push` placing a shell from its parent page stacks only the
+    shell.
+  - A warm deep link replaces the stack (`handle_location` is a `go`), and one matching no route
+    makes it a single error page. An app receiving links no route is for, such as an OAuth callback,
+    declares a route for them or handles them before `track()`.
+  - `go` closes route-less overlays, including a non-dismissable one over a page it keeps; a
+    security gate must be a route redirect. A removed page's `on_result` fires once with an empty
+    result, on the `go`'s own frame.
+  - Only the top page animates, with its route's transition or the navigator's default. Removed
+    pages stay alive until it settles, though depth and back already report the new stack. A `go`
+    applied in a navigator's first build starts no transition, and when several `go` calls land in
+    one frame the last wins and the earlier pages are not built.
 - `frust-shell-common`'s non-default `gpu` feature: `install_gpu_handle` and `gpu_handle` are
-  removed. A shell now publishes through an RAII `GpuPublisher` into a replaceable, generation-tagged
-  slot, read with `with_gpu_handle` and `gpu_handle_generation`. Only in-repo consumers were affected.
+  removed. A shell now publishes through an RAII `GpuPublisher` into a replaceable,
+  generation-tagged slot. Migration: hold a `GpuPublisher` for the device owner's lifetime and call
+  `publish(generation, make)`; read with `with_gpu_handle::<T, _>(f)` (the handle is current only
+  for the call) and watch `gpu_handle_generation()` to detect a replacement.
+- `frust-shell-ios`: 29 of the 32 `ffi_glue` functions, and the matching `ios_app!` exports, are now
+  `pub unsafe fn` with a Safety contract each, because they dereference a pointer the caller passes;
+  `system_ui_state`, `set_surface_mode` and `set_present_sync` stay safe. `ffi_glue::init` also
+  gains a required `pre_init: impl FnOnce()` parameter before `make_app`; it runs first, inside the
+  function's panic guard and before the GPU device exists, and a panic in it makes `init` return
+  null. C symbols and signatures are unchanged, so Swift callers are unaffected, and so are apps
+  using `ios_app!`, which passes the closure. Migration: a Rust caller of those functions wraps the
+  call in `unsafe` and honours the contract on each, and passes `|| {}` to `init` or a closure that
+  runs early setup such as `frust::gpu::request_optional_features(..)`.
 
 ### Added
 
-- New plugin `frust-background-task`: add it from the `frust` TUI's Add Plugin dialog, then call
-  `frust_background_task::install()` in the app's setup. It backs `frust::BackgroundTask` with an iOS background-task assertion, or on
-  Android a `shortService` foreground service (the `FOREGROUND_SERVICE` permission, a low-priority
-  notification, and no `POST_NOTIFICATIONS` request). A refused start degrades to the no-op guard with
-  `is_granted()` false. A watchdog of about 150 s bounds the service; `expired()` is the app's signal to
-  cut work short. Apps targeting Android 14+ must make a Play Console declaration; an app can opt out
-  with `tools:node="remove"`. Android protection is best effort and depends on the lifecycle edge the
-  guard begins at; checked on a Pixel 5 (Android 14) and an iPhone SE.
-- Native debug builds log a warning when a flush-on-background callback runs over 8 ms, or a whole drain over
-  16 ms, because the OS lifecycle callback is blocked meanwhile. Release and web builds do not measure.
-- `frust::BackgroundTask` (`begin`, `expired`, `is_granted`, `end`; dropping it ends the task exactly
-  once, from any thread). It is a no-op until the `frust-background-task` plugin provides a backend, on iOS
-  and Android only. The sanctioned pattern: a `flush_on_background` callback calls `BackgroundTask::begin` on the
-  UI thread, then `spawn_blocking(write + drop(task))` (not on web, where `spawn_blocking` panics). The
-  playground Network page gains guarded and
-  unguarded write buttons.
-- `frust-reactive`'s `test-support` feature (forwarded by the facade's `test-support`) adds
-  `time::test_support::{install_virtual_clock, advance, now}`. `frust::testing::Tester` installs a
-  per-thread virtual clock, and `pump(Duration)` fires due `frust::time` sleeps and `Timer`s
-  deterministically, stepping through each deadline in order (a chain or re-armed timer inside one pump
-  fires at its own virtual time). `pump_until` remains the real-time wait. Any future polled off the
-  Tester's thread stays on wall time, including `frust::spawn` and `use_task` fetch futures.
-- `frust::time::{sleep, Timer, Duration}`: `sleep(duration)` is an awaitable wall-clock delay (a real
-  browser `setTimeout` on web) and `Timer::new(duration, callback)` runs a callback once, with `cancel`,
-  `is_active`, `fire_now` and `detach`. A `Timer` is cancelled when dropped and with its owner, and its
-  callback runs under the owner that armed it. It fires on the next desktop loop turn, or the next mobile
-  display tick while resumed. Nothing ticks regularly while backgrounded, so a due timer normally fires on
-  the first tick after resume but may run earlier in a shell's background pump; rely on neither.
-  `flush_on_background` instead runs the callback synchronously at the first of the app going inactive or
-  hidden (also on focus loss, once); only synchronous work in it is guaranteed to complete before
-  suspension, work it spawns is not, and no background-task assertion is provided. `frust::spawn_local_scoped` is `spawn_local` bound to
-  the calling owner. The playground Network page gains a Timers block.
-- `GestureDetector::on_double_tap` and `DoubleTapDetails { local_position }`: two taps within 300 ms and
-  100 px of each other (each tap within the 18 px slop), timed on the raw input clock and kept alive by
-  requested frames. With `on_double_tap` wired, the single `on_tap` waits out the window and is delivered
-  afterwards; a second press that fails (slop, long press, cancel) drops the first tap. Detectors
-  without `on_double_tap` are unchanged.
-- `GestureDetector::drag_start_behavior(DragStartBehavior::{Start, Down})` for pan and the axis drags.
-  `Start` (the default, the existing behaviour) reports the start where the slop was crossed, and the
-  first update is the next move's delta. `Down` reports the start at the press point, and the crossing
-  move carries one update with the whole travel from the press (an axis drag only its axis); no extra
-  velocity sample.
-- A second pointer contact landing while a `GestureDetector` press is pending fires `on_tap_cancel`, with
-  no long press, tap or double tap (the first finger may still start a drag), whenever a
-  contact-capturing widget (`pinch_detector`, `pan_zoom`) sits below the detector. A bare detector never
-  hears the second finger; see the `gesture-second-contact-needs-a-contact-captor` limitation.
-- The new `frust-photo-library` plugin crate: `PhotoLibrary::pick(&PickOptions)` opens the system photo
-  picker on Android and iOS (no permission and no Info.plist string needed) and a native file dialog on
-  Linux, macOS and Windows. Options: a media filter, a limit, `on_progress` loading reports
-  (`PickProgress`, throttled to 20 per second, ending at 1.0) and a `CancelToken`. Mobile picks are
-  copies in an app cache (`PickedItem::is_copy`), reclaimed with `PhotoLibrary::clear_pick_cache`;
-  `pick` blocks, refuses the UI thread on mobile and allows one pick at a time (`PhotoError::Busy`).
-  Cancelling returns `PhotoError::Cancelled` and removes the call's partial copies. The registry entry
-  `photo-library` adds the plugin's Gradle module and the `PhotosUI` link; the playground gains a Picker
-  panel. The optional `library` feature (also a registry feature, adding the Android media read
-  permissions, `NSPhotoLibraryUsageDescription` and the `Photos` link) adds library browsing on Android
-  and iOS: `PhotoLibrary::albums`, `assets` (newest-first pages with an `AssetQuery`) and `thumbnail`
-  (straight-alpha RGBA8 for a requested box, `Fill` or `Fit`, behind a byte-budgeted in-memory cache;
-  `set_thumbnail_cache_budget`, `clear_thumbnail_cache`), plus `manage_limited_selection` for Limited
-  access. Browsing is read-only and never takes the pick guard; iOS picks carry `asset_id` under the
-  feature, and the playground gains a Browse panel.
-  `PhotoLibrary::export_original(&AssetId, &ExportOptions)` (with `library`) writes an asset's untouched
-  bytes to a file: the original or the edited rendition, `allow_network`, progress ending at 1.0 on
-  success and a `CancelToken`; the default destination `<cache>/frust-photo-library/originals` is left
-  alone by `clear_pick_cache`. `PhotoLibrary::save(&SaveRequest)`, behind the new `save` cargo and
-  registry feature, files an image or video into the library (Photos on iOS, `MediaStore` on Android),
-  optionally into an album. New `PhotoError` variants: `NetworkRequired`, `MissingUsageDescription`,
-  `InvalidRequest`. Stored location is kept by Android browse + export with Media location granted and by
-  the iOS picker, and zeroed by the Android Photo Picker (see the
-  `photo-library-android-location-redacted` limitation). The playground gains an Originals panel.
-- `frust-file-dialogs` opens files on Android (Storage Access Framework) and iOS
-  (`UIDocumentPickerViewController`) and gains `FileDialog::export_file` (a save dialog or the platform's
-  export UI, then a copy; `ExportOutcome`), `pick_folder` with persistable `FolderGrant`s (`token`,
-  `restore`, `local_path`, `list`, `release`; `FolderEntry::copy_to` and `read_to_vec`; `ListOptions`),
-  and `FileDialog::cancel`, `on_progress` and `ListOptions::cancel` with the crate's own `CancelToken`
-  and `FileProgress`. `FileDialogError` gains `UiThread`, `NoPresenter`, `PlatformNotInitialized`,
-  `AccessLost`, `Io`, `Platform` and `Cancelled`. The `file-dialogs` registry entry adds the plugin's Gradle
-  module and the `UniformTypeIdentifiers` link. `PhotoLibrary::scan_folder(&FolderGrant, &FolderScan)`
-  pages the images and videos of a granted folder, newest first, on desktop, Android and iOS. The playground
-  gains a Folders panel and Export file, Pick folder and Cancel on its Desktop page.
-- `Share::files` and `Share::files_anchored` share one to 64 files: the Android chooser (through a
-  `FileProvider` in the plugin's own Gradle module), the iOS activity sheet and a macOS sharing picker.
-  Linux and Windows answer `ShareError::Unsupported`. On Android `Ok` means the share is enqueued: the
-  files are copied on a background thread and a failure is logged under tag `FrustShare`.
-- `frust::testing::Tester` (facade `test-support` feature): a state-generic headless driver. `pump` /
-  `pump_and_settle` / `pump_until` on a manual clock under its own child reactive owner;
-  `tap` / `press` / `long_press` / `drag` / `timed_drag`; `start_gesture` / `start_touch` with
-  `move_by` / `move_to` / `up` / `cancel`; `find::{text, label, role, by_type}` plus
-  `get_semantics` / `bounds` / `perform_action`; `scene` / `semantics` / `inspect` / `send`;
-  `set_metrics` / `resize`. Built with `new`, `with_options` (`TesterOptions`) or `new_with`. There
-  is no process-wide lock, so Tester tests run in parallel. The one-shot helpers `semantics_of`,
-  `scene_of` and `scene_of_with` are unchanged. `frust::authoring` re-exports `TextWidget`.
-  `Tester::up_at` releases a gesture at a point it never moved to (the `Up` carries the point; no
-  travel reaches a velocity tracker), and `frust::testing` re-exports `InspectDetail` and
-  `TextInspect` next to `InspectNode`, so a test can honour clipping ancestors for any control.
-- `frust::paths::{data_dir, cache_dir, atomic_write}`: the platform data and cache directories and the
-  write-to-temp-and-rename helper, re-exported from `frust-paths` so an app depending on the facade
-  alone can place caches, sidecars and export staging; the module docs say what each platform backs up.
-- The new `frust-permissions` plugin crate: one `status` / `request` / `open_settings` API over
+- `frust-background-task` (new plugin crate): add it from the `frust` TUI's Add Plugin dialog, then
+  call `frust_background_task::install()` in the app's setup. It backs `frust::BackgroundTask` with
+  an iOS background-task assertion or an Android `shortService` foreground service
+  (`FOREGROUND_SERVICE`, a low-priority notification, no `POST_NOTIFICATIONS` request). A refused
+  start is the no-op guard with `is_granted()` false; a watchdog of about 150 s bounds the service
+  and `expired()` signals the app to cut work short. Apps targeting Android 14+ must make a Play
+  Console declaration, or opt out with `tools:node="remove"`. Checked on a Pixel 5 (Android 14) and
+  an iPhone SE.
+- `frust::BackgroundTask` (`begin`, `expired`, `is_granted`, `end`; dropping it ends the task
+  exactly once, from any thread): a no-op on every platform until the plugin provides a backend,
+  which it does only on iOS and Android, and a `begin` with no backend logs one warning on those
+  two. The plugin installs only when no backend is set. The sanctioned pattern: a
+  `Timer::flush_on_background` callback calls `begin` on the UI thread, then
+  `spawn_blocking(write + drop(task))` (not on web, where `spawn_blocking` panics).
+- `frust::time::{sleep, Timer, Duration}`: `sleep(duration)` is an awaitable wall-clock delay (a
+  real browser `setTimeout` on web, cleared when dropped or cancelled; durations above `i32::MAX` ms
+  clamp and a background tab may throttle it). `Timer::new(duration, callback)` runs a callback
+  once, with `cancel`, `is_active`, `fire_now` and `detach`; it is cancelled when dropped and with
+  its owner, and the callback runs under the owner that armed it. A timer fires on the next desktop
+  loop turn or mobile display tick while resumed; nothing ticks regularly while backgrounded, so a
+  due timer may fire on the first tick after resume or in a shell's background pump.
+  `frust::spawn_local_scoped` is `spawn_local` bound to the calling owner.
+- `Timer::flush_on_background()` runs a timer's callback synchronously at the first of the app going
+  inactive or hidden (also on focus loss, once). Only synchronous work in it is guaranteed to
+  complete before suspension; work it spawns is not, and no background-task assertion is provided.
+  Native debug builds log a warning when a callback runs over 8 ms or a drain over 16 ms, because
+  the OS lifecycle callback is blocked meanwhile; release and web builds do not measure.
+- `MemoryPressure` (`Moderate`, `Critical`): `AppLifecycleListener::on_memory_pressure`, the
+  shell-facing `push_memory_pressure` and the diagnostic `last_memory_pressure()`, independent of
+  `AppLifecycleState`. iOS reports its memory warning as `Critical`; Android maps `onTrimMemory`
+  levels (`RUNNING_MODERATE`, `RUNNING_LOW`, `BACKGROUND`, `MODERATE` to `Moderate`,
+  `RUNNING_CRITICAL` and `COMPLETE` to `Critical`); macOS reports a libdispatch source; Windows,
+  Linux and web report none.
+- On `Critical` pressure iOS and Android trim the render caches (`SurfaceRenderer::trim_memory` /
+  `EngineRenderer::trim_memory` hold retained pages to the plain 32 MiB budget and clamp atlas
+  growth, one-way until the renderer is rebuilt); macOS only reports. iOS reaches this through the
+  additive C export `frust_memory_warning` (`frust_ffi.h`, called by `FrustViewController`).
+  `frust_render::set_reported_device_memory` reports device memory where there is no
+  `/proc/meminfo`, and under `perf-trace` iOS logs
+  `frust-perf ios-mem phys_footprint_kib=<n>|unknown` about once a second.
+  `frust build ios --define FRUST_FORCE_MOBILE_TIER=1` forces the plain tier.
+- `frust::paths::{data_dir, cache_dir, atomic_write}`: the platform data and cache directories and
+  the write-to-temp-and-rename helper, re-exported from `frust-paths` so an app depending on the
+  facade alone can place caches, sidecars and export staging; the module docs say what each platform
+  backs up.
+- `frust-photo-library` (new plugin crate): `PhotoLibrary::pick(&PickOptions)` opens the system
+  photo picker on Android and iOS (no permission or Info.plist string needed) and a native file
+  dialog on desktop, with a media filter, a limit, throttled `on_progress` reports (`PickProgress`)
+  and a `CancelToken`. Mobile picks are copies in an app cache, reclaimed with `clear_pick_cache`
+  (`PickedItem::is_copy`); `pick` blocks, refuses the UI thread on mobile and allows one pick at a
+  time (`PhotoError::Busy`), and cancelling removes partial copies (`PhotoError::Cancelled`). The
+  `photo-library` registry entry adds the Gradle module and the `PhotosUI` link.
+- `frust-photo-library` optional `library` feature (Android media read permissions,
+  `NSPhotoLibraryUsageDescription`, the `Photos` link): browse with `PhotoLibrary::albums`, `assets`
+  (newest-first pages with an `AssetQuery`) and `thumbnail` (straight-alpha RGBA8, `Fill` or `Fit`,
+  a byte-budgeted cache with `set_thumbnail_cache_budget` and `clear_thumbnail_cache`), plus
+  `manage_limited_selection`. Browsing is read-only and never takes the pick guard; iOS picks carry
+  `asset_id` under the feature.
+- `PhotoLibrary::export_original(&AssetId, &ExportOptions)` (`library`) writes an asset's untouched
+  original or edited bytes to a file, with `allow_network`, progress and a `CancelToken`; the
+  default destination is left alone by `clear_pick_cache`. `PhotoLibrary::save(&SaveRequest)` (the
+  `save` feature) files an image or video into Photos or `MediaStore`, optionally into an album.
+  `PhotoLibrary::scan_folder(&FolderGrant, &FolderScan)` pages a granted folder's images and videos,
+  newest first. New `PhotoError` variants: `NetworkRequired`, `MissingUsageDescription`,
+  `InvalidRequest`. Stored location is kept by Android browse and export with Media location granted
+  and by the iOS picker, and zeroed by the Android Photo Picker
+  (`photo-library-android-location-redacted`).
+- `frust-permissions` (new plugin crate): one `status` / `request` / `open_settings` API over
   Android runtime permissions and Apple authorization for photos (read/write or add-only), camera,
   microphone and media location (the location stored inside photos, never device position). Each
-  permission is an opt-in cargo feature, so an app links and declares only what it uses. The
-  registry entry (`photos`, `photos-add`, `camera`, `microphone`, `media-location`) adds the
-  matching manifest permissions, Info.plist usage strings, framework links and macOS entitlements.
-  Linux, Windows and web answer `Unsupported`; the playground gains a Photos section.
-- The new `frust-device-info` plugin crate: `DeviceMemory::query()` reports total RAM, the Android
-  low-RAM flag, system-available memory (Android/Linux/Windows) and the iOS per-process headroom, so
-  an app can size caches on Android 14+ where no foreground trim-memory level is delivered any more.
-- `frust-database`: `Database::schema_version`, `Database::migrate(&[Migration])` (one transaction per step,
-  `PRAGMA user_version` bumped inside it, identical on both engines) and `Database::execute_batch` (many
-  statements in one transaction); a new `DatabaseError::Migration` variant.
-- Rich text spans. `frust-text` gains `TextSpan` and `TextContext::layout_rich` /
-  `layout_rich_bounded`, laying out differently styled pieces as one paragraph (paragraph knobs come
-  from the first span; a one-span call shares the plain cache entry; a truncated line always paints
-  its ellipsis and stays within the width unless the ellipsis alone is wider, styled after the span
-  the cut settles in within two passes, so between spans of different sizes or fonts it can follow
-  another span's glyph). `frust-widgets` gains `rich_text(spans)` and `span(text)` with per-span
-  size, colour, weight, family, italic, letter spacing, locale, font features, decorations and
-  themed roles, resolving theme and the OS text scale like `TextView`.
-- A memory-pressure event: `MemoryPressure` (`Moderate`, `Critical`),
-  `AppLifecycleListener::on_memory_pressure`, shell-facing `push_memory_pressure` and the diagnostic
-  `last_memory_pressure()`, independent of `AppLifecycleState`. iOS reports its memory warning as
-  `Critical`; Android maps `onTrimMemory` levels (RUNNING_MODERATE, RUNNING_LOW, BACKGROUND, MODERATE
-  to `Moderate`; RUNNING_CRITICAL, COMPLETE to `Critical`) and trims the render caches on `Critical`,
-  which was a no-op before; macOS reports a libdispatch memory-pressure source (warn to `Moderate`,
-  critical to `Critical`) without trimming. Windows, Linux and web report none.
-- `SceneTextureHints` (`filter`: `SceneTextureFilter::{Linear, Nearest, NearestWhenMagnified}`, and
-  a caller-asserted `opaque`) for externally bound textures: `EngineRenderer::bind_texture_with` and
-  `ExternalFrame::bind_texture_with`, re-exported from `frust-engine`, `frust-render` and `frust::gpu`.
-  `Linear` shares the image sampling resolver, and an `opaque` texture joins the depth-writing opaque
-  pass like an opaque image. Unhinted textures behave as before.
-- Texture bus: `SourceFormat::Bgra8` (premultiplied; swizzled on the CPU on GL only) and sub-rect
-  updates through `SourceFrame::with_update_region` / `UpdateRegion` (re-exported as
-  `frust::texture::UpdateRegion`), refused with a one-time warning when no same-size, same-format
-  texture is shown.
-- `DeviceHandle::generation()` (process-wide, monotonic, non-zero, shared by clones) and
-  `DeviceHandle::is_lost()` (latched by the device-lost callback, never cleared); `frust::gpu::device_generation()`.
-- `frust::gpu::request_optional_features`/`requested_optional_features` (and
-  `frust_render::missing_requested_features`): a process-wide, adapter-conditioned union of optional
-  wgpu features, honoured by the shells and the headless renderer. A missing feature is left out; none
-  can be required, and limits are not opt-in.
-- `app!(Root, gpu_features = { .. }, ..)` (facade `gpu` feature) requests optional features before
-  the device is built on desktop, web, Android and iOS (`@pre_init` on `android_app!`/`ios_app!`). On
-  Android a pre-init device lacking a requested feature is rebuilt, forfeiting that launch overlap.
-- Android and iOS publish their live device to `frust::gpu::with_context`, as desktop does.
-- Bitmap-strike colour emoji render on the engine: bitmap-first faces (sbix without outlines, CBDT)
-  bypass glifo for an engine-side route, drawn by CoreText on iOS and decoded
-  from PNG/dupe/flip records elsewhere, each strike charged and refunded its exact atlas slot, strikes
-  over 512 px refused everywhere. Faces with outlines draw outlines. BGRA and mask strikes still do not draw.
-- `GestureDetector` press callbacks `on_tap_down`, `on_tap_up` (before `on_tap`) and `on_tap_cancel`,
-  with `#[non_exhaustive]` `Copy` `TapDownDetails`/`TapUpDetails` (`local_position`) from `frust-ui`.
-  Down fires at once; a slop or bounds exit, a stolen or system cancel, or a second Down cancels.
-  Exactly one up or cancel follows each down; leaving the bounds cancels but a later `on_tap` fires.
-- `complex-scripts` cargo feature on `frust-text` and `frust-ui`, default on: it carries the
-  dictionary line and word segmentation (about 3 MB per app). An app opts out with
-  `frust-ui = { version = "...", default-features = false }` (or `frust-text` likewise); unspaced
-  Thai/Lao/Khmer/Myanmar text then overflows a line instead of wrapping, and Chinese/Japanese word
-  motion falls back to per-character stops. Cargo unifies features across the graph, so every
-  library in the app's dependency graph must also leave `frust-ui`/`frust-text` default features
-  off; frust's own plugins do.
-- `TextStyle` `with_<field>` builders for every field (`with_family`, `with_weight`, `with_style`,
-  `with_width`, `with_size`, `with_color`, `with_letter_spacing`, `with_line_height`,
-  `with_align`, `with_overflow_wrap`, `with_locale`, `with_variation(s)`), chained from
-  `TextStyle::new(size, color)` or `Default`.
-- `glass_surface(child)` (`GlassSurfaceView`, flat from `frust`): a baseline widget that paints one
-  tier of the theme's glass scale behind its child (shadow cast outside the surface, rounded clip, backdrop blur and washes,
-  child, specular hairline). `.tier(GlassTier)` picks `Control`, `Bar` (default) or `Chrome` from the
-  new `GlassScale::tier(GlassTier) -> &GlassMaterial`; `.corner_radius(f64)` (clamped to a capsule, half the shorter side, like `ShapeScale::resolve`:
-  an infinite radius is a capsule, a NaN or negative one square) and `.material(..)`
-  (wins over the theme's tier) refine it, and with neither a theme nor a material it paints an
-  opaque `#EFEFEF` fill. A material's blur intent is a Gaussian sigma in logical px (CSS
-  `backdrop-filter: blur(Npx)` is sigma N), clamped by the engine. Under a scale the sigma follows
-  the transform's mean scale; a rotation or skew samples the rotated rectangle's device bounding box.
-- `set_max_backdrops_per_frame(n) -> usize` and `max_backdrops_per_frame()` (flat from `frust` and
-  `frust-render`; defined in `frust-engine`, with `MAX_BACKDROPS_PER_FRAME` 4 as the default and
-  `BACKDROP_CAP_CEILING` 16): the per-frame backdrop-blur cap is app-configurable, process-wide and
-  clamped to `1..=16`. A frame recording more backdrops than the cap is still refused whole
-  (`EngineError::TooManyBackdrops`), and `SceneCompiler::compile_with_backdrop_cap` compiles against
-  an explicit cap.
-- Stroke caps, joins and miter limit, and the even-odd fill rule, in `frust-scene` (also in
-  `frust::authoring::scene`): `StrokeCap` (`Butt`, `Round`, `Square`), `StrokeJoin` (`Miter`,
-  `Round`, `Bevel`), `StrokeStyle { cap, join, miter_limit }` (`ROUND`, `new`, `with_miter_limit`)
-  and `FillRule` (`NonZero`, `EvenOdd`), carried by `PathStyle::FillEvenOdd` and
-  `PathStyle::StrokeStyled { width, dash, style }` (helpers `PathStyle::fill_rule()` / `stroke()`).
-  `SceneBuilder` and `PaintScene` gain `fill_path_with_rule` and `stroke_path_styled`; the
-  `PaintScene` defaults fall back to `fill_path` / `stroke_path(_dashed)`. The engine and the CPU
-  oracle render both, and a non-finite or below-1 miter limit is refused as `InvalidGeometry`.
-- `frust::motion::detent` (flat in `frust::motion`): `Detents`, pure NaN-safe snap-point math
-  (`open_progress`, `drag_to`, `release_target`, `settle` returning `DetentRelease` under a
-  `DismissPolicy`), and the headless `DetentController` (interruptible drag; a release hands the
-  fling velocity to `spring_to_with_velocity`; `with_fling_velocity(f64)` sets the fling speed,
-  defaulting to `DEFAULT_FLING_VELOCITY`). `DismissPolicy::SpringBack` snaps back to open; on
-  `Dismiss` the controller stops and holds progress, and the caller owns the exit animation.
-- Stroked icons: `IconShape` (`Path`/`Circle`/`Rect`), `IconPaint` (`Stroke` default, `Fill`),
-  `IconElement` (const `stroke`/`fill`, with `opacity`, a single `dash` pattern and its own
-  `stroke_width` through `with_opacity` / `with_dash` / `with_stroke_width`) and
-  `StrokedIconSource { elements, design, stroke_width }`,
-  converted to `IconData` by `From<StrokedIconSource>` or `IconData::from_elements`;
-  `IconData::is_stroked()` reports one and `IconData::resolve()` returns one fillable outline (each stroke
-  expanded with round caps and joins), so fill-only slots (plugin icons) render a stroked icon filled and
-  ignore `stroke_width` overrides. `IconView::stroke_width(f64)` overrides the width;
-  strokes use round caps and joins, scale with the icon and take the resolved icon colour.
-  `IconElementStyle` carries an element's paint and those attributes for runtime-built icons
-  (`IconData::from_styled_elements`); `resolve()` bakes an element's dash and width into the
-  outline and drops opacity.
-- Framework haptic feedback in `frust-core` (flat from `frust` and in `frust::authoring`):
-  `#[non_exhaustive] HapticFeedback` (`Selection`, `Light`, `Medium`, `Heavy`, `Success`,
-  `Warning`, `Error`), `HapticSink`, the last-wins `set_haptic_sink`, `haptic_sink_installed()`
-  and `perform_haptic()` (a no-op without a sink). The `frust-haptics` README shows wiring it as
-  the sink.
-- Animation time scale: `set_animation_time_scale(f64) -> bool` (accepts
-  `MIN_ANIMATION_TIME_SCALE` 0.01 ..= `MAX_ANIMATION_TIME_SCALE` 100.0, rejects anything else) and
-  `animation_time_scale()`. `PaintCtx::frame_time()` returns the scaled animation clock and the new
-  `PaintCtx::input_time()` the raw shell clock; `frust-widgets` long-press, hold, caret blink,
-  double-tap windows, velocity timestamps, drag hold and auto-scroll read `input_time()`.
-- Devtools: the `set_animation_time_scale` method (params `AnimationTimeScaleParams { scale }`,
-  authenticated), the `animation_time_scale` capability and
-  `DevtoolsClient::set_animation_time_scale`. The protocol stays v1: the change is additive and an
-  older client decodes the capability as `Unknown`. A scale a client set is reset to 1.0 when that
-  client disconnects.
-- `frust-ui` `test-support` feature (enable from `[dev-dependencies]`) and
-  `frust::testing::semantics_of(build, size) -> SemanticsUpdate`, so an out-of-tree design system
-  can test `Widget::semantics`. `scene_of(build, size)` and `scene_of_with(build, size, &SceneOptions)`
-  (`SceneOptions::theme` / `frame_time` / `warm_frames`) paint a view into a `Scene` a test can
-  inspect; a recorded `BackdropBlur` count is an upper bound on what counts toward the backdrop cap.
-  The facade's `test-support` now forwards `frust-core/test-support`, so `PaintCtx::for_test` is
-  available too.
-- `column()` / `row()` gain `.gap(f64)`, a fixed space between consecutive children (negative or
-  NaN is `0`), and `MainAxisAlignment` gains `Center`, `End`, `SpaceBetween`, `SpaceAround` and
-  `SpaceEvenly`; they distribute leftover space only on a bounded main axis with no flexible child.
-- `Route::transition(TransitionSpec)` gives a route's pages their own transition, and
-  `Router::push_with(location, PushOptions)` pushes with per-push options. Precedence: the push
-  options, then the route, then the navigator default; all collapse under reduce motion.
-  `push_with` stamps the resolved location over any `.route(..)` on the options, and on a resolution
-  error pushes the error page and ignores them.
-- `PushOptions::barrier(Color)` and `barrier_dismissible(bool)`: a route-owned modal scrim painted
-  under the page. Only its alpha animates, following the route's eased progress (instant under
-  `TransitionSpec::NONE`); a press and release the page leaves unhandled dismisses through the
-  page's `BackPolicy` unless the press lands on content (layout wrappers such as `Padding`,
-  `SafeArea` and `Align` are transparent), and taps are ignored while a transition is in flight.
-- `Widget::hit_test_self` (provided, default `true`): `false` makes a widget transparent to pointer
-  hits beside its children; layout wrappers, and a `Container` that paints nothing, return `false`.
-- `GestureDetector` drag callbacks: `on_{vertical_drag,horizontal_drag,pan}_{start,update,end,cancel}`
-  with the `#[non_exhaustive]`, local-only `DragStartDetails` / `DragUpdateDetails` /
-  `DragEndDetails`. Axis recognizers start after 18 px along their axis, pan after 36 px; the
-  first to cross wins, and a same-axis scroll view takes the drag first. Release velocity is
-  measured on the raw input clock. `cancel` is delivered on the next state-bearing pass (normally
-  the next rebuild's housekeeping), not inside the `Cancel` event.
+  permission is an opt-in cargo feature, and the registry entry (`photos`, `photos-add`, `camera`,
+  `microphone`, `media-location`) adds the matching manifest permissions, Info.plist strings,
+  framework links and macOS entitlements. Linux, Windows and web answer `Unsupported`.
+- `frust-device-info` (new plugin crate): `DeviceMemory::query()` reports total RAM, the Android
+  low-RAM flag, system-available memory (Android, Linux, Windows) and the iOS per-process headroom,
+  so an app can size caches on Android 14+, where no foreground trim-memory level is delivered any
+  more.
+- `frust-file-dialogs` on Android (Storage Access Framework) and iOS
+  (`UIDocumentPickerViewController`): `open_file` and `open_files` now work, returning app-private
+  copies; `save_file` still answers `Unsupported` there, so use the new `FileDialog::export_file`
+  (`ExportOutcome`). Also new: `pick_folder` with persistable `FolderGrant`s (`token`, `restore`,
+  `local_path`, `list`, `release`; `FolderEntry`; `ListOptions`) and `FileDialog::cancel` /
+  `on_progress` with `CancelToken` and `FileProgress`. UI-thread calls are refused with `UiThread`;
+  web is unchanged. `FileDialogError` gains `UiThread`, `NoPresenter`, `PlatformNotInitialized`,
+  `AccessLost`, `Io`, `Platform` and `Cancelled`.
+- `Share::files` and `Share::files_anchored` share one to 64 files: the Android chooser (through a
+  `FileProvider` in the plugin's new Gradle module), the iOS activity sheet and a macOS sharing
+  picker; Linux and Windows answer `ShareError::Unsupported`. On Android `Ok` means the share is
+  enqueued, with files copied on a background thread and any failure logged under tag `FrustShare`.
+  An existing app re-runs Add Plugin for `share` to include the module; text and URL sharing are
+  unchanged.
+- `frust-database`: `Database::schema_version`, `Database::execute_batch` (many statements in one
+  transaction) and `Database::migrate(&[Migration])`, one transaction per step with
+  `PRAGMA user_version` bumped inside it, identical on both engines. A stored schema newer than the
+  last migration the app knows is an error, `DatabaseError::Migration` (the new variant, also
+  returned for an invalid list), so a downgraded binary cannot read a schema it does not know.
 - `SharedPreferences::in_memory()`: a public, infallible, process-local store that is never
   persisted; clones share the map.
-- `frust::Layer` (with `Layer::IDENTITY`) and `frust::resolve_layers`, beside `TransitionDriver`,
-  `make_driver` and `resolve_spec`, so `PageTransition::Custom` is authorable out of tree.
-- `frust::authoring::text::LocaleStamp` (new public API, also `frust_text::LocaleStamp`):
-  `for_style(explicit_locale)` / `is_current(explicit_locale)` stamp a cached layout with the
-  default-locale generation (constant for a style with its own locale); read it before shaping and
-  store it with the layout (464fe55aa). `frust-widgets` `Text`/`TextInput` and the glyph, material,
-  beui, shadcn and native-widgets layout caches follow that rule (4c1f2b8ee, d86d95ff1, 0d39ac7a1,
-  f897dd659, b0fec455f).
-- `test-support` features on `frust-text` and `frust-widgets` expose the shared
-  `LocaleSlotGuard` (`frust_text::test_support`, `frust_widgets::test_support`) over the
-  default-locale slot; it replaces the plugins' private locale test locks.
-- `TextContext::notdef_glyph_count()`: `.notdef` glyphs counted per context across retained
-  layouts, the shape-cache path and the editor (17e18cd45). `TextLayout` is now `Sync`.
-- `EngineRenderer::prepare` (every plan-stage refusal) and `encode_prepared` / `encode_prepared_traced`
-  (record a prepared frame; refuse only `AlphaCapacity` / `PaintCapacity` when the held plan matches, otherwise re-plan and can surface any `prepare` error), plus the public helper
-  `RegionCopyMode::of_usage`. `SurfaceRenderer::engine_refusals()` returns the `#[non_exhaustive]`
-  `EngineRefusalReport { count, first_reason }`. The `FRUST_RENDER_INJECT_REFUSAL` fault-injection knob
-  (`plan:N` / `record:N`, compile-time or runtime, honoured in release builds) refuses every Nth frame
-  at that stage. `frust_gpu::lifecycle::MAX_TRANSIENT_SKIPS` (3) bounds a run of acquire
-  `Timeout`/`Occluded` skips before the swapchain is reconfigured.
-- `EngineRenderer::set_synthetic_oblique` / `synthetic_oblique` and `set_glyph_run_cache` /
-  `glyph_run_cache` forward the faux-oblique and resident-glyph-run-cache switches on the renderer,
-  matching `SceneCompiler`.
-- `frust_bench` gains the `weight_probe` scenario (faux-bold and faux-oblique rows on a static Noto
-  Sans subset). On a Pixel 5 (unhinted tier) weight 400 draws 15955 ink px and weight 700 draws 22300
-  (+39.8%); the italic rows stay upright with faux oblique off. Three PingFang SC Han rows
-  (weights 300/400/600) sit below them: on an iPhone 13 mini (iOS 27.2, `mobile_large`) they draw
-  24,812 / 34,416 / 48,085 ink px with no refused, unverified or unavailable warning.
-- `skrifa` is a dev-dependency of `frust-engine` (test-only, from the root `[workspace.dependencies]`),
-  used by a probe of whether `glifo`'s hinting instance can be built per face.
-- hvgl-only faces (Apple's PingFang) now draw from the glyph atlas: `text/hvgl_atlas.rs` inserts
-  them frust-side, `OutlineReason::Hvgl` is the fallback, `SceneCompiler::set_hvgl_atlas` /
-  `EngineRenderer::set_hvgl_atlas` switch the route (default on), and `CompiledFrame` gains
-  `hvgl_atlas_draws` and `hvgl_outline_fallbacks`. The `frust-perf enc` line appends both counts, then
-  `hvgl_variation_mismatches` and `hvgl_variation_unverified` (cumulative) and `hvgl_unavailable`
-  (per-frame median).
-  The route restates `glifo` 0.3.0 `renderer.rs:591`/`:342`/`:521`/`:311`, so
-  `tests/hvgl_atlas_parity.rs` is the tripwire on a `glifo` bump (`engine-hvgl-atlas-pin-bound`).
-  iPhone 13 mini, S6 at 3x: PingFang 61 atlas draws and 0 outline fallbacks per window, `glyphs_us`
-  5,377 -> 183, CPU work per frame 6,146 -> 1,437 us, presented cadence unchanged
-  (p2p 16.68 ms; gates ha04-13mini-s6-phase-head, gr02-13mini-presented-cadence); Apple M4
-  Metal, a 300-glyph PingFang paragraph compiles in 9.7 us, was 613 (ha04-m4-metal). Merged in f5f360e70,
-  a3b5ebd5b.
-- `frust_render::set_reported_device_memory`: a shell reports device memory where there is no
-  `/proc/meminfo`. `frust-shell-ios` reads `sysctl hw.memsize` and calls it before the first renderer (3bab21765).
-- iOS answers `didReceiveMemoryWarning`: `frust_memory_warning` sends `RenderCommand::TrimMemory`
-  (fire-and-forget, serviced in every phase), `SurfaceRenderer::trim_memory` and
-  `EngineRenderer::trim_memory` hold the retained pages to the plain 32 MiB budget and clamp atlas
-  growth to the plain tier's bytes (`ImageResidency::request_growth_ceiling`; the atlas has no
-  layer-release primitive), one-way until the renderer is rebuilt. Android and desktop ignore the
-  command. Host-tested; on-device delivery was not exercised (rf01-13mini-memory-warning, skipped).
-- `frust-perf ios-mem phys_footprint_kib=<n>|unknown`, about 1 Hz on iOS under `perf-trace`, and the
-  compile-time `FRUST_FORCE_MOBILE_TIER` define (`frust build ios --define FRUST_FORCE_MOBILE_TIER=1`)
-  that forces the plain tier. iPhone 13 mini, S6, one session: `phys_footprint` p50 229.9 MiB plain vs
-  252.0 MiB `mobile_large` (+22 MiB), 527/527 vs 137/527 resident glyphs (rf01-13mini-footprint-ab,
-  p2-round1-integration-root).
-- `frust-testing`'s `dup_identities` gains `hvgl_restatement_is_attested_for_the_locked_glifo`: a
-  `glifo` bump fails on ubuntu CI until `HVGL_PARITY_VERIFIED_GLIFO` acknowledges the macOS parity
-  re-run (an attestation, not a run). `hvgl_atlas.rs` factors its outline and glyph-rect transforms
-  into pure helpers with 11 golden vectors.
-- hvgl diagnostics: per-fetch outline-cache counters `SceneCompiler::hvgl_outline_hits` /
-  `hvgl_outline_misses` and the `CompiledFrame` fields of the same names (an atlas-route glyph absent
-  from the cache is fetched twice, measured then rasterized, so it reads one miss and one hit; an
-  inkless glyph is only measured; an atlas-resident glyph never fetches; a fetch at a refused
-  variation instance asks CoreText for nothing and counts as neither), and a per-frame
-  `CompiledFrame::hvgl_unavailable_glyphs` on both draw routes with the cumulative
-  `SceneCompiler::hvgl_unavailable_glyphs`. The first report in a process is a `log::warn` naming the
-  face (escaped), the count and `skipped_glyphs`; later ones log at debug (5736ac67a, bc67cdb0b).
-- hvgl faces are checked against CoreText rather than trusted. Each variation copy is read back
-  (`CTFontCopyVariation`) and each axis asked is classified: applied, contradicted (reported beyond a
-  single F2Dot14 step of the axis range, a clamp included) or unreported. Only a contradicted axis
-  refuses the instance: counted by the new `SceneCompiler::hvgl_variation_mismatches`, never cached,
-  its glyphs unavailable. Unreported axes draw CoreText's copy, unverified, counted by the new public
-  `SceneCompiler::hvgl_variation_unverified()`. Each kind warns once per open face. Off Apple every
-  glyph of an hvgl-classified run counts in `hvgl_unavailable_glyphs`. Opening a face also compares a 16-range `cmap` sample of
-  its bytes with CoreText; a mismatch counts in `hvgl_bytes_mismatches` and the warning names the
-  codepoint as `U+XXXX`. `objc2-core-foundation` gains the `CFArray`/`CFDictionary`/`CFNumber`
-  features, no version change (265aaa068).
-- `TextContext::font_cache_stats()` returns `FontCacheStats { write_failures, written_generation, dirty,
-  attached, persistent }`, and `BackgroundFlush::went_to_background_outcome()` returns a `BackgroundFlushOutcome`
-  (per-context results; `went_to_background` still returns the flushed count). Both types are
-  re-exported (`frust_text`, `frust_shell_common`, `frust::authoring::text`). A report whose every flush
-  failed leaves the once-per-transition latch unarmed so the next hide retries; the first failed flush a
-  hook sees logs at warn, later ones at debug (1f7cf69bf, d4adce3f3).
-- `AnimationController::velocity()` and the velocity-carrying retarget `spring_to(target, SpringDesc)` /
-  `spring_to_with_velocity(target, velocity, SpringDesc)` in `frust-core`, so any controller user gets
-  velocity continuity (a fling or release velocity carries into the spring).
-- `frust-theme` `MotionExtras { extended: 800.0, reduced_fade: 120.0 }` (milliseconds; read with
-  `MotionExtras::of(theme)` / `reduced_fade_duration()`; flat as `frust::MotionExtras`) and
-  `resolve_spec_with(spec, scheme, reduced_fade)`. `MotionDurations` and `MotionScheme` are unchanged.
+- `frust::testing::Tester` (facade `test-support` feature): a state-generic headless driver under
+  its own child reactive owner. `pump` / `pump_and_settle` / `pump_until`; `tap` / `press` /
+  `long_press` / `drag` / `timed_drag`; `start_gesture` / `start_touch` with `move_by` / `move_to` /
+  `up` / `up_at` / `cancel`; `find::{text, label, role, by_type}`, `get_semantics` / `bounds` /
+  `perform_action`; `scene` / `semantics` / `inspect` / `send`; `set_metrics` / `resize`. Built with
+  `new`, `with_options` (`TesterOptions`) or `new_with`, with no process-wide lock, so Tester tests
+  run in parallel.
+- `Tester::pump(Duration)` drives a per-thread virtual clock: `frust::time` sleeps and `Timer`s fire
+  deterministically, stepping through each deadline in order (a chain or re-armed timer inside one
+  pump fires at its own virtual time). `pump_until` remains the real-time wait, and any future
+  polled off the Tester's thread stays on wall time, including `frust::spawn` and `use_task` fetch
+  futures. The hook is `frust-reactive`'s `test-support` feature (forwarded by the facade's):
+  `time::test_support::{install_virtual_clock, advance, now}`.
+- `Tester::{text_runs, text_overflows, assert_no_text_overflow}` and `TextRun`: list every text run
+  with its geometry and flags, and fail a test when one is cut or sticks out. Containment stops at a
+  clipping ancestor: content a scroll, list or page viewport hides is `TextRun::hidden` or
+  `clipped`, never an overflow. `frust::testing` re-exports `InspectDetail` and `TextInspect` next
+  to `InspectNode`, and `frust::authoring` re-exports `TextWidget`.
+- `frust::testing::{semantics_of, scene_of, scene_of_with}` (`SceneOptions`): one-shot helpers for
+  an out-of-tree design system, enabled by the `frust-ui` `test-support` feature from
+  `[dev-dependencies]`, which also makes `PaintCtx::for_test` available. `test-support` on
+  `frust-text` and `frust-widgets` exposes the shared `LocaleSlotGuard` over the default-locale
+  slot.
+- `GestureDetector` tap callbacks: `on_tap_down`, `on_tap_up` (before `on_tap`) and `on_tap_cancel`,
+  with `#[non_exhaustive]` `Copy` `TapDownDetails` / `TapUpDetails` (`local_position`) from
+  `frust-ui`. Down fires at once; a slop or bounds exit, a stolen or system cancel, or a second Down
+  cancels, and exactly one up or cancel follows each down (leaving the bounds cancels but a later
+  `on_tap` fires).
+- `GestureDetector::on_double_tap` and `DoubleTapDetails { local_position }`: two taps within 300 ms
+  and 100 px of each other (each within the 18 px slop), timed on the raw input clock. With it wired
+  the single `on_tap` waits out the window and is delivered afterwards, and a second press that
+  fails drops the first tap; detectors without it are unchanged.
+- `GestureDetector` drag callbacks
+  `on_{vertical_drag,horizontal_drag,pan}_{start,update,end,cancel}` with `#[non_exhaustive]`,
+  local-only `DragStartDetails` / `DragUpdateDetails` / `DragEndDetails`. Axis recognizers start
+  after 18 px along their axis, pan after 36 px; the first to cross wins and a same-axis scroll view
+  takes the drag first. Release velocity is on the raw input clock, and `cancel` arrives on the next
+  state-bearing pass, not inside the `Cancel` event.
+  `drag_start_behavior(DragStartBehavior::{Start, Down})` reports the start where the slop was
+  crossed (the default) or at the press point.
+- A second pointer contact landing while a `GestureDetector` press is pending fires `on_tap_cancel`
+  with no long press, tap or double tap, whenever a contact-capturing widget (`pinch_detector`,
+  `pan_zoom`) sits below the detector. A bare detector never hears the second finger
+  (`gesture-second-contact-needs-a-contact-captor`).
+- Rich text spans: `frust-text` `TextSpan` and `TextContext::layout_rich` / `layout_rich_bounded`
+  lay out differently styled pieces as one paragraph, and `frust-widgets` `rich_text(spans)` and
+  `span(text)` add per-span size, colour, weight, family, italic, letter spacing, locale, font
+  features, decorations and themed roles, resolving theme and the OS text scale like `TextView`. A
+  truncated line paints its ellipsis within the width unless the ellipsis alone is wider.
+- `TextStyle` `with_<field>` builders for every field, chained from `TextStyle::new(size, color)` or
+  `Default`.
+- `OverflowWrap` (`Normal`, `Anywhere`; `frust::authoring::text`), `TextStyle::with_overflow_wrap`
+  and `TextView::overflow_wrap` set per-paragraph wrapping and join the shape-cache key;
+  `TextView::locale(..)` tags a paragraph without marking color or family explicit, so it keeps
+  theme defaults and the OS text-scale rule.
+- OpenType font features: `TextStyle::with_feature(tag, value)` / `with_features(..)` (a later
+  setting of a tag wins) and `TextView::font_feature(s)` / `tabular_figures()`. Text decorations:
+  `TextDecoration` on `TextStyle::with_decoration`, `TextView::underline()` / `line_through()` /
+  `decoration(..)` and `TextLayout::decoration_rects`, painted as plain fills. `TextInput` draws
+  none (see LIMITATIONS).
+- `MonospaceFamily` theme extension (`Theme::monospace_family()`, attached by the shadcn, beUI and
+  Glyph themes) with `TextView::themed_mono_family()`, and `TextInputView::themed_family(role)` /
+  `themed_mono_family()` so a theme swap re-faces typed text; the catalog text fields use them.
+- `TextLayout::{line_count, max_width, did_exceed_max_lines, is_ellipsized, overflows_width}` report
+  how a laid-out block fit its limits, and `TextLayout` is now `Sync`.
+  `TextContext::notdef_glyph_count()` counts `.notdef` glyphs per context across retained layouts,
+  the shape cache and the editor.
+- `TextContext::font_cache_stats()`
+  (`FontCacheStats { write_failures, written_generation, dirty, attached, persistent }`) and
+  `BackgroundFlush::went_to_background_outcome()` (`BackgroundFlushOutcome`, per-context results;
+  `went_to_background` still returns the flushed count), re-exported through `frust_text`,
+  `frust_shell_common` and `frust::authoring::text`. A report whose every flush failed leaves the
+  once-per-transition latch unarmed so the next hide retries.
+- `frust::authoring::text::LocaleStamp` (`frust_text::LocaleStamp`): `for_style` / `is_current`
+  stamp a cached layout with the default-locale generation; read it before shaping and store it with
+  the layout. `frust-widgets` `Text` / `TextInput` and the glyph, material, beUI, shadcn and
+  native-widgets layout caches follow that rule.
+- `frust-theme` OS text scale: `TextScale`, `TypeScale::scaled`, `Theme::with_text_scale`,
+  `Theme::text_scale`, `Theme::authored_type_scale`, `TextScale::clamped` and `scale_style`. The
+  additive iOS C export `frust_set_text_scale` (`frust_ffi.h`) lets a Swift embedder that hosts
+  frust outside `FrustViewController` push Dynamic Type, which the shipped controller does itself.
+- `glass_surface(child)` (`GlassSurfaceView`, flat from `frust`) paints one tier of the theme's
+  glass scale behind its child: an outside shadow, rounded clip, backdrop blur and washes, specular
+  hairline. `.tier(GlassTier)` picks `Control`, `Bar` (default) or `Chrome` from `GlassScale::tier`;
+  `.corner_radius(f64)` clamps to a capsule, and `.material(..)` wins over the theme's tier. Without
+  either it paints opaque `#EFEFEF`. A material's blur is a Gaussian sigma in logical px (CSS
+  `blur(Npx)` is sigma N), clamped by the engine.
+- `set_max_backdrops_per_frame(n) -> usize` and `max_backdrops_per_frame()` (flat from `frust` and
+  `frust-render`): the per-frame backdrop-blur cap is app-configurable, process-wide and clamped to
+  `1..=16` (default `MAX_BACKDROPS_PER_FRAME` 4, ceiling `BACKDROP_CAP_CEILING`). A frame over the
+  cap is still refused whole (`EngineError::TooManyBackdrops`), and
+  `SceneCompiler::compile_with_backdrop_cap` compiles against an explicit cap.
+- Stroke caps, joins and miter limit, and the even-odd fill rule, in `frust-scene` and
+  `frust::authoring::scene`: `StrokeCap`, `StrokeJoin`, `StrokeStyle { cap, join, miter_limit }`,
+  `FillRule`, and `fill_path_with_rule` / `stroke_path_styled` on `SceneBuilder` and `PaintScene`
+  (defaults fall back to `fill_path` / `stroke_path`). A non-finite or below-1 miter limit is
+  refused as `InvalidGeometry`. A dashed closed subpath with a skipped stretch joins its seam under
+  non-round styles, and the culling reach of a mitred stroke caps the miter factor so a huge limit
+  stays finite. The new `PathStyle` variants are a narrow break, below.
+- Stroked icons: `IconShape` (`Path` / `Circle` / `Rect`), `IconPaint` (`Stroke` default, `Fill`),
+  `IconElement` (`stroke` / `fill`, `with_opacity`, `with_dash`, `with_stroke_width`) and
+  `StrokedIconSource`, converted to `IconData` by `From<StrokedIconSource>` or
+  `IconData::from_elements` (`from_styled_elements` with `IconElementStyle` for runtime-built
+  icons). `IconData::resolve()` returns one fillable outline for fill-only slots and `is_stroked()`
+  reports one; `IconView::stroke_width(f64)` overrides the width.
+- Framework haptics in `frust-core` (flat from `frust` and `frust::authoring`): `#[non_exhaustive]`
+  `HapticFeedback` (`Selection`, `Light`, `Medium`, `Heavy`, `Success`, `Warning`, `Error`),
+  `HapticSink`, the last-wins `set_haptic_sink`, `haptic_sink_installed()` and `perform_haptic()` (a
+  no-op without a sink); the `frust-haptics` README shows the wiring. `MaterialHaptics` forwards to
+  the sink when no Material hook is set (`SliderTick` maps to `Selection`, `None` to nothing).
+- Animation time scale: `set_animation_time_scale(f64) -> bool` (`MIN_ANIMATION_TIME_SCALE` 0.01 ..=
+  `MAX_ANIMATION_TIME_SCALE` 100.0), `animation_time_scale()` and the raw clock
+  `PaintCtx::input_time()`, read by gesture timers, caret blink, velocity timestamps, drag hold,
+  auto-scroll, the catalog tooltips and the material and shadcn press latches. Devtools adds the
+  authenticated `set_animation_time_scale` method, the `animation_time_scale` capability and
+  `DevtoolsClient::set_animation_time_scale`; the protocol stays v1, and a scale a client set resets
+  to 1.0 when it disconnects.
+- `frust::motion::detent` (flat in `frust::motion`): `Detents`, pure NaN-safe snap-point math
+  (`open_progress`, `drag_to`, `release_target`, `settle` returning `DetentRelease` under a
+  `DismissPolicy`), and the headless `DetentController`, whose release hands the fling velocity to
+  `spring_to_with_velocity` (`with_fling_velocity`, default `DEFAULT_FLING_VELOCITY`). `SpringBack`
+  snaps back to open; on `Dismiss` the controller stops and holds progress and the caller owns the
+  exit animation.
 - `frust::motion::presence`: `Presence` and `presence(open, child)` with `.timing(enter, exit)` and
   `.on_exited`. The child stays mounted: always built and laid out, painted only while visible,
   input only while open, semantics only while visible. Reversing a duration ramp is value-continuous
   and a spring value- and velocity-continuous; `on_exited` is delivered on the next frame's
-  Housekeeping event, and only once an exit has painted. Under `reduce_motion` it runs a linear reduced fade.
-- With the default-on `complex-scripts` feature, dictionary line and word segmentation
-  (`parley_engine`): unspaced
-  Thai/Lao/Khmer/Myanmar text wraps and word-moves at dictionary word boundaries, and the
-  Chinese/Japanese word dictionary drives CJ word motion. A line overflows only when a run has no
-  break opportunity (one long word, a URL) unless `overflow_wrap` says otherwise.
-- Untagged text shapes (`locl`) and line-breaks in the app default locale; ja/zh spans (style
-  locale, else the default) get the ja/zh line-break tailoring, so small kana and the prolonged
-  sound mark may start a line while kinsoku still keeps 。、， off line starts. An explicit
-  `TextStyle` locale always wins.
-- `OverflowWrap` (`Normal`, `Anywhere`; `frust::authoring::text`), `TextStyle::with_overflow_wrap`
-  and `TextView::overflow_wrap`; paragraph-level and part of the shape-cache key.
-- `TextView::locale(..)` tags a paragraph without marking color or family explicit, so it keeps
-  theme defaults and the OS text-scale rule.
-- A bundled Thai test face (`testing/fonts/NotoSansThai-Subset.ttf`, OFL), registered by
-  `frust_testing::fonts::test_fonts()`.
-- OpenType font features: `TextStyle::with_feature(tag, value)` / `with_features(..)` (a later
-  setting of a tag wins), and `TextView::font_feature(s)` and `tabular_figures()` (`tnum`).
-  Features are part of the shape-cache key.
-- Text decorations: `TextDecoration` (`frust::authoring::text`) on `TextStyle::with_decoration`,
-  and `TextView::underline()`, `line_through()` and `decoration(..)`. `TextLayout::decoration_rects`
-  places one rectangle per same-style, same-face line segment from the face's run metrics, and
-  `TextView` paints them as plain fills with no new scene command. `TextInput` draws none (see
-  LIMITATIONS).
-- `MonospaceFamily` theme extension (`Theme::monospace_family()`, falling back to the generic
-  monospace family): the shadcn, beUI and Glyph themes attach it, and
-  `TextView::themed_mono_family()` resolves it.
-- `TextInputView::themed_family(role)` and `themed_mono_family()` take a field's content and
-  placeholder family from the active theme at layout (the theme's family wins over a `text_style`
-  family). The catalogs' text fields use them, so a theme swap re-faces typed text.
-- `ExternalFrame::drain_id()` and `device_generation()` identify the surface drain and device a pass
-  records for, so a pass can key per-surface, per-device resources.
-- `HeadlessRenderer::render_with_passes` (and `render_draining_registry`, which opts into the
-  process-wide registry) render external passes offscreen; `EngineOracle` has the same two methods.
-- `frust::gpu::headless` re-exports `HeadlessRenderer`, `HeadlessOptions`, `HeadlessSpec`,
-  `HeadlessImage`, `HeadlessMeta` and the golden env-var names, so an app can golden-test its own pass.
-- The playground gains a "GPU pass" section that drives an `ExternalPass` through the facade only.
-- OS text scale on Android and iOS: `frust-theme` gains `TextScale`, `TypeScale::scaled`,
-  `Theme::with_text_scale`, `Theme::text_scale`, `Theme::authored_type_scale`, `TextScale::clamped`
-  and `scale_style`; default-sized `Text` and `TextInput` follow it, explicit sizes do not.
-- Material `zh-Hans` strings, and `frust_i18n::Locale::likely_script`.
-- `TextLayout::{line_count, max_width, did_exceed_max_lines, is_ellipsized, overflows_width}`:
-  read-only accessors for how a laid-out block fit its limits.
-- `Widget::inspect_detail`, the `#[non_exhaustive]` `InspectDetail` enum, `TextInspect` and the new
-  `InspectNode.detail` field: a widget can attach typed detail to its inspect node. The text and
-  rich-text widgets report their last layout through it (text, line count, ellipsis, overflow), and
-  `EitherWidget`, `EitherOf3Widget`…`EitherOf8Widget` and `ShortcutsWidget` forward it from their
-  child. A hand-written `InspectNode` struct literal now needs `detail: None`. `InspectDetail::Clip`
-  marks a widget that clips its descendants to its own box: `ScrollWidget`, `ListViewWidget`,
-  `PageViewWidget`, `ViewportWidget`, `PanZoomWidget`, `NavigatorWidget` and, while they clip
-  overflowing content, the sliver list, grid, fixed-extent list, box adapter, fill-remaining and
-  padding widgets report it.
-- `frust::testing::Tester::{text_runs, text_overflows, assert_no_text_overflow}` and `TextRun`:
-  list every text run with its geometry and flags, and fail a test when one is cut or sticks out.
-  Containment stops at a clipping ancestor: content a scroll, list or page viewport hides is
-  `TextRun::hidden` (all of it) or `clipped` (part of it), never an overflow.
+  Housekeeping event, once and only after an exit has painted, so it is a cleanup cue rather than a
+  correctness gate. Under `reduce_motion` it runs a linear reduced fade. A settled child paints
+  without an alpha layer.
+- `AnimationController::velocity()` and the velocity-carrying retarget
+  `spring_to(target, SpringDesc)` / `spring_to_with_velocity(target, velocity, SpringDesc)` in
+  `frust-core`, so a fling or release velocity carries into the spring. `frust-theme`
+  `MotionExtras { extended: 800.0, reduced_fade: 120.0 }` (ms; read with `MotionExtras::of(theme)` /
+  `reduced_fade_duration()`; flat as `frust::MotionExtras`) and
+  `resolve_spec_with(spec, scheme, reduced_fade)`.
+- `column()` / `row()` `.gap(f64)`: a fixed space between consecutive children (negative or NaN is
+  `0`).
+- `Route::transition(TransitionSpec)` and `Router::push_with(location, PushOptions)`: precedence
+  push options, then route, then navigator default, all collapsing under reduce motion.
+  `PushOptions::barrier(Color)` and `barrier_dismissible(bool)` add a route-owned modal scrim
+  following the route's eased progress; a press the page leaves unhandled dismisses through its
+  `BackPolicy` unless it lands on content.
+- `Widget::hit_test_self` (provided, default `true`): `false` makes a widget transparent to pointer
+  hits beside its children; layout wrappers such as `Padding`, `SafeArea` and `Align`, and a
+  `Container` that paints nothing, return `false`.
+- `Widget::inspect_detail`, the `#[non_exhaustive]` `InspectDetail` enum and `TextInspect` let a
+  widget attach typed detail to its inspect node. The text and rich-text widgets report their last
+  layout through it, `EitherWidget`, `EitherOf3Widget`…`EitherOf8Widget` and `ShortcutsWidget`
+  forward it, and `InspectDetail::Clip` marks the scroll, list, page, viewport, pan-zoom, navigator
+  and clipping sliver widgets.
+- `frust::Layer` (with `Layer::IDENTITY`) and `frust::resolve_layers`, beside `TransitionDriver`,
+  `make_driver` and `resolve_spec`, so `PageTransition::Custom` is authorable out of tree.
+- `SceneTextureHints` for externally bound textures (`filter`:
+  `SceneTextureFilter::{Linear, Nearest, NearestWhenMagnified}`, and a caller-asserted `opaque`):
+  `EngineRenderer::bind_texture_with` and `ExternalFrame::bind_texture_with`, re-exported from
+  `frust-engine`, `frust-render` and `frust::gpu`. An `opaque` texture joins the depth-writing
+  opaque pass; unhinted textures behave as before.
+- Texture bus: `SourceFormat::Bgra8` (premultiplied) and sub-rect updates through
+  `SourceFrame::with_update_region` / `UpdateRegion` (re-exported as
+  `frust::texture::UpdateRegion`), refused with a one-time warning when no same-size, same-format
+  texture is shown. The bus detects a GPU device change by generation and recovers region producers
+  on the new device.
+- GPU device identity: `DeviceHandle::generation()` (process-wide, monotonic, non-zero, shared by
+  clones), `DeviceHandle::is_lost()` (latched by the device-lost callback) and
+  `frust::gpu::device_generation()`. Android and iOS publish their live device to
+  `frust::gpu::with_context`, as desktop does.
+- `frust::gpu::request_optional_features` / `requested_optional_features` (and
+  `frust_render::missing_requested_features`): a process-wide, adapter-conditioned union of optional
+  wgpu features honoured by the shells and the headless renderer; a missing feature is left out.
+  `app!(Root, gpu_features = { .. }, ..)` (facade `gpu` feature; `@pre_init` on `android_app!` /
+  `ios_app!`) requests them before the device is built, and on Android a pre-init device lacking one
+  is rebuilt.
+- External passes: `ExternalFrame::drain_id()` and `device_generation()` identify the surface drain
+  and device a pass records for. `HeadlessRenderer::render_with_passes` and
+  `render_draining_registry` render passes offscreen (`EngineOracle` has the same two), with
+  `ExternalFrame::frame_index` counting that renderer's own renders from 0 on the explicit path.
+  `frust::gpu::headless` re-exports the headless types and golden env-var names so an app can
+  golden-test its own pass. `frust_render::ExternalPassDrain` (doc-hidden, shell-facing) is the
+  per-engine drain state a custom shell passes to `run_external_passes`.
+- Refused frames: `EngineRenderer::prepare` (every plan-stage refusal) and `encode_prepared` /
+  `encode_prepared_traced`, `RegionCopyMode::of_usage`, `SurfaceRenderer::engine_refusals()`
+  (`EngineRefusalReport { count, first_reason }`) and `frust_gpu::lifecycle::MAX_TRANSIENT_SKIPS`
+  (3). The `FRUST_RENDER_INJECT_REFUSAL` knob (`plan:N` / `record:N`) refuses every Nth frame, in
+  release builds too.
+- `EngineRenderer::set_synthetic_oblique` / `synthetic_oblique` and `set_glyph_run_cache` /
+  `glyph_run_cache` forward those switches on the renderer, matching `SceneCompiler`.
+  `SceneCompiler::glyph_resident_texels()` and `glyph_texel_budget()` report what the glyph atlas
+  charges against its budget.
+- Bitmap-strike colour emoji render on the engine: bitmap-first faces (sbix without outlines, CBDT)
+  take an engine-side route, drawn by CoreText on iOS and decoded from PNG/dupe/flip records
+  elsewhere, each strike charged and refunded its exact atlas slot. Strikes over 512 px are refused;
+  faces with outlines draw outlines; BGRA and mask strikes still do not draw.
+- Apple's hvgl-only system faces (PingFang) draw from the glyph atlas instead of as outlines, by
+  default (`SceneCompiler::set_hvgl_atlas` / `EngineRenderer::set_hvgl_atlas` switch the route,
+  `OutlineReason::Hvgl` is the fallback), checked on an iPhone 13 mini (iOS 27.2). `CompiledFrame`
+  gains `hvgl_atlas_draws` and `hvgl_outline_fallbacks`, and the `frust-perf enc` line appends the
+  route's counts. Faux bold and faux oblique are not applied on this route
+  (`text-hvgl-synthesis-not-applied`), and two macOS system faces have no hinting instance, so a
+  hinted faux-bold request on them is nearly invisible (`text-hinted-faux-bold-unhintable-face`).
+- hvgl faces are verified against CoreText: each variation copy is read back and each requested axis
+  classified as applied, contradicted (refusing the instance, `hvgl_variation_mismatches`) or
+  unreported (drawing CoreText's copy, `hvgl_variation_unverified()`), and opening a face compares a
+  `cmap` sample (`hvgl_bytes_mismatches`). `SceneCompiler::hvgl_outline_hits` /
+  `hvgl_outline_misses`, the per-frame `CompiledFrame::hvgl_unavailable_glyphs` and the cumulative
+  counter round out the diagnostics. Each kind warns once per open face; off Apple every
+  hvgl-classified glyph counts as unavailable.
+- Material `zh-Hans` strings and `frust_i18n::Locale::likely_script`.
+- The playground gains Timers and guarded write buttons on its Network page, Picker, Browse,
+  Originals and Folders panels, Export file, Pick folder and Cancel on its Desktop page, a Photos
+  section and a "GPU pass" section.
 
 ### Changed
 
-- On the web, `sleep` now clears its browser timeout when it is dropped or cancelled. Durations above
-  `i32::MAX` ms clamp, and a background tab may throttle the timer; both are documented on `sleep`.
-- `frust-file-dialogs` on Android and iOS: `open_file` and `open_files` used to answer `Unsupported` and now
-  work, returning app-private copies of the chosen files; `save_file` still answers `Unsupported` there, so
-  use `export_file`. Calls on the UI thread are refused with `UiThread`. Web is unchanged.
-- `frust-share` now carries an Android Gradle module (the `FileProvider` behind `Share::files`). An
-  existing app re-runs Add Plugin for `share` to include the module before sharing files on Android;
-  text and URL sharing are unchanged.
-- The Android logger's level follows the `debug.frust.log` system property (`adb shell setprop
-  debug.frust.log debug`, cleared on reboot; off / error / warn / info / debug / trace, the
-  `FRUST_LOG` vocabulary of the other shells) instead of being fixed at `Info`; unset, it stays
-  `Info` in every build. The chosen level is logged once at startup under the `frust` tag.
-- `frust::gpu::with_context` keeps its signature but answers the current device, which may change
-  between calls: do not keep device or queue clones across frames, and rebuild device-owned
-  resources when `device_generation()` changes.
-- `MainAxisAlignment` gained `Center`, `End`, `SpaceBetween`, `SpaceAround` and `SpaceEvenly` (a
-  narrow source break): an exhaustive `match` over it must add the arms or a wildcard.
-- The per-frame backdrop cap counts only backdrops whose blur region reaches the frame target, so a
-  backdrop scrolled or translated clear of the frame (a `ScrollView`'s warm paint margin) no longer
-  counts. The cap, its clamp and the whole-frame refusal are unchanged; the up-front count ignores
-  retained corrections and clip coverage, so it can still over-count inside clipped or retained
-  regions.
-- `PathStyle` gained `FillEvenOdd` and `StrokeStyled` (a narrow source break): an exhaustive `match`
-  over `PathStyle` outside frust must add the two arms, or read through `PathStyle::fill_rule()` /
-  `stroke()` instead of matching.
-- The Material and shadcn overlay modals compute open progress, the drag clamp, the release target
-  and the settle decision through `Detents`; behaviour is unchanged for finite snap points, and their
-  public fling-velocity constants now equal `DEFAULT_FLING_VELOCITY`. The shadcn modal now drops
-  non-finite snap points, as Material already did, which fixes a possible drag panic, and a
-  non-finite settle target snaps to the open detent.
-- Catalog tooltips (material, glyph, shadcn), the material selection and toggle-button long-press latches
-  and the shadcn OTP caret blink time input on the raw clock (`input_time()`), so they ignore the
-  animation time scale.
-- `MaterialHaptics` forwards to the framework haptic sink when no Material hook is set
-  (`SliderTick` maps to `Selection`, `None` to nothing).
-- The `.notdef` warning names only the face, the script and the cluster count, never user text,
-  and fires once per (face, script). `frust_text::notdef_glyph_count()` is deprecated in favour of
-  `TextContext::notdef_glyph_count()` (it still returns the process-wide total, now counted once per
-  line table when its memo is filled rather than once per paint) (17e18cd45).
-- Scheduler: `MAX_SPILL_PAGES` (3) spill slots serve a fan nested inside a fan under a held ancestor
-  and every tree whose isolated layers hold at most two isolated children; `MAX_LIVE_PAGES` goes
-  from 3 to 5, costing up to +128 MiB of intermediates, only on frames that use the extra slots.
-  Migration: `frust_engine::schedule::PageParity` gains the pub variant `SpillPool(SpillSlot)` (a
-  patch-release source break), so an exhaustive downstream `match` needs a wildcard arm or the new
-  `PageParity::is_spill()` / `spill_slot()` (`PageParity::spill(n)` builds one, `None` past `MAX_SPILL_PAGES`).
+- **Breaking (narrow):** `MainAxisAlignment` gains `Center`, `End`, `SpaceBetween`, `SpaceAround`
+  and `SpaceEvenly`, distributing leftover space only on a bounded main axis with no flexible child.
+  Migration: an exhaustive `match` over it adds the arms or a wildcard.
+- **Breaking (narrow):** `PathStyle` gains `FillEvenOdd` and `StrokeStyled { width, dash, style }`
+  (rendered by the engine and the CPU oracle). Migration: an exhaustive `match` over `PathStyle`
+  outside frust adds the two arms, or reads through `PathStyle::fill_rule()` / `stroke()` instead of
+  matching.
+- **Breaking (narrow):** `frust_engine::schedule::PageParity` gains `SpillPool(SpillSlot)` and
+  `MAX_LIVE_PAGES` goes from 3 to 5: three `MAX_SPILL_PAGES` slots serve a fan nested inside a fan
+  under a held ancestor and every tree whose isolated layers hold at most two isolated children,
+  costing up to +128 MiB of intermediates only on frames that use them. Migration: an exhaustive
+  `match` needs a wildcard arm or the new `PageParity::is_spill()` / `spill_slot()`
+  (`PageParity::spill(n)` builds one, `None` past the limit).
+- **Breaking (narrow):** `TextStyle` is now `#[non_exhaustive]` and gains the public fields
+  `overflow_wrap`, `features` and `decoration`. Migration: build it with
+  `TextStyle::new(size, color)` or `Default` plus the `with_*` builders; struct literals and
+  exhaustive destructures no longer compile outside `frust-text`.
+- **Breaking (narrow):** `InspectNode` gains the public field `detail`. Migration: a hand-written
+  struct literal adds `detail: None`.
+- **Breaking (narrow):** tooling and shell-facing types gained members:
+  `frust_devtools_protocol::Capability` and `Method` (`AnimationTimeScale`,
+  `SetAnimationTimeScale`), `frust_shell_common::RenderCommand` and `RenderEvent` (`TrimMemory`),
+  and `frust_engine::CompiledFrame` (five `hvgl_*` fields). Migration: an exhaustive `match` adds
+  the arms or a wildcard; a `CompiledFrame` struct literal or pattern adds the fields or `..`.
+- **Breaking (narrow):** `frust_shell_android::jni_glue::native_init` gains a required
+  `pre_init: impl FnOnce()` parameter between `cache_dir` and `make_app`; it stays a safe function.
+  It runs first, inside the panic guard and before the shell adopts the GPU device built at library
+  load, and a panic in it makes `nativeInit` return 0. `android_app!` users are unaffected, since
+  the macro passes the closure. Migration: a hand-written embedder passes `|| {}`, or a closure that
+  runs early setup such as `frust::gpu::request_optional_features(..)`; if the pre-built device
+  lacks a requested feature its adapter offers, the shell rebuilds it, a synchronous device build
+  at that launch.
+- **Behaviour change:** `AnimationController::reverse()` at exactly 0.0 settles `Dismissed` where it
+  settled `Completed`. `forward()` always settles `Completed` and `reverse()` always `Dismissed`,
+  whatever the start value (it can lie outside 0..=1 after `spring_to`); `animate_to` settles by
+  direction of travel.
+- **Behaviour change:** `PaintCtx::frame_time()` returns the scaled animation clock (the shell clock
+  under `set_animation_time_scale`). Identical at the default scale of 1.0; code timing input should
+  read `input_time()`.
+- **Behaviour change:** `frust::gpu::with_context` keeps its signature but answers the current
+  device, which may change between calls. Do not keep device or queue clones across frames, and
+  rebuild device-owned resources when `device_generation()` changes.
+- **Behaviour change:** the facade's default features go from none to `complex-scripts` (also on
+  `frust-text`), which carries dictionary line and word segmentation at about 3 MB per app
+  (`docs/PERFORMANCE_BASELINES.md`). Unspaced Thai, Lao, Khmer and Myanmar text wraps at dictionary
+  word boundaries and a Chinese/Japanese dictionary drives CJ word motion. Opt out with
+  `frust-ui = { version = "...", default-features = false }` (or `frust-text` likewise): unspaced
+  text then overflows and CJ word motion falls back to per-character stops. Cargo unifies features,
+  so every library in the graph must also leave these defaults off; frust's own plugins do.
+- **Behaviour change:** default-sized `Text` and `TextInput` follow the OS text scale on Android and
+  iOS; explicit sizes do not. Scaffolded Android manifests gain `fontScale` in
+  `android:configChanges`, and an existing app should add it to keep state across a font-size
+  change.
+- **Behaviour change:** `frust_paths::atomic_write` (also `frust::paths::atomic_write`) uses a
+  per-call temp file opened with `create_new`, so concurrent writers and same-stem files no longer
+  collide and a pre-placed symlink is never followed, and it returns `Unsupported` on the web
+  instead of panicking. `data_dir` and `cache_dir` return `None` for an empty or relative `HOME`,
+  `APPDATA` or `LOCALAPPDATA`.
+- **Behaviour change:** `frust-i18n` negotiation is script-aware, so `zh-TW`, `zh-HK` and `zh-MO` no
+  longer resolve to a `zh-Hans` bundle, and a language-only switch keeps its script.
+- Untagged text shapes (`locl`) and line-breaks in the app default locale. ja/zh spans (style
+  locale, else the default) use Normal line-break strictness, so small kana and the prolonged sound
+  mark may start a line while kinsoku still keeps `。`, `、` and `，` off line starts; an explicit
+  `TextStyle` locale always wins.
+- The font-cache flush runs at the lifecycle `Hidden` edge instead of on pause or focus loss: iOS in
+  `frust_did_enter_background` (no longer at `willResignActive`), Android in `native_on_stop` (no
+  longer at `onPause`), and desktop when every window is minimized, occluded or suspended (no longer
+  on focus loss), with a flush at exit, once per exit, including menu Quit. Web flushes nothing,
+  having no persistent cache.
 - `SurfaceRenderer::encode` now does the engine's planning, so a frame the engine refuses is skipped
-  before the swapchain is acquired and `encode_us` carries the plan CPU time that `submit_us` used to.
-  Frames refused after acquire present the acquired image on the main surface (the previous frame
-  re-converted on the straight-alpha arm, a base-colour clear on the direct arm); a refused overlay keeps
-  its acquired texture un-presented, so its previous frame stays, at most one frame
-  (`engine-scheduler-skip-on-escalation`, `wgpu-vulkan-discard-texture-noop`).
-- `FontHandle::with_synthesis` clamps skew to +/-30 degrees and embolden to at most 0.5 em.
+  before the swapchain is acquired, and `encode_us` carries the plan CPU time `submit_us` used to.
 - Glyph admission is sticky: a run whose every glyph is already resident is served over the texel
-  budget, only a run that would insert is refused, and LRU eviction still drains the excess. iPhone
-  13 mini, S6 at 3x: the atlas held 0 of 527 glyphs and thrashed (24,051 evictions per three runs);
-  with sticky admission alone it holds 231, and 527 of 527 with the tier change below (5c4fcad87; gate gr02-13mini-residency).
-- On iOS the `mobile_large` tier starts at 3 GiB of `hw.memsize` (4 GiB elsewhere): a 4 GB iPhone
-  13 mini reports 3674 MiB and previously stayed on the plain tier. The tier raises the glyph atlas
-  from 16 to 64 MiB and the retained-page budget from 32 to 64 MiB.
+  budget, only a run that would insert is refused, and LRU eviction drains the excess. On iOS the
+  `mobile_large` tier starts at 3 GiB of `hw.memsize` (4 GiB elsewhere), so 4 GB iPhones reach it,
+  raising the glyph atlas from 16 to 64 MiB and the retained-page budget from 32 to 64 MiB.
 - Faux-bold embolden is computed per side from the size-quantized basis at the route key, the
-  lowering and the resident plan, so the amount keyed and the amount drawn are the same bits.
-  Sub-quantum scale jitter can still mint `glifo` cache entries, because the size `glifo` keys is not
-  quantized.
-- Engine tests: `variable_route` uses calibrated magnitude bands, and the italic paragraph compile-cost
-  test counts draws instead of reading a wall clock.
-- Probe result: every bundled face yields a `skrifa` hinting instance at every engine size; two macOS
-  system faces do not, so a hinted faux-bold request on them is nearly invisible
-  (`text-hinted-faux-bold-unhintable-face`). Faux bold and faux oblique are not applied on the hvgl
-  route (`text-hvgl-synthesis-not-applied`). See [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
-- The single-file hvgl provider is now `text/hvgl/{mod,face,outline,ffi}.rs` (internal): the public surface,
-  the open-face checks and refusals, the outline and variation-instance caches, and every CoreText
-  call, which is now the only `unsafe` in the module. One generic bounded LRU bounds the open faces,
-  each face's instances and the outline cache; refusal sets stay first-in-first-out (c0002cfab,
-  1d1418e9b).
-- The font-cache flush runs at the lifecycle `Hidden` edge instead of on pause or focus loss. iOS
-  flushes in `frust_did_enter_background` (no longer at `willResignActive`), Android in `native_on_stop`
-  (no longer at `onPause`), desktop when every window is minimized or occluded, or suspended (no longer
-  on focus loss), and desktop gains a flush at exit, once per exit, including menu Quit. Web flushes
-  nothing: it has no persistent cache. iPhone 13 mini: one flush per background (14.3 ms first write,
-  then 0.1 ms), none for a Control Center pull; Pixel 5: one per `onStop` (12.1 ms, then 0.1 ms), none
-  for the share sheet, and the cache survives `am force-stop`; macOS M4: minimize 1 (11.2 ms), occlusion 1,
-  Quit 1, focus loss 0 (p4-ios-flush-hidden, p4-android-flush-hidden, p4-desktop-flush-hidden,
-  p4-web-no-flush; 64281d470).
-- `frust-i18n`: `fraction_fallbacks()` is a test seam, not observability; the 0.6.4 note calling it
-  observability is superseded. The language-id cache is bounded (256 entries) and the per-locale currency
-  formatter cache has a bound test (64); both documented as approximate LRU. Vietnamese relative
-  day `hôm nay` is lowercase (f1956dd44).
-- The system emoji-fallback test in `crates/frust-text/tests/emoji.rs` now uses the counted-skip
-  precondition (`SKIPPED (n)` plus a `SKIP SUMMARY`): a Linux host with no emoji font reports one
-  skip, macOS reports none, and the registered-subset test checks the served face by font-data
-  identity. The 0.6.4 note claiming a counted emoji skip was not true until now; the macOS CoreText
-  han oracle test also holds `LocaleSlotGuard` (4bddadbd8).
-- The advisory `text-oracle-macos` / `text-oracle-windows` CI legs (still outside `ci-ok`) now scope
-  on `Cargo.lock`, `Cargo.toml`, `rust-toolchain.toml`, `frust-text`, `frust-engine`, `frust-scene`,
-  `frust-paths`, `frust-gpu`, `testing/fonts`, `crates/frust-text/tests/fonts` and `ci.yml`; a leg
-  that does not run writes `SKIPPED (scope: <reason>)` to the job summary (05b812682).
-- A full `cargo test --workspace` on a Windows x64 MSVC host passes: 18 tests in 8 suites were
-  fixed. Eleven assumed Unix (path separators, `\\?\` verbatim prefixes, Java-properties colon
-  escaping, JSON-escaped paths, case-insensitive environment names, response-file dialect) and now
-  build expectations from the product encoders; the Android hot-patch tests that fake an NDK with
-  shell scripts and the `xcodebuild` test are `cfg`-gated to the hosts that support them; the
-  `frust-hotpatch` `real_patch_library` test expects the by-design zero slide on Windows
-  (2f2832c1c, 651d30a1d).
-- Every reduce-motion collapse (navigator, including the interactive edge-swipe settle, switcher,
-  `AnimatedOpacity` and `card_switcher`) runs for `MotionExtras::reduced_fade` (120 ms by default; 0
-  snaps with no frame request) instead of a fixed 120 ms. The `network_image` fade-in therefore
-  collapses to that reduced fade under reduce-motion.
-- `TextStyle` gains a public field `overflow_wrap`, and is now `#[non_exhaustive]`: build it with
-  `TextStyle::new` / `Default` plus the new `with_*` builders (struct literals no longer compile
-  outside `frust-text`). ja/zh text now uses Normal line-break strictness (small kana may start a
-  line). Release size grows by about 3 MB per app with the segmentation dictionaries (see
-  `docs/PERFORMANCE_BASELINES.md`).
-- `TextStyle` gains the public fields `features` and `decoration`; since it is
-  `#[non_exhaustive]`, no struct-literal migration is needed outside `frust-text`.
+  lowering and the resident plan, so the amount keyed and the amount drawn agree;
+  `FontHandle::with_synthesis` clamps skew to ±30 degrees and embolden to at most 0.5 em.
+- The per-frame backdrop cap counts only backdrops whose blur region reaches the frame target, so
+  one scrolled or translated clear of the frame (a `ScrollView`'s warm paint margin) no longer
+  counts; the up-front count can still over-count inside clipped or retained regions.
+- The `.notdef` warning names only the face, the script and the cluster count, never user text, and
+  fires once per (face, script).
+- The Material and shadcn overlay modals compute snap progress through `Detents`, unchanged for
+  finite snap points; their fling-velocity constants now equal `DEFAULT_FLING_VELOCITY`.
+- Every reduce-motion collapse (navigator including the interactive edge-swipe settle, switcher,
+  `AnimatedOpacity`, `card_switcher`) runs for `MotionExtras::reduced_fade` (120 ms by default; 0
+  snaps with no frame request) instead of a fixed 120 ms, and the `network_image` fade-in collapses
+  to it under reduce-motion.
 - An `ExternalPass` registration's `record` is never run concurrently, even with two live surfaces.
-- `ExternalFrame::frame_index` on an explicit headless render (`render_with_passes`) counts that
-  renderer's own renders from 0; surfaces and registry drains keep the process-wide count.
-- Scaffolded Android manifests gain `fontScale` in `android:configChanges`; existing apps should add
-  it to keep state across a font-size change.
-- `frust-material-i18n` depends on `frust-reactive`.
-- Docs: `clean-signals-frust` shows localized failure text through the helpers' closures.
-- `frust-shell-ios`: every `ios_app!` export and `ffi_glue` function that dereferences a caller-supplied
-  pointer is now `unsafe` with its own Safety contract, `frust_destroy` and the overlay exports among them.
-  C symbols and signatures are unchanged, so Swift callers are unaffected; a Rust caller of those functions
-  now needs an `unsafe` block. The iOS-target clippy run is clean, and CI gained an advisory macOS
-  `clippy-ios` job for the iOS simulator target.
+- The Android logger's level follows the `debug.frust.log` system property
+  (`adb shell setprop debug.frust.log debug`; the `FRUST_LOG` vocabulary, cleared on reboot) instead
+  of being fixed at `Info`; unset it stays `Info` in every build.
+
+### Deprecated
+
+- `frust_text::notdef_glyph_count()` is deprecated in favour of `TextContext::notdef_glyph_count()`.
+  It still returns the process-wide total, now counted once per line table when its memo is filled
+  rather than once per paint.
 
 ### Fixed
 
-- The Android hot-patch discovery-cancel test and the TUI clipboard abandoned-write test are deterministic.
-  `interrupt_e2e` reports the captured output and leaves no orphan on a timeout, the engine retained
-  parallel-walk test retries a bounded number of frames until a helper merges a run, and the
-  `frust-reactive` timer tests run on the virtual clock.
-- The motion-token conversions behind reduce-motion, navigation transitions, the switcher and presence
-  no longer panic paint: each uses `Duration::try_from_secs_f64` and falls back on a negative,
-  non-finite or too-large value (`MotionExtras::reduced_fade_duration` 120 ms, navigation transitions
-  340 ms enter / 150 ms exit, the switcher base 220 ms, presence timing the neutral token).
-- `AnimationController::forward()` always settles `Completed` and `reverse()` always `Dismissed`, whatever
-  the start value (it can lie outside 0..=1 after `spring_to`); `animate_to` settles by direction of
-  travel. Behaviour change: `reverse()` at exactly 0.0 now settles `Dismissed`, where it settled `Completed`.
-- `presence`: a callback attached after an exit settled never fires for that exit, a zero-distance duration
-  ramp settles immediately with no frame, open-then-close before any paint fires `on_exited` once, and a
-  settled child paints without an alpha layer. An exit settles only when painted, so `on_exited` is a
-  cleanup cue, not a correctness gate.
+- A frame the engine refuses no longer freezes Android/Vulkan apps: a dropped un-presented swapchain
+  texture leaks its image on wgpu-hal 30.0.1
+  ([gfx-rs/wgpu#5723](https://github.com/gfx-rs/wgpu/issues/5723)), so frust no longer drops an
+  acquired texture while its swapchain lives. The main surface presents a backstop frame, a refused
+  overlay keeps its texture un-presented so its previous frame stays on screen, and the swapchain
+  reconfigures after `MAX_TRANSIENT_SKIPS` consecutive acquire timeouts
+  (`engine-scheduler-skip-on-escalation`, `wgpu-vulkan-discard-texture-noop`).
 - An interactive edge-swipe pop honours `reduce_motion`: it collapses to `ReducedCrossfade` on its
   first paint, the drag drives the alpha, the release settles on the reduced timing, and a
   `PageTransition::Custom` fn is not called.
-- A frame the engine refuses no longer freezes Android/Vulkan apps: a dropped un-presented swapchain
-  texture leaks its image on wgpu-hal 30.0.1 ([gfx-rs/wgpu#5723](https://github.com/gfx-rs/wgpu/issues/5723)),
-  so frust no longer drops an acquired texture while its swapchain lives (the main surface presents a
-  backstop frame, a refused overlay keeps the texture un-presented for its next frame, so its previous frame stays on screen) and reconfigures after `MAX_TRANSIENT_SKIPS`
-  consecutive acquire timeouts.
-- Font-cache file hygiene: stale temp files are swept under the registry lock on both load paths (this
-  process's after 10 minutes, another process's after 24 hours, with no PID liveness check), every live copy
-  of a path writes through one writer with a monotonic generation so an older snapshot never overwrites a
-  newer one (file format v7 unchanged), and a clean flush of a deferred-path context joins a live shared
-  copy (734411802, 2791c5134, f69fccfc0).
-- The web shell's page-lifecycle listeners are owned by a guard that removes them on drop (no leaked
-  closures), and the hide flush is skipped while the web tier has no persistent font cache (74e0f87dc).
-- DirectWrite resolution honours generic families for a generic-only request: `Monospace` resolves
-  to Consolas and `Serif` to Times New Roman, where every generic used to resolve to the Segoe UI
-  fallback (2f2832c1c).
-- A `Checkbox` / `Radio` with an empty label is exactly the control size tall (20 px) instead of
-  taking the host UI font's line height; this was a golden mismatch on Windows and on the Linux
-  T400 host, and the golden is unchanged (2f2832c1c).
+- The motion-token conversions behind reduce-motion, navigation transitions and the switcher no
+  longer panic paint: each uses `Duration::try_from_secs_f64` and falls back on a negative,
+  non-finite or too-large value.
+- The shadcn modal drops non-finite snap points, as Material already did, which fixes a possible
+  drag panic, and a non-finite settle target snaps to the open detent.
 - A second surface no longer keeps a stale external-pass binding after `unregister_external_pass`:
   each surface's drain reconciles against the registry and unbinds in its own engine.
-- `frust-i18n` negotiation is script-aware, so `zh-TW`/`HK`/`MO` no longer resolve to a `zh-Hans`
-  bundle and a language-only switch keeps its script.
-- `frust_paths::atomic_write` (also `frust::paths::atomic_write`) uses a per-call temp file opened with
-  `create_new`, so concurrent writers and same-stem files no longer collide and a pre-placed symlink is
-  never followed; it returns `Unsupported` on the web instead of panicking; `data_dir`/`cache_dir`
-  return `None` for an empty or relative `HOME`/`APPDATA`/`LOCALAPPDATA`.
+- Font-cache files: stale temp files are swept on both load paths (this process's after 10 minutes,
+  another process's after 24 hours), every live copy of a path writes through one writer so an older
+  snapshot never overwrites a newer one (file format v7 unchanged), and the first failed flush a
+  hook sees logs at warn.
+- The web shell's page-lifecycle listeners are owned by a guard that removes them on drop, and the
+  hide flush is skipped while the web tier has no persistent font cache.
+- DirectWrite resolution honours generic families for a generic-only request: `Monospace` resolves
+  to Consolas and `Serif` to Times New Roman, where every generic used to resolve to the Segoe UI
+  fallback.
+- A `Checkbox` / `Radio` with an empty label is exactly the control size tall (20 px) instead of
+  taking the host UI font's line height.
+- `frust-i18n`: the language-id cache is bounded (256 entries) and the currency formatter cache is
+  bounded (64 entries), both approximate LRU.
 
 ## 0.6.5 — 2026-11-02
 

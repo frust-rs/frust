@@ -57,9 +57,10 @@
 //!
 //! - **No drag and drop.** Upstream's pointer path is HTML5 `dragstart` /
 //!   `dragover` / `drop` with a `dataTransfer` payload and a drop-position ratio
-//!   test against the hovered row's box. frust has no drag protocol at all, and
-//!   a hand-rolled one (press, slop, autoscroll, drop indicator, cancel) is a
-//!   component of its own. Every move upstream offers through a drag is still
+//!   test against the hovered row's box. frust ships drag primitives
+//!   (`frust-widgets`' `drag` module), but this component does not use them
+//!   yet: wiring press, slop, autoscroll, a drop indicator and cancel into the
+//!   painted rows is a component of its own. Every move upstream offers through a drag is still
 //!   reachable here: the four `Alt+Shift+Arrow` commands, reported through
 //!   [`AiSidebarView::on_move`] and applied with [`ai_sidebar_move`].
 //! - **No inline rename.** Upstream swaps the row's label for an `<input>` on

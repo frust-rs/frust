@@ -85,7 +85,7 @@ pub trait PaintScene {
     fn draw_image(&mut self, _data: &peniko::ImageData, _dest: Rect) {}
 
     /// Draw a fragment-shader-filled rect into `dest`; `time` is app seconds
-    /// (no CPU golden: `docs/LIMITATIONS.md` `engine-shader-quad-goldens-uncomparable`).
+    /// (no CPU golden: the CPU golden arms cannot render a shader program).
     /// `program` must be a retained handle — minting one per paint or `build`
     /// misses the pipeline cache every frame.
     fn draw_shader(&mut self, _program: &ShaderProgram, _dest: Rect, _time: f32) {}

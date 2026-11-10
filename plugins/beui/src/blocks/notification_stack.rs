@@ -78,9 +78,10 @@
 //! - **No pointer-type branch, so no tap-dismisser.** Upstream reads
 //!   `gesture.pointerType` to tell a finger from a mouse: a *touch* expansion
 //!   arms an outside-tap dismisser, because a finger never "leaves". frust's
-//!   `PointerEvent` carries no pointer type (the gap
-//!   [`crate::components::context_menu`] records for its long-press), so both
-//!   gestures take the mouse path: press to expand, press again to follow
+//!   `PointerEvent` carries no pointer kind; the mouse-or-touch identity is
+//!   read through `EventCtx::pointer_id`, and this component does not
+//!   distinguish mouse from touch yet, so both gestures take the mouse path:
+//!   press to expand, press again to follow
 //!   `on_view_all` or collapse. A touch user is never stranded — the second tap
 //!   still closes it — they simply cannot close it by tapping elsewhere.
 //! - **Deep cards pop rather than fade in.** Upstream toggles a plain

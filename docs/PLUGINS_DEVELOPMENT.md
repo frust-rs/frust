@@ -307,8 +307,7 @@ section (deep link `frustplay://section/photos`), Picker panel: filter and limit
   - **iOS access:** Settings lists *Add Photos Only* only for an app whose first Photos request was add-only; an album save with add-only
     access reads `PermissionDenied`.
   - **Not run:** a DNG export on a phone (none available). Gate devices: iPhone SE 2nd gen (iOS 26.7.1), Pixel 5 (Android 14).
-- **Open:** the API 29/30 emulator leg (the `ACTION_OPEN_DOCUMENT` fallback picker) has not been run
-  (`photo-library-android-picker-fallback-untested` in [LIMITATIONS.md](LIMITATIONS.md)).
+- **Open:** the API 29/30 emulator leg (the `ACTION_OPEN_DOCUMENT` fallback picker) has not been run.
 
 ## Permissions manual test (Android + iOS + macOS)
 

@@ -213,8 +213,8 @@ The one-live-session slot (the same one [`AuthSession::start`] claims) is claime
   there (`true` on macOS, where `ASWebAuthenticationSession` serves the
   custom-scheme path). Ask `LoopbackSession::is_supported()` for the loopback
   path — `true` on all three. The listener binds on ephemeral loopback
-  (`127.0.0.1:<port>` on an ephemeral port; `auth-session-loopback-poll-interval-v1` in
-  [LIMITATIONS.md](https://github.com/frust-rs/frust/blob/main/docs/LIMITATIONS.md)), opens the authorization URL in
+  (`127.0.0.1:<port>` on an ephemeral port; the accept loop polls its shutdown flag every 25 ms, so a
+  cancel or timeout closes the socket within about one poll), opens the authorization URL in
   the system browser (via [`frust-url-launcher`](https://github.com/frust-rs/frust/blob/main/plugins/url-launcher/README.md)),
   and receives the redirect — RFC 8252 §7.3's "loopback IP redirection" pattern
   for platforms with no in-app browser-tab primitive

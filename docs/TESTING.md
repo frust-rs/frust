@@ -512,8 +512,8 @@ Store independent baselines for:
   Chrome (chromedriver) — run recipe in [RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)'s
   `FRUST_ENGINE_DOWNLEVEL` row. It compares against the existing `cpu/` class above rather than owning
   one of its own: each baseline is `include_bytes!`'d straight from `testing/goldens/cpu/` (no filesystem
-  in a browser), held to the same P1 bar `engine-vulkan-nvidia-t400/`/`engine-metal-macos/` are. See
-  [LIMITATIONS.md](LIMITATIONS.md)'s `engine-webgl2-atlas-target` for the one residual upstream constraint.
+  in a browser), held to the same P1 bar `engine-vulkan-nvidia-t400/`/`engine-metal-macos/` are. The one residual upstream
+  constraint is wgpu-hal's GLES binding of a one-layer array texture as plain 2D, hence the two-layer atlas floor.
 - `android-emulator-api36-host/`: composed Android screenshots using host GPU.
 - `android-emulator-api36-swiftshader/`: diagnostic software-GPU screenshots.
 - Physical-device families only when a stable, owned device is part of the

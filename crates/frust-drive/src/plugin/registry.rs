@@ -66,7 +66,7 @@
 //! `permissions` (dependency, the plugin's own Android library module, and
 //! five optional features carrying the app-side manifest permissions, usage
 //! strings, framework links and macOS entitlements each permission needs) is
-//! described at `PERMISSIONS`. The newest entry, `photo-library`
+//! described at `PERMISSIONS`. `photo-library`
 //! (dependency, the plugin's own Android library module and the `PhotosUI`
 //! framework link; no permission or plist key in its base, and two optional
 //! features: `library` for album and asset browsing, and `save` for writing

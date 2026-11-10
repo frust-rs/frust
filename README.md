@@ -113,8 +113,9 @@ Frust apps are plain Rust in the same process as the OS, so an OS-capability plu
 platform APIs directly through FFI (`jni` on Android, `objc2` on Apple) rather than through a
 per-plugin Kotlin/Swift bridge: `frust-shared-preferences`, `frust-secure-storage`,
 `frust-camera`, `frust-clipboard`, `frust-haptics`, `frust-url-launcher`, `frust-auth-session`,
-`frust-iap`, `frust-database`, `frust-i18n`, `frust-video-player`, and `frust-native-widgets`
-(real platform controls). The generated app shell itself still carries a thin native entry point
+`frust-iap`, `frust-database`, `frust-i18n`, `frust-video-player`, `frust-background-task`,
+`frust-device-info`, `frust-permissions`, `frust-photo-library`, and `frust-native-widgets` (real
+platform controls). The generated app shell itself still carries a thin native entry point
 — Kotlin on Android, Swift on iOS — that the Rust core calls into. `frust create --arch
 clean-signals` scaffolds an opt-in clean-architecture variant wired to `clean-signals-frust`.
 
@@ -126,9 +127,8 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 > Frust can currently be considered in an alpha state. In particular, we're
 > still working on the following:
 >
-> - **No partial repaint / damage regions** — built, measured, lost, and removed
->   (`partial-repaint-outcome` in `docs/LIMITATIONS.md`): every rendered
->   frame re-rasterizes the full surface. The rest of the render model (retained layers,
+> - **No partial repaint / damage regions** — built, measured, lost, and removed:
+>   every rendered frame re-rasterizes the full surface. The rest of the render model (retained layers,
 >   repaint boundaries, slivers, platform-view overlays, texture widgets) and what is still
 >   missing against Flutter's are mapped in
 >   [docs/learning/17-render-model-vs-flutter.md](docs/learning/17-render-model-vs-flutter.md).
@@ -137,8 +137,7 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 >   at the theme's cosmetic rate), not what each one costs.
 > - **Back handling is single-window** — the Android back press is routed
 >   across nested and per-tab navigators, but the arbitration state is
->   process-wide, so multi-window apps cannot route back per window (see
->   `back-single-window` in `docs/LIMITATIONS.md`).
+>   process-wide, so multi-window apps cannot route back per window.
 >
 > `frust-engine`, the frust-owned strips-on-wgpu renderer, carries its own
 > named alpha-state gaps, notably:

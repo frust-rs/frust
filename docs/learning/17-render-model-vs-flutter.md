@@ -29,7 +29,7 @@ docs.flutter.dev page. Frust paths are in this repository.
 | Relayout boundary | per-pod constraint-equality relayout skipping | `crates/frust-core/src/widget.rs` (`layout_child`), `crates/frust-core/src/app/layout.rs` (`RenderRoot::layout_with_text`) / `rendering/object.dart` (`_relayoutBoundary`) | A pod whose constraints equal last pass's and which is not dirty returns its cached size. Without parent pointers, a parent on a dirty path still runs its own layout; only clean subtrees below it are skipped. |
 | Layout assertions | `FRUST_LAYOUT_AUDIT` | `crates/frust-core/src/app/layout.rs` (`LayoutAudit`, `RenderRoot::set_layout_audit`), `docs/CORE_DEVELOPMENT.md` | After a skipping pass the audit runs a forced full pass and logs every pod whose geometry differs: it finds a widget that changes layout state without saying so. A debug aid; it doubles layout cost. |
 | `ClipPath`, `BackdropFilter` | `PushClipPath`, `BackdropBlur` | `crates/frust-scene/src/`, `crates/frust-engine/src/compile/clip.rs` / `widgets/basic.dart` | Path clips are coverage masks; at most four backdrop blurs render per frame (`backdrop-blur-bound`). |
-| Partial repaint / damage | measured, rejected, removed | `LIMITATIONS.md` `partial-repaint-outcome` | Flutter repaints only the damaged region when the embedder reports one (`engine/src/flutter/shell/common/rasterizer.h`, `FrameDamage`); frust re-rasterizes the surface each rendered frame. A scissored partial path was built and measured: it lost on mobile-shaped workloads, so it was removed. |
+| Partial repaint / damage | measured, rejected, removed | `docs/RENDER_ARCHITECTURE.md` | Flutter repaints only the damaged region when the embedder reports one (`engine/src/flutter/shell/common/rasterizer.h`, `FrameDamage`); frust re-rasterizes the surface each rendered frame. A scissored partial path was built and measured: it lost on mobile-shaped workloads, so it was removed. |
 | `PlatformView` hybrid composition | overlay surfaces plus the Mode A / Mode B matrix | `crates/frust-shell-common/src/platform_view.rs` (`ingest_scene`), `crates/frust-render/src/overlay.rs` (`# Segments`), `docs/SHELLS_ARCHITECTURE.md`, `docs/NATIVE_WIDGETS_ARCHITECTURE.md` / docs.flutter.dev/platform-integration/android/platform-views | Mode A: opaque frust surface, native view above. Mode B: translucent surface, native view below, hole-punched. To paint frust content *above* a native view the display list is cut at the view's slot and each cut is drawn on its own overlay surface. Android, iOS and macOS ship this behind `FRUST_OVERLAYS` (default off), on one shared overlay table whose withdraw never waits. |
 | `Texture` widget | `texture_view` fed by a `TextureSink` | `crates/frust-widgets/src/texture_view.rs`, `crates/frust-plugin/src/texture.rs`, `crates/frust-render/src/texture_bus.rs`, `frust::texture` / `widgets/texture.dart`, `rendering/texture.dart` | A producer pushes frames into a latest-frame mailbox; the renderer imports them as a scene texture. Producers: video-player `VideoOutput::Texture`, camera `preview_texture`. Android hardware-buffer import (`crates/frust-gpu/src/import/android.rs`) is behind `FRUST_ANDROID_HWBUFFER_IMPORT`. |
 
@@ -37,12 +37,12 @@ docs.flutter.dev page. Frust paths are in this repository.
 
 | Gap | Entry in `docs/LIMITATIONS.md` |
 |---|---|
-| No partial repaint; each rendered frame re-rasterizes the surface | `partial-repaint-outcome` |
-| Residual render-model gaps (a parent on a dirty path still lays out; a non-default `BlendMode` on a layer is refused) | `render-model-gaps` |
+| No partial repaint; each rendered frame re-rasterizes the surface | none (stated in the row) |
+| Residual render-model gaps (a parent on a dirty path still lays out; a non-default `BlendMode` on a layer is refused) | none (stated in the row) |
 | Retained pages are a budgeted, refusable cache; the ledger is process-global; an eviction between publish and the next scene can refuse a frame | `retained-pages-budget-refusals`, `retained-ledger-single-renderer`, `retained-stale-ledger-eviction-thrash` |
 | `BackdropBlur` has five limits; `PushClipPath` re-rasterizes its mask per push | `backdrop-blur-bound`, `path-clip-mask-rerasterized` |
 | No `NestedScrollView`, no reverse growth, no snapping or stretching headers | `sliver-v1-scope` |
-| `ScrollView` and `ListView` are not built on the sliver viewport | `scroll-view-list-view-not-viewport-based` |
+| `ScrollView` and `ListView` are not built on the sliver viewport | none (stated in the row) |
 | Overlays are off by default on Android although the host passes its device leg | `android-overlays-opt-in-pending-device-leg` |
 | An Android overlay covers every native view, including later slots | `android-overlays-cover-later-slots` |
 | Content an overlay cannot draw (retained pages, scene textures, backdrop blur) stays under the native view | `overlay-unservable-content-stays-on-main` |

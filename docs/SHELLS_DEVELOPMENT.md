@@ -359,8 +359,8 @@ rather than as passing-by-analogy with a browser that was checked. Check:
       **not** reach this fallback on this stack, since `requestAdapter` fails outright instead of
       falling through to GL, so the query param is the only way; per the README's own record of
       that finding): shapes, layout, backgrounds, theme colours, text, gradients, blur and layers
-      all stay pixel-correct — the atlas two-layer floor (see [LIMITATIONS.md](LIMITATIONS.md)
-      `engine-webgl2-atlas-target`) is what makes glyphs render instead of painting as solid
+      all stay pixel-correct — the atlas two-layer floor (wgpu-hal's GLES backend binds a one-layer
+      array texture as plain 2D) is what makes glyphs render instead of painting as solid
       opaque boxes; a regression here means that floor broke.
 - [ ] Safari 26 and Firefox on Windows/macOS (WebGPU): same checks as the Chrome/WebGPU row
       above. Firefox on Linux (its own WebGL2 fallback): same checks as the Chrome/WebGL2 row.

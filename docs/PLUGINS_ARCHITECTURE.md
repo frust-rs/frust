@@ -7,7 +7,7 @@ substrate, in two halves with opposite directions: the Android platform-handle s
 (JavaVM/Context) a shell writes and a JNI-reaching plugin reads, and the desktop view-factory
 registry a plugin writes and a desktop shell reads. On top of it sit the independent
 OS-capability plugins — `shared-preferences`, `secure-storage`, `camera`, `clipboard`, `haptics`,
-`iap`, `video-player`, `url-launcher`, `auth-session`, `share`, `file-dialogs`, `connectivity`, `device-info`, `permissions`, and `photo-library` — each exposing one platform-independent
+`iap`, `video-player`, `url-launcher`, `auth-session`, `share`, `file-dialogs`, `connectivity`, `device-info`, `permissions`, `photo-library`, and `background-task` — each exposing one platform-independent
 public API behind a per-platform backend. `url-launcher` opens an absolute `http`/`https` URL in the
 platform's default external browser, fire-and-forget, over Android `ACTION_VIEW`, iOS
 `openURL:options:completionHandler:`, or a desktop opener — the launch half of an RFC 8252 OAuth

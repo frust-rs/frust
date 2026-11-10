@@ -56,9 +56,11 @@
 //! # Degradations against the web original
 //!
 //! - **No touch two-tap.** Upstream's first tap expands and the second acts,
-//!   keyed off `gesture.pointerType`; `PointerEvent` here carries no pointer
-//!   type (the gap [`crate::components::context_menu`] records for its own
-//!   long-press), so every press acts and the labels are reached by hover or
+//!   keyed off `gesture.pointerType`; `PointerEvent` carries no pointer kind,
+//!   and the mouse-or-touch identity is read through `EventCtx::pointer_id`.
+//!   This component does not distinguish mouse from touch yet (nor does
+//!   [`crate::components::context_menu`] for its long-press), so every press
+//!   acts and the labels are reached by hover or
 //!   focus. The bar stays usable by touch — it is icons plus an accessible name
 //!   — it simply does not reveal its labels on the way.
 //! - **No outside-tap dismissal.** It exists upstream only to close a

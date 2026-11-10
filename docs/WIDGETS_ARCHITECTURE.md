@@ -592,5 +592,4 @@ as a geometry core, as Material's `sliver_app_bar` does.
 `sliver_persistent_header`, a variable-extent `sliver_list`, a 4-column `sliver_grid` and
 `sliver_fill_remaining` under a `ScrollController`; its smoke test covers bar heights, wheel, jumps
 and zero layout-audit mismatches. v1 scope limits are registered as
-`sliver-v1-scope`; `ScrollView`/`ListView` are not yet viewport-based
-(`scroll-view-list-view-not-viewport-based`).
+`sliver-v1-scope`; `ScrollView`/`ListView` are not yet viewport-based.

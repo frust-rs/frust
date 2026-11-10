@@ -35,16 +35,13 @@
 //! | progress fill `scaleX(ratio)`, `duration: 0.28` | [`PROGRESS_MS`], a lane on the ratio |
 //! | row enter `y: 8 → 0`, exit `y: -6`, `duration: 0.22` | [`ROW_ENTER_RISE`] / [`ROW_EXIT_RISE`] / [`UPLOAD_ROW_MS`] |
 //!
-//! # There is no drop, because the framework delivers none
+//! # There is no drop, because this port does not read one
 //!
 //! Upstream's dropzone is a `<button>` wrapping a hidden `<input type="file">`,
-//! with `onDragEnter`/`onDragOver`/`onDragLeave`/`onDrop` on top. **frust
-//! delivers neither.** [`InputEvent`](frust::authoring::InputEvent) has five
-//! variants — pointer, scroll, key, IME and the housekeeping broadcast — and
-//! none of them carries a file, a drag session, or a path; no shell in this
-//! repository publishes a file-drop signal for a widget to read, so there is
-//! nothing this port could subscribe to, and nothing here waits on a shell seam
-//! that does not exist yet.
+//! with `onDragEnter`/`onDragOver`/`onDragLeave`/`onDrop` on top. **This port
+//! consumes neither.** The desktop shell does publish a file-drop event
+//! (`FileDropEvent` in `frust-core`), but this component does not subscribe to
+//! it yet, so no path ever reaches the dropzone from a drag.
 //!
 //! So the port is **programmatic**, and says so in its API:
 //!
@@ -605,7 +602,7 @@ impl<State: 'static> FileUploadView<State> {
 
     /// Drive the dropzone's dragging chrome (`data-[dragging=true]`).
     ///
-    /// A **prop**, not an observed state: frust delivers no drag session a
+    /// A **prop**, not an observed state: this component reads no drag session a
     /// widget could latch (see the [module docs](self)), so an app with its own
     /// drag signal sets this and an app without one leaves it `false`.
     pub fn dragging(mut self, dragging: bool) -> Self {
