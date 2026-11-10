@@ -1029,9 +1029,24 @@ const PHOTO_LIBRARY_SAVE: &[Contribution] = &[
     Contribution::IosFramework { name: "Photos" },
 ];
 
-/// `photo-library`'s optional features: `library` (browsing) and `save`
-/// (writing originals). Their contributions are described at
-/// [`PHOTO_LIBRARY_LIBRARY`] and [`PHOTO_LIBRARY_SAVE`].
+/// `photo-library`'s `decode` feature contributions: the full-resolution
+/// native decode (`PhotoLibrary::decode_file`). The Cargo feature and the
+/// ImageIO framework link are its only lines: the decode runs in the app's
+/// own process, so it needs no Android module, no permission and no plist
+/// entry. An iOS app that enables it links ImageIO in Xcode, which the
+/// `frust_drive` applier writes into `OTHER_LDFLAGS`.
+const PHOTO_LIBRARY_DECODE: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-photo-library",
+        feature: "decode",
+    },
+    Contribution::IosFramework { name: "ImageIO" },
+];
+
+/// `photo-library`'s optional features: `library` (browsing), `save`
+/// (writing originals) and `decode` (full-resolution native decode). Their
+/// contributions are described at [`PHOTO_LIBRARY_LIBRARY`],
+/// [`PHOTO_LIBRARY_SAVE`] and [`PHOTO_LIBRARY_DECODE`].
 const PHOTO_LIBRARY_FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: "library",
@@ -1051,6 +1066,14 @@ const PHOTO_LIBRARY_FEATURES: &[FeatureSpec] = &[
                   needs read-write access and the `library` feature's usage \
                   string; add-only access returns PermissionDenied.",
         contributions: PHOTO_LIBRARY_SAVE,
+    },
+    FeatureSpec {
+        id: "decode",
+        summary: "Full-resolution native decode of a photo file or library asset: \
+                  enables the Cargo feature and links the ImageIO framework. No \
+                  permission or usage string; reading an asset from the library \
+                  still needs the `library` feature and `permissions` `photos`.",
+        contributions: PHOTO_LIBRARY_DECODE,
     },
 ];
 
@@ -1599,13 +1622,14 @@ mod tests {
 
     /// The `photo-library` entry's base contributions: Cargo dependency,
     /// Android library module, `PhotosUI` framework; no permission or plist
-    /// entry in the base. Its one optional feature is `library`.
+    /// entry in the base. Its optional features are `library`, `save` and
+    /// `decode`.
     #[test]
     fn photo_library_base_contributions_match_the_final_accounting() {
         let spec = find_plugin("photo-library").unwrap();
         assert_eq!(spec.crate_dir, "photo-library");
         let ids: Vec<&str> = spec.optional_features.iter().map(|f| f.id).collect();
-        assert_eq!(ids, vec!["library", "save"]);
+        assert_eq!(ids, vec!["library", "save", "decode"]);
         assert_eq!(spec.requires_sibling, None);
         assert_eq!(spec.base.len(), 3);
         assert!(matches!(
@@ -2057,6 +2081,84 @@ mod tests {
             );
         }
         assert_eq!(repeats, 2);
+    }
+
+    /// The `decode` feature's accounting: the Cargo feature on the
+    /// `frust-photo-library` dependency and the ImageIO framework link, in
+    /// that order, and no permission, plist entry, Gradle module or Swift
+    /// package of its own.
+    #[test]
+    fn photo_library_decode_feature_contributions_match_the_final_accounting() {
+        let spec = find_plugin("photo-library").unwrap();
+        let feature = spec
+            .optional_features
+            .iter()
+            .find(|f| f.id == "decode")
+            .unwrap();
+        let c = feature.contributions;
+        assert_eq!(c.len(), 2, "{c:?}");
+        assert!(matches!(
+            c[0],
+            Contribution::CargoFeature {
+                name: "frust-photo-library",
+                feature: "decode",
+            }
+        ));
+        assert!(matches!(
+            c[1],
+            Contribution::IosFramework { name: "ImageIO" }
+        ));
+    }
+
+    /// `photo-library` with `decode` applied twice: the Cargo feature and the
+    /// ImageIO link land once each, the second apply reports every line as
+    /// `AlreadyPresent`, and a re-apply leaves a byte-identical tree.
+    #[test]
+    fn photo_library_decode_feature_adds_imageio_once_and_is_idempotent() {
+        let root = scaffold_project("photo-library-decode-idempotence");
+
+        let first = add_plugin(&root, "photo-library", &["decode"]).unwrap();
+        assert_eq!(first.items.len(), 3 + 2, "{first:?}");
+        assert!(
+            first
+                .items
+                .iter()
+                .all(|i| i.outcome != AddOutcome::AlreadyPresent),
+            "{first:?}"
+        );
+
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert_eq!(cargo.matches("\"decode\"").count(), 1, "{cargo}");
+
+        let pbxproj =
+            fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        let lists = pbxproj.matches("OTHER_LDFLAGS = (").count();
+        assert!(lists >= 1, "{pbxproj}");
+        assert_eq!(
+            pbxproj
+                .matches("\"-framework\",\n\t\t\t\t\tImageIO,\n")
+                .count(),
+            lists,
+            "{pbxproj}"
+        );
+        assert_pbxproj_well_formed(&pbxproj);
+
+        let after_first = snapshot_tree(&root);
+        let second = add_plugin(&root, "photo-library", &["decode"]).unwrap();
+        assert!(
+            second
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{second:?}"
+        );
+        assert_eq!(
+            after_first,
+            snapshot_tree(&root),
+            "a second apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// `photo-library` with `save` and `permissions` with `photos-add` in one
