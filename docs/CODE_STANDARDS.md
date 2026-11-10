@@ -373,8 +373,7 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   an outgoing/covered subtree that was itself on the live chain — on a push, the page being
   **covered**. Two severing paths are registered rather than fixed: a type swap inside a wrapper view
   re-boxing an `AnyView` under its own `Box<dyn Widget>` (`focus-wrapper-erasure-swap-blind`) and
-  the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's focus link
-  (`focus-navbar-item-truncation-unmarked`). See `docs/LIMITATIONS.md`.
+  the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's focus link. See `docs/LIMITATIONS.md`.
 
 - **A focusable control answers `Widget::is_focusable` and activates only on a bare, non-repeat
   Space/Enter while focused;** its keyboard-focus look reads `PaintCtx::is_focused_for_ring`, while

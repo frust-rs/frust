@@ -85,7 +85,7 @@ texture, an offscreen shader target). This lab reads each resource and runs its 
    comment: *"wgpu-hal 30.0.1's GLES backend picks a texture's GL target from the descriptor alone
    … A one-layer array descriptor therefore binds as plain `GL_TEXTURE_2D` while … the strip
    shader always samples this texture as a `sampler2DArray` … and every sample returns
-   `(0, 0, 0, 1)`"* (registered as `engine-webgl2-atlas-target` in `docs/LIMITATIONS.md`). Growth
+   `(0, 0, 0, 1)`"*. Growth
    is `AtlasArray::ensure_layers`: a deeper texture plus a layer copy recorded in **its own**
    encoder and submitted before the frame's writes — lab 4's first sanctioned own-encoder exception,
    because a copy in the frame's encoder would run after that frame's `write_texture` uploads and

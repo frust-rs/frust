@@ -298,7 +298,7 @@ tests: [TESTING.md](TESTING.md).
 ```bash
 # frust-database / frust-network-image Android gates: C builds (bindgen, ring) need cargo-ndk's
 # CC_*/AR_* passthrough, which plain `cargo check --target` lacks (plain works only with
-# `-p frust-network-image --no-default-features`); playground links ring (same form); iOS gate needs xcrun (macOS-only).
+# `-p frust-network-image --no-default-features`); playground links ring (same form); iOS gate needs xcrun (macOS-only): rusqlite's `bundled` SQLite and ring compile C against the iOS SDK.
 cargo ndk -t arm64-v8a check -p frust-database
 cargo ndk -t arm64-v8a -P 29 check -p frust-network-image
 cargo check -p frust-database --target aarch64-apple-ios
@@ -336,18 +336,18 @@ cargo test -p frust-i18n --no-default-features --test macro_diagnostics -- --ign
 cargo check --target aarch64-linux-android \
   -p frust-ui -p frust-plugin -p frust-shared-preferences -p frust-secure-storage \
   -p frust-camera -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player \
-  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions -p frust-photo-library -p frust-background-task
+  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-device-info -p frust-permissions -p frust-photo-library -p frust-background-task
 cargo check --target aarch64-linux-android -p frust-native-widgets --features demo-components
 
 # --all-targets also compiles cfg(test), which the plain checks above skip:
 cargo check --all-targets --target aarch64-linux-android -p frust-shell-android -p frust-iap
 
-# iOS compile gate (type-check only, runs on Linux): the facade graph must compile for the
+# iOS compile gate (type-check only, needs macOS: the C build scripts above need xcrun): the facade graph must compile for the
 # Simulator target (frust-secure-storage also gates the device target).
 cargo check --target aarch64-apple-ios-sim \
   -p frust-ui -p frust-shared-preferences -p frust-secure-storage -p frust-camera -p frust-network-image \
   -p frust-native-widgets -p frust-clipboard -p frust-haptics -p frust-iap -p frust-i18n -p frust-video-player \
-  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-permissions -p frust-photo-library -p frust-background-task
+  -p frust-share -p frust-url-launcher -p frust-auth-session -p frust-device-info -p frust-permissions -p frust-photo-library -p frust-background-task
 cargo check --target aarch64-apple-ios -p frust-secure-storage -p frust-share
 cargo check --target aarch64-apple-ios-sim -p frust-native-widgets --features demo-components
 
