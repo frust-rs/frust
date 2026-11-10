@@ -233,7 +233,7 @@ pub fn keys_module(messages: &[Message], span: Span) -> Result<TokenStream, syn:
             /// The single resolution path every generated function takes.
             #[doc(hidden)]
             #[allow(dead_code)]
-            fn resolve_or_key(
+            fn __frust_resolve_or_key(
                 resolver: &impl ::frust_i18n::Resolve,
                 key: &str,
                 args: ::core::option::Option<
@@ -258,9 +258,12 @@ fn function(message: &Message, name: &str, span: Span) -> Result<TokenStream, sy
     let ident = Ident::new(name, span);
     let doc = format!("Formats the `{key}` message.");
 
-    // A Fluent identifier always starts with a letter, so no argument can
-    // ever be named `_resolver` — which is what makes the resolver
-    // parameter's name collision-proof against a `$variable` of any name.
+    // A Fluent identifier always starts with a letter, so the snake-casing of
+    // a `$variable` can never start with an underscore. Every name the
+    // generated body introduces itself — the `_resolver` parameter, the
+    // `__frust_args` local, the `__frust_arguments` struct parameter and the
+    // `__frust_resolve_or_key` helper — starts with one, which is what makes
+    // them collision-proof against a `$variable` of any name.
     let mut fields = Vec::with_capacity(message.vars.len());
     let mut taken: BTreeMap<String, &str> = BTreeMap::new();
     for var in &message.vars {
@@ -282,7 +285,7 @@ fn function(message: &Message, name: &str, span: Span) -> Result<TokenStream, sy
             #[doc = #doc]
             #[allow(dead_code)]
             pub fn #ident(_resolver: &impl ::frust_i18n::Resolve) -> ::std::string::String {
-                resolve_or_key(_resolver, #key, ::core::option::Option::None)
+                __frust_resolve_or_key(_resolver, #key, ::core::option::Option::None)
             }
         });
     }
@@ -299,9 +302,9 @@ fn function(message: &Message, name: &str, span: Span) -> Result<TokenStream, sy
                 _resolver: &impl ::frust_i18n::Resolve,
                 #param: impl #value,
             ) -> ::std::string::String {
-                let mut args = ::frust_i18n::__private::fluent_bundle::FluentArgs::new();
-                args.set(#var, #param);
-                resolve_or_key(_resolver, #key, ::core::option::Option::Some(&args))
+                let mut __frust_args = ::frust_i18n::__private::fluent_bundle::FluentArgs::new();
+                __frust_args.set(#var, #param);
+                __frust_resolve_or_key(_resolver, #key, ::core::option::Option::Some(&__frust_args))
             }
         });
     }
@@ -322,11 +325,12 @@ fn function(message: &Message, name: &str, span: Span) -> Result<TokenStream, sy
     });
     let bounds = generics.iter().map(|generic| quote! { #generic: #value });
     let sets = fields.iter().map(|(field, var)| {
-        quote! { args.set(#var, arguments.#field); }
+        quote! { __frust_args.set(#var, __frust_arguments.#field); }
     });
 
     Ok(quote! {
         #[doc = #args_doc]
+        #[allow(dead_code)]
         pub struct #args_ident<#(#generics),*> {
             #(#field_defs,)*
         }
@@ -335,11 +339,11 @@ fn function(message: &Message, name: &str, span: Span) -> Result<TokenStream, sy
         #[allow(dead_code)]
         pub fn #ident<'a, #(#bounds),*>(
             _resolver: &impl ::frust_i18n::Resolve,
-            arguments: #args_ident<#(#generics),*>,
+            __frust_arguments: #args_ident<#(#generics),*>,
         ) -> ::std::string::String {
-            let mut args = ::frust_i18n::__private::fluent_bundle::FluentArgs::new();
+            let mut __frust_args = ::frust_i18n::__private::fluent_bundle::FluentArgs::new();
             #(#sets)*
-            resolve_or_key(_resolver, #key, ::core::option::Option::Some(&args))
+            __frust_resolve_or_key(_resolver, #key, ::core::option::Option::Some(&__frust_args))
         }
     })
 }

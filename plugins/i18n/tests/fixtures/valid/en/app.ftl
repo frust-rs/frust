@@ -13,5 +13,9 @@ editor-notice = Working { $working } of { $full }
 
 only-en = English only
 
+unused-pair = Unused { $left } and { $right }
+
+pass-through = Passed { $args }
+
 save = Save
     .tooltip = Save this document

@@ -96,6 +96,17 @@ fn a_multi_variable_key_binds_each_field_to_its_own_placeholder() {
 }
 
 #[test]
+fn a_single_variable_named_args_binds_to_its_placeholder() {
+    let engine = plain();
+    let chain = engine.negotiate(&[locale("en")]);
+
+    assert_eq!(
+        keys::pass_through(&engine.with_chain(&chain), "value"),
+        "Passed value"
+    );
+}
+
+#[test]
 fn a_message_only_the_fallback_has_resolves_through_the_chain() {
     let engine = plain();
     let chain = engine.negotiate(&[locale("de")]);

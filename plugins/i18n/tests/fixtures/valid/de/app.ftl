@@ -11,3 +11,7 @@ cart-items =
     }
 
 editor-notice = Arbeit { $working } von { $full }
+
+unused-pair = Ungenutzt { $left } und { $right }
+
+pass-through = Durchgereicht { $args }
