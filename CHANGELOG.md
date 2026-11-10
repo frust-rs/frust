@@ -10,7 +10,8 @@ A patch release (the 0.6.x line continues) with three breaks, listed under Break
 and `RouteNavigator::go` now make the stack exactly the matched chain, `frust-shell-common`'s
 non-default `gpu` feature replaces `install_gpu_handle` and `gpu_handle` with `GpuPublisher`,
 `with_gpu_handle` and `gpu_handle_generation`, and the `frust-shell-ios` `ffi_glue` functions that
-dereference a caller's pointers are now `pub unsafe fn`. Narrow source breaks are marked in Changed
+dereference a caller's pointers are now `pub unsafe fn`, with `init` also taking a `pre_init`
+closure. Narrow source breaks are marked in Changed
 with their migrations: new `MainAxisAlignment` and `PathStyle` variants, `PageParity::SpillPool`
 with `MAX_LIVE_PAGES` raised to 5, `#[non_exhaustive]` `TextStyle`, the new `InspectNode::detail`
 field, and added variants or fields on `Capability`, `Method`, `RenderCommand`, `RenderEvent` and
@@ -52,9 +53,13 @@ fonts (PingFang) now draw from the glyph atlas.
   for the call) and watch `gpu_handle_generation()` to detect a replacement.
 - `frust-shell-ios`: 29 of the 32 `ffi_glue` functions, and the matching `ios_app!` exports, are now
   `pub unsafe fn` with a Safety contract each, because they dereference a pointer the caller passes;
-  `system_ui_state`, `set_surface_mode` and `set_present_sync` stay safe. C symbols and signatures
-  are unchanged, so Swift callers are unaffected. Migration: a Rust caller of those functions wraps
-  the call in `unsafe` and honours the contract on each.
+  `system_ui_state`, `set_surface_mode` and `set_present_sync` stay safe. `ffi_glue::init` also
+  gains a required `pre_init: impl FnOnce()` parameter before `make_app`; it runs first, inside the
+  function's panic guard and before the GPU device exists, and a panic in it makes `init` return
+  null. C symbols and signatures are unchanged, so Swift callers are unaffected, and so are apps
+  using `ios_app!`, which passes the closure. Migration: a Rust caller of those functions wraps the
+  call in `unsafe` and honours the contract on each, and passes `|| {}` to `init` or a closure that
+  runs early setup such as `frust::gpu::request_optional_features(..)`.
 
 ### Added
 
@@ -394,6 +399,12 @@ fonts (PingFang) now draw from the glyph atlas.
   `SetAnimationTimeScale`), `frust_shell_common::RenderCommand` and `RenderEvent` (`TrimMemory`),
   and `frust_engine::CompiledFrame` (five `hvgl_*` fields). Migration: an exhaustive `match` adds
   the arms or a wildcard; a `CompiledFrame` struct literal or pattern adds the fields or `..`.
+- **Breaking (narrow):** `frust_shell_android::jni_glue::native_init` gains a required
+  `pre_init: impl FnOnce()` parameter between `cache_dir` and `make_app`; it stays a safe function.
+  It runs first, inside the panic guard and before the GPU device exists, and a panic in it makes
+  `nativeInit` return 0. `android_app!` users are unaffected, since the macro passes the closure.
+  Migration: a hand-written embedder passes `|| {}`, or a closure that runs early setup such as
+  `frust::gpu::request_optional_features(..)`.
 - **Behaviour change:** `AnimationController::reverse()` at exactly 0.0 settles `Dismissed` where it
   settled `Completed`. `forward()` always settles `Completed` and `reverse()` always `Dismissed`,
   whatever the start value (it can lie outside 0..=1 after `spring_to`); `animate_to` settles by
