@@ -276,7 +276,7 @@ tracked `RwSignal` read; an atomic process mirror also answers before the runtim
 `on_inactive`, `on_pause`, `on_restart`, `on_detach`, then `on_state_change`) that run synchronously
 on the UI thread. `request_app_exit` asks every `on_exit_requested` listener without
 short-circuiting; any `AppExitResponse::Cancel` cancels the exit. Which shells push which states,
-and which exits are asked, is in [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md). `BackgroundTask` is the lifecycle-adjacent guard (iOS assertion, no-op elsewhere).
+and which exits are asked, is in [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md). `BackgroundTask` is the lifecycle-adjacent guard (backends from the background-task plugin: iOS assertion, Android short foreground service; no-op otherwise).
 
 `MemoryPressure` (`Moderate`: trim cheaply rebuilt caches; `Critical`: release everything off screen;
 `#[non_exhaustive]`) is a separate event, independent of the state machine. Shells call
