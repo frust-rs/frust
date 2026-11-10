@@ -45,7 +45,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `is_granted()` false. A watchdog of about 150 s bounds the service; `expired()` is the app's signal to
   cut work short. Apps targeting Android 14+ must make a Play Console declaration; an app can opt out
   with `tools:node="remove"`. Android protection is best effort and depends on the lifecycle edge the
-  guard begins at; Android device behaviour is not yet verified.
+  guard begins at; checked on a Pixel 5 (Android 14) and an iPhone SE.
 - Native debug builds log a warning when a flush-on-background callback runs over 8 ms, or a whole drain over
   16 ms, because the OS lifecycle callback is blocked meanwhile. Release and web builds do not measure.
 - `frust::BackgroundTask` (`begin`, `expired`, `is_granted`, `end`; dropping it ends the task exactly

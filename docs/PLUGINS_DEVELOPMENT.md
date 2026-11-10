@@ -354,7 +354,7 @@ to 10 s; API 29-30 may flash one) and never requests `POST_NOTIFICATIONS`.
   `adb shell cmd activity stop-app <pkg>` kills the process mid-write;
   `adb shell pm revoke <pkg> android.permission.POST_NOTIFICATIONS` leaves the service running, notification hidden.
 - **iPhone:** run the 40 s leg, background the app, and confirm the write finishes or `expired()` is reported.
-- Device results are added by a later card.
+- Device results are in `docs/LIMITATIONS.md` (`background-task-android-refusal-cases`).
 
 ## Material asset regeneration
 

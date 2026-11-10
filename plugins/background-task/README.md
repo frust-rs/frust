@@ -67,12 +67,14 @@ notification is simply hidden when the permission is denied.
 instance from the background. Then `begin` reports `is_granted() == false` and
 `expired()` reads `true`; the work runs anyway, unprotected.
 
-Protection on Android is best effort and not yet device-verified. A
-flush-on-background callback normally runs at the Inactive edge (`onPause`, app
-still visible), where a foreground-service start is expected to be allowed. A
+Protection on Android is best effort. A flush-on-background callback normally
+runs at the Inactive edge (`onPause`, app still visible), where a
+foreground-service start was allowed on a Pixel 5 (Android 14, targetSdk 36). A
 timer armed while already Inactive, or armed by an Inactive flush, runs at the
-Hidden edge (`onStop`), where a start is expected to be refused on targetSdk 31+;
-then `is_granted()` is false and the work runs unprotected.
+Hidden edge (`onStop`); a start there right after leaving the foreground was also
+allowed, under the system's activity-visibility grace period. Later than that, a
+start is expected to be refused on targetSdk 31+ (not exercised); then
+`is_granted()` is false and the work runs unprotected.
 
 A refusal that only arrives once the service runs (`startForeground`
 throwing) shows up as `expired()`.
