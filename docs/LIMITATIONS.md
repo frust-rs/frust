@@ -9732,8 +9732,10 @@ delay, so the gate shows the guard works rather than that this write needed it. 
 
 ### `background-task-android-refusal-cases` — Android refuses or limits the `BackgroundTask` foreground service
 
-**Observed**: the Android backend is a `shortService` foreground service. A start made inside `onStop`, the Hidden edge
-that `flush_on_background` runs at, is refused on targetSdk 31+; `begin` then reports `is_granted() == false`, never
+**Observed**: the Android backend is a `shortService` foreground service. A flush-on-background callback normally runs at
+the Inactive edge (`onPause`, app still visible), where a start is expected to be allowed. A timer armed while already
+Inactive, or armed by an Inactive flush, runs at the Hidden edge (`onStop`), where a start is expected to be refused on
+targetSdk 31+ (unverified until the device gate records it); `begin` then reports `is_granted() == false`, never
 throws, and the work proceeds unprotected. API 29-33 have no system `onTimeout`, so only the plugin's watchdog (about
 150 s) ends the service there. On Android 12+ a short guard normally shows no notification (display may be deferred up to
 10 s, not guaranteed); on API 29-30 a brief one may flash. Apps targeting Android 14+ must declare the foreground service
