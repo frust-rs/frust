@@ -34,6 +34,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- Native debug builds log a warning when a flush-on-background callback runs over 8 ms, or a whole drain over
+  16 ms, because the OS lifecycle callback is blocked meanwhile. Release and web builds do not measure.
 - `frust::BackgroundTask` (`begin`, `expired`, `is_granted`, `end`; dropping it ends the task exactly
   once, from any thread). iOS takes a UIKit background-task assertion from Rust; Android, desktop and web
   are no-ops. The sanctioned pattern: a `flush_on_background` callback calls `BackgroundTask::begin` on the
@@ -427,6 +429,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- On the web, `sleep` now clears its browser timeout when it is dropped or cancelled. Durations above
+  `i32::MAX` ms clamp, and a background tab may throttle the timer; both are documented on `sleep`.
 - `frust-file-dialogs` on Android and iOS: `open_file` and `open_files` used to answer `Unsupported` and now
   work, returning app-private copies of the chosen files; `save_file` still answers `Unsupported` there, so
   use `export_file`. Calls on the UI thread are refused with `UiThread`. Web is unchanged.
