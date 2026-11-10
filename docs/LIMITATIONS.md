@@ -6155,6 +6155,8 @@ same-shape port of the mobile/desktop implementation.
 **Trigger for removal**: tracked per plugin as each grows a real web
 backend, rather than closed as one blanket entry.
 
+---
+
 ### `web-clipboard-unavailable-v1` — `frust-clipboard` has no web backend; every call reports `UnsupportedPlatform`
 
 **Observed** (evidence: `plugins/clipboard/src/lib.rs`'s `set_text`/
@@ -6247,9 +6249,7 @@ ship that and treat a `Decoder` error as a per-platform answer.
 **Evidence**: platform format-matrix survey (Media3's extractor set vs
 AVFoundation's); the crate's own `Backends`/format-asymmetry note. Not yet
 reproduced on hardware — the device gate for this plugin is still owed. See
-also `video-web-windows-linux-unavailable-v1` below. The playground's overlay
-chrome is square-cornered to work around an engine-side defect: a rounded fill
-composites incorrectly at a punched-hole edge.
+also `video-web-windows-linux-unavailable-v1` below.
 
 ---
 
@@ -6268,7 +6268,8 @@ scope, the shape `iap-desktop-unavailable-v1` records. The browser is a
 different gap entirely — the whole platform-view mechanism is absent there
 (`web-no-plugins-native-widgets-platform-views-v1`), so a web backend would
 need a `<video>` element composited against the canvas, not just a session
-backend. Texture mode has no desktop or web producer either.
+backend. Texture mode has producers on Android, iOS, and macOS only, so
+Windows, Linux, and the browser have none either.
 
 **Why accepted**: mobile-first v1 scope plus one real desktop host (macOS)
 to prove the desktop platform-view path. The unsupported arm is a
@@ -6431,9 +6432,11 @@ or work around from inside the pty.
 ### `lean-android-hashbrown-split` — the lean Android release graph carries two `hashbrown` copies
 
 **Observed**: `hashbrown` resolves to two versions on the lean Android release graph —
-0.16.1 and 0.17.1. `parley_engine`/`fontique` (and `frust-engine`'s vendored `vello_common`/`glifo`
-stack) already sit on 0.17.1; the 0.16.1 copy is held down by `accesskit_consumer 0.38.0`,
-`gpu-allocator 0.28.0`, and `tree_arena 0.2.0`.
+0.16.1 and 0.17.1. `parley_engine`/`fontique` and the registry `glifo`/`vello_cpu` stack
+(exact-pinned in the root `Cargo.toml`) already sit on 0.17.1; the 0.16.1 copy is held down by
+`accesskit_consumer 0.38.0`, `gpu-allocator 0.28.0`, and `tree_arena 0.2.0`. `Cargo.lock` holds a
+third version, 0.15.5, but only `object` (reached through the host-side `frust-drive` tooling) uses
+it, so it is not on the Android graph.
 
 **Applies to**: every Android release build (lean or full feature set) — the split is on the
 resolved dependency graph, not behind a feature flag.
@@ -6450,8 +6453,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 **Trigger for removal**: `accesskit_consumer`, `gpu-allocator`, or `tree_arena` moving to a
 `hashbrown 0.17` requirement.
 
-**Evidence**: `Cargo.lock` (two `hashbrown` entries, 0.16.1 and 0.17.1, and their reverse
-dependencies); the lean Android graph in `benchmarks/frust_bench`.
+**Evidence**: `Cargo.lock` (the `hashbrown` entries and their reverse dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
@@ -6467,32 +6469,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `android-build-legacy-fallback-one-release` — a pre-migration Android layout keeps building via a read-only fallback, for one release
-
-**Observed**: `android_build::artifacts::discover` resolves a build's Gradle output new-first (`build/android/app/outputs`), then falls back read-only to the pre-migration AGP default (`android/app/build/outputs`) when only that path exists, printing a one-time warning naming the migration recipe. The fallback is a compatibility bridge, not a second permanent layout.
-
-**Applies to**: any project scaffolded before the `build/` root migration whose `settings.gradle.kts` still lacks the `buildDirectory` redirect.
-
-**Why accepted**: it lets a pre-migration app keep building and running without forcing an immediate migration, at the cost of one extra directory probe per artifact lookup — accepted for one release cycle only, per the module's own doc comment, after which an unmigrated project is expected to have followed the recipe.
-
-**Trigger for removal**: the release after the one this shipped in; delete `legacy_output_dir` and the fallback branch in `resolve_output_dir` together with this entry.
-
-**Evidence**: `crates/frust-drive/src/android_build/artifacts.rs` (`legacy_output_dir`, `resolve_output_dir`, `MIGRATION_RECIPE_DOC`).
-
----
-
-### `ios-build-phase-cargo-metadata-per-build` — the iOS build phase shells out to `cargo metadata` on every Xcode build
-
-**Observed**: the generated Xcode build-phase script resolves the Rust target directory via `${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | ...)}` — when `CARGO_TARGET_DIR` is unset (the common case), every Simulator or device build shells out to `cargo metadata` before it can copy the compiled static library into `$BUILT_PRODUCTS_DIR`.
-
-**Applies to**: every iOS build of a scaffolded app.
-
-**Why accepted**: `cargo metadata` is what lets the phase resolve the real target directory correctly under a `.cargo/config.toml` `[build] target-dir` override or a `CARGO_TARGET_DIR` env var, instead of assuming the default; its cost (a workspace manifest walk, no compilation) is negligible next to the `cargo build` step the same script already runs first.
-
-**Evidence**: `crates/frust-drive/templates/app/ios.tmpl/Runner.xcodeproj/project.pbxproj.tmpl`'s build-phase `shellScript`.
-
----
-
 ### `url-launcher-ios-open-failure-unobservable` — an iOS launch failure has nothing left to report back to
 
 **Observed**: `UrlLauncher::open_external` on iOS dispatches the lookup-and-open sequence onto `dispatch_get_main_queue()` asynchronously (`DispatchQueue::exec_async`) and returns `Ok(())` immediately, before that closure has run. The closure's own call, `UIApplication::openURL_options_completionHandler`, passes `None` for the completion handler, so even a successful dispatch reports nothing back into Rust once it runs. A "no handler for this URL" or "app suspended" failure on this path is therefore unobservable to the caller — `open_external` always returns `Ok(())` on iOS regardless of what actually happens.
@@ -6501,23 +6477,25 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Why accepted**: a synchronous main-thread bounce (blocking until the dispatched closure completes) would violate this crate's fire-and-forget, never-block-the-caller contract if `open_external` is ever called from a background thread — `exec_async` is the only shape that holds that contract regardless of caller thread, and there is no result channel back into an already-returned stack frame from a `dispatch_get_main_queue()` closure.
 
-**Trigger for removal**: none anticipated without a callback-based `open_external` API (the crate currently returns before dispatch completes) — a redesign this crate's originating task did not call for.
+**Trigger for removal**: none anticipated without a callback-based `open_external` API (the crate currently returns before dispatch completes) — a redesign of the crate's synchronous shape.
 
 **Evidence**: `plugins/url-launcher/src/apple.rs`'s module doc (*Main-thread dispatch*, *`unsafe`*) and its `open_on_main`/`open_external` functions.
 
 ---
 
-### `url-launcher-desktop-no-deep-link-return` — desktop has no channel for a launched browser to hand a result back
+### `url-launcher-desktop-no-deep-link-return` — a desktop browser launched by `frust-url-launcher` cannot hand a result back
 
-**Observed**: `desktop::open_external` spawns `open`/`xdg-open` (macOS/Linux) or calls `ShellExecuteW` (Windows) and returns as soon as the OS accepts the launch; none of the three has any way for the resulting browser tab to hand a result — an OAuth authorization code, say — back to the launching process.
+**Observed**: `desktop::open_external` spawns `open`/`xdg-open` (macOS/Linux) or calls `ShellExecuteW` (Windows) and returns as soon as the OS accepts the launch; none of the three has any way for the resulting browser tab to hand a result back to the launching process. `frust-url-launcher` itself offers no return channel.
 
-**Applies to**: macOS, Linux, and Windows alike; any app using this plugin to start a browser-mediated round trip (e.g. an RFC 8252 OAuth authorization request) on desktop.
+**Applies to**: macOS, Linux, and Windows alike; an app that uses this plugin alone to start a browser-mediated round trip (for example an OAuth authorization request) on desktop. A desktop OAuth round trip is covered by `frust-auth-session`'s loopback listener (`LoopbackSession`) with the protocol half in `frust-oauth-native`; use those instead of this plugin for that case.
 
-**Why accepted**: this plugin's charter is opening a URL, nothing more — a full desktop OAuth round trip needs a return channel this crate does not provide (a local loopback listener, a manually pasted code, or similar), left to the app. Mobile's equivalent return leg goes through `frust::deep_links()` instead, which has no desktop analogue.
+**Workaround**: use `frust-auth-session`'s loopback session for a redirect-based flow; for anything else, a manually pasted code.
 
-**Trigger for removal**: a desktop deep-link/callback channel ships elsewhere in the framework and this plugin (or its caller) wires a completion path into it.
+**Why accepted**: this plugin's charter is opening a URL, nothing more. Mobile's equivalent return leg goes through `frust::deep_links()`, which has no desktop analogue.
 
-**Evidence**: `plugins/url-launcher/src/desktop.rs`'s module doc; `plugins/url-launcher/README.md` §3 (*Desktop has no deep-link callback*).
+**Trigger for removal**: this plugin grows a completion path of its own, or a desktop deep-link channel ships in the framework.
+
+**Evidence**: `plugins/url-launcher/src/desktop.rs`'s module doc; `plugins/url-launcher/README.md` §3 (*Desktop has no deep-link callback*); `plugins/auth-session/src/loopback.rs` (`LoopbackSession`).
 
 ---
 
@@ -6923,20 +6901,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `auth-session-loopback-poll-interval-v1` — the loopback accept loop's 25 ms poll bounds cancel/timeout/drop latency, not instant
-
-**Observed**: `LoopbackSession`'s accept loop polls its shutdown flag every 25 ms; a cancel (`LoopbackCancel::cancel`), a dropped future, or `LoopbackOptions::timeout` elapsing therefore closes the listener socket within about one poll interval — including while a connection is already being served, since each connection's reads also run in 25 ms passes (since commit `5e686576`) rather than blocking for the full request-head budget. The one exception is a response write already in progress, bounded by `CONNECTION_IO_TIMEOUT` (2 s) rather than the poll interval. While idle, the loop wakes 40 times a second whether or not a client ever connects.
-
-**Applies to**: every `LoopbackSession`, on every target it runs on.
-
-**Why accepted**: a self-connect wake (opening a throwaway loopback connection to interrupt `accept()` immediately) would close the gap but adds its own connect-to-self race and extra firewall/antivirus surface on Windows; polling is the portable choice, and 25 ms is well under human-perceptible latency for a cancel button or a timeout deadline.
-
-**Trigger for removal**: none anticipated — a deliberate portability trade, not a deferral.
-
-**Evidence**: `plugins/auth-session/src/loopback.rs`'s module doc (*Lifecycle* step 3, *Security*'s last paragraph) and its accept-loop poll interval.
-
----
-
 ### `auth-session-no-cancel-v1` — no way to cancel a live session from Rust
 
 **Observed**: `AuthSession` exposes no `cancel` method — once `start` returns a pending future, it only resolves when the identity provider redirects, the user dismisses the platform tab themselves, or a platform-level failure occurs; there is no programmatic way for an app to dismiss a live session (e.g. on its own timeout or navigation-away). Dropping the awaited future (not awaiting it, or awaiting and then discarding the result) releases the session Busy slot immediately without waiting for platform resolution — but it does **not** end the platform UI: on Android the Custom Tab stays on screen until the user closes it (a redirect it delivers afterwards finds no pending session and is dropped); on iOS/macOS the presented `ASWebAuthenticationSession` sheet stays up until the user dismisses it or the next `AuthSession::start` `-cancel`s it in favour of the new session (its `CanceledLogin` completion is then discarded as a stale generation).
@@ -7047,7 +7011,7 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 **Trigger for removal**: a `frust` migration command, or 0.5.0 projects falling out of use.
 
-**Evidence**: deferred action item act_000001a1021c875bkG9kgNET; the 0.5.0 templates (`crates/frust-drive/templates/app/` before the platform-wiring change).
+**Evidence**: the 0.5.0 templates (`crates/frust-drive/templates/app/` before the platform-wiring change).
 
 ---
 
@@ -7121,20 +7085,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 
 ---
 
-### `network-image-no-reinstall-recheck` — a network image view that found no loader does not re-check when one is installed
-
-**Observed**: a view built before `NetworkImages::install()` (or without a context loader) shows its error slot and logs once; it looks for a loader again only when its url, headers or target change, not when a loader appears later.
-
-**Applies to**: views built before install; in practice `install()` runs in the `app!` setup block, before any view.
-
-**Why accepted**: the supported call site (`frust::app!(App, setup = { NetworkImages::install(); })`) makes the case unreachable; a missing install is a programmer error surfaced by the error slot and the log line.
-
-**Trigger for removal**: none planned.
-
-**Evidence**: `plugins/network-image/src/view.rs` and `plugins/network-image/src/install.rs` (`NetworkImages::loader`).
-
----
-
 ### `network-image-disk-hit-decode-failure-not-evicted` — a disk cache entry that fails to decode is not evicted
 
 **Observed**: when bytes read from the disk cache fail to decode (corrupt file, unsupported format after the `webp` feature was turned off), the load fails and the entry stays; the view shows its error slot on every attempt until the entry is evicted by the LRU or `clear_disk`/`clear_all` is called.
@@ -7146,20 +7096,6 @@ dependencies); the lean Android graph in `benchmarks/frust_bench`.
 **Trigger for removal**: evict-on-decode-failure plus a single refetch in `ImageLoader`.
 
 **Evidence**: `plugins/network-image/src/loader.rs` (disk-hit decode path); `plugins/network-image/src/disk_cache.rs`.
-
----
-
-### `network-image-android-gate-needs-ndk` — the Android compile gate for the network image plugin needs the NDK C compiler
-
-**Observed**: `cargo check --target aarch64-linux-android -p frust-network-image` with default features fails without the NDK toolchain on `PATH` because `ring` compiles C. The gate is `cargo ndk -t arm64-v8a -P 29 check -p frust-network-image`; `examples/playground` links `ring` through the plugin's default feature, so its Android check takes the same form. The plain target check works only with `--no-default-features`.
-
-**Applies to**: contributors and CI running the Android compile gates without `cargo-ndk`.
-
-**Why accepted**: ring has no pure-Rust build; the TLS stack is the plugin's reason to exist, and `cargo-ndk` is already a prerequisite for Android builds.
-
-**Trigger for removal**: a pure-Rust TLS provider, or an NDK-configured environment in the plain gate.
-
-**Evidence**: [DEVELOPMENT.md](DEVELOPMENT.md) § Test (compile gates); `plugins/network-image/Cargo.toml`.
 
 ---
 
@@ -7294,14 +7230,14 @@ paint no keyboard-focus ring").
 
 ### `android-first-frame-carries-shader-module-creation` — the first frame after a surface install waits for the shader modules it draws with
 
-**Observed**: since the shader modules are created on first use (PR #102, 2026-10-19), the first
+**Observed**: since the shader modules are created on first use (measured 2026-10-19), the first
 frame after a surface install on Android waits in `first_submit_pipeline_wait` for the four modules
 its own pipelines need, which a pool of threads starts at install: `first_encode_done →
-first_frame_presented` is 32 ms median on the OnePlus 9 and 54 on the Pixel 5 against the ≤ 25 ms the
-frust-fast plan set (11 / 14 when the install created every module itself) — while
+first_frame_presented` is 32 ms median on the OnePlus 9 and 54 on the Pixel 5 against the ≤ 25 ms target
+(11 / 14 when the install created every module itself) — while
 `first_frame_presented` as a whole fell from 124 to 67 ms and from 214 to 108, with `adapter_ready`
-back at September's 32 / 40 ms. Starting the modules on the GPU pre-init thread instead (f2-03,
-2026-10-20) measured 28 / 45: a `wgpu::ShaderModule` needs the device, the pre-init thread owns one
+back at September's 32 / 40 ms. Starting the modules on the GPU pre-init thread instead
+(2026-10-20) measured 28 / 45: a `wgpu::ShaderModule` needs the device, the pre-init thread owns one
 only at the end of its work, and the install follows that moment at once, so the modules never exist
 before the install whatever thread starts them.
 
@@ -7329,7 +7265,7 @@ shader modules re-measure (2026-10-20)" under the OnePlus 9 and Pixel 5 S7 secti
 ### `i18n-interval-hand-rolled` — date and time ranges are joined by hand, with no CLDR interval formats
 
 **Observed**: `fmt::time_range`, `time_range_in_zone`, `date_range` and `datetime_range_in_zone`
-are hand-rolled. ICU4X 2.2 (`icu_datetime`, `icu_experimental`, `icu_time`) has no interval
+are hand-rolled. ICU4X 2.4 (`icu_datetime`, `icu_experimental`, `icu_time`) has no interval
 formatter and its baked data has no interval key, so each end is formatted separately and the
 two are joined with a per-language separator (ja U+FF5E, zh U+2013, otherwise ` – `). In
 12-hour locales a day period shared by both ends is collapsed onto the last end by string
@@ -7508,7 +7444,7 @@ member 2, when drawn hinted with a synthetic bold; the probe's `#[ignore]` macOS
 **Workaround**: use a real bold face or a variable weight axis.
 
 **Evidence**: `crates/frust-engine/tests/hint_instance_probe.rs`; the `embolden_basis` rustdoc in
-`crates/frust-engine/src/text/atlas_policy.rs`; follow-up act_000001a19c2219a9PDJpfDuS.
+`crates/frust-engine/src/text/atlas_policy.rs`.
 
 ---
 
@@ -7541,11 +7477,10 @@ window with a wide margin; the browser offers no file to persist to.
 **Evidence**: `crates/frust-text/src/oracle/cache.rs` (`STALE_TEMP_AFTER`, `FOREIGN_STALE_TEMP_AFTER`);
 `crates/frust-shell-desktop/src/app_handler.rs` (`font_cache_transition`, `font_cache_exit`);
 `crates/frust-shell-ios/src/ffi_glue.rs` (`frust_did_enter_background`); `crates/frust-shell-web/src/app_handler.rs`
-(`has_persistent_font_cache`). Gates: p4-ios-flush-hidden (one flush per background, none on foreground or for a
-top-right Control Center pull; a Notification Center pull does report a background, by iOS design),
-p4-android-flush-hidden (Pixel 5: one flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, cache
-survives `am force-stop`), p4-desktop-flush-hidden (macOS M4: minimize 1 flush at 11.2 ms, occlusion 1, Quit 1 exit
-flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
+(`has_persistent_font_cache`). Device observations: on iOS one flush per background, none on foreground or for a
+top-right Control Center pull (a Notification Center pull does report a background, by iOS design); on a Pixel 5 one
+flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache survives `am force-stop`; on macOS
+(M4) minimize 1 flush at 11.2 ms, occlusion 1, Quit 1 exit flush, focus loss 0; in Chrome a tab hide logs no flush.
 
 ---
 
@@ -7713,6 +7648,8 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Evidence**: `crates/frust-widgets/src/gesture.rs` tests `a_bare_detector_does_not_hear_a_second_finger`, `a_nested_pinch_keeps_its_second_finger_and_the_press_is_cancelled` and `a_pinch_behind_a_component_boundary_still_cancels_the_press_and_scales`; facade Tester test `a_bare_detector_never_hears_a_second_finger_so_the_press_runs_on` (`crates/frust/src/testing/gesture.rs`). A possible lift, not planned: mirror `contacts_requested` outward in `frust-core` `component.rs` the way `capture_pointer` is.
 
+---
+
 ### `memory-pressure-not-reported-on-windows-linux-web` — no memory-pressure event on Windows, Linux or web
 
 **Observed**: `on_memory_pressure` never fires on Windows, Linux or web, since those shells have no source. iOS, Android and macOS report it. The render caches are trimmed only on iOS and Android Critical, and the app is never told about a low-memory condition on the other hosts.
@@ -7739,7 +7676,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Trigger for removal**: a catalog moving its remaining constants onto `TypeScale` roles, or a desktop OS text-scale source.
 
-**Evidence**: (2026-11-07) `frust-theme` text-scale tests (`crates/frust-theme/src/typography.rs`); gate `p4-text-scale` on a Xiaomi 12 and an iPhone 13 mini.
+**Evidence**: (2026-11-07) `frust-theme` text-scale tests (`crates/frust-theme/src/typography.rs`); device checks on a Xiaomi 12 and an iPhone 13 mini.
 
 ---
 
@@ -7787,7 +7724,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Trigger for removal**: Android reports a never-asked state. Until then, a slower-device gate leg should confirm the 500 ms threshold.
 
-**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*The asked flag*); gate k2-pm-07 (Pixel 5, Android 14: Denied, then Blocked with no dialog; `pm clear` returns every row to `NotDetermined`); the recovery rules are `currentCode` and `isSystemRefusal` in the same file, with the round-1 re-check legs in `docs/PLUGINS_DEVELOPMENT.md` (*Permissions manual test*).
+**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*The asked flag*); device run on a Pixel 5 (Android 14): Denied, then Blocked with no dialog; `pm clear` returns every row to `NotDetermined`; the recovery rules are `currentCode` and `isSystemRefusal` in the same file, with the re-check steps in `docs/PLUGINS_DEVELOPMENT.md` (*Permissions manual test*).
 
 ---
 
@@ -7803,7 +7740,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Trigger for removal**: a persisted request registry that survives process death.
 
-**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Delivering the answer*); `plugins/permissions/src/android.rs` (`REQUEST_TIMEOUT`); gate k2-pm-07 (rotation with a dialog up delivered the answer). Process death with a dialog up is derived from the code and has not been run on a device.
+**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Delivering the answer*); `plugins/permissions/src/android.rs` (`REQUEST_TIMEOUT`); Pixel 5 device run (rotation with a dialog up delivered the answer). Process death with a dialog up is derived from the code and has not been run on a device.
 
 ---
 
@@ -7819,7 +7756,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Trigger for removal**: a macOS Photos arm with its entitlement and a device gate.
 
-**Evidence**: (2026-11-08) `plugins/permissions/src/apple.rs` (Photos and `MediaLocation` arms on macOS); the macOS host test `photos_and_media_location_are_unsupported_on_macos`; gate k2-pm-08 (Mac: Photos and Media location rows read `Unsupported`).
+**Evidence**: (2026-11-08) `plugins/permissions/src/apple.rs` (Photos and `MediaLocation` arms on macOS); the macOS host test `photos_and_media_location_are_unsupported_on_macos`; a Mac device run (Photos and Media location rows read `Unsupported`).
 
 ---
 
@@ -7835,7 +7772,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Trigger for removal**: `ManifestPermission` gains a `maxSdkVersion` field and the registry sets it, and the API 30 emulator leg passes.
 
-**Evidence**: (2026-11-08) `crates/frust-drive/src/plugin/registry.rs` (`PERMISSIONS_PHOTOS`, `PHOTO_LIBRARY_LIBRARY`); `plugins/permissions/src/codes.rs` (the photos permission lists); gate k2-pm-07 (step 7, the API 30 emulator leg, OWED).
+**Evidence**: (2026-11-08) `crates/frust-drive/src/plugin/registry.rs` (`PERMISSIONS_PHOTOS`, `PHOTO_LIBRARY_LIBRARY`); `plugins/permissions/src/codes.rs` (the photos permission lists); the API 30 emulator run is not yet done.
 
 ---
 
@@ -7851,9 +7788,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Trigger for removal**: Android grants `ACCESS_MEDIA_LOCATION` under partial access, or the API adds a way to read photo location without it.
 
-**Evidence**: (2026-11-08) `plugins/permissions/src/codes.rs` (`MEDIA_LOCATION`); `plugins/permissions/src/apple.rs` (`media_location`); `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Media location*); gate k2-pm-07 (Pixel 5: full access Granted with no dialog; Limited access refused silently, recorded and fixed to report `Denied`); gate k2-pm-06 (iPhone 13 mini: Granted, no prompt, before it mirrored Photos; re-check owed); gate k2-pm-08 (Mac: `Unsupported`).
-
----
+**Evidence**: (2026-11-08) `plugins/permissions/src/codes.rs` (`MEDIA_LOCATION`); `plugins/permissions/src/apple.rs` (`media_location`); `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Media location*); device runs: Pixel 5 (full access Granted with no dialog; Limited access reports `Denied`); iPhone 13 mini (Granted, no prompt; recorded before `MediaLocation` was made to mirror Photos, not re-checked since); Mac (`Unsupported`).
 
 ---
 
@@ -7869,7 +7804,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 **Trigger for removal**: the platform reports a blocked state without an Activity.
 
-**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Denied and Blocked need a resumed Activity*, `currentCode`); gate k2-pm-07 (Pixel 5: Blocked read with the app resumed). The no-Activity read is derived from the code and has not been run on a device.
+**Evidence**: (2026-11-08) `plugins/permissions/platform/android/src/main/kotlin/dev/frust/permissions/FrustPermissionsHost.kt` (*Denied and Blocked need a resumed Activity*, `currentCode`); Pixel 5 device run (Blocked read with the app resumed). The no-Activity read is derived from the code and has not been run on a device.
 
 ---
 
@@ -7999,11 +7934,11 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ---
 
-### `photo-library-macos-desktop-folder-only` — desktop has no photo library to browse
+### `photo-library-macos-desktop-folder-only` — desktop and the browser have no photo library to browse
 
 **Observed**: with the `library` feature, `albums`, `assets`, `thumbnail` and `manage_limited_selection` answer `PhotoError::Unsupported` on macOS, Linux and Windows (and web); only `pick` works there, through the native file dialog. macOS Photos is not read, even though the machine has a Photos library.
 
-**Applies to**: macOS, Linux and Windows; apps that want an in-app grid of the user's photos.
+**Applies to**: macOS, Linux, Windows and the browser tier; apps that want an in-app grid of the user's photos.
 
 **Workaround**: use `pick` (the file dialog) on desktop, or list a folder yourself.
 
@@ -8063,22 +7998,6 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ---
 
-### `photo-library-android-picker-fallback-untested` — the API 29/30 picker fallback has not been device-tested
-
-**Observed**: below the system picker's availability (API 33, or API 30 with R SDK extension 2) the host falls back to the Google Play services picker and then to `ACTION_OPEN_DOCUMENT`, which enforces no selection maximum (the result is truncated to the limit). No API 29 or 30 device or emulator leg has run; the Pixel 5 and Xiaomi 12 legs ran on newer Android.
-
-**Applies to**: Android 10 and 11 devices without the Play services picker.
-
-**Workaround**: none known; report a failure with the Android version.
-
-**Why accepted**: owed device leg, not a measured degrade.
-
-**Trigger for removal**: the API 29/30 emulator leg passes.
-
-**Evidence**: (2026-11-08) `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/FrustPhotoLibraryHost.kt` (picker selection, limit handling); leg owed.
-
----
-
 ### `photo-library-live-photo-still-only` — exporting a Live Photo returns its still, not the paired video
 
 **Observed**: `export_original` on an iOS Live Photo writes the still image resource only; the paired video resource is never selected, so the exported file is a plain photo with no motion.
@@ -8111,7 +8030,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 ---
 
-### `photo-library-android-location-redacted` — stored location survives only some routes on Android
+### `photo-library-android-location-redacted` — stored location survives only some pick and export routes (Android, measured against iOS)
 
 **Observed**: whether an image's stored GPS location survives depends on the route, measured on a Pixel 5 (Android 14) with a camera photo and on an iPhone SE 2nd gen (iOS 26.7.1):
 
@@ -8125,7 +8044,7 @@ flush, focus loss 0), p4-web-no-flush (Chrome: tab hide logs no flush).
 
 Media location has no user-facing switch on Android 14: it is granted along with Photos.
 
-**Applies to**: Android apps that need stored location from a pick, or from an export without Media location.
+**Applies to**: Android apps that need stored location from a pick, or from an export without Media location. iOS `PHPicker` keeps location with default options and is listed only for contrast.
 
 **Workaround**: browse and export (`library`), with `permissions`' `media-location` feature requested and granted; that is the route known to keep location. GPS through a folder-grant read on Android has not been measured, so do not rely on it. An app can tell its user that picked photos lose their location on Android and that the library route keeps it.
 
@@ -8285,5 +8204,21 @@ service stopped, no ANR. `am force-stop`, `cmd activity stop-app` and `kill -9` 
 shows the guard works, not that it was needed. Notification display was not observed: the test app does not declare
 `POST_NOTIFICATIONS`, so none can appear on API 33+. API 29-33 and a start after the grace period were not exercised.
 `plugins/background-task`.
+
+---
+
+### `android-accessibility-service-abort` — an Android app aborts when a window change meets an active accessibility client
+
+**Observed**: an Android app aborts (SIGABRT on the UI thread) when an accessibility client is active — TalkBack, or any tool that queries the accessibility tree such as `uiautomator dump` — and the window then changes: a rotation or resize, a window-content change that publishes semantics, or a back-finish followed by a relaunch. The abort message is a `Result::unwrap()` on a Java exception. The AccessKit Android adapter (`accesskit_android 0.7.5`, a version-pinned dependency) raises an accessibility event from a runnable it posts to the UI thread and unwraps a JNI call that threw; the panic crosses the JNI boundary and aborts in every build mode. The Android shell installs no panic hook, so the message is lost outside a tombstone.
+
+**Applies to**: every frust Android app, only while an accessibility service or client is active. Without one, the path is not taken.
+
+**Workaround**: none in app code.
+
+**Why accepted**: the unwrap is inside the pinned dependency's own runnable, outside frust's call stack; the remedy is an upstream change plus a pin bump, which the version-pin policy ([DEVELOPMENT.md](DEVELOPMENT.md) § Version-Pin Policy) requires to be planned on its own.
+
+**Trigger for removal**: a pinned `accesskit_android` that no longer unwraps the failing call.
+
+**Evidence**: reproduced deterministically on a Pixel 5 in profile and debug builds: `adb shell uiautomator dump` followed by a rotation aborts within a second, 2 of 2; plain rotations with no accessibility client, 8 of 8 stayed alive. Symbolized frames: `accesskit_android` `event.rs` `send_completed_event` / `send_window_content_changed`, called from `dev.accesskit.android.Delegate`'s posted runnable. First seen 2026-09-30; seen again in device gates on 2026-11-01 and 2026-11-03.
 
 ---
