@@ -801,3 +801,12 @@ mod android_originals;
 pub(crate) use android_originals::export_original;
 #[cfg(feature = "save")]
 pub(crate) use android_originals::save;
+
+// Decode: the real arm lands with the ImageDecoder arm in a following change.
+#[cfg(feature = "decode")]
+pub(crate) fn decode_file(
+    _path: &std::path::Path,
+    _options: &crate::DecodeOptions,
+) -> Result<crate::DecodedImage, PhotoError> {
+    Err(PhotoError::Unsupported)
+}

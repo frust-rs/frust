@@ -145,6 +145,33 @@ pub struct PickedItem {
     pub is_copy: bool,
 }
 
+/// Capture metadata read from an image's EXIF block. Every field is optional: a file carries
+/// only what its camera or editor wrote.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct ExifData {
+    /// When the photo was taken, as the file records it (`YYYY:MM:DD HH:MM:SS`, local time).
+    pub capture_time: Option<String>,
+    /// Camera manufacturer.
+    pub camera_make: Option<String>,
+    /// Camera model.
+    pub camera_model: Option<String>,
+    /// Lens description.
+    pub lens: Option<String>,
+    /// ISO sensitivity.
+    pub iso: Option<u32>,
+    /// Exposure time in seconds.
+    pub exposure_seconds: Option<f64>,
+    /// Aperture as an f-number.
+    pub aperture: Option<f64>,
+    /// Focal length in millimetres.
+    pub focal_length_mm: Option<f64>,
+    /// GPS latitude in degrees, south negative.
+    pub gps_latitude: Option<f64>,
+    /// GPS longitude in degrees, west negative.
+    pub gps_longitude: Option<f64>,
+}
+
 /// Why a photo-library call failed. Display never echoes paths or identifiers.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

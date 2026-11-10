@@ -52,6 +52,7 @@
 //! ```
 
 mod cancel;
+mod decode;
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
@@ -81,6 +82,7 @@ mod pixels;
 mod thumb_cache;
 
 pub use cancel::CancelToken;
+pub use decode::{DecodeOptions, DecodedImage, ImageColorSpace};
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
@@ -101,7 +103,7 @@ pub use originals::{
     AssetVersion, ExportOptions, ExportedOriginal, ProgressFn, SaveRequest, SavedAsset,
 };
 pub use types::{
-    AssetId, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
+    AssetId, ExifData, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
 };
 
 /// The folder types [`PhotoLibrary::scan_folder`] takes and returns, from `frust-file-dialogs`,
@@ -306,6 +308,61 @@ impl PhotoLibrary {
         {
             let _ = (id, options);
             Err(library_disabled())
+        }
+    }
+
+    /// Decodes an image file at its full resolution, downscaled so neither side exceeds
+    /// [`DecodeOptions::max_dimension`], into straight-alpha RGBA8. Blocks; needs the `decode`
+    /// feature. [`PhotoError::UiThread`] on a mobile UI thread, [`PhotoError::Unsupported`]
+    /// where the platform has no decoder, and [`PhotoError::InvalidRequest`] for a zero
+    /// `max_dimension`. A token cancelled before the call returns [`PhotoError::Cancelled`].
+    pub fn decode_file(
+        path: &std::path::Path,
+        options: &DecodeOptions,
+    ) -> Result<DecodedImage, PhotoError> {
+        #[cfg(feature = "decode")]
+        {
+            decode::precheck(options)?;
+            platform::decode_file(path, options)
+        }
+        #[cfg(not(feature = "decode"))]
+        {
+            let _ = (path, options);
+            Err(decode::decode_disabled())
+        }
+    }
+
+    /// Exports an asset's file (see [`export_original`](Self::export_original)), decodes it as
+    /// [`decode_file`](Self::decode_file) does, and removes the exported file afterwards on
+    /// success, failure and cancel. Blocks; needs the `decode` and `library` features.
+    pub fn decode_asset(
+        id: &AssetId,
+        options: &DecodeOptions,
+        export: &ExportOptions,
+    ) -> Result<DecodedImage, PhotoError> {
+        #[cfg(all(feature = "decode", feature = "library"))]
+        {
+            decode::decode_asset_with(
+                id,
+                options,
+                export,
+                |id, export| {
+                    if originals::is_cancelled(export) {
+                        return Err(PhotoError::Cancelled);
+                    }
+                    platform::export_original(id, export)
+                },
+                platform::decode_file,
+            )
+        }
+        #[cfg(not(all(feature = "decode", feature = "library")))]
+        {
+            let _ = (id, options, export);
+            Err(if cfg!(feature = "decode") {
+                library_disabled()
+            } else {
+                decode::decode_disabled()
+            })
         }
     }
 

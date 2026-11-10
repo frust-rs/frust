@@ -141,6 +141,15 @@ pub(crate) fn save(
     Err(PhotoError::Unsupported)
 }
 
+// Decode: desktop has no native decoder arm yet.
+#[cfg(feature = "decode")]
+pub(crate) fn decode_file(
+    _path: &std::path::Path,
+    _options: &crate::DecodeOptions,
+) -> Result<crate::DecodedImage, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,6 +20,9 @@ library = []
 # with it off `PhotoLibrary::save` returns `PhotoError::FeatureDisabled`. `export_original`
 # needs `library` instead.
 save = []
+# Full-resolution native decode (`PhotoLibrary::decode_file`, and `decode_asset` together with
+# `library`). A code gate only: with it off both calls return `PhotoError::FeatureDisabled`.
+decode = []
 
 [dependencies]
 thiserror = { workspace = true }
