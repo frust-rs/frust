@@ -46,3 +46,12 @@ pub(crate) fn save(
 ) -> Result<crate::SavedAsset, PhotoError> {
     Err(PhotoError::Unsupported)
 }
+
+// Decode: these targets have no native decoder.
+#[cfg(feature = "decode")]
+pub(crate) fn decode_file(
+    _path: &std::path::Path,
+    _options: &crate::DecodeOptions,
+) -> Result<crate::DecodedImage, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
