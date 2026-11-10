@@ -371,9 +371,10 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   binds a container that publishes a cleared IME surface** (the navigator's `needs_ime_clear`
   producers, `PatternSwitcher`'s): an inactive publish *is* a session release, so raise it only for
   an outgoing/covered subtree that was itself on the live chain — on a push, the page being
-  **covered**. Two severing paths are registered rather than fixed: a type swap inside a wrapper view
-  re-boxing an `AnyView` under its own `Box<dyn Widget>` (`focus-wrapper-erasure-swap-blind`) and
-  the hand-rolled navbar/tabbar item lists, which never clear or mark a truncated item's focus link. See `docs/LIMITATIONS.md`.
+  **covered**. One severing path is registered rather than fixed: a type swap inside a wrapper view
+  re-boxing an `AnyView` under its own `Box<dyn Widget>` (`focus-wrapper-erasure-swap-blind`). One
+  more is latent and unregistered: the hand-rolled navbar/tabbar item lists never clear or mark a
+  truncated item's focus link, harmless only while nav items never take focus. See `docs/LIMITATIONS.md`.
 
 - **A focusable control answers `Widget::is_focusable` and activates only on a bare, non-repeat
   Space/Enter while focused;** its keyboard-focus look reads `PaintCtx::is_focused_for_ring`, while

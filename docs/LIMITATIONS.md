@@ -3,7 +3,7 @@
 A register of accepted, known limitations an app author can actually hit —
 not a bug list and not a TODO list. Open bugs and unshipped fixes are tracked
 separately; this doc is for a degrade that is **measured, understood, and
-deliberately shipped anyway** (accepted by Ed, or blocked on a documented
+deliberately shipped anyway** (accepted by the maintainers, or blocked on a documented
 constraint), so it is discoverable from the docs instead of only from a gate
 report or an old chat.
 
@@ -25,7 +25,7 @@ effect.
 
 **Applies to**: Android, a platform view hosted inside a scrolling container
 (e.g. the camera preview inside playground's `ScrollView`); measured on
-cupid. Does not apply in texture mode: the camera's texture preview is scene content, not a hosted view.
+a Xiaomi 12. Does not apply in texture mode: the camera's texture preview is scene content, not a hosted view.
 
 **Why not fixed**: the shape-aware sync tail's regime detector keys off an
 acquire-wait EWMA that cannot rise until the GPU queue actually builds under
@@ -37,31 +37,31 @@ arm that speculatively latches the regime on touch-down via a new
 Kotlin→Rust signal — is more invasive and awaits a ruling; it is not
 automatic.
 
-**Evidence**: on-device A/B measurement (Android, cupid) — see Why not fixed
+**Evidence**: on-device A/B measurement (Android, Xiaomi 12) — see Why not fixed
 above for the result.
 
 ---
 
 ### `cam-tail-p90-residual` — shape-aware sync tail does not clear its own bar (Android)
 
-**Observed**: with the shape-aware sync tail active, cupid's steady-state
+**Observed**: with the shape-aware sync tail active, the Xiaomi 12's steady-state
 platform-view lead has a p90 of 1.78-1.98 display frames (~15-17 ms) against
 a ≤0.25-frame p90 target that it does not clear. Median lead is 0 at every
 measured velocity and overshoot is 0 everywhere.
 
-**Applies to**: Android, acquire-bound devices in the same class as cupid
+**Applies to**: Android, acquire-bound devices in the same class as the Xiaomi 12
 (the regime the tail activates for at all).
 
 **Why accepted**: strictly better than the gate-only control on the same
 device/session (p90 4.8-4.9 frames), zero overshoot at every velocity.
-Accepted by Ed on 2026-07-26 partly because a camera preview is expected to
+Accepted by the maintainers on 2026-07-26 partly because a camera preview is expected to
 be placed on a static surface rather than inside a scroll view, which makes
 this residual unobservable for that use case — but the sync machinery itself
 stays load-bearing regardless: playground's own camera page deliberately
 scrolls the slot to exercise the dispose/revive cycle, and `platform_views`
 remains a scrolling Mode B testbed.
 
-**Evidence**: on-device measurement (cupid); closed and accepted per Ed's
+**Evidence**: on-device measurement (Xiaomi 12); closed and accepted per the maintainers'
 ruling above.
 
 ---
@@ -774,7 +774,7 @@ Builds from the CLI (`frust build --release`, `frust run --release`) continue
 to scrub via the normal signal path regardless.
 
 **Why accepted**: the raw-mode/ISIG interaction has always existed when a TUI
-terminal is in raw mode, and closing it was deferred by Ed (2026-08-04). The
+terminal is in raw mode, and closing it was deferred by the maintainers (2026-08-04). The
 exposure is real: many new users encounter the TUI first. Mitigation exists
 (signal-based scrub is one of two layers; the `Drop` guard still covers normal
 completion; SIGTERM/SIGHUP still scrub as above; actual leakage still
@@ -817,7 +817,7 @@ relying on the old `frust tui </dev/null` behavior.
 to support mixed-stream scenarios (see `tui-raw-mode-signing-scrub` above for
 the related signal-handling gap). There is
 deliberately no environment escape valve: `FRUST_NO_TUI` was considered and
-rejected by Ed (2026-08-04) — "frust --args for CLI and frust for TUI should
+rejected by the maintainers (2026-08-04) — "frust --args for CLI and frust for TUI should
 cover everything."
 
 **Evidence**: `crates/frust-cli/src/main.rs`'s `default_command` (`stdin_tty && stdout_tty`).
@@ -1799,7 +1799,7 @@ from the text," not an oversight.
 **Observed**: `frust-tui`'s `Supervisor` reports its own bounded-channel overflow (a build/run
 process producing lines faster than the workbench's internal channel can carry) as
 `SessionEventKind::Dropped(n)`, a cumulative, drop-newest counter. `engine::update` stores it only
-on `SessionView::dropped` for the UI to display — it is never appended to the session's own log
+on `SessionView::dropped` (reported through the MCP session summary) — it is never appended to the session's own log
 store as a line. `supervise::session_feeds::SessionSubscribers::deliver_lines` (what feeds a DAP
 client's `SessionEventFeed`) replays only lines actually present in that log store, so a client
 attached over `frust-dap` has no way to learn the supervisor itself silently dropped `n` lines
@@ -1810,7 +1810,10 @@ upstream — only the *feed's own* overflow (a separate, already-marked case; se
 channel overflows; unreachable in ordinary interactive use (the same rarity as the feed's own
 overflow), and distinct from — upstream of — that overflow.
 
-**Why accepted**: an open gap rather than an evaluated v1 stance. Closing it needs either synthesizing a log
+**Why accepted**: the overflow needs bursts of output deeper than the shared 256-slot channel (each
+slot a coalesced batch of lines), so it is unreachable in ordinary interactive use, and the count is
+still kept on `SessionView::dropped` and reported in the session summary the MCP backend serves
+(`dropped_log_lines`). Closing it needs either synthesizing a log
 line for the drop count (extra plumbing `SessionView` does not otherwise need) or extending
 `SessionEvent` with a marker variant `SessionSubscribers` replays alongside real lines.
 
@@ -2044,7 +2047,7 @@ affects every new user's first download).
 **Why accepted**: the feature's formatter quality (full CLDR support, ICU4X correctness
 guarantees over hand-rolled tables) was judged to outweigh the cost. The decision was
 re-confirmed after the original ~49 KB estimate was corrected to the honest +1.09 MB
-figure. Accepted by Ed 2026-08-15.
+figure. Accepted by the maintainers 2026-08-15.
 
 **Opt-out**: `default-features = false` in `frust-i18n`'s dependency stanza (app's
 `Cargo.toml` or workspace root). Apps that skip the feature retain the direct API's
@@ -2300,7 +2303,7 @@ AppKit's own behavior.
 ### `desktop-installer-runtime-partial` — some installer formats are refused, and some have never run for real
 
 **Observed**: `frust build <os> --installer` shells out to a pinned `cargo-packager` over an
-already-assembled bundle. An app author can hit three limits:
+already-assembled bundle. An app author can hit four limits:
 
 1. **`.rpm` is not a supported output.** `cargo-packager` 0.11 builds only `.deb`/AppImage/pacman on
    Linux, so a requested `.rpm` is a typed `InstallerError::RpmNotSupported` refusal naming
@@ -2309,7 +2312,12 @@ already-assembled bundle. An app author can hit three limits:
    as `cargo-packager`'s own typed refusal ("Could not find a square icon to use as AppImage icon")
    rather than a bundle with no icon, unlike a plain `frust build linux`, where a bad icon only
    downgrades to a `BundleNote`.
-3. **Runs that were never made.** Windows NSIS `.exe` and WiX `.msi` assembly is unit-tested against
+3. **`--installer appimage` fails on a host whose `binutils` emits a `.relr.dyn` section.** The
+   `strip` step of `cargo-packager` 0.11.8's vendored `linuxdeploy` rejects that relocation section,
+   so the build ends in `InstallerError::PackagerFailed`. The `.deb` path is unaffected. It is an
+   upstream tool mismatch, not a Frust defect, and host-conditioned: the same config shape has built
+   an `.AppImage` on another host.
+4. **Runs that were never made.** Windows NSIS `.exe` and WiX `.msi` assembly is unit-tested against
    a faked process runner only. A macOS `.dmg` has been built and mounted with an `Apple Development`
    identity (MacBook, 2026-08-17), but never with a `Developer ID Application` identity, and no
    `[macos] notarize = true` run has reached Apple's `notarytool`, so the packager's re-sign, its
@@ -2319,11 +2327,16 @@ already-assembled bundle. An app author can hit three limits:
 machine.
 
 **Why accepted**: the `.rpm` and square-icon rules are `cargo-packager`'s own limits, each surfaced as
-a typed refusal rather than a silent failure. The unmade runs need a Windows installer pass and a
+a typed refusal rather than a silent failure. The AppImage failure is a host tool-version mismatch
+with a proven typed-error path, not an unverified code path; it closes on a host with older or
+compatible `binutils`, or on an upstream `linuxdeploy` fix, neither of which this pipeline
+controls. The unmade runs need a Windows installer pass and a
 Developer ID identity with Apple credentials; both lanes stay opt-in and unit-tested until then.
 
 **Evidence**: `crates/frust-drive/src/desktop_build/installer.rs` (`InstallerFormat::for_target`,
-`RpmNotSupported`, the square-icon refusal test); a MacBook run of the `.dmg` lane, 2026-08-17.
+`RpmNotSupported`, the square-icon refusal test); a MacBook run of the `.dmg` lane, 2026-08-17; a
+Linux run of `--installer appimage` on a host with newer `binutils` that failed in the vendored
+`strip` step with `PackagerFailed` while `--installer deb` produced a genuine Debian package.
 
 ---
 
@@ -3141,7 +3154,9 @@ which no desktop platform does. The desktop gesture actually meant to open it (a
 works as well: this is an extra route, not a missing one.
 
 **Applies to**: desktop and any mouse-driven host on the framework route. `drag::draggable()` does
-read the source and needs a hold only for touch; the field does not.
+read the source and needs a hold only for touch; the field does not. The entry is scoped to the text field: the generic
+gesture detector (`crates/frust-widgets/src/gesture.rs`) does not consult the source either, so its
+`on_long_press` and `on_hold_progress` also fire for a held mouse.
 
 **Why accepted**: the wrong behaviour costs a selection the user can dismiss, never an edit.
 
@@ -3997,8 +4012,8 @@ a deliberate design choice recorded in its own module doc (the reveal ramp, the 
   unused), although drag recognizers do publish a release velocity (`DragEndDetails::velocity`), so
   a fast, short flick that upstream would open springs back here.
 - **No outside-press dismissal for `expandable_tabs`/`notification_stack`.**
-- **No pointer-type distinction** anywhere in the catalog — `PointerEvent` carries a `PointerSource`,
-  but no beUI component reads it, so a mouse and a touch press are handled identically.
+- **No pointer-type distinction** anywhere in the catalog — the contact's source rides beside the event
+  (`EventCtx::pointer_id`), but no beUI component reads it, so a mouse and a touch press are handled identically.
 - **`morphing_tabs`' active-tab order commits on release, not after the neighbours settle.**
 - **Text narrowing (`ReactNode` → `String`) in stack/list rows** — `notification_stack` and similar
   row-based blocks take plain text where upstream takes arbitrary content, the same narrowing
@@ -4142,7 +4157,7 @@ SHELLS_ARCHITECTURE.md, *Mobile frame path*), or a controller write requests its
 
 ### `scrollbar-vertical-pointer-only` — the baseline scrollbar is vertical, pointer-driven and invisible to semantics
 
-**Observed**: `.scrollbar(ScrollbarStyle)` exists only on the vertical `ScrollView` and `ListView`; horizontal surfaces and `CustomScrollView` take no bar. The bar is reached by pointer alone — no keyboard focus or keys — and contributes no semantics node of its own. A `ListView` can show one blank frame after a large thumb jump, as after any controller jump applied at paint, before the next rebuild re-windows its rows. Wheel scrolling with a bar shown is unexercised on the Linux rig (its synthetic wheel events never reach the window); macOS and Windows are unverified until their gates run.
+**Observed**: `.scrollbar(ScrollbarStyle)` exists only on the vertical `ScrollView` and `ListView`; horizontal surfaces and `CustomScrollView` take no bar. The bar is reached by pointer alone — no keyboard focus or keys — and contributes no semantics node of its own. A `ListView` can show one blank frame after a large thumb jump, as after any controller jump applied at paint, before the next rebuild re-windows its rows.
 
 **Applies to**: apps opting into the baseline scrollbar on any platform.
 
@@ -4450,8 +4465,7 @@ and compare against the kit.
 
 **Observed**: `ClipStack::push_path` always takes the mask shape — never a page, never a scissor —
 and there is no mask cache, so a path clip is re-rasterized on every push; a retained body under it
-is never retained. Goldens `unit-clip-path-star`/`-concave` have cpu and engine-vulkan-nvidia-t400
-baselines; engine-metal-macos baselines are owed.
+is never retained.
 
 **Applies to**: scenes with many or large path clips per frame.
 
@@ -6074,8 +6088,9 @@ bridge turns real browser composition (CJK marked text, dead keys, mobile autoco
    `navigator.clipboard` (a page that is not a secure context) leaves no route after the widget has
    already deleted.
 
-**Accepted because**: the composition, commit and cancel contract itself is real, and none of these
-blocks ordinary text entry. (1) blocks only deletion from a soft keyboard. (4) needs three
+**Accepted because**: real CJK/IME composition has not been driven through a live browser, so the
+composition, commit and cancel contract rests on the bridge's own tests rather than a live run;
+none of these gaps blocks ordinary text entry. (1) blocks only deletion from a soft keyboard. (4) needs three
 conditions at once, and a page served over plain `http` has already lost the async clipboard for
 every other purpose.
 
@@ -6432,7 +6447,7 @@ or work around from inside the pty.
 ### `lean-android-hashbrown-split` — the lean Android release graph carries two `hashbrown` copies
 
 **Observed**: `hashbrown` resolves to two versions on the lean Android release graph —
-0.16.1 and 0.17.1. `parley_engine`/`fontique` and the registry `glifo`/`vello_cpu` stack
+0.16.1 and 0.17.1. `parley_engine`, `fontique` and the registry `glifo`
 (exact-pinned in the root `Cargo.toml`) already sit on 0.17.1; the 0.16.1 copy is held down by
 `accesskit_consumer 0.38.0`, `gpu-allocator 0.28.0`, and `tree_arena 0.2.0`. `Cargo.lock` holds a
 third version, 0.15.5, but only `object` (reached through the host-side `frust-drive` tooling) uses
@@ -6825,7 +6840,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 **Why accepted**: this is RFC 8252's own documented risk for a custom-scheme redirect (its §8.1 recommends reverse-domain-unique scheme naming, which narrows but does not eliminate the window), not a defect this plugin introduces — callers MUST use PKCE and verify the state parameter to defend against forged/injected callbacks (see `README.md` §3.4 *Security*). HTTPS App Links (domain-verified) or Android's newer Auth Tab API would close the gap, but neither is in this plugin's v1 scope.
 
-**Trigger for removal**: a follow-on card adds an HTTPS App Links or Auth Tab callback path and `AuthSessionRequest` grows a way to select it; a narrower follow-on refuses redirects observed after a superseded launch (the host would need to remember that a tab it no longer tracks is still open).
+**Trigger for removal**: an HTTPS App Links or Auth Tab callback path exists and `AuthSessionRequest` grows a way to select it; or redirects observed after a superseded launch are refused (the host would need to remember that a tab it no longer tracks is still open).
 
 **Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt`'s class doc (*Why the outcome is read from `activity.intent`*, *The double-delivery note*) and its `pending` slot; `plugins/auth-session/src/android.rs` (*The generation round trip*); `examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` intent filter.
 
@@ -6837,7 +6852,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 **Applies to**: Android only; apps relying on `ephemeral: true` for cookie isolation must not assume it holds on every browser.
 
-**Why accepted**: the provider is chosen from a curated allow-list of well-known providers (default browser first if it supports Custom Tabs, then the first provider from the list that is installed and answers `CustomTabsService`); there is no portable way to demand ephemeral support short of binding to the service and checking `CustomTabsClient.isEphemeralBrowsingSupported`, which is a follow-on, not a v1 blocker.
+**Why accepted**: the provider is chosen from a curated allow-list of well-known providers (default browser first if it supports Custom Tabs, then the first provider from the list that is installed and answers `CustomTabsService`); there is no portable way to demand ephemeral support short of binding to the service and checking `CustomTabsClient.isEphemeralBrowsingSupported`, which is outside v1.
 
 **Trigger for removal**: the host probes ephemeral support before launching (or prefers a provider that reports it) and the gate records `no cookie (set now)` on a second ephemeral visit.
 
@@ -6853,7 +6868,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 **Why accepted**: v1 scope — differentiating between user-dismissed tabs and system-level resume events would require tracking session state and callback origin more finely than the current host does. The one-session `Busy` guard ensures a stuck session never wedges a later one, so an app that retries the auth flow after an interruption will not deadlock.
 
-**Trigger for removal**: a follow-on card tracks session lifecycle granularly, distinguishing user dismissal (Cancelled) from Activity-level interruption (a new `Interrupted` outcome or a more specific error variant).
+**Trigger for removal**: session lifecycle is tracked granularly, distinguishing user dismissal (Cancelled) from Activity-level interruption (a new `Interrupted` outcome or a more specific error variant).
 
 **Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt` (`onActivityResumed`); `plugins/auth-session/README.md` §3 (the *Attribution is by timing, not evidence* bullet).
 
@@ -6909,7 +6924,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 **Why accepted**: v1 scope — the one-session `Busy` guard (this crate's *Exactly one live session* doc section) means a stuck session still cannot wedge a later one forever, even with no cancel path and no forced cleanup — dropping the future frees the slot for a new session. Neither this crate's originating task nor its gate script called for a programmatic cancel on the platform-backend side.
 
-**Trigger for removal**: a follow-on task adds `AuthSession::cancel` (dismissing `ASWebAuthenticationSession` via `-cancel`, finishing the Android Custom Tab activity) and resolves the live session with `AuthSessionOutcome::Cancelled`.
+**Trigger for removal**: `AuthSession::cancel` exists (dismissing `ASWebAuthenticationSession` via `-cancel`, finishing the Android Custom Tab activity), resolving the live session with `AuthSessionOutcome::Cancelled`.
 
 **Evidence**: `plugins/auth-session/src/lib.rs`'s public API (`AuthSession::start`/`is_supported` only); `plugins/auth-session/README.md` §2.
 
@@ -6921,7 +6936,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 **Applies to**: iOS and macOS alike (both route through the same `apple.rs` module).
 
-**Why accepted**: this crate's deployment floor is iOS 15, where the newer initializer does not exist at all — supporting the HTTPS-callback form would need a second, floor-gated code path for a callback shape this crate's originating task did not ask for. A downstream app asked for HTTPS App-Link callback support (2026-09-23) as a wanted, non-blocking enhancement — v1 ships served instead by the private-use-scheme `AuthSession::start` path, or, on desktop, by `LoopbackSession`'s plain-`http` loopback redirect.
+**Why accepted**: this crate's deployment floor is iOS 15, where the newer initializer does not exist at all — supporting the HTTPS-callback form would need a second, floor-gated code path for a callback shape v1 does not offer. v1 is served instead by the private-use-scheme `AuthSession::start` path, or, on desktop, by `LoopbackSession`'s plain-`http` loopback redirect.
 
 **Trigger for removal**: raising the crate's deployment floor to iOS 17.4, or adding a floor-gated second path that uses the newer initializer when available.
 
