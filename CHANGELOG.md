@@ -12,7 +12,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   takes one generated `<PascalKey>Args` struct with a named field per variable, instead of
   positional arguments, so two values of the same type cannot be swapped at a call site. A message
   with zero or one variable is unchanged. Migration: for `editor-notice = Working: { $working },
-  full: { $full }`, replace `keys::editor_notice(&resolver, 50, 60)` (variables in name order, `full` then `working`) with
+  full: { $full }`, replace `keys::editor_notice(&resolver, 50, 60)` (variables in name order,
+  `full` then `working`) with
   `keys::editor_notice(&resolver, keys::EditorNoticeArgs { working: 60, full: 50 })`.
 
 ### Added
