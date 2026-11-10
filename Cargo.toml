@@ -205,6 +205,8 @@ sys-locale = "=0.3.2"
 # frust-i18n zoned formatting only. Bundled tzdb: mobile targets have no reliable system zoneinfo.
 # MSRV 1.70.
 jiff = { version = "0.2.38", default-features = false, features = ["std", "tzdb-bundle-always"] }
+# frust-i18n device zone name only (`device_time_zone`); the zone rules stay jiff's bundled tzdb.
+iana-time-zone = "0.1.65"
 # reactive stack (frust-reactive) — do not add reactive_graph's `effects`
 # feature anywhere (see docs/DEVELOPMENT.md's Version-Pin Policy)
 reactive_graph = "0.2"

@@ -38,6 +38,63 @@ pub fn zone_offset_seconds(unix_seconds: i64, iana: &str) -> Result<i32, I18nErr
     Ok(zone.to_offset(instant).seconds())
 }
 
+/// The device's current IANA time zone name, for example `"Europe/Berlin"`.
+///
+/// The platform is asked on every call and nothing is cached here, so a zone
+/// the user changes while the app runs is seen by the next call. The name is
+/// validated against the bundled database; `None` (with a logged warning)
+/// when the platform cannot report a zone or reports one the database does
+/// not know. Callers must handle `None`.
+///
+/// Re-read on resume to notice a change, by reading the lifecycle state in
+/// `build` so the view rebuilds when the app returns to the foreground:
+///
+/// ```ignore
+/// impl Component for Today {
+///     fn build(&self, _cx: &mut BuildContext) -> impl View {
+///         let _ = app_lifecycle().state();
+///         let zone = device_time_zone().unwrap_or_else(|| "UTC".to_owned());
+///         Text::new(zone)
+///     }
+/// }
+/// ```
+#[must_use]
+pub fn device_time_zone() -> Option<String> {
+    validated_zone(iana_time_zone::get_timezone())
+}
+
+/// The UTC offset, in seconds east of UTC, of the device's current zone at the
+/// instant `unix_seconds`; `None` when [`device_time_zone`] is `None` or the
+/// instant is outside the range the zone database represents.
+///
+/// Like [`device_time_zone`] this reads the platform on every call.
+#[must_use]
+pub fn device_offset_seconds(unix_seconds: i64) -> Option<i32> {
+    let zone = device_time_zone()?;
+    zone_offset_seconds(unix_seconds, &zone).ok()
+}
+
+/// Accepts a platform zone-read result, keeping only names the bundled
+/// database knows.
+fn validated_zone<E: std::fmt::Display>(raw: Result<String, E>) -> Option<String> {
+    match raw {
+        Ok(name) => validate_zone_name(name),
+        Err(error) => {
+            log::warn!("frust-i18n: could not read the device time zone: {error}");
+            None
+        }
+    }
+}
+
+fn validate_zone_name(name: String) -> Option<String> {
+    if TimeZone::get(&name).is_ok() {
+        Some(name)
+    } else {
+        log::warn!("frust-i18n: the device reported an unknown time zone `{name}`");
+        None
+    }
+}
+
 /// The civil date and time the instant `unix_seconds` reads as in zone `iana`.
 ///
 /// # Errors
@@ -262,6 +319,31 @@ pub(super) fn utc_unix(date: CivilDate, time: CivilTime) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_raw_zone_name_yields_none() {
+        assert_eq!(validate_zone_name("Not/AZone".to_owned()), None);
+        assert_eq!(validated_zone::<String>(Err("no zone".to_owned())), None);
+        assert_eq!(
+            validated_zone::<String>(Ok("Europe/Berlin".to_owned())).as_deref(),
+            Some("Europe/Berlin")
+        );
+    }
+
+    #[test]
+    fn device_zone_is_accepted_by_jiff_and_offset_composes() {
+        // Hosts without a readable zone (some CI containers) legitimately give None.
+        let Some(zone) = device_time_zone() else {
+            assert_eq!(device_offset_seconds(0), None);
+            return;
+        };
+        assert!(TimeZone::get(&zone).is_ok());
+        let instant = 1_700_000_000;
+        assert_eq!(
+            device_offset_seconds(instant),
+            zone_offset_seconds(instant, &zone).ok()
+        );
+    }
 
     #[test]
     fn fixed_offsets_parse_in_every_accepted_shape() {
