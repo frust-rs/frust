@@ -6,6 +6,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Unreleased
 
+## 0.6.6 — 2026-11-11
+
 A patch release (the 0.6.x line continues) with three breaks, listed under Breaking: `Router::go`
 and `RouteNavigator::go` now make the stack exactly the matched chain, `frust-shell-common`'s
 non-default `gpu` feature replaces `install_gpu_handle` and `gpu_handle` with `GpuPublisher`,
@@ -420,10 +422,11 @@ fonts (PingFang) now draw from the glyph atlas.
 - **Behaviour change:** the facade's default features go from none to `complex-scripts` (also on
   `frust-text`), which carries dictionary line and word segmentation at about 3 MB per app
   (`docs/PERFORMANCE_BASELINES.md`). Unspaced Thai, Lao, Khmer and Myanmar text wraps at dictionary
-  word boundaries and a Chinese/Japanese dictionary drives CJ word motion. Opt out with
-  `frust-ui = { version = "...", default-features = false }` (or `frust-text` likewise): unspaced
-  text then overflows and CJ word motion falls back to per-character stops. Cargo unifies features,
-  so every library in the graph must also leave these defaults off; frust's own plugins do.
+  word boundaries and a Chinese/Japanese dictionary drives CJ word motion. Opt out by adding
+  `default-features = false` to the facade dependency, which a scaffolded app declares as
+  `frust = { package = "frust-ui", ... }` (or to `frust-text` likewise): unspaced text then
+  overflows and CJ word motion falls back to per-character stops. Cargo unifies features, so every
+  library in the graph must also leave these defaults off; frust's own plugins do.
 - **Behaviour change:** default-sized `Text` and `TextInput` follow the OS text scale on Android and
   iOS; explicit sizes do not. Scaffolded Android manifests gain `fontScale` in
   `android:configChanges`, and an existing app should add it to keep state across a font-size
@@ -507,6 +510,14 @@ fonts (PingFang) now draw from the glyph atlas.
   taking the host UI font's line height.
 - `frust-i18n`: the language-id cache is bounded (256 entries) and the currency formatter cache is
   bounded (64 entries), both approximate LRU.
+
+### Known issues
+
+- An Android app aborts when an accessibility client is active (TalkBack, or a tool that queries the
+  accessibility tree such as `uiautomator dump`) and the window then changes. This predates 0.6.6.
+  The fix is an upstream change to `accesskit_android` plus a pin bump, and there is no workaround in
+  app code. See `android-accessibility-service-abort` in
+  [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
 
 ## 0.6.5 — 2026-11-02
 
