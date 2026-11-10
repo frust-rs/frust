@@ -1164,11 +1164,7 @@ fn create_handle(
     // regardless of a signal write, so the waker is a no-op (mirrors Android).
     let rt = ReactiveRuntime::init(no_op_waker());
 
-    // Replace, not install-if-absent: a relaunched shell re-owns the slot. Must follow
-    // `ReactiveRuntime::init`, which claims this thread as the UI thread the setter asserts.
-    frust_reactive::set_background_task_backend(Arc::new(
-        crate::background_task::IosBackgroundTasks,
-    ));
+    // The shell installs no background-task backend; `frust-background-task` does, on an app's opt-in.
 
     // Selection toolbar: LOCK the policy to `Native` rather than merely
     // setting it, so an app's own later call can never win here. This is the
