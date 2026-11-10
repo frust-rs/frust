@@ -247,3 +247,49 @@ fn keep_rules_cover_both_classes() {
         rules.contains("-keep class dev.frust.backgroundtask.FrustBackgroundTaskService { *; }")
     );
 }
+
+#[test]
+fn a_covered_begin_is_granted() {
+    let host = code(&read(HOST));
+    let begin = body(&host, "fun begin(");
+    assert!(begin.contains("val covered = tasks.isNotEmpty()"));
+    assert!(
+        begin.contains("if (started || covered) return true"),
+        "a failed start must still be granted while a running service covers the task"
+    );
+}
+
+#[test]
+fn only_a_service_not_yet_in_the_foreground_expires_on_late_refusal() {
+    let service = code(&read(SERVICE));
+    let command = body(&service, "override fun onStartCommand");
+    let catch = body(command, "catch (e: Exception)");
+    let guard = index_of(catch, "if (!inForeground)");
+    assert!(guard < index_of(catch, "FrustBackgroundTaskHost.expireLive()"));
+    assert!(guard < index_of(catch, "stopSelf(lastStartId)"));
+}
+
+#[test]
+fn begin_logs_a_refusal_only_when_it_returns_false() {
+    let host = code(&read(HOST));
+    let begin = body(&host, "fun begin(");
+    let catch = body(begin, "catch (e: Exception)");
+    assert!(
+        !catch.contains("logRefusal"),
+        "the catch block runs before the covered check"
+    );
+    assert!(catch.contains("failure = e"));
+    let covered_return = index_of(begin, "if (started || covered) return true");
+    let log = index_of(begin, "logRefusal(\"startForegroundService\", failure)");
+    assert!(
+        covered_return < log,
+        "the log must follow the covered return"
+    );
+    assert!(log < index_of(begin, "return false"));
+}
+
+#[test]
+fn the_notification_is_secret_on_the_lock_screen() {
+    let service = code(&read(SERVICE));
+    assert!(service.contains("setVisibility(NotificationCompat.VISIBILITY_SECRET)"));
+}

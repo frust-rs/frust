@@ -51,8 +51,9 @@ spawn_blocking(move || {
 ## Android
 
 One foreground service covers every live guard. It starts with the first guard
-and stops when the last one ends. Task names reach the notification, so keep
-them user-readable.
+and stops when the last one ends. Android may display the task name in a
+notification, so it must not contain user data (the notification itself is marked
+secret on the lock screen).
 
 **Notification.** A low-importance notification on channel
 `frust_background_work` (app icon, app label, task name). It asks for deferred
@@ -64,13 +65,22 @@ notification is simply hidden when the permission is denied.
 
 **Refusal.** Android refuses a foreground-service start in some states, for
 instance from the background. Then `begin` reports `is_granted() == false` and
-`expired()` reads `true`; the work runs anyway, unprotected. Begin the guard
-while the app is still visible, which is what a flush-on-background callback
-does. A refusal that only arrives once the service runs (`startForeground`
+`expired()` reads `true`; the work runs anyway, unprotected.
+
+Protection on Android is best effort and not yet device-verified. A
+flush-on-background callback normally runs at the Inactive edge (`onPause`, app
+still visible), where a foreground-service start is expected to be allowed. A
+timer armed while already Inactive, or armed by an Inactive flush, runs at the
+Hidden edge (`onStop`), where a start is expected to be refused on targetSdk 31+;
+then `is_granted()` is false and the work runs unprotected.
+
+A refusal that only arrives once the service runs (`startForeground`
 throwing) shows up as `expired()`.
 
-**Time limit.** A 150-second watchdog runs from the first `startForeground`, and
-each later guard re-arms it. It sits below the system's 3-minute `shortService`
+**Time limit.** A 150-second watchdog runs from the first `startForeground`. It is
+re-armed only when a later guard's `startForeground` succeeds, so a guard begun
+in the background that is covered by a running service does not re-arm it and
+may get less than the full 150 s. It sits below the system's 3-minute `shortService`
 limit, and is the only limit before Android 14. When it or the system's own
 timeout fires, `expired()` turns `true` and the service stops. `expired()` is
 your signal to cut the work short; nothing cancels it for you.

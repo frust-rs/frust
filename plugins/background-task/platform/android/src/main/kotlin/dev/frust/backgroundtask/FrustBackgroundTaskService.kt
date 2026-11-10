@@ -97,6 +97,7 @@ class FrustBackgroundTaskService : Service() {
             .setContentTitle(applicationInfo.loadLabel(packageManager))
             .setContentText(FrustBackgroundTaskHost.firstTaskName())
             .setOngoing(true)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
             .build()

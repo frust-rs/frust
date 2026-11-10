@@ -1,11 +1,12 @@
 //! A platform-neutral "keep the process alive while this short work finishes" guard.
 //!
-//! [`BackgroundTask`] is the Apple background-execution assertion
-//! (`beginBackgroundTask`/`endBackgroundTask`) behind a portable face — not a
-//! scheduler. It does not run anything; it asks the platform not to suspend the process
-//! until the guard ends. Android, desktop and web install no backend by default, so
-//! there the guard is a no-op that reports itself granted and unexpired: nothing refused it,
-//! and nothing protects the work either.
+//! [`BackgroundTask`] is a portable face over the platform's background-execution
+//! protection — not a scheduler. It does not run anything; it asks the platform not to
+//! suspend the process until the guard ends. Every platform is a no-op until the
+//! `frust-background-task` plugin is installed, and the plugin provides real backends on
+//! iOS (Apple's `beginBackgroundTask`/`endBackgroundTask`) and Android. Without a backend
+//! the guard reports itself granted and unexpired: nothing refused it, and nothing
+//! protects the work either.
 //!
 //! # The sanctioned flush pattern
 //!
@@ -79,7 +80,7 @@ impl TaskState {
     }
 }
 
-/// The platform half of [`BackgroundTask`], installed by a shell.
+/// The platform half of [`BackgroundTask`], installed by the `frust-background-task` plugin.
 pub trait BackgroundTaskBackend: Send + Sync + 'static {
     /// Start a platform assertion named `name` and return an opaque id. Call
     /// [`TaskState::set_refused`] when the platform refuses. On expiry, the backend's
@@ -127,6 +128,20 @@ pub fn set_background_task_backend(b: Arc<dyn BackgroundTaskBackend>) {
     *BACKEND.lock().unwrap_or_else(|e| e.into_inner()) = Some(b);
 }
 
+static WARNED_NO_BACKEND: AtomicBool = AtomicBool::new(false);
+
+/// Log once per process that a mobile build has no backend installed.
+fn warn_no_backend() {
+    if cfg!(any(target_os = "android", target_os = "ios"))
+        && !WARNED_NO_BACKEND.swap(true, Ordering::Relaxed)
+    {
+        log::warn!(
+            "frust: BackgroundTask::begin ran with no backend installed, so the work is \
+             unprotected; add the `frust-background-task` plugin and call its `install()`"
+        );
+    }
+}
+
 /// A guard that keeps the process alive until it is ended or dropped. See the module
 /// docs. Every guard ends its platform task exactly once.
 pub struct BackgroundTask {
@@ -137,14 +152,20 @@ pub struct BackgroundTask {
 
 impl BackgroundTask {
     /// Begin a background task named `name`. UI-thread-only once the runtime exists.
-    /// With no backend installed this is a granted no-op.
+    /// With no backend installed this is a granted no-op; on Android and iOS it also logs
+    /// one warning per process naming the `frust-background-task` plugin.
+    ///
+    /// Android may show `name` in a notification, so it must not contain user data.
     pub fn begin(name: &str) -> BackgroundTask {
         assert_ui_thread("BackgroundTask::begin");
         let state = Arc::new(TaskState::new());
         let backend = backend();
         let id = match &backend {
             Some(b) => b.begin(name, &state),
-            None => 0,
+            None => {
+                warn_no_backend();
+                0
+            }
         };
         BackgroundTask { id, state, backend }
     }

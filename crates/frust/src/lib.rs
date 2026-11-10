@@ -2134,7 +2134,8 @@ pub use frust_reactive::{DeepLink, DeepLinks, deep_links, push_deep_link};
 /// ```
 ///
 /// [`BackgroundTask`] keeps the process alive while short work finishes after the app
-/// backgrounds (Apple's background-execution assertion; a no-op elsewhere). The pattern:
+/// backgrounds. It is a no-op on every platform until the `frust-background-task` plugin is
+/// installed, which provides real backends on iOS and Android. The pattern:
 /// a [`Timer::flush_on_background`](crate::time::Timer::flush_on_background) callback
 /// calls `BackgroundTask::begin` on the UI thread, then
 /// `spawn_blocking(move || { write(); drop(task); })`. Not on web, where `spawn_blocking`
