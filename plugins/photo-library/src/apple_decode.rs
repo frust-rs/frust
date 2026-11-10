@@ -1,0 +1,820 @@
+//! iOS and macOS: full-resolution decode through ImageIO, for
+//! [`PhotoLibrary::decode_file`](crate::PhotoLibrary::decode_file).
+//!
+//! 1. The file URL becomes an image source with `kCGImageSourceShouldCache` off, so ImageIO keeps
+//!    no full-size copy of the pixels around.
+//! 2. The first image's properties give the source size (upright, after its EXIF orientation)
+//!    and the EXIF, TIFF and GPS dictionaries that fill [`ExifData`].
+//! 3. `CGImageSourceCreateThumbnailAtIndex` builds the image from the full data (never an
+//!    embedded preview), applies the orientation and scales the long edge down to
+//!    [`DecodeOptions::max_dimension`]. A smaller image keeps its size.
+//! 4. A premultiplied RGBA8 bitmap context in an explicitly chosen space draws it: Display P3
+//!    when the image is wide-gamut and [`DecodeOptions::srgb`] is off, sRGB otherwise.
+//!    [`DecodedImage::color_space`] names the space drawn into. The pixels are then converted
+//!    to straight alpha.
+//!
+//! # Cancel
+//!
+//! The token is checked before the source is created, before the decode and before the draw.
+//! The ImageIO decode itself cannot be interrupted: a cancel that lands during it takes effect
+//! when it returns.
+//!
+//! # Errors
+//!
+//! A missing file is [`PhotoError::NotFound`]. A file ImageIO cannot read, one cut short inside
+//! its headers, or one without an image is a [`PhotoError::Platform`] decode error, never a panic.
+//! Messages never echo the path.
+//!
+//! ImageIO is lenient with a file whose pixel data stops early: JPEG, PNG and HEIC alike decode,
+//! with the missing part left blank, and ImageIO reports the source as complete. Such a file is
+//! returned as an image, not an error; telling it apart would need a per-format container check.
+
+use std::path::Path;
+use std::ptr::NonNull;
+
+use objc2::rc::autoreleasepool;
+use objc2_core_foundation::{
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGFloat,
+    CGPoint, CGRect, CGSize,
+};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGBitmapInfo, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
+    CGImageByteOrderInfo, kCGColorSpaceDisplayP3, kCGColorSpaceSRGB,
+};
+
+use crate::cancel::CancelToken;
+use crate::decode::{DecodeOptions, DecodedImage, ImageColorSpace};
+use crate::pixels;
+use crate::types::{ExifData, PhotoError};
+
+/// A property dictionary as ImageIO returns it: string keys, values of any CF type.
+type Properties = CFDictionary<CFString, CFType>;
+
+/// `CGImageSourceStatus.kCGImageStatusComplete`.
+const STATUS_COMPLETE: i32 = 0;
+
+// Hand-declared: the workspace has no ImageIO bindings, and the decoder needs only these.
+#[link(name = "ImageIO", kind = "framework")]
+unsafe extern "C" {
+    // A `CGImageSourceRef` is a CF object; it is handled as a plain `CFType`.
+    fn CGImageSourceCreateWithURL(
+        url: &CFURL,
+        options: Option<&CFDictionary>,
+    ) -> Option<NonNull<CFType>>;
+    fn CGImageSourceGetCount(isrc: &CFType) -> usize;
+    fn CGImageSourceGetStatusAtIndex(isrc: &CFType, index: usize) -> i32;
+    fn CGImageSourceCopyPropertiesAtIndex(
+        isrc: &CFType,
+        index: usize,
+        options: Option<&CFDictionary>,
+    ) -> Option<NonNull<CFDictionary>>;
+    fn CGImageSourceCreateThumbnailAtIndex(
+        isrc: &CFType,
+        index: usize,
+        options: Option<&CFDictionary>,
+    ) -> Option<NonNull<CGImage>>;
+
+    static kCGImageSourceShouldCache: &'static CFString;
+    static kCGImageSourceCreateThumbnailFromImageAlways: &'static CFString;
+    static kCGImageSourceCreateThumbnailWithTransform: &'static CFString;
+    static kCGImageSourceThumbnailMaxPixelSize: &'static CFString;
+
+    static kCGImagePropertyPixelWidth: &'static CFString;
+    static kCGImagePropertyPixelHeight: &'static CFString;
+    static kCGImagePropertyOrientation: &'static CFString;
+    static kCGImagePropertyExifDictionary: &'static CFString;
+    static kCGImagePropertyTIFFDictionary: &'static CFString;
+    static kCGImagePropertyGPSDictionary: &'static CFString;
+
+    static kCGImagePropertyExifDateTimeOriginal: &'static CFString;
+    static kCGImagePropertyExifISOSpeedRatings: &'static CFString;
+    static kCGImagePropertyExifExposureTime: &'static CFString;
+    static kCGImagePropertyExifFNumber: &'static CFString;
+    static kCGImagePropertyExifFocalLength: &'static CFString;
+    static kCGImagePropertyExifLensModel: &'static CFString;
+    static kCGImagePropertyTIFFMake: &'static CFString;
+    static kCGImagePropertyTIFFModel: &'static CFString;
+    static kCGImagePropertyTIFFDateTime: &'static CFString;
+    static kCGImagePropertyGPSLatitude: &'static CFString;
+    static kCGImagePropertyGPSLatitudeRef: &'static CFString;
+    static kCGImagePropertyGPSLongitude: &'static CFString;
+    static kCGImagePropertyGPSLongitudeRef: &'static CFString;
+}
+
+/// Decodes `path` per `options`. The caller has run [`crate::decode::precheck`] and, on iOS,
+/// refused the main thread.
+pub(crate) fn decode_file(
+    path: &Path,
+    options: &DecodeOptions,
+) -> Result<DecodedImage, PhotoError> {
+    autoreleasepool(|_| decode_in_pool(path, options))
+}
+
+fn decode_in_pool(path: &Path, options: &DecodeOptions) -> Result<DecodedImage, PhotoError> {
+    if cancelled(options) {
+        return Err(PhotoError::Cancelled);
+    }
+    match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(PhotoError::NotFound),
+        Err(e) => return Err(e.into()),
+    }
+    let url = CFURL::from_file_path(path)
+        .ok_or_else(|| PhotoError::Platform("the path is not a valid file URL".to_owned()))?;
+    let no_cache = flag_options(&[
+        // SAFETY: reading an ImageIO constant key, valid for the life of the process.
+        unsafe { kCGImageSourceShouldCache },
+    ]);
+    let no_cache_off = no_cache.as_opaque();
+    // SAFETY: `url` and the options dictionary are live CF objects for the call. The result
+    // follows the Create rule, so it is owned (+1) and `CFRetained` releases it on every path.
+    let source = unsafe { CGImageSourceCreateWithURL(&url, Some(no_cache_off)) }
+        // SAFETY: a non-null Create-rule result is owned by the caller.
+        .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+        .ok_or_else(undecodable)?;
+    // SAFETY: `source` is a live image source.
+    if unsafe { CGImageSourceGetCount(&source) } == 0 {
+        return Err(undecodable());
+    }
+    // SAFETY: as above; index 0 exists, checked just now. A source ImageIO could not parse
+    // reports a status other than complete.
+    if unsafe { CGImageSourceGetStatusAtIndex(&source, 0) } != STATUS_COMPLETE {
+        return Err(undecodable());
+    }
+    // SAFETY: as above. The Copy-rule result is owned (+1) and released by `CFRetained`.
+    let properties = unsafe { CGImageSourceCopyPropertiesAtIndex(&source, 0, Some(no_cache_off)) }
+        // SAFETY: a non-null Copy-rule result is owned by the caller, and ImageIO documents it
+        // as a dictionary keyed by `CFString`; values stay untyped `CFType`.
+        .map(|ptr| unsafe { CFRetained::<Properties>::from_raw(ptr.cast()) })
+        .ok_or_else(undecodable)?;
+    let info = SourceInfo::read(&properties);
+
+    if cancelled(options) {
+        return Err(PhotoError::Cancelled);
+    }
+    let image = thumbnail(&source, &info, options.max_dimension)?;
+
+    if cancelled(options) {
+        return Err(PhotoError::Cancelled);
+    }
+    let drawn = draw(&image, options.srgb)?;
+    let (source_width, source_height) = info.upright_size().unwrap_or((drawn.width, drawn.height));
+    Ok(DecodedImage {
+        width: drawn.width,
+        height: drawn.height,
+        source_width,
+        source_height,
+        rgba: drawn.rgba,
+        color_space: drawn.color_space,
+        exif: info.exif,
+    })
+}
+
+fn cancelled(options: &DecodeOptions) -> bool {
+    options
+        .cancel
+        .as_ref()
+        .is_some_and(CancelToken::is_cancelled)
+}
+
+fn undecodable() -> PhotoError {
+    PhotoError::Platform("the file has no decodable image".to_owned())
+}
+
+/// `{ key: false }` for each key.
+fn flag_options(keys: &[&CFString]) -> CFRetained<CFDictionary<CFString, CFBoolean>> {
+    let values = vec![CFBoolean::new(false); keys.len()];
+    CFDictionary::from_slices(keys, &values)
+}
+
+/// The full-data, upright, capped image.
+fn thumbnail(
+    source: &CFType,
+    info: &SourceInfo,
+    max_dimension: u32,
+) -> Result<CFRetained<CGImage>, PhotoError> {
+    // Never ask for more than the source has: the cap only ever shrinks.
+    let long_edge = info
+        .upright_size()
+        .map_or(max_dimension, |(w, h)| w.max(h).min(max_dimension));
+    let size = CFNumber::new_i64(i64::from(long_edge.max(1)));
+    let yes = CFBoolean::new(true);
+    let no = CFBoolean::new(false);
+    // SAFETY: reading ImageIO constant keys, valid for the life of the process.
+    let keys: [&CFString; 4] = unsafe {
+        [
+            kCGImageSourceCreateThumbnailFromImageAlways,
+            kCGImageSourceCreateThumbnailWithTransform,
+            kCGImageSourceShouldCache,
+            kCGImageSourceThumbnailMaxPixelSize,
+        ]
+    };
+    let values: [&CFType; 4] = [yes, yes, no, &size];
+    let options = CFDictionary::<CFString, CFType>::from_slices(&keys, &values);
+    let options = options.as_opaque();
+    // SAFETY: `source` and `options` are live CF objects for the call, and index 0 exists
+    // (checked by the caller). The Create-rule result is owned and released by `CFRetained`.
+    unsafe { CGImageSourceCreateThumbnailAtIndex(source, 0, Some(options)) }
+        // SAFETY: a non-null Create-rule result is owned by the caller.
+        .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+        .ok_or_else(undecodable)
+}
+
+struct Drawn {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    color_space: ImageColorSpace,
+}
+
+/// Draw `image` 1:1 into a fresh RGBA8 context and return straight-alpha pixels.
+fn draw(image: &CGImage, srgb: bool) -> Result<Drawn, PhotoError> {
+    let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+    let (Ok(out_width), Ok(out_height)) = (u32::try_from(width), u32::try_from(height)) else {
+        return Err(too_large());
+    };
+    if width == 0 || height == 0 {
+        return Err(undecodable());
+    }
+    let stride = width.checked_mul(4).ok_or_else(too_large)?;
+    let len = stride.checked_mul(height).ok_or_else(too_large)?;
+    let wide = !srgb && CGImage::color_space(Some(image)).is_some_and(|s| s.is_wide_gamut_rgb());
+    // SAFETY: reading Core Graphics' constant colour-space names.
+    let (p3_name, srgb_name) = unsafe { (kCGColorSpaceDisplayP3, kCGColorSpaceSRGB) };
+    let (name, color_space) = if wide {
+        (p3_name, ImageColorSpace::DisplayP3)
+    } else {
+        (srgb_name, ImageColorSpace::Srgb)
+    };
+    let space = CGColorSpace::with_name(Some(name))
+        .ok_or_else(|| PhotoError::Platform("the output colour space is unavailable".to_owned()))?;
+    let mut rgba = vec![0u8; len];
+    let info =
+        CGBitmapInfo(CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0);
+    // SAFETY: `rgba` holds exactly `stride * height` writable bytes and outlives the context,
+    // which is dropped below before the buffer is read or moved. The parameters describe an
+    // 8-bit premultiplied RGBA layout Core Graphics supports.
+    let context = unsafe {
+        CGBitmapContextCreate(
+            rgba.as_mut_ptr().cast(),
+            width,
+            height,
+            8,
+            stride,
+            Some(&space),
+            info.0,
+        )
+    }
+    .ok_or_else(|| PhotoError::Platform("cannot create a bitmap context".to_owned()))?;
+    let rect = CGRect::new(
+        CGPoint::new(0.0, 0.0),
+        CGSize::new(width as CGFloat, height as CGFloat),
+    );
+    CGContext::draw_image(Some(&context), rect, Some(image));
+    drop(context);
+    pixels::unpremultiply_rgba8_in_place(&mut rgba);
+    Ok(Drawn {
+        width: out_width,
+        height: out_height,
+        rgba,
+        color_space,
+    })
+}
+
+fn too_large() -> PhotoError {
+    PhotoError::Platform("the decoded image is too large".to_owned())
+}
+
+/// What the image's properties say before any pixel is decoded.
+#[derive(Debug, Default)]
+struct SourceInfo {
+    /// Stored (un-oriented) pixel size.
+    width: Option<u32>,
+    height: Option<u32>,
+    /// EXIF orientation, `1..=8`; `1` when absent.
+    orientation: u32,
+    exif: Option<ExifData>,
+}
+
+impl SourceInfo {
+    fn read(properties: &Properties) -> Self {
+        // SAFETY (all `unsafe` reads below): ImageIO constant keys, valid for the life of the
+        // process.
+        let (width_key, height_key, orientation_key) = unsafe {
+            (
+                kCGImagePropertyPixelWidth,
+                kCGImagePropertyPixelHeight,
+                kCGImagePropertyOrientation,
+            )
+        };
+        let dimension = |key| {
+            number(properties, key)
+                .filter(|v| *v >= 1.0 && *v <= f64::from(u32::MAX))
+                .map(|v| v as u32)
+        };
+        let orientation = number(properties, orientation_key)
+            .filter(|v| (1.0..=8.0).contains(v))
+            .map_or(1, |v| v as u32);
+        Self {
+            width: dimension(width_key),
+            height: dimension(height_key),
+            orientation,
+            exif: read_exif(properties),
+        }
+    }
+
+    /// The source size as displayed: orientations 5 to 8 turn the image a quarter.
+    fn upright_size(&self) -> Option<(u32, u32)> {
+        let (w, h) = (self.width?, self.height?);
+        Some(if (5..=8).contains(&self.orientation) {
+            (h, w)
+        } else {
+            (w, h)
+        })
+    }
+}
+
+fn read_exif(properties: &Properties) -> Option<ExifData> {
+    // SAFETY (all `unsafe` reads in this function): ImageIO constant keys, valid for the life
+    // of the process.
+    let exif = sub_dictionary(properties, unsafe { kCGImagePropertyExifDictionary });
+    let tiff = sub_dictionary(properties, unsafe { kCGImagePropertyTIFFDictionary });
+    let gps = sub_dictionary(properties, unsafe { kCGImagePropertyGPSDictionary });
+    let exif = exif.as_deref();
+    let tiff = tiff.as_deref();
+    let gps = gps.as_deref();
+
+    let exif_string = |key| exif.and_then(|d| string(d, key));
+    let exif_number = |key| exif.and_then(|d| number(d, key));
+    let tiff_string = |key| tiff.and_then(|d| string(d, key));
+
+    let iso = exif.and_then(|d| {
+        let key = unsafe { kCGImagePropertyExifISOSpeedRatings };
+        first_number(d, key).or_else(|| number(d, key))
+    });
+    let coordinate = |value_key, ref_key, negative: &str| {
+        let d = gps?;
+        let value = number(d, value_key)?;
+        let negate = string(d, ref_key).is_some_and(|r| r.eq_ignore_ascii_case(negative));
+        Some(if negate { -value.abs() } else { value })
+    };
+
+    let data = ExifData {
+        capture_time: exif_string(unsafe { kCGImagePropertyExifDateTimeOriginal })
+            .or_else(|| tiff_string(unsafe { kCGImagePropertyTIFFDateTime })),
+        camera_make: tiff_string(unsafe { kCGImagePropertyTIFFMake }),
+        camera_model: tiff_string(unsafe { kCGImagePropertyTIFFModel }),
+        lens: exif_string(unsafe { kCGImagePropertyExifLensModel }),
+        iso: iso
+            .filter(|v| *v >= 0.0 && *v <= f64::from(u32::MAX))
+            .map(|v| v.round() as u32),
+        exposure_seconds: exif_number(unsafe { kCGImagePropertyExifExposureTime }),
+        aperture: exif_number(unsafe { kCGImagePropertyExifFNumber }),
+        focal_length_mm: exif_number(unsafe { kCGImagePropertyExifFocalLength }),
+        gps_latitude: coordinate(
+            unsafe { kCGImagePropertyGPSLatitude },
+            unsafe { kCGImagePropertyGPSLatitudeRef },
+            "S",
+        ),
+        gps_longitude: coordinate(
+            unsafe { kCGImagePropertyGPSLongitude },
+            unsafe { kCGImagePropertyGPSLongitudeRef },
+            "W",
+        ),
+    };
+    (data != ExifData::default()).then_some(data)
+}
+
+/// A finite number stored under `key`.
+fn number(dict: &Properties, key: &CFString) -> Option<f64> {
+    let value = dict.get(key)?;
+    value
+        .downcast_ref::<CFNumber>()?
+        .as_f64()
+        .filter(|v| v.is_finite())
+}
+
+/// A non-empty string stored under `key`, trimmed.
+fn string(dict: &Properties, key: &CFString) -> Option<String> {
+    let value = dict.get(key)?;
+    let s = value.downcast_ref::<CFString>()?.to_string();
+    let s = s.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
+/// The first element of an array of numbers stored under `key`.
+fn first_number(dict: &Properties, key: &CFString) -> Option<f64> {
+    let value = dict.get(key)?;
+    let array = value.downcast_ref::<CFArray>()?;
+    // SAFETY: the array's elements are CF objects (ImageIO stores only property-list values),
+    // so viewing them as `CFType` is sound.
+    let array: &CFArray<CFType> = unsafe { array.cast_unchecked() };
+    let first = array.get(0)?;
+    first
+        .downcast_ref::<CFNumber>()?
+        .as_f64()
+        .filter(|v| v.is_finite())
+}
+
+/// The dictionary stored under `key`, when it is one.
+fn sub_dictionary(dict: &Properties, key: &CFString) -> Option<CFRetained<Properties>> {
+    let value = dict.get(key)?;
+    value.downcast_ref::<CFDictionary>()?;
+    // SAFETY: just checked that the value is a dictionary; ImageIO's metadata dictionaries are
+    // keyed by `CFString`, and values stay untyped `CFType`.
+    Some(unsafe { CFRetained::cast_unchecked(value) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_core_graphics::CGBitmapContextCreateImage;
+    use std::path::PathBuf;
+
+    // Encoding is test-only: the fixtures are written by ImageIO itself, so no binary file
+    // lives in the repository.
+    #[link(name = "ImageIO", kind = "framework")]
+    unsafe extern "C" {
+        fn CGImageDestinationCreateWithURL(
+            url: &CFURL,
+            kind: &CFString,
+            count: usize,
+            options: Option<&CFDictionary>,
+        ) -> Option<NonNull<CFType>>;
+        fn CGImageDestinationAddImage(
+            idst: &CFType,
+            image: &CGImage,
+            properties: Option<&CFDictionary>,
+        );
+        fn CGImageDestinationFinalize(idst: &CFType) -> bool;
+    }
+
+    /// ImageIO loads its private codecs by leaf name through `DYLD_LIBRARY_PATH`, so a directory
+    /// there holding `libpng`/`libjpeg` (Homebrew's `lib`, for one) replaces them and the first
+    /// decode dies with `SIGBUS`. When the variable is set, run test `name` again in a child
+    /// process without it and report its outcome; `true` means the child ran it.
+    fn rerun_without_dyld_library_path(name: &str) -> bool {
+        if std::env::var_os("DYLD_LIBRARY_PATH").is_none_or(|v| v.is_empty()) {
+            return false;
+        }
+        let module = module_path!();
+        let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                &format!("{module}::{name}"),
+                "--exact",
+                "--quiet",
+                "--test-threads",
+                "1",
+            ])
+            .env_remove("DYLD_LIBRARY_PATH")
+            .status()
+            .expect("rerun the test");
+        assert!(status.success(), "{name} failed in the child process");
+        true
+    }
+
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn new(tag: &str, ext: &str) -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "frust-photo-apple-decode-{tag}-{}.{ext}",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// A `width x height` image whose premultiplied RGBA8 pixels come from `pixel(x, y)`, in
+    /// the named colour space.
+    fn image(
+        width: usize,
+        height: usize,
+        space: &CFString,
+        pixel: impl Fn(usize, usize) -> [u8; 4],
+    ) -> CFRetained<CGImage> {
+        let mut buf = vec![0u8; width * height * 4];
+        for y in 0..height {
+            for x in 0..width {
+                let i = (y * width + x) * 4;
+                buf[i..i + 4].copy_from_slice(&pixel(x, y));
+            }
+        }
+        let space = CGColorSpace::with_name(Some(space)).expect("colour space");
+        let info = CGBitmapInfo(
+            CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0,
+        );
+        // SAFETY: `buf` holds `width * 4 * height` bytes and outlives the context, which is
+        // dropped at the end of this function after the image has copied the pixels.
+        let context = unsafe {
+            CGBitmapContextCreate(
+                buf.as_mut_ptr().cast(),
+                width,
+                height,
+                8,
+                width * 4,
+                Some(&space),
+                info.0,
+            )
+        }
+        .expect("bitmap context");
+        CGBitmapContextCreateImage(Some(&context)).expect("image")
+    }
+
+    /// Writes `image` as `uti` with `properties`; `false` when this system cannot encode it.
+    fn write(path: &Path, uti: &str, image: &CGImage, properties: Option<&CFDictionary>) -> bool {
+        let url = CFURL::from_file_path(path).expect("url");
+        let uti = CFString::from_str(uti);
+        // SAFETY: live CF arguments; the Create-rule result is owned by `CFRetained`.
+        let dest = unsafe { CGImageDestinationCreateWithURL(&url, &uti, 1, None) };
+        let Some(dest) = dest else {
+            return false;
+        };
+        // SAFETY: a non-null Create-rule result is owned by the caller.
+        let dest = unsafe { CFRetained::from_raw(dest) };
+        // SAFETY: `dest`, `image` and `properties` are live CF objects for both calls.
+        unsafe {
+            CGImageDestinationAddImage(&dest, image, properties);
+            CGImageDestinationFinalize(&dest)
+        }
+    }
+
+    fn srgb_name() -> &'static CFString {
+        // SAFETY: reading Core Graphics' constant colour-space name.
+        unsafe { kCGColorSpaceSRGB }
+    }
+
+    fn pixel(img: &DecodedImage, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * img.width + x) * 4) as usize;
+        img.rgba[i..i + 4].try_into().unwrap()
+    }
+
+    fn near(a: [u8; 4], b: [u8; 4], tolerance: u8) -> bool {
+        a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= tolerance)
+    }
+
+    /// 400 x 200 opaque: red left half, blue right half.
+    fn halves() -> CFRetained<CGImage> {
+        image(400, 200, srgb_name(), |x, _| {
+            if x < 200 {
+                [255, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            }
+        })
+    }
+
+    fn jpeg_properties() -> CFRetained<CFDictionary<CFString, CFType>> {
+        // SAFETY (every `unsafe` read here): ImageIO constant keys.
+        let exif_keys: [&CFString; 6] = unsafe {
+            [
+                kCGImagePropertyExifDateTimeOriginal,
+                kCGImagePropertyExifISOSpeedRatings,
+                kCGImagePropertyExifExposureTime,
+                kCGImagePropertyExifFNumber,
+                kCGImagePropertyExifFocalLength,
+                kCGImagePropertyExifLensModel,
+            ]
+        };
+        let time = CFString::from_str("2024:05:06 07:08:09");
+        let iso_value = CFNumber::new_i32(400);
+        let iso = CFArray::<CFNumber>::from_objects(&[&iso_value]);
+        let exposure = CFNumber::new_f64(0.01);
+        let f_number = CFNumber::new_f64(1.8);
+        let focal = CFNumber::new_f64(4.2);
+        let lens = CFString::from_str("Fixture lens");
+        let exif_values: [&CFType; 6] = [&time, &iso, &exposure, &f_number, &focal, &lens];
+        let exif = CFDictionary::<CFString, CFType>::from_slices(&exif_keys, &exif_values);
+
+        let tiff_keys: [&CFString; 2] =
+            unsafe { [kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel] };
+        let make = CFString::from_str("Frust");
+        let model = CFString::from_str("Fixture");
+        let tiff_values: [&CFType; 2] = [&make, &model];
+        let tiff = CFDictionary::<CFString, CFType>::from_slices(&tiff_keys, &tiff_values);
+
+        let gps_keys: [&CFString; 4] = unsafe {
+            [
+                kCGImagePropertyGPSLatitude,
+                kCGImagePropertyGPSLatitudeRef,
+                kCGImagePropertyGPSLongitude,
+                kCGImagePropertyGPSLongitudeRef,
+            ]
+        };
+        let lat = CFNumber::new_f64(12.5);
+        let lat_ref = CFString::from_str("S");
+        let lon = CFNumber::new_f64(45.25);
+        let lon_ref = CFString::from_str("W");
+        let gps_values: [&CFType; 4] = [&lat, &lat_ref, &lon, &lon_ref];
+        let gps = CFDictionary::<CFString, CFType>::from_slices(&gps_keys, &gps_values);
+
+        let keys: [&CFString; 4] = unsafe {
+            [
+                kCGImagePropertyOrientation,
+                kCGImagePropertyExifDictionary,
+                kCGImagePropertyTIFFDictionary,
+                kCGImagePropertyGPSDictionary,
+            ]
+        };
+        // 6: the stored image is shown turned a quarter clockwise.
+        let orientation = CFNumber::new_i32(6);
+        let values: [&CFType; 4] = [&orientation, &exif, &tiff, &gps];
+        CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
+    }
+
+    #[test]
+    fn jpeg_is_capped_oriented_and_carries_exif() {
+        if rerun_without_dyld_library_path("jpeg_is_capped_oriented_and_carries_exif") {
+            return;
+        }
+        let file = TempFile::new("orient", "jpg");
+        let properties = jpeg_properties();
+        assert!(write(
+            &file.0,
+            "public.jpeg",
+            &halves(),
+            Some(properties.as_opaque())
+        ));
+
+        let img = decode_file(&file.0, &DecodeOptions::new(100)).expect("decode");
+        // Turned upright: 200 x 400 before the cap, 50 x 100 after.
+        assert_eq!((img.width, img.height), (50, 100));
+        assert_eq!((img.source_width, img.source_height), (200, 400));
+        assert_eq!(img.rgba.len(), 50 * 100 * 4);
+        assert_eq!(img.color_space, ImageColorSpace::Srgb);
+        // The stored left (red) half is now on top.
+        assert!(near(pixel(&img, 25, 20), [255, 0, 0, 255], 24));
+        assert!(near(pixel(&img, 25, 80), [0, 0, 255, 255], 24));
+
+        let exif = img.exif.expect("exif");
+        assert_eq!(exif.capture_time.as_deref(), Some("2024:05:06 07:08:09"));
+        assert_eq!(exif.camera_make.as_deref(), Some("Frust"));
+        assert_eq!(exif.camera_model.as_deref(), Some("Fixture"));
+        assert_eq!(exif.lens.as_deref(), Some("Fixture lens"));
+        assert_eq!(exif.iso, Some(400));
+        let close = |v: Option<f64>, want: f64| v.is_some_and(|v| (v - want).abs() < 1e-6);
+        assert!(close(exif.exposure_seconds, 0.01), "{exif:?}");
+        assert!(close(exif.aperture, 1.8), "{exif:?}");
+        assert!(close(exif.focal_length_mm, 4.2), "{exif:?}");
+        assert!(close(exif.gps_latitude, -12.5), "{exif:?}");
+        assert!(close(exif.gps_longitude, -45.25), "{exif:?}");
+    }
+
+    #[test]
+    fn jpeg_without_orientation_keeps_its_shape_and_never_upscales() {
+        if rerun_without_dyld_library_path(
+            "jpeg_without_orientation_keeps_its_shape_and_never_upscales",
+        ) {
+            return;
+        }
+        let file = TempFile::new("plain", "jpg");
+        assert!(write(&file.0, "public.jpeg", &halves(), None));
+
+        let img = decode_file(&file.0, &DecodeOptions::new(160)).expect("decode");
+        assert_eq!((img.width, img.height), (160, 80));
+        assert_eq!((img.source_width, img.source_height), (400, 200));
+        assert!(near(pixel(&img, 20, 40), [255, 0, 0, 255], 24));
+        assert!(near(pixel(&img, 140, 40), [0, 0, 255, 255], 24));
+
+        // A cap above the source size returns the source size.
+        let img = decode_file(&file.0, &DecodeOptions::new(4096)).expect("decode");
+        assert_eq!((img.width, img.height), (400, 200));
+    }
+
+    #[test]
+    fn png_keeps_straight_alpha() {
+        if rerun_without_dyld_library_path("png_keeps_straight_alpha") {
+            return;
+        }
+        let file = TempFile::new("alpha", "png");
+        // Straight (255, 128, 0, 128), stored premultiplied.
+        let src = image(64, 32, srgb_name(), |_, _| [128, 64, 0, 128]);
+        assert!(write(&file.0, "public.png", &src, None));
+
+        let img = decode_file(&file.0, &DecodeOptions::new(32)).expect("decode");
+        assert_eq!((img.width, img.height), (32, 16));
+        assert_eq!(img.color_space, ImageColorSpace::Srgb);
+        assert!(img.exif.is_none());
+        let px = pixel(&img, 16, 8);
+        assert!(near(px, [255, 128, 0, 128], 2), "{px:?}");
+    }
+
+    #[test]
+    fn wide_gamut_png_stays_in_display_p3_unless_srgb_is_asked() {
+        if rerun_without_dyld_library_path(
+            "wide_gamut_png_stays_in_display_p3_unless_srgb_is_asked",
+        ) {
+            return;
+        }
+        let file = TempFile::new("p3", "png");
+        // SAFETY: reading Core Graphics' constant colour-space name.
+        let p3 = unsafe { kCGColorSpaceDisplayP3 };
+        let src = image(8, 8, p3, |_, _| [0, 255, 0, 255]);
+        assert!(write(&file.0, "public.png", &src, None));
+
+        let img = decode_file(&file.0, &DecodeOptions::new(8)).expect("decode");
+        assert_eq!(img.color_space, ImageColorSpace::DisplayP3);
+        assert!(near(pixel(&img, 4, 4), [0, 255, 0, 255], 2));
+
+        let img = decode_file(&file.0, &DecodeOptions::new(8).srgb()).expect("decode");
+        assert_eq!(img.color_space, ImageColorSpace::Srgb);
+        // P3 green lies outside sRGB: the red channel goes negative and clips, green stays high.
+        let px = pixel(&img, 4, 4);
+        assert!(px[1] > 200 && px[3] == 255, "{px:?}");
+    }
+
+    #[test]
+    fn heic_decodes_when_the_system_can_encode_it() {
+        if rerun_without_dyld_library_path("heic_decodes_when_the_system_can_encode_it") {
+            return;
+        }
+        let file = TempFile::new("heic", "heic");
+        if !write(&file.0, "public.heic", &halves(), None) {
+            eprintln!("this system has no HEIC encoder; HEIC decode is left to the device gate");
+            return;
+        }
+        let img = decode_file(&file.0, &DecodeOptions::new(200)).expect("decode");
+        assert_eq!((img.width, img.height), (200, 100));
+        assert!(near(pixel(&img, 20, 50), [255, 0, 0, 255], 32));
+    }
+
+    #[test]
+    fn truncated_and_foreign_files_are_decode_errors() {
+        if rerun_without_dyld_library_path("truncated_and_foreign_files_are_decode_errors") {
+            return;
+        }
+        // Each cut keeps at most a fifth of the file, so it ends inside the headers.
+        let jpeg = TempFile::new("whole", "jpg");
+        assert!(write(&jpeg.0, "public.jpeg", &halves(), None));
+        let png = TempFile::new("whole", "png");
+        let src = image(64, 32, srgb_name(), |x, y| {
+            [(x * 4) as u8, (y * 8) as u8, 7, 255]
+        });
+        assert!(write(&png.0, "public.png", &src, None));
+        for whole in [&jpeg, &png] {
+            let bytes = std::fs::read(&whole.0).unwrap();
+            for keep in [bytes.len() / 5, 30, 2] {
+                let cut = TempFile::new(&format!("cut{keep}"), "img");
+                std::fs::write(&cut.0, &bytes[..keep]).unwrap();
+                assert_eq!(
+                    decode_file(&cut.0, &DecodeOptions::new(64)).map(|_| ()),
+                    Err(undecodable()),
+                    "{keep} of {} bytes",
+                    bytes.len()
+                );
+            }
+        }
+
+        let text = TempFile::new("text", "jpg");
+        std::fs::write(&text.0, b"not an image at all").unwrap();
+        assert_eq!(
+            decode_file(&text.0, &DecodeOptions::new(64)).map(|_| ()),
+            Err(undecodable())
+        );
+
+        let empty = TempFile::new("empty", "png");
+        std::fs::write(&empty.0, b"").unwrap();
+        assert_eq!(
+            decode_file(&empty.0, &DecodeOptions::new(64)).map(|_| ()),
+            Err(undecodable())
+        );
+    }
+
+    #[test]
+    fn missing_file_and_cancel() {
+        let missing = TempFile::new("missing", "jpg");
+        assert_eq!(
+            decode_file(&missing.0, &DecodeOptions::new(8)).map(|_| ()),
+            Err(PhotoError::NotFound)
+        );
+        let token = CancelToken::new();
+        token.cancel();
+        assert_eq!(
+            decode_file(&missing.0, &DecodeOptions::new(8).cancel(token)).map(|_| ()),
+            Err(PhotoError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn upright_size_turns_for_quarter_orientations() {
+        let mut info = SourceInfo {
+            width: Some(4),
+            height: Some(3),
+            orientation: 1,
+            exif: None,
+        };
+        assert_eq!(info.upright_size(), Some((4, 3)));
+        for o in 5..=8 {
+            info.orientation = o;
+            assert_eq!(info.upright_size(), Some((3, 4)));
+        }
+        info.height = None;
+        assert_eq!(info.upright_size(), None);
+    }
+}

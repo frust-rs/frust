@@ -210,12 +210,7 @@ mod tests {
 
     #[cfg(all(
         feature = "decode",
-        any(
-            target_os = "linux",
-            target_os = "macos",
-            target_os = "windows",
-            target_os = "freebsd"
-        )
+        any(target_os = "linux", target_os = "windows", target_os = "freebsd")
     ))]
     #[test]
     fn desktop_decode_file_is_unsupported() {

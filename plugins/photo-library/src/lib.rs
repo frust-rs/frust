@@ -51,6 +51,8 @@
 //! }
 //! ```
 
+#[cfg(all(feature = "decode", any(target_os = "ios", target_os = "macos")))]
+mod apple_decode;
 mod cancel;
 mod decode;
 #[cfg(any(
@@ -316,6 +318,14 @@ impl PhotoLibrary {
     /// feature. [`PhotoError::UiThread`] on a mobile UI thread, [`PhotoError::Unsupported`]
     /// where the platform has no decoder, and [`PhotoError::InvalidRequest`] for a zero
     /// `max_dimension`. A token cancelled before the call returns [`PhotoError::Cancelled`].
+    ///
+    /// iOS and macOS decode through ImageIO (HEIC, JPEG, PNG and every other format it reads),
+    /// apply the EXIF orientation, and return Display P3 pixels for a wide-gamut image unless
+    /// [`DecodeOptions::srgb`] is set. A missing file is [`PhotoError::NotFound`]; a file with
+    /// no decodable image, or one cut short inside its headers, is [`PhotoError::Platform`]. A
+    /// file whose pixel data stops early decodes with the missing part blank (ImageIO's own
+    /// leniency). The token is checked between stages, but the platform decode itself is not
+    /// interruptible.
     pub fn decode_file(
         path: &std::path::Path,
         options: &DecodeOptions,
