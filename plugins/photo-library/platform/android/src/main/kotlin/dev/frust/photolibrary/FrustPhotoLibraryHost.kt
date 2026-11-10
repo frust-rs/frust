@@ -27,6 +27,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -65,6 +66,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Kotlin → Rust | `nativeOnExportProgress(requestId: Long, done: Long, total: Long)` | bytes copied, once per chunk; absent when the size is unknown |
  * | Kotlin → Rust | `nativeOnExportDone(requestId: Long, code: Int, mime: String?, name: String?)` | [OK] with the provider's MIME type and display name, or [CANCELLED], [NOT_FOUND], [PERMISSION_DENIED], [EXPORT_FAILED] |
  * | Kotlin → Rust | `nativeOnSaveDone(requestId: Long, code: Int, uri: String?)` | [OK] with the new asset's URI, or [PERMISSION_DENIED], [SAVE_FAILED] |
+ * | Rust → Kotlin | `decodeHeader(requestId: Long, path: String, maxDimension: Int): DecodeHeader` | a [DecodeHeader]; `code` is [OK], [NOT_FOUND], [NOT_INITIALIZED], [PERMISSION_DENIED], [NO_DECODER] or [DECODE_FAILED] |
+ * | Rust → Kotlin | `decodeInto(requestId: Long, path: String, width: Int, height: Int, srgb: Boolean, pixels: ByteBuffer): DecodeResult` | a [DecodeResult]; the same codes plus [CANCELLED] |
+ * | Rust → Kotlin | `cancelDecode(requestId: Long)` — `(J)V` | nothing; an unknown or finished id is ignored |
  *
  * Every request that returned [PENDING] gets exactly one answer: a pick gets
  * [nativeOnPickResult] or [nativeOnPickError], an export [nativeOnExportDone],
@@ -85,6 +89,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * export never fails over location. `MediaStore` has no rendition split and
  * its files are local, so the rendition and network options are ignored here.
  * [saveToLibrary] runs in [MediaStoreWriter].
+ *
+ * ## Decoding
+ *
+ * [decodeHeader], [decodeInto] and [cancelDecode] run in [ImageDecodeHost]
+ * on the calling thread and never touch the pick slot or an executor.
+ * [decodeInto] fills the caller's direct `ByteBuffer` and never keeps it.
  *
  * ## Browsing
  *
@@ -184,6 +194,10 @@ object FrustPhotoLibraryHost {
     const val EXPORT_FAILED = 12
     /** A save could not be written. */
     const val SAVE_FAILED = 13
+    /** No installed decoder handles the image's format. */
+    const val NO_DECODER = 14
+    /** The image could not be decoded (a `DecodeException` or a read failure). */
+    const val DECODE_FAILED = 15
 
     // --- Filter codes: mirror `src/android.rs`.
 
@@ -200,6 +214,15 @@ object FrustPhotoLibraryHost {
     const val KIND_IMAGE = 0
     /** A video. */
     const val KIND_VIDEO = 1
+
+    // --- Colour spaces in [DecodeResult.colorSpace]: mirror `src/android_decode.rs`.
+
+    /** sRGB. */
+    const val COLOR_SRGB = 0
+    /** Display P3. */
+    const val COLOR_DISPLAY_P3 = 1
+    /** Any other space. */
+    const val COLOR_OTHER = 2
 
     /** The synthetic all-media album's id, listed first by [albums]. */
     const val ALL_MEDIA_ALBUM_ID = "frust.all_media"
@@ -253,6 +276,34 @@ object FrustPhotoLibraryHost {
         @JvmField val height: Int,
         @JvmField val rowBytes: Int,
         @JvmField val pixels: ByteArray?,
+    )
+
+    /** [decodeHeader]: the oriented source size and the capped size [decodeInto] decodes at. */
+    class DecodeHeader(
+        @JvmField val code: Int,
+        @JvmField val sourceWidth: Int,
+        @JvmField val sourceHeight: Int,
+        @JvmField val width: Int,
+        @JvmField val height: Int,
+    )
+
+    /**
+     * [decodeInto]: the decoded bitmap's colour space and the file's EXIF. An
+     * absent EXIF value is null, 0 ([iso]) or NaN.
+     */
+    class DecodeResult(
+        @JvmField val code: Int,
+        @JvmField val colorSpace: Int,
+        @JvmField val captureTime: String?,
+        @JvmField val cameraMake: String?,
+        @JvmField val cameraModel: String?,
+        @JvmField val lens: String?,
+        @JvmField val iso: Int,
+        @JvmField val exposureSeconds: Double,
+        @JvmField val aperture: Double,
+        @JvmField val focalLengthMm: Double,
+        @JvmField val gpsLatitude: Double,
+        @JvmField val gpsLongitude: Double,
     )
 
     /** The application [Context], installed once by [FrustPhotoLibraryInitProvider]. */
@@ -468,6 +519,29 @@ object FrustPhotoLibraryHost {
         val ctx = appContext ?: return NOT_INITIALIZED
         MediaStoreWriter.save(ctx, requestId, File(sourcePath), isVideo, displayName, album)
         return PENDING
+    }
+
+    /**
+     * The header of [path] (a file path or a content URI) capped to
+     * [maxDimension]. Any thread but the main one (it reads the file).
+     */
+    @JvmStatic
+    fun decodeHeader(requestId: Long, path: String, maxDimension: Int): DecodeHeader =
+        ImageDecodeHost.header(appContext, requestId, path, maxDimension)
+
+    /**
+     * Decode [path] at [width] x [height] into [pixels], a direct buffer of
+     * `width * height * 4` bytes that is written only before this returns and
+     * never kept. Any thread but the main one (the decode blocks).
+     */
+    @JvmStatic
+    fun decodeInto(requestId: Long, path: String, width: Int, height: Int, srgb: Boolean, pixels: ByteBuffer): DecodeResult =
+        ImageDecodeHost.decodeInto(appContext, requestId, path, width, height, srgb, pixels)
+
+    /** Cancel decode [requestId]. Any thread; an unknown id is ignored. */
+    @JvmStatic
+    fun cancelDecode(requestId: Long) {
+        ImageDecodeHost.cancel(requestId)
     }
 
     // --- Kotlin -> Rust -----------------------------------------------------

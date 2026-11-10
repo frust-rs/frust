@@ -29,7 +29,12 @@
 //! - originals and saves: the host calls, exports and codes match, neither
 //!   touches pick state or a pick's executor, the export copies in cancellable
 //!   chunks and deletes its partial file, the location-preserving open falls
-//!   back rather than failing, and the writer publishes or deletes every row.
+//!   back rather than failing, and the writer publishes or deletes every row;
+//! - decode: the host calls and result objects match, the pixels cross as one
+//!   direct `ByteBuffer` (never a Java array) that the host never keeps, the
+//!   decode uses the software allocator, a target size and
+//!   `copyPixelsToBuffer`, a format with no decoder is typed, the UI thread is
+//!   refused first, and the module's one `unsafe` block carries its SAFETY note.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -51,9 +56,12 @@ const KOTLIN_PERMISSIONS: &str =
 const KOTLIN_WRITER: &str =
     "platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreWriter.kt";
 const RUST_ANDROID_ORIGINALS: &str = "src/android_originals.rs";
+const KOTLIN_DECODER: &str =
+    "platform/android/src/main/kotlin/dev/frust/photolibrary/ImageDecodeHost.kt";
+const RUST_ANDROID_DECODE: &str = "src/android_decode.rs";
 
 /// How many leading [`SHARED_CODES`] are result codes (the rest are filters and kinds).
-const RESULT_CODES: usize = 14;
+const RESULT_CODES: usize = 16;
 
 /// Every code the two sides share, by name.
 const SHARED_CODES: &[&str] = &[
@@ -71,11 +79,16 @@ const SHARED_CODES: &[&str] = &[
     "NOT_LIMITED",
     "EXPORT_FAILED",
     "SAVE_FAILED",
+    "NO_DECODER",
+    "DECODE_FAILED",
     "FILTER_IMAGES",
     "FILTER_VIDEOS",
     "FILTER_IMAGES_AND_VIDEOS",
     "KIND_IMAGE",
     "KIND_VIDEO",
+    "COLOR_SRGB",
+    "COLOR_DISPLAY_P3",
+    "COLOR_OTHER",
 ];
 
 fn read(rel: &str) -> String {
@@ -173,13 +186,16 @@ fn kotlin_codes_equal_their_rust_twins() {
     let mut rust = rust_jint_consts(&read(RUST_ANDROID));
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_LIBRARY)));
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_ORIGINALS)));
-    // The originals module repeats some codes; `extend` would mask a drift.
-    for (name, value) in rust_jint_consts(&read(RUST_ANDROID_ORIGINALS)) {
-        assert_eq!(
-            kotlin.get(&name),
-            Some(&value),
-            "src/android_originals.rs's `{name}` must equal the Kotlin host's"
-        );
+    rust.extend(rust_jint_consts(&read(RUST_ANDROID_DECODE)));
+    // The originals and decode modules repeat some codes; `extend` would mask a drift.
+    for file in [RUST_ANDROID_ORIGINALS, RUST_ANDROID_DECODE] {
+        for (name, value) in rust_jint_consts(&read(file)) {
+            assert_eq!(
+                kotlin.get(&name),
+                Some(&value),
+                "{file}'s `{name}` must equal the Kotlin host's"
+            );
+        }
     }
     for name in SHARED_CODES {
         let k = kotlin
@@ -1399,4 +1415,269 @@ fn export_ids_are_media_store_image_and_video_items() {
     assert!(check.contains("segments[1] == \"images\" || segments[1] == \"video\""));
     assert!(check.contains("segments[2] == \"media\""));
     assert!(check.contains("all { it in '0'..'9' }"));
+}
+
+#[test]
+fn decode_jni_calls_match_the_kotlin_declarations() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_DECODE);
+    for (decl, name, sig) in [
+        (
+            "@JvmStatic\n    fun decodeHeader(requestId: Long, path: String, maxDimension: Int): DecodeHeader",
+            "decodeHeader",
+            "(JLjava/lang/String;I)Ldev/frust/photolibrary/FrustPhotoLibraryHost$DecodeHeader;",
+        ),
+        (
+            "@JvmStatic\n    fun decodeInto(requestId: Long, path: String, width: Int, height: Int, srgb: Boolean, pixels: ByteBuffer): DecodeResult",
+            "decodeInto",
+            "(JLjava/lang/String;IIZLjava/nio/ByteBuffer;)Ldev/frust/photolibrary/FrustPhotoLibraryHost$DecodeResult;",
+        ),
+        (
+            "@JvmStatic\n    fun cancelDecode(requestId: Long) {",
+            "cancelDecode",
+            "(J)V",
+        ),
+    ] {
+        assert!(kotlin.contains(decl), "Kotlin host must declare `{decl}`");
+        let at = rust
+            .find(&format!("jni_str!(\"{name}\")"))
+            .unwrap_or_else(|| panic!("src/android_decode.rs never calls `{name}`"));
+        let window = &rust[at..(at + 200).min(rust.len())];
+        assert!(
+            window.contains(&format!("\"{sig}\"")),
+            "src/android_decode.rs must call `{name}` with `{sig}`"
+        );
+        assert!(
+            rust.contains(&format!("`{name}` | `(")),
+            "src/android_decode.rs's contract table must list `{name}`"
+        );
+        assert!(
+            kotlin.contains(&format!("`{name}(")),
+            "the Kotlin host's contract table must list `{name}`"
+        );
+    }
+    let host = rust_code(&kotlin);
+    for (call, target) in [
+        (
+            "fun decodeHeader(",
+            "ImageDecodeHost.header(appContext, requestId, path, maxDimension)",
+        ),
+        (
+            "fun decodeInto(",
+            "ImageDecodeHost.decodeInto(appContext, requestId, path, width, height, srgb, pixels)",
+        ),
+        ("fun cancelDecode(", "ImageDecodeHost.cancel(requestId)"),
+    ] {
+        let at = host.find(call).unwrap();
+        let window = &host[at..(at + 300).min(host.len())];
+        assert!(
+            window.contains(target),
+            "`{call}` must forward to `{target}`"
+        );
+    }
+    assert!(
+        read(RUST_ANDROID).contains(
+            "#[cfg(feature = \"decode\")]\n#[path = \"android_decode.rs\"]\nmod android_decode;"
+        ),
+        "src/android.rs declares the decode arm behind the `decode` feature"
+    );
+}
+
+#[test]
+fn decode_result_fields_match_their_rust_reads() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_DECODE);
+    let reads = [
+        (
+            "class DecodeHeader(",
+            vec![
+                ("code", "Int", "int_field"),
+                ("sourceWidth", "Int", "int_field"),
+                ("sourceHeight", "Int", "int_field"),
+                ("width", "Int", "int_field"),
+                ("height", "Int", "int_field"),
+            ],
+        ),
+        (
+            "class DecodeResult(",
+            vec![
+                ("code", "Int", "int_field"),
+                ("colorSpace", "Int", "int_field"),
+                ("captureTime", "String?", "string_field"),
+                ("cameraMake", "String?", "string_field"),
+                ("cameraModel", "String?", "string_field"),
+                ("lens", "String?", "string_field"),
+                ("iso", "Int", "int_field"),
+                ("exposureSeconds", "Double", "double_field"),
+                ("aperture", "Double", "double_field"),
+                ("focalLengthMm", "Double", "double_field"),
+                ("gpsLatitude", "Double", "double_field"),
+                ("gpsLongitude", "Double", "double_field"),
+            ],
+        ),
+    ];
+    for (class, fields) in reads {
+        let declared = jvm_fields(&kotlin, class);
+        let expected: Vec<_> = fields
+            .iter()
+            .map(|(name, ty, _)| (name.to_string(), ty.to_string()))
+            .collect();
+        assert_eq!(declared, expected, "`{class}` fields changed");
+        for (name, _, reader) in fields {
+            let read = format!("{reader}(env, &result, jni_str!(\"{name}\"))");
+            assert!(rust.contains(&read), "no `{read}` in src/android_decode.rs");
+        }
+    }
+    for (reader, sig) in [
+        ("fn int_field(", "jni_sig!(\"I\")"),
+        ("fn double_field(", "jni_sig!(\"D\")"),
+        ("fn string_field(", "jni_sig!(\"Ljava/lang/String;\")"),
+    ] {
+        assert!(
+            function(&rust, reader).contains(sig),
+            "`{reader}` reads `{sig}`"
+        );
+    }
+    // Nested in the host, so its `FrustPhotoLibraryHost$*` keep rule covers the fields Rust
+    // reads; Rust never loads `ImageDecodeHost` by name, so it needs no keep rule of its own.
+    assert!(
+        read(CONSUMER_RULES)
+            .contains("-keep class dev.frust.photolibrary.FrustPhotoLibraryHost$* { *; }")
+    );
+    for file in [RUST_ANDROID, RUST_ANDROID_DECODE] {
+        assert!(
+            !rust_code(&read(file)).contains("ImageDecodeHost"),
+            "{file} must reach the decoder through FrustPhotoLibraryHost only"
+        );
+    }
+}
+
+#[test]
+fn decode_fills_one_direct_buffer_with_the_software_allocator() {
+    let decoder = read(KOTLIN_DECODER);
+    assert!(decoder.contains("package dev.frust.photolibrary\n"));
+    assert!(decoder.contains("\ninternal object ImageDecodeHost {"));
+    for call in [
+        "decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE)",
+        "decoder.setTargetSize(width, height)",
+        "decoder.setTargetColorSpace(targetColorSpace(info.colorSpace, srgb))",
+        "pixels.order(ByteOrder.nativeOrder())",
+        "bitmap.copyPixelsToBuffer(pixels)",
+        "ImageDecoder.isMimeTypeSupported(type)",
+        "throw HeaderRead()",
+        "ExifInterface(path)",
+    ] {
+        assert!(
+            decoder.contains(call),
+            "ImageDecodeHost.kt must call `{call}`"
+        );
+    }
+    let copy = function(&decoder, "private fun decodeAndCopy(");
+    let cancelled = copy
+        .find("if (!live.contains(requestId)) return null")
+        .expect("the decode checks for a cancel before the copy");
+    assert!(cancelled < copy.find("bitmap.copyPixelsToBuffer(pixels)").unwrap());
+    assert!(copy.contains("pixels.capacity() != bitmap.byteCount"));
+    assert!(copy.contains("bitmap.config != Bitmap.Config.ARGB_8888"));
+    let into = function(&decoder, "fun decodeInto(");
+    assert!(
+        into.contains("} finally {\n            live.remove(requestId)"),
+        "decodeInto always drops its request"
+    );
+    let header = function(&decoder, "fun header(");
+    assert!(header.contains("live.add(requestId)"));
+    // The buffer is a Rust allocation alive only for the `decodeInto` call: never stored.
+    for line in decoder.lines().map(str::trim) {
+        let property = line.starts_with("val ")
+            || line.starts_with("var ")
+            || line.starts_with("private val ")
+            || line.starts_with("private var ");
+        assert!(
+            !(property && line.contains("ByteBuffer")),
+            "ImageDecodeHost.kt must never keep the pixel buffer: `{line}`"
+        );
+    }
+    assert!(
+        !decoder.contains("ByteArray(width") && !decoder.contains("ByteBuffer.allocate"),
+        "full-size pixels never go through a Java array"
+    );
+    assert!(
+        !decoder.contains("Matrix") && !decoder.contains("TAG_ORIENTATION"),
+        "ImageDecoder applies the orientation itself; nothing rotates again"
+    );
+    let codes = function(&decoder, "private fun codeFor(");
+    assert!(codes.contains("is ImageDecoder.DecodeException ->"));
+    assert!(codes.contains("FrustPhotoLibraryHost.DECODE_FAILED"));
+    let check = function(&decoder, "private fun requireDecoder(");
+    assert!(check.contains("throw Refused(FrustPhotoLibraryHost.NO_DECODER)"));
+
+    let rust = read(RUST_ANDROID_DECODE);
+    let code = rust_code(&rust);
+    assert_eq!(
+        code.matches("unsafe").count(),
+        1,
+        "src/android_decode.rs holds exactly one `unsafe` block"
+    );
+    let at = rust
+        .find("unsafe { env.new_direct_byte_buffer(rgba.as_mut_ptr(), rgba.len()) }")
+        .expect("the one `unsafe` block wraps the pixel buffer");
+    let before = &rust[..at];
+    let safety = before.rfind("// SAFETY:").expect("a SAFETY note");
+    assert!(
+        !before[safety..].contains("\n\n"),
+        "the SAFETY note sits right above the block"
+    );
+    let note = &before[safety..];
+    assert!(note.contains("alive and unmoved") && note.contains("never keeps it"));
+    let into = function(&code, "fn decode_into(");
+    let call = into.find("jni_str!(\"decodeInto\")").unwrap();
+    let release = into
+        .find("env.delete_local_ref(buffer);")
+        .expect("the buffer's local reference is deleted");
+    assert!(call < release, "the buffer is released after the call");
+    assert!(into.contains("rgba: &mut [u8],"));
+    assert!(!code.contains("[B") && !code.contains("JByteArray"));
+    let finish = function(&code, "fn finish(");
+    assert!(finish.contains("pixels::unpremultiply_rgba8_in_place(&mut rgba);"));
+}
+
+#[test]
+fn decode_refuses_the_ui_thread_and_types_its_errors() {
+    let android = rust_code(&read(RUST_ANDROID));
+    let arm = function(&android, "pub(crate) fn decode_file(");
+    let ui = arm
+        .find("with_host(|env, _class| ensure_off_ui_thread(env))?;")
+        .expect("decode_file refuses the UI thread");
+    assert!(ui < arm.find("android_decode::decode(path, options)").unwrap());
+    assert!(!arm.contains("Unsupported"), "the stub arm is gone");
+
+    let rust = rust_code(&read(RUST_ANDROID_DECODE));
+    let errors = function(&rust, "fn decode_error(");
+    for mapping in [
+        "NO_DECODER => PhotoError::Unsupported,",
+        "DECODE_FAILED => PhotoError::Platform(",
+        "CANCELLED => PhotoError::Cancelled,",
+    ] {
+        assert!(
+            errors.contains(mapping),
+            "decode_error must map `{mapping}`"
+        );
+    }
+    let decode = function(&rust, "pub(super) fn decode(");
+    let hook = decode
+        .find("token.set_hook(move || cancel_decode(request_id));")
+        .expect("the cancel hook reaches the host");
+    assert!(hook < decode.find("run_decode(").unwrap());
+    assert!(decode.contains("token.clear_hook();"));
+    let run = function(&rust, "fn run_decode(");
+    assert!(
+        run.matches("if is_cancelled(options) {").count() >= 2,
+        "the token is checked before the header and after the copy"
+    );
+    assert!(
+        run.contains("cancel_decode(request_id);"),
+        "a request abandoned after its header is dropped on the host"
+    );
+    let cancel = function(&rust, "fn cancel_decode(");
+    assert!(cancel.contains("jni_str!(\"cancelDecode\")"));
 }
