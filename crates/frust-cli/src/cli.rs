@@ -114,6 +114,11 @@ pub enum Command {
     Devices,
     /// Remove build outputs (cargo target dirs + Gradle/Xcode build dirs).
     Clean,
+    /// Manage the Frust plugins of the project in the current directory.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// Launch the TUI workbench: an advanced interactive interface for
     /// managing Frust projects.
     Tui,
@@ -169,6 +174,23 @@ pub enum Command {
     Build {
         #[command(subcommand)]
         target: BuildTarget,
+    },
+}
+
+/// `frust plugin` subcommands.
+#[derive(Subcommand, Debug)]
+pub enum PluginCommand {
+    /// Add a plugin to the project in the current directory: its Cargo
+    /// dependency and platform wiring, the same edits the TUI's Add Plugin
+    /// dialog makes. Idempotent: a re-run changes nothing.
+    Add {
+        /// Plugin id, e.g. `device-info`; an unknown id lists the valid ones.
+        id: String,
+
+        /// Optional plugin feature to enable; repeatable. An unknown feature
+        /// lists the plugin's valid ones.
+        #[arg(long = "feature", value_name = "FEATURE")]
+        features: Vec<String>,
     },
 }
 

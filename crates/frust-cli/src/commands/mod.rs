@@ -5,10 +5,11 @@ pub mod clean;
 pub mod create;
 pub mod devices;
 pub mod doctor;
+pub mod plugin;
 pub mod run;
 pub mod tui;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, PluginCommand};
 use anyhow::{Context, Result};
 use frust_drive::process::RealProcessRunner;
 
@@ -65,6 +66,12 @@ pub fn dispatch(command: Command, cli: &Cli) -> Result<u8> {
         Command::Clean => {
             let cwd = std::env::current_dir().context("reading current directory")?;
             clean::run_in(&*runner, &cwd)
+        }
+        Command::Plugin {
+            command: PluginCommand::Add { id, features },
+        } => {
+            let cwd = std::env::current_dir().context("reading current directory")?;
+            plugin::add(&cwd, &id, &features)
         }
         Command::Tui => tui::run(),
         Command::Run {
