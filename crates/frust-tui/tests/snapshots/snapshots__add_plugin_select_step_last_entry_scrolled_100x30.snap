@@ -7,25 +7,25 @@ expression: rendered
                                                                                                     
  PROJECTS         ╭ Add plugin ───────────────────────────────────── [Esc] Close ╮                  
   ▸ huddle        │                                                              │▓▓                
-                  │  Choose a plugin to add to this project  (19-27 of 27)       │▓▓                
- DEVICES ↻ R      │    ( ) network-image                                         │▓▓                
-   none found     │        Network image view: URL images with an in-memory +    │▓▓                
-                  │    ( ) share                                                 │▓▓                
- SESSIONS         │        Share text, a URL or files through the platform       │▓▓                
-   none running   │    ( ) connectivity                                          │▓▓                
-                  │        Default-network availability and change events        │▓▓                
- ACTIONS          │    ( ) qr                                                    │▓▓                
-   New project · n│        QR code view (qrcode encoder, canvas-painted)         │▓▓                
-   Add plugin · a │    ( ) file-dialogs                                          │▓▓                
-   Doctor · i     │        Native file open/save dialogs on Linux, macOS and     │▓▓                
-   Build · b      │    ( ) material-i18n                                         │▓▓                
-   Clean · c      │        Localized Material widget strings that follow the     │▓▓                
-   MCP off · M    │    ( ) device-info                                           │▓▓                
-   DAP off · D    │        Device memory query (total RAM, low-RAM flag,         │▓▓                
-                  │    ( ) permissions                                           │▓▓                
-                  │        Permission status, request and open_settings;         │▓▓                
-                  │  ▸ (o) photo-library                                         │▓▓                
+                  │  Choose a plugin to add to this project  (20-28 of 28)       │▓▓                
+ DEVICES ↻ R      │    ( ) share                                                 │▓▓                
+   none found     │        Share text, a URL or files through the platform       │▓▓                
+                  │    ( ) connectivity                                          │▓▓                
+ SESSIONS         │        Default-network availability and change events        │▓▓                
+   none running   │    ( ) qr                                                    │▓▓                
+                  │        QR code view (qrcode encoder, canvas-painted)         │▓▓                
+ ACTIONS          │    ( ) file-dialogs                                          │▓▓                
+   New project · n│        Native file open/save dialogs on Linux, macOS and     │▓▓                
+   Add plugin · a │    ( ) material-i18n                                         │▓▓                
+   Doctor · i     │        Localized Material widget strings that follow the     │▓▓                
+   Build · b      │    ( ) device-info                                           │▓▓                
+   Clean · c      │        Device memory query (total RAM, low-RAM flag,         │▓▓                
+   MCP off · M    │    ( ) permissions                                           │▓▓                
+   DAP off · D    │        Permission status, request and open_settings;         │▓▓                
+                  │    ( ) photo-library                                         │▓▓                
                   │        Pick photos and videos with the system picker         │▓▓                
+                  │  ▸ (o) background-task                                       │▓▓                
+                  │        Keeps a short write alive after the app leaves the    │▓▓                
                   │                                                              │▓▓                
                   │   Back    Next    Cancel                                     │▓▓                
                   │  ↑/↓ choose · Enter next · Esc close                         │▓▓                
