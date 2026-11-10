@@ -16,7 +16,7 @@ frust-network-image = "0.6"            # add `features = ["webp"]` for WebP
 frust::app!(App, setup = { NetworkImages::install(); });
 ```
 
-`frust add plugin network-image` adds the dependency. With no installed loader a view shows its
+The `frust` TUI's Add Plugin dialog adds the dependency. With no installed loader a view shows its
 error slot and logs once.
 
 ## 2. Use

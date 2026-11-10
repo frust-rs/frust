@@ -67,7 +67,7 @@ gradle.lifecycle.beforeProject {
         layout.buildDirectory.set(rootDir.resolve("../build/android/frust-native-widgets"))
     }
 }
-// `frust plugin add` appends each plugin's Android library module here with
+// The TUI's Add Plugin dialog appends each plugin's Android library module here with
 // the same include/projectDir/build-dir-redirect trio as `:frust-embedding`
 // above, so every module this project ever gains — built-in or
 // plugin-contributed — stays under THIS app's `build/android/` root.
