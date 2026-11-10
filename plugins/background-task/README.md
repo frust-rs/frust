@@ -11,11 +11,9 @@ Like every frust **platform plugin**, this crate is added to your app's own
 
 ## Add it
 
-```sh
-frust add background-task
-```
-
-That adds the Cargo dependency and, on Android, wires the Gradle module. Then call
+Run `frust` with no arguments in your project to open the workbench, and add
+`background-task` from its Add Plugin dialog. That adds the Cargo dependency and,
+on Android, wires the Gradle module. Then call
 `install()` once, from the app's setup block or the root `Component::init`:
 
 ```rust
@@ -117,7 +115,7 @@ Every `begin` is then refused and the work runs unprotected.
 
 ## Wiring the Gradle module by hand
 
-`frust add` does this for you. An existing project can add it directly:
+The Add Plugin dialog does this for you. To wire it by hand instead:
 
 ```kotlin
 // android/settings.gradle.kts
