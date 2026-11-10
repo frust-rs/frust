@@ -12,7 +12,7 @@ Like every frust **platform plugin**, this crate is added to your app's own
 ## Add it
 
 Run `frust` with no arguments in your project to open the workbench, and add
-`background-task` from its Add Plugin dialog. That adds the Cargo dependency and,
+`background-task` from its Add Plugin dialog (or run `frust plugin add background-task` from a shell). That adds the Cargo dependency and,
 on Android, wires the Gradle module. Then call
 `install()` once, from the app's setup block or the root `Component::init`:
 

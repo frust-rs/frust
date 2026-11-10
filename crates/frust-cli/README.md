@@ -13,6 +13,7 @@ Commands, as listed by `frust --help`:
 - `doctor`: validate the Frust toolchain (Rust targets, NDK, Android SDK, Xcode)
 - `devices`: list connected devices, emulators, and simulators
 - `clean`: remove build outputs (cargo target dirs and Gradle/Xcode build dirs)
+- `plugin add <id> [--feature <f>]...`: add a plugin to the project in the current directory (Cargo dependency and platform wiring), the shell route to the TUI's Add Plugin dialog; idempotent
 - `tui`: launch the TUI workbench for managing Frust projects
 - `run`: build, install, launch and stream logs on a connected device; with no Android device selected it falls back to `cargo run`, and `-d web` builds for the browser and serves the result
 - `build`: produce a distributable artifact, a release-signed APK/AAB via Gradle or an iOS app/IPA via `xcodebuild`
