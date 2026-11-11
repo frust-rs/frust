@@ -5,8 +5,8 @@
 # `/etc/apt/apt-mirrors.txt`. When name resolution on the runner turns flaky,
 # each download that misses waits out a DNS timeout, and the step fails after
 # about twenty minutes with `Temporary failure resolving`. This script resolves
-# the archive hosts once, with retries, and pins them in `/etc/hosts` so the
-# downloads no longer depend on DNS; it bounds each fetch; and it falls back to
+# the archive hosts once (through public resolvers if the runner's own fails)
+# and pins them in `/etc/hosts` so the downloads no longer depend on DNS; it bounds each fetch; and it falls back to
 # `archive.ubuntu.com` when the Azure name cannot be resolved at all, or once
 # more if the install fails anyway.
 set -euo pipefail
@@ -35,16 +35,28 @@ install() {
         sudo apt-get "${opts[@]}" install -y --no-install-recommends "$@"
 }
 
-# Prints the first IPv4 address of a host, trying a few times.
+# Prints one IPv4 address of a host: the system resolver first, then two public
+# resolvers over HTTPS by address, which work when the runner's own resolver is
+# the part that is failing.
 resolve() {
-    local host=$1 ip
-    for _ in 1 2 3 4 5 6 7 8; do
+    local host=$1 ip url
+    for _ in 1 2 3; do
         ip=$(getent ahostsv4 "$host" | awk 'NR == 1 { print $1 }') || true
         if [ -n "${ip:-}" ]; then
             echo "$ip"
             return 0
         fi
         sleep 2
+    done
+    for url in "https://1.1.1.1/dns-query" "https://8.8.8.8/resolve"; do
+        ip=$(curl -fsS -m 10 -H 'accept: application/dns-json' "$url?name=$host&type=A" |
+            python3 -c 'import json, sys
+answers = [a["data"] for a in json.load(sys.stdin).get("Answer", []) if a.get("type") == 1]
+print(answers[0] if answers else "")') || true
+        if [ -n "${ip:-}" ]; then
+            echo "$ip"
+            return 0
+        fi
     done
     return 1
 }
