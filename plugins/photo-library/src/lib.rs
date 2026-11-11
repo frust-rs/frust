@@ -57,6 +57,10 @@
     any(target_os = "ios", target_os = "macos")
 ))]
 mod apple_decode;
+// The iOS change feed's pure half (the sentinel, the batch merge, the error mapping) has no Photos
+// dependency, so the host compiles it for its tests; on iOS `apple` declares the whole module.
+#[cfg(all(test, feature = "library", not(target_os = "ios")))]
+mod apple_changes;
 mod cancel;
 #[cfg_attr(not(feature = "library"), allow(dead_code))]
 mod changes;
@@ -253,6 +257,9 @@ impl PhotoLibrary {
     /// The library's current [`ChangeToken`], to pass to [`changes_since`](Self::changes_since)
     /// later. Blocks; see [`albums`](Self::albums) for the rules. Desktop and web have no photo
     /// library and return [`PhotoError::Unsupported`].
+    ///
+    /// iOS keeps a change history from iOS 16; on iOS 15 the token is a fixed placeholder that
+    /// [`changes_since`](Self::changes_since) always answers with [`LibraryChanges::FullRescan`].
     pub fn current_change_token() -> Result<ChangeToken, PhotoError> {
         #[cfg(feature = "library")]
         {
@@ -386,6 +393,32 @@ impl PhotoLibrary {
         #[cfg(not(feature = "library"))]
         {
             let _ = (id, request, token);
+            Err(library_disabled())
+        }
+    }
+
+    /// The iCloud identifier of each asset in `ids`: one entry per id, in order, `None` where the
+    /// asset has no cloud identifier or the lookup failed for that id. Unlike an [`AssetId`],
+    /// which is local to one device, a cloud identifier names the same asset on every device
+    /// signed in to the same iCloud Photos library.
+    ///
+    /// Expensive and blocking: Photos resolves the whole batch in one call, so map every id the
+    /// app needs at once (before persisting them, say) rather than one at a time. See
+    /// [`albums`](Self::albums) for the thread and access rules. iOS 15 and later only; every
+    /// other platform returns [`PhotoError::Unsupported`].
+    pub fn cloud_identifiers(ids: &[AssetId]) -> Result<Vec<Option<String>>, PhotoError> {
+        #[cfg(all(feature = "library", target_os = "ios"))]
+        {
+            platform::cloud_identifiers(ids)
+        }
+        #[cfg(all(feature = "library", not(target_os = "ios")))]
+        {
+            let _ = ids;
+            Err(PhotoError::Unsupported)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = ids;
             Err(library_disabled())
         }
     }
@@ -927,6 +960,28 @@ mod tests {
         );
         assert_eq!(
             PhotoLibrary::on_library_changed(|| {}).map(|_| ()),
+            Err(PhotoError::Unsupported)
+        );
+    }
+
+    #[cfg(not(feature = "library"))]
+    #[test]
+    fn cloud_identifiers_are_feature_gated() {
+        assert_eq!(
+            PhotoLibrary::cloud_identifiers(&[AssetId::from_raw("a")]),
+            Err(PhotoError::FeatureDisabled { feature: "library" })
+        );
+    }
+
+    #[cfg(all(feature = "library", not(target_os = "ios")))]
+    #[test]
+    fn cloud_identifiers_are_ios_only() {
+        assert_eq!(
+            PhotoLibrary::cloud_identifiers(&[AssetId::from_raw("a")]),
+            Err(PhotoError::Unsupported)
+        );
+        assert_eq!(
+            PhotoLibrary::cloud_identifiers(&[]),
             Err(PhotoError::Unsupported)
         );
     }
