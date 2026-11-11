@@ -402,6 +402,28 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   `cancelThumbnail(requestId)`, which fires the `CancellationSignal` the host holds for that load (a cancel
   landing before the host registers it lets that load finish, and the call still returns `Cancelled`).
   A consumer keeps one `ImageSource` per asset, since each one built from pixels is a new engine image.
+- `photo-library`'s `library` tier also carries a change feed, cursor paging and a cloud-identifier mapping.
+  Token flow: the app persists the `ChangeToken` bytes (`current_change_token` on first run), calls
+  `changes_since(&token)`, applies the `Delta` (inserted, updated, deleted ids) or re-reads the library on
+  `FullRescan`, and stores the answer's `next`. The Rust registry behind `on_library_changed` is
+  platform-independent; each platform arm supplies a start/stop hook for one process-wide native observer
+  (a `PHPhotoLibraryChangeObserver` on iOS, a `ContentObserver` on Android) that runs while any
+  `ChangeSubscription` lives. Its callback is wake-only: no data, any thread, possibly coalesced or
+  spurious, so the app answers it with `changes_since` off the UI thread. iOS archives a
+  `PHPersistentChangeToken` (iOS 16+; a fixed placeholder token and an always-`FullRescan` answer on iOS 15)
+  and merges the change batches into one delta, an id inserted then deleted appearing only as deleted.
+  Android's token is the plugin's own versioned encoding of the `MediaStore` volume version, the generation
+  (API 30+) and the sorted id sets; a row visible but missing from the id set counts as inserted, and an
+  undecodable token or a changed volume version is a `FullRescan` (see `photo-library-change-feed-full-rescan`,
+  `photo-library-android-change-token-size` in [LIMITATIONS.md](LIMITATIONS.md)). A `Delta` evicts its
+  updated and deleted ids from the thumbnail LRU and a `FullRescan` clears it, inside `changes_since`.
+  `assets_after(&AssetQuery, Option<&AssetCursor>)` pages without an offset or total: Android by keyset on
+  the `assets` order (no count, no seek), iOS by position in one `PHFetchResult` snapshot per cursor session
+  (four kept; an evicted session's cursor is `InvalidRequest`; `photo-library-ios-cursor-pins-snapshot`). An
+  `AssetCursor` is in memory only and bound to its album, filter and platform. `cloud_identifiers(&[AssetId])`
+  resolves a whole batch with one expensive blocking Photos call on iOS 15+ and is `Unsupported` elsewhere.
+  An `AssetId` is local to one device and best-effort stable across launches, so an app may store it but
+  cannot move it to another device or platform; a cloud identifier is the cross-device name.
 - Android requires an explicit platform-handle init (JavaVM/Context, via `frust_plugin::android`)
   before any plugin can reach the OS, done through scoped, per-call JNI attaches; Apple needs no
   init step since `objc2` reaches the ObjC runtime globally. `camera`, `iap`, `video-player`, and
