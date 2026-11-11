@@ -233,11 +233,38 @@ pub(crate) fn require_file(path: &std::path::Path) -> Result<(), PhotoError> {
 /// An EXIF measurement (ISO, exposure time, aperture, focal length) that means something: a
 /// zero, negative or non-finite value is absent on every arm.
 #[cfg(all(
-    feature = "decode",
+    any(feature = "decode", feature = "library"),
     any(target_os = "android", target_os = "ios", target_os = "macos")
 ))]
 pub(crate) fn positive_measure(value: f64) -> Option<f64> {
     (value.is_finite() && value > 0.0).then_some(value)
+}
+
+/// A GPS position that means something. Both coordinates must be present and finite, latitude
+/// within -90..=90 and longitude within -180..=180, and the pair must not be exactly 0.0, 0.0:
+/// a platform that redacts a location zeroes the values rather than removing them. Anything
+/// else is `None` for both, so one coordinate never stands alone. A single coordinate at 0.0
+/// (the equator or the prime meridian) is a real position and is kept.
+#[cfg(all(
+    any(feature = "decode", feature = "library"),
+    any(target_os = "android", target_os = "ios", target_os = "macos")
+))]
+pub(crate) fn usable_position(
+    latitude: Option<f64>,
+    longitude: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    match (latitude, longitude) {
+        (Some(lat), Some(lon))
+            if lat.is_finite()
+                && lon.is_finite()
+                && (-90.0..=90.0).contains(&lat)
+                && (-180.0..=180.0).contains(&lon)
+                && !(lat == 0.0 && lon == 0.0) =>
+        {
+            (Some(lat), Some(lon))
+        }
+        _ => (None, None),
+    }
 }
 
 #[cfg(test)]
@@ -386,6 +413,38 @@ mod tests {
             std::fs::write(&path, b"x").unwrap();
             assert_eq!(require_file(&path), Ok(()));
             std::fs::remove_file(&path).unwrap();
+        }
+
+        #[test]
+        fn usable_position_keeps_real_positions_only() {
+            let real = (Some(-33.5), Some(151.25));
+            assert_eq!(usable_position(real.0, real.1), real);
+            // One coordinate at 0.0 is a real position.
+            assert_eq!(
+                usable_position(Some(0.0), Some(10.0)),
+                (Some(0.0), Some(10.0))
+            );
+            assert_eq!(
+                usable_position(Some(10.0), Some(-0.0)),
+                (Some(10.0), Some(-0.0))
+            );
+            assert_eq!(
+                usable_position(Some(90.0), Some(-180.0)),
+                (Some(90.0), Some(-180.0))
+            );
+            let absent = (None, None);
+            assert_eq!(usable_position(Some(0.0), Some(0.0)), absent);
+            assert_eq!(usable_position(Some(-0.0), Some(0.0)), absent);
+            assert_eq!(usable_position(Some(1.0), None), absent);
+            assert_eq!(usable_position(None, Some(1.0)), absent);
+            assert_eq!(usable_position(None, None), absent);
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                assert_eq!(usable_position(Some(bad), Some(1.0)), absent, "{bad}");
+                assert_eq!(usable_position(Some(1.0), Some(bad)), absent, "{bad}");
+            }
+            for (lat, lon) in [(90.5, 1.0), (-91.0, 1.0), (1.0, 180.5), (1.0, -181.0)] {
+                assert_eq!(usable_position(Some(lat), Some(lon)), absent, "{lat},{lon}");
+            }
         }
 
         #[test]

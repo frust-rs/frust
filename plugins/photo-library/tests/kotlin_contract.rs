@@ -26,6 +26,9 @@
 //!   declarations, every blocking call refuses the UI thread, browsing never
 //!   takes the pick slot, paging and the access check keep their shape, and
 //!   the asked-flag keys and permission table match `frust-permissions`;
+//! - thumbnail cancel: the load gets a real `CancellationSignal` held under its
+//!   request id, `cancelThumbnail` fires it, a failure after the cancel answers
+//!   `CANCELLED`, and the Rust hook calls the entry and types the code;
 //! - originals and saves: the host calls, exports and codes match, neither
 //!   touches pick state or a pick's executor, the export copies in cancellable
 //!   chunks and deletes its partial file, the location-preserving open falls
@@ -34,7 +37,11 @@
 //!   direct `ByteBuffer` (never a Java array) that the host never keeps, the
 //!   decode uses the software allocator, a target size and
 //!   `copyPixelsToBuffer`, a format with no decoder is typed, the UI thread is
-//!   refused first, and the module's one `unsafe` block carries its SAFETY note.
+//!   refused first, and the module's one `unsafe` block carries its SAFETY note;
+//! - metadata: the `assetMetadata` call and its result match, the host opens
+//!   the asset with the export's own open and reuses the decoder's EXIF read
+//!   (no tag read of its own), closes its stream, reports no GPS from a
+//!   redacted read, and the Rust arm refuses the UI thread and types its codes.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -59,6 +66,9 @@ const RUST_ANDROID_ORIGINALS: &str = "src/android_originals.rs";
 const KOTLIN_DECODER: &str =
     "platform/android/src/main/kotlin/dev/frust/photolibrary/ImageDecodeHost.kt";
 const RUST_ANDROID_DECODE: &str = "src/android_decode.rs";
+const KOTLIN_METADATA: &str =
+    "platform/android/src/main/kotlin/dev/frust/photolibrary/AssetMetadataHost.kt";
+const RUST_ANDROID_METADATA: &str = "src/android_metadata.rs";
 
 /// How many leading [`SHARED_CODES`] are result codes (the rest are filters and kinds).
 const RESULT_CODES: usize = 16;
@@ -187,8 +197,13 @@ fn kotlin_codes_equal_their_rust_twins() {
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_LIBRARY)));
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_ORIGINALS)));
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_DECODE)));
-    // The originals and decode modules repeat some codes; `extend` would mask a drift.
-    for file in [RUST_ANDROID_ORIGINALS, RUST_ANDROID_DECODE] {
+    rust.extend(rust_jint_consts(&read(RUST_ANDROID_METADATA)));
+    // The originals, decode and metadata modules repeat some codes; `extend` would mask a drift.
+    for file in [
+        RUST_ANDROID_ORIGINALS,
+        RUST_ANDROID_DECODE,
+        RUST_ANDROID_METADATA,
+    ] {
         for (name, value) in rust_jint_consts(&read(file)) {
             assert_eq!(
                 kotlin.get(&name),
@@ -676,14 +691,19 @@ fn browse_jni_calls_match_the_kotlin_declarations() {
             "()Ldev/frust/photolibrary/FrustPhotoLibraryHost$AlbumsResult;",
         ),
         (
-            "@JvmStatic\n    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult",
+            "@JvmStatic\n    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult",
             "assets",
-            "(Ljava/lang/String;IJI)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;",
+            "(Ljava/lang/String;IJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;",
         ),
         (
-            "@JvmStatic\n    fun thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult",
+            "@JvmStatic\n    fun thumbnail(requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult",
             "thumbnail",
-            "(Ljava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;",
+            "(JLjava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;",
+        ),
+        (
+            "@JvmStatic\n    fun cancelThumbnail(requestId: Long) {",
+            "cancelThumbnail",
+            "(J)V",
         ),
         (
             "@JvmStatic\n    fun manageLimitedSelection(requestId: Long): Int",
@@ -751,6 +771,10 @@ fn browse_result_fields_match_their_rust_reads() {
                 ("heights", "IntArray", "int_array_field"),
                 ("dates", "LongArray", "long_array_field"),
                 ("durations", "LongArray", "long_array_field"),
+                ("modified", "LongArray", "long_array_field"),
+                ("favorites", "IntArray", "int_array_field"),
+                ("names", "Array<String?>", "string_array_field"),
+                ("types", "Array<String?>", "string_array_field"),
             ],
         ),
         (
@@ -887,8 +911,8 @@ fn browsing_checks_access_and_pages_by_sdk() {
         browser.contains("MediaStore.Video.Media.EXTERNAL_CONTENT_URI"),
         "asset ids are typed collection URIs, which loadThumbnail resolves on every API level"
     );
-    let thumb = function(&browser, "fun thumbnail(");
-    assert!(thumb.contains("loadThumbnail(uri, Size(width, height), null)"));
+    let thumb = function(&browser, "private fun loadThumbnail(");
+    assert!(thumb.contains("loadThumbnail(uri, Size(width, height), signal)"));
     assert!(thumb.contains("catch (e: FileNotFoundException)"));
     assert!(thumb.contains("Bitmap.Config.ARGB_8888"));
     assert!(thumb.contains("copyPixelsToBuffer"));
@@ -902,6 +926,120 @@ fn browsing_checks_access_and_pages_by_sdk() {
     let error = function(&rust, "fn browse_error(");
     assert!(error.contains("PERMISSION_DENIED => PhotoError::PermissionDenied,"));
     assert!(error.contains("NOT_FOUND => PhotoError::NotFound,"));
+}
+
+#[test]
+fn a_thumbnail_load_is_cancellable_on_both_sides() {
+    let browser = read(KOTLIN_BROWSER);
+    let code = rust_code(&browser);
+    assert!(
+        !code.contains("loadThumbnail(uri, Size(width, height), null)"),
+        "loadThumbnail never runs without a CancellationSignal"
+    );
+    assert!(browser.contains("import android.os.CancellationSignal"));
+    let entry = function(&browser, "fun thumbnail(ctx: Context?, requestId: Long,");
+    assert!(entry.contains("val signal = CancellationSignal()"));
+    assert!(entry.contains("thumbnailSignals[requestId] = signal"));
+    assert!(
+        entry.contains("} finally {") && entry.contains("thumbnailSignals.remove(requestId)"),
+        "a finished load drops its signal, so a late cancel finds nothing"
+    );
+    let load = function(&browser, "private fun loadThumbnail(");
+    assert!(load.contains("loadThumbnail(uri, Size(width, height), signal)"));
+    assert!(
+        load.contains("catch (e: OperationCanceledException) {")
+            && load.contains("thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)"),
+        "the cancel exception answers CANCELLED"
+    );
+    assert!(
+        load.contains("thumbnailFailed(cancelledOr(signal, FrustPhotoLibraryHost.NOT_FOUND))"),
+        "a missing-file failure after a cancel is a cancel"
+    );
+    assert!(load.contains(
+        "if (signal.isCanceled) return@browse thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)"
+    ));
+    let cancel = function(&browser, "fun cancelThumbnail(requestId: Long) {");
+    assert!(cancel.contains("thumbnailSignals[requestId]?.cancel()"));
+
+    let kotlin = rust_code(&read(KOTLIN_HOST));
+    let at = kotlin
+        .find("fun cancelThumbnail(requestId: Long) {")
+        .unwrap();
+    assert!(
+        kotlin[at..(at + 200).min(kotlin.len())]
+            .contains("MediaStoreBrowser.cancelThumbnail(requestId)"),
+        "the host's cancel entry forwards to the browser"
+    );
+    let at = kotlin.find("fun thumbnail(requestId: Long,").unwrap();
+    assert!(
+        kotlin[at..(at + 300).min(kotlin.len())].contains(
+            "MediaStoreBrowser.thumbnail(appContext, requestId, id, width, height, fill)"
+        )
+    );
+    let host = read(KOTLIN_HOST);
+    assert!(host.contains("`cancelThumbnail(requestId: Long)` — `(J)V`"));
+
+    let rust = rust_code(&read(RUST_ANDROID_LIBRARY));
+    let arm = function(&rust, "pub(crate) fn thumbnail(");
+    let hook = arm
+        .find("token.set_hook(move || cancel_thumbnail(request_id));")
+        .expect("the token's hook cancels this request");
+    let call = arm.find("jni_str!(\"thumbnail\")").unwrap();
+    let clear = arm
+        .find("token.clear_hook();")
+        .expect("the hook is cleared");
+    assert!(hook < call && call < clear);
+    assert!(arm.contains("JValue::Long(request_id as jlong),"));
+    let hook = function(&rust, "fn cancel_thumbnail(");
+    assert!(hook.contains("jni_str!(\"cancelThumbnail\")"));
+    let error = function(&rust, "fn browse_error(");
+    assert!(error.contains("CANCELLED => PhotoError::Cancelled,"));
+}
+
+#[test]
+fn asset_detail_columns_are_projected_by_api_level_and_details() {
+    let browser = read(KOTLIN_BROWSER);
+    let base = browser
+        .split("private val ASSET_PROJECTION")
+        .nth(1)
+        .and_then(|rest| rest.split("private val DETAIL_COLUMNS").next())
+        .expect("ASSET_PROJECTION");
+    assert!(base.contains("MediaStore.MediaColumns.DATE_MODIFIED,"));
+    assert!(
+        !base.contains("IS_FAVORITE")
+            && !base.contains("DISPLAY_NAME")
+            && !base.contains("MIME_TYPE"),
+        "the always-projected columns hold only what API 29 has and no detail column"
+    );
+    let detail = browser
+        .split("private val DETAIL_COLUMNS")
+        .nth(1)
+        .and_then(|rest| rest.split("private fun projection").next())
+        .expect("DETAIL_COLUMNS");
+    assert!(detail.contains("MediaStore.MediaColumns.DISPLAY_NAME,"));
+    assert!(detail.contains("MediaStore.MediaColumns.MIME_TYPE,"));
+    let projection = function(&browser, "private fun projection(");
+    assert!(
+        projection.contains(
+            "if (Build.VERSION.SDK_INT >= 30) columns += MediaStore.MediaColumns.IS_FAVORITE"
+        ),
+        "IS_FAVORITE is an API 30 column"
+    );
+    assert!(
+        projection.contains("if (details) columns += DETAIL_COLUMNS"),
+        "name and type are projected only with details"
+    );
+    let page = function(&browser, "private fun queryPage(");
+    assert!(page.contains("val projection = projection(details)"));
+    assert!(!page.contains("ASSET_PROJECTION"));
+    let rows = function(&browser, "private fun readRows(");
+    assert!(rows.contains("cursor.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)"));
+    assert!(rows.contains("if (favoriteAt < 0) FAVORITE_UNKNOWN"));
+    assert!(rows.contains("val nameAt = if (details)"));
+    assert!(rows.contains("val typeAt = if (details)"));
+    let rust = rust_code(&read(RUST_ANDROID_LIBRARY));
+    assert!(function(&rust, "pub(crate) fn assets(").contains("JValue::Bool(details)"));
+    assert!(function(&rust, "fn assets_from(").contains("burst_id: None,"));
 }
 
 #[test]
@@ -1297,7 +1435,13 @@ fn cancel_reaches_the_host_and_export_progress_stays_off_the_lock() {
 #[test]
 fn the_original_open_prefers_unredacted_bytes_and_never_fails_over_location() {
     let kotlin = read(KOTLIN_HOST);
-    let open = function(&kotlin, "private fun openOriginal(");
+    assert!(
+        kotlin.contains(
+            "private fun openOriginal(ctx: Context, uri: Uri): InputStream = openOriginalStream(ctx, uri).stream"
+        ),
+        "the export opens through the shared open"
+    );
+    let open = function(&kotlin, "internal fun openOriginalStream(");
     let gate = open
         .find("ctx.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION)")
         .expect("setRequireOriginal only with the grant");
@@ -1487,6 +1631,7 @@ fn decode_jni_calls_match_the_kotlin_declarations() {
 fn decode_result_fields_match_their_rust_reads() {
     let kotlin = read(KOTLIN_HOST);
     let rust = read(RUST_ANDROID_DECODE);
+    let metadata = read(RUST_ANDROID_METADATA);
     let reads = [
         (
             "class DecodeHeader(",
@@ -1516,7 +1661,12 @@ fn decode_result_fields_match_their_rust_reads() {
             ],
         ),
     ];
-    for (class, fields) in reads {
+    // `DecodeHeader` is the decoder's own; `DecodeResult` is read once, in `read_result`, for
+    // the decode and the metadata call alike.
+    for ((class, fields), (file, source, result)) in reads.into_iter().zip([
+        (RUST_ANDROID_DECODE, &rust, "&result"),
+        (RUST_ANDROID_METADATA, &metadata, "result"),
+    ]) {
         let declared = jvm_fields(&kotlin, class);
         let expected: Vec<_> = fields
             .iter()
@@ -1524,17 +1674,23 @@ fn decode_result_fields_match_their_rust_reads() {
             .collect();
         assert_eq!(declared, expected, "`{class}` fields changed");
         for (name, _, reader) in fields {
-            let read = format!("{reader}(env, &result, jni_str!(\"{name}\"))");
-            assert!(rust.contains(&read), "no `{read}` in src/android_decode.rs");
+            let read = format!("{reader}(env, {result}, jni_str!(\"{name}\"))");
+            assert!(source.contains(&read), "no `{read}` in {file}");
         }
     }
+    let shared = rust_code(&metadata);
+    assert!(function(&shared, "pub(super) fn read_result(").contains("Ok(Filled {"));
+    assert!(
+        rust_code(&rust).contains("read_result(env, &result)"),
+        "the decoder reads its result through the shared reader"
+    );
     for (reader, sig) in [
         ("fn int_field(", "jni_sig!(\"I\")"),
         ("fn double_field(", "jni_sig!(\"D\")"),
         ("fn string_field(", "jni_sig!(\"Ljava/lang/String;\")"),
     ] {
         assert!(
-            function(&rust, reader).contains(sig),
+            function(&metadata, reader).contains(sig),
             "`{reader}` reads `{sig}`"
         );
     }
@@ -1544,10 +1700,11 @@ fn decode_result_fields_match_their_rust_reads() {
         read(CONSUMER_RULES)
             .contains("-keep class dev.frust.photolibrary.FrustPhotoLibraryHost$* { *; }")
     );
-    for file in [RUST_ANDROID, RUST_ANDROID_DECODE] {
+    for file in [RUST_ANDROID, RUST_ANDROID_DECODE, RUST_ANDROID_METADATA] {
+        let code = rust_code(&read(file));
         assert!(
-            !rust_code(&read(file)).contains("ImageDecodeHost"),
-            "{file} must reach the decoder through FrustPhotoLibraryHost only"
+            !code.contains("ImageDecodeHost") && !code.contains("AssetMetadataHost"),
+            "{file} must reach the hosts through FrustPhotoLibraryHost only"
         );
     }
 }
@@ -1606,7 +1763,7 @@ fn decode_fills_one_direct_buffer_with_the_software_allocator() {
         "ImageDecoder applies the orientation itself; nothing rotates again"
     );
     // The capture time is the original capture tag only, never the last-modified one.
-    let exif = function(&decoder, "private fun withExif(");
+    let exif = function(&decoder, "internal fun withExif(");
     assert!(exif.contains("exif?.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL),"));
     assert!(
         !exif.contains("ExifInterface.TAG_DATETIME)"),
@@ -1687,4 +1844,150 @@ fn decode_refuses_the_ui_thread_and_types_its_errors() {
     );
     let cancel = function(&rust, "fn cancel_decode(");
     assert!(cancel.contains("jni_str!(\"cancelDecode\")"));
+}
+
+#[test]
+fn metadata_jni_call_matches_the_kotlin_declaration() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_METADATA);
+    let decl = "@JvmStatic\n    fun assetMetadata(id: String): DecodeResult";
+    assert!(kotlin.contains(decl), "Kotlin host must declare `{decl}`");
+    let at = rust
+        .find("jni_str!(\"assetMetadata\")")
+        .expect("src/android_metadata.rs never calls `assetMetadata`");
+    let window = &rust[at..(at + 200).min(rust.len())];
+    assert!(
+        window.contains(
+            "\"(Ljava/lang/String;)Ldev/frust/photolibrary/FrustPhotoLibraryHost$DecodeResult;\""
+        ),
+        "src/android_metadata.rs must call `assetMetadata` with its declared signature"
+    );
+    assert!(
+        rust.contains("`assetMetadata` | `("),
+        "src/android_metadata.rs's contract table must list `assetMetadata`"
+    );
+    assert!(
+        kotlin.contains("`assetMetadata("),
+        "the Kotlin host's contract table must list `assetMetadata`"
+    );
+    let host = rust_code(&kotlin);
+    let at = host.find("fun assetMetadata(").unwrap();
+    assert!(
+        host[at..(at + 200).min(host.len())].contains("AssetMetadataHost.read(appContext, id)"),
+        "`assetMetadata` must forward to `AssetMetadataHost.read`"
+    );
+    let android = read(RUST_ANDROID);
+    assert!(
+        android.contains(
+            "#[cfg(any(feature = \"decode\", feature = \"library\"))]\n#[path = \"android_metadata.rs\"]\nmod android_metadata;"
+        ),
+        "src/android.rs declares the shared EXIF module for either feature"
+    );
+}
+
+#[test]
+fn metadata_host_reuses_the_export_open_and_the_shared_exif_read() {
+    let host = read(KOTLIN_METADATA);
+    assert!(host.contains("package dev.frust.photolibrary\n"));
+    assert!(host.contains("\ninternal object AssetMetadataHost {"));
+    let body = function(&host, "fun read(");
+    let check = body
+        .find("if (!FrustPhotoLibraryHost.isExportableId(uri))")
+        .expect("only MediaStore image and video ids are read");
+    let open = body
+        .find("FrustPhotoLibraryHost.openOriginalStream(context, uri)")
+        .expect("the asset opens through the export's own open");
+    assert!(check < open);
+    assert!(
+        body.contains("opened.stream.use { input ->"),
+        "the stream is closed on every path"
+    );
+    assert!(body.contains("ExifInterface(input)"));
+    assert!(
+        body.contains(
+            "ImageDecodeHost.withExif(FrustPhotoLibraryHost.COLOR_OTHER, exif, opened.unredacted)"
+        ),
+        "the EXIF goes through the decoder's read, without GPS from a redacted read"
+    );
+    for (code, catch) in [
+        ("NOT_FOUND", "catch (e: FileNotFoundException)"),
+        ("PERMISSION_DENIED", "catch (e: SecurityException)"),
+        ("DECODE_FAILED", "catch (e: Exception)"),
+    ] {
+        let at = body.find(catch).unwrap_or_else(|| panic!("no `{catch}`"));
+        let window = &body[at..(at + 260).min(body.len())];
+        assert!(
+            window.contains(&format!("FrustPhotoLibraryHost.{code})")),
+            "`{catch}` answers `{code}`"
+        );
+    }
+    assert!(
+        !host.contains("getAttribute") && !host.contains("TAG_"),
+        "AssetMetadataHost.kt must not read tags of its own"
+    );
+    assert!(
+        !host.contains(", e)"),
+        "the exception message can carry a path"
+    );
+
+    let decoder = read(KOTLIN_DECODER);
+    let exif = function(&decoder, "internal fun withExif(");
+    assert!(exif.contains("withLocation: Boolean = true"));
+    assert!(exif.contains("val located = exif?.takeIf { withLocation }"));
+    assert_eq!(
+        exif.matches("located?.let { coordinate(").count(),
+        2,
+        "both GPS values come from the location-checked read"
+    );
+    assert!(decoder.contains("internal fun decodeFailed(code: Int): DecodeResult"));
+
+    let kotlin = read(KOTLIN_HOST);
+    let open = function(&kotlin, "internal fun openOriginalStream(");
+    assert!(open.contains("OriginalStream(it, true)"));
+    assert!(open.contains("?: throw IOException(\"no input stream\"), false)"));
+}
+
+#[test]
+fn metadata_refuses_the_ui_thread_and_types_its_codes() {
+    let android = rust_code(&read(RUST_ANDROID));
+    let arm = function(&android, "pub(crate) fn asset_metadata(");
+    let ui = arm
+        .find("with_host(|env, _class| ensure_off_ui_thread(env))?;")
+        .expect("asset_metadata refuses the UI thread");
+    assert!(
+        ui < arm
+            .find("android_metadata::asset_metadata(id, options)")
+            .unwrap()
+    );
+
+    let rust = rust_code(&read(RUST_ANDROID_METADATA));
+    let errors = function(&rust, "fn metadata_error(");
+    for mapping in [
+        "NOT_FOUND => PhotoError::NotFound,",
+        "PERMISSION_DENIED => PhotoError::PermissionDenied,",
+        "NOT_INITIALIZED => PhotoError::PlatformNotInitialized,",
+        "DECODE_FAILED => PhotoError::Platform(",
+        "CANCELLED => PhotoError::Cancelled,",
+        "other => error_for(other),",
+    ] {
+        assert!(
+            errors.contains(mapping),
+            "metadata_error must map `{mapping}`"
+        );
+    }
+    let result = function(&rust, "fn metadata_result(");
+    assert!(
+        result.contains("Ok(exif_from(filled).unwrap_or_default())"),
+        "an asset with no EXIF is an empty value, not an error"
+    );
+    let call = function(&rust, "pub(super) fn asset_metadata(");
+    let host = call.find("request_metadata(").unwrap();
+    let cancel = call
+        .find("if options.is_cancelled() {")
+        .expect("a cancel that raced the answer wins");
+    assert!(host < cancel);
+    assert!(
+        !rust.contains("unsafe"),
+        "src/android_metadata.rs holds no `unsafe`"
+    );
 }

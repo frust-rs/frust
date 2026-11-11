@@ -16,6 +16,14 @@
 //!
 //! Every blocking call refuses the UI thread with [`PhotoError::UiThread`]
 //! before any work.
+//!
+//! `thumbnail` carries a request id. The call's [`CancelToken`] hook calls the
+//! host's `cancelThumbnail` with it, which fires the `CancellationSignal` the
+//! host passed to `loadThumbnail`; the host answers `CANCELLED` for a load that
+//! stopped or finished after the cancel. The hook is set before the host call
+//! and cleared after it, and the token is checked on both sides of the call, so
+//! a cancel wins even when it lands before the host has registered the signal
+//! (that load then runs to its end, and its pixels are dropped).
 
 use std::sync::atomic::Ordering;
 
@@ -24,12 +32,14 @@ use jni::sys::{jint, jlong};
 use jni::{Env, jni_sig, jni_str};
 
 use super::{
-    Answer, LAUNCH_FAILED, NEXT_REQUEST_ID, NOT_INITIALIZED, PENDING, Slot, WAITS, await_answer,
-    ensure_off_ui_thread, error_for, filter_code, lock, read_strings, run_jni, with_host,
+    Answer, CANCELLED, LAUNCH_FAILED, NEXT_REQUEST_ID, NOT_INITIALIZED, PENDING, Slot, WAITS,
+    await_answer, ensure_off_ui_thread, error_for, filter_code, lock, read_strings, run_jni,
+    with_host,
 };
+use crate::cancel::CancelToken;
 use crate::library::{
     Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, Thumbnail, ThumbnailMode,
-    ThumbnailRequest,
+    ThumbnailRequest, favorite_from_code, modified_ms_from_seconds,
 };
 use crate::pick_cache;
 use crate::pixels;
@@ -115,6 +125,7 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
     let offset = jlong::try_from(query.offset).unwrap_or(jlong::MAX);
     let limit = jint::try_from(query.effective_limit()).unwrap_or(jint::MAX);
     let filter = filter_code(query.filter);
+    let details = query.details;
     with_host(|env, class| {
         ensure_off_ui_thread(env)?;
         run_jni(env, "FrustPhotoLibraryHost.assets", |env| {
@@ -127,13 +138,14 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
                     class,
                     jni_str!("assets"),
                     jni_sig!(
-                        "(Ljava/lang/String;IJI)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;"
+                        "(Ljava/lang/String;IJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;"
                     ),
                     &[
                         JValue::Object(&album),
                         JValue::Int(filter),
                         JValue::Long(offset),
                         JValue::Int(limit),
+                        JValue::Bool(details),
                     ],
                 )?
                 .l()?;
@@ -151,8 +163,12 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
                 heights: int_array_field(env, &result, jni_str!("heights"))?,
                 dates: long_array_field(env, &result, jni_str!("dates"))?,
                 durations: long_array_field(env, &result, jni_str!("durations"))?,
+                modified: long_array_field(env, &result, jni_str!("modified"))?,
+                favorites: int_array_field(env, &result, jni_str!("favorites"))?,
+                names: string_array_field(env, &result, jni_str!("names"))?,
+                types: string_array_field(env, &result, jni_str!("types"))?,
             };
-            Ok(assets_from(columns, total))
+            Ok(assets_from(columns, total, details))
         })?
     })
 }
@@ -165,10 +181,22 @@ struct AssetColumns {
     heights: Vec<jint>,
     dates: Vec<jlong>,
     durations: Vec<jlong>,
+    /// `DATE_MODIFIED`, in seconds.
+    modified: Vec<jlong>,
+    /// `1`, `0`, or `-1` when the platform does not report it.
+    favorites: Vec<jint>,
+    /// Only meaningful when the query asked for details.
+    names: Vec<Option<String>>,
+    /// Only meaningful when the query asked for details.
+    types: Vec<Option<String>>,
 }
 
 /// Zip [`AssetColumns`] into a page.
-fn assets_from(columns: AssetColumns, total: jlong) -> Result<AssetPage, PhotoError> {
+fn assets_from(
+    columns: AssetColumns,
+    total: jlong,
+    details: bool,
+) -> Result<AssetPage, PhotoError> {
     let n = columns.ids.len();
     if [
         columns.kinds.len(),
@@ -176,12 +204,19 @@ fn assets_from(columns: AssetColumns, total: jlong) -> Result<AssetPage, PhotoEr
         columns.heights.len(),
         columns.dates.len(),
         columns.durations.len(),
+        columns.modified.len(),
+        columns.favorites.len(),
     ]
     .iter()
     .any(|len| *len != n)
     {
         return Err(mismatched_arrays());
     }
+    if details && (columns.names.len() != n || columns.types.len() != n) {
+        return Err(mismatched_arrays());
+    }
+    let mut names = columns.names;
+    let mut types = columns.types;
     let mut items = Vec::with_capacity(n);
     for (index, id) in columns.ids.into_iter().enumerate() {
         let Some(id) = id else {
@@ -196,6 +231,12 @@ fn assets_from(columns: AssetColumns, total: jlong) -> Result<AssetPage, PhotoEr
             duration_ms: u64::try_from(columns.durations[index])
                 .ok()
                 .filter(|ms| *ms > 0),
+            modified_unix_ms: modified_ms_from_seconds(columns.modified[index]),
+            is_favorite: favorite_from_code(columns.favorites[index]),
+            // Android has no burst identifier.
+            burst_id: None,
+            file_name: if details { names[index].take() } else { None },
+            content_type: if details { types[index].take() } else { None },
         });
     }
     Ok(AssetPage {
@@ -218,12 +259,23 @@ fn mismatched_arrays() -> PhotoError {
 }
 
 /// The crate root's `thumbnail` arm; `lib.rs` serves cache hits before this.
-pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thumbnail, PhotoError> {
+pub(crate) fn thumbnail(
+    id: &AssetId,
+    request: &ThumbnailRequest,
+    token: &CancelToken,
+) -> Result<Thumbnail, PhotoError> {
     let width = jint::try_from(request.width).unwrap_or(jint::MAX);
     let height = jint::try_from(request.height).unwrap_or(jint::MAX);
     let fill = matches!(request.mode, ThumbnailMode::Fill);
-    with_host(|env, class| {
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    // Outside `with_host`: a token already cancelled runs the hook here, and
+    // the hook attaches to the JVM itself.
+    token.set_hook(move || cancel_thumbnail(request_id));
+    let outcome = with_host(|env, class| {
         ensure_off_ui_thread(env)?;
+        if token.is_cancelled() {
+            return Err(PhotoError::Cancelled);
+        }
         run_jni(env, "FrustPhotoLibraryHost.thumbnail", |env| {
             let raw_id = env.new_string(id.as_str())?;
             let result = env
@@ -231,9 +283,10 @@ pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thum
                     class,
                     jni_str!("thumbnail"),
                     jni_sig!(
-                        "(Ljava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;"
+                        "(JLjava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;"
                     ),
                     &[
+                        JValue::Long(request_id as jlong),
                         JValue::Object(&raw_id),
                         JValue::Int(width),
                         JValue::Int(height),
@@ -255,7 +308,32 @@ pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thum
             let pixels = env.convert_byte_array(&pixels)?;
             Ok(thumbnail_from(width, height, row_bytes, pixels))
         })?
-    })
+    });
+    token.clear_hook();
+    // A cancel that raced the host's answer still wins.
+    if token.is_cancelled() {
+        return Err(PhotoError::Cancelled);
+    }
+    outcome
+}
+
+/// The cancel hook of thumbnail `request_id`. Runs on whichever thread called
+/// [`CancelToken::cancel`]; the host ignores an id it is not loading.
+fn cancel_thumbnail(request_id: u64) {
+    let sent = with_host(|env, class| {
+        run_jni(env, "FrustPhotoLibraryHost.cancelThumbnail", |env| {
+            env.call_static_method(
+                class,
+                jni_str!("cancelThumbnail"),
+                jni_sig!("(J)V"),
+                &[JValue::Long(request_id as jlong)],
+            )?
+            .v()
+        })
+    });
+    if let Err(err) = sent {
+        log::debug!("frust-photo-library: cancelling the thumbnail on the host failed: {err}");
+    }
 }
 
 /// Tightens the host's premultiplied rows to straight-alpha RGBA8.
@@ -333,6 +411,7 @@ fn browse_error(code: jint) -> PhotoError {
         PERMISSION_DENIED => PhotoError::PermissionDenied,
         NOT_FOUND => PhotoError::NotFound,
         QUERY_FAILED => PhotoError::Platform("the media library query failed".to_string()),
+        CANCELLED => PhotoError::Cancelled,
         other => error_for(other),
     }
 }
@@ -389,4 +468,72 @@ fn long_array_field(
     let mut values = vec![0; array.len(env)?];
     array.get_region(env, 0, &mut values)?;
     Ok(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn columns(n: usize) -> AssetColumns {
+        AssetColumns {
+            ids: (0..n).map(|i| Some(format!("content://m/{i}"))).collect(),
+            kinds: vec![KIND_IMAGE; n],
+            widths: vec![4; n],
+            heights: vec![3; n],
+            dates: vec![1_000; n],
+            durations: vec![0; n],
+            modified: vec![1_700_000_000; n],
+            favorites: vec![1; n],
+            names: vec![Some("a.jpg".into()); n],
+            types: vec![Some("image/jpeg".into()); n],
+        }
+    }
+
+    #[test]
+    fn a_cancelled_load_is_typed_and_other_codes_keep_theirs() {
+        assert_eq!(browse_error(CANCELLED), PhotoError::Cancelled);
+        assert_eq!(browse_error(NOT_FOUND), PhotoError::NotFound);
+        assert_eq!(
+            browse_error(PERMISSION_DENIED),
+            PhotoError::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn new_columns_decode_into_the_asset() {
+        let page = assets_from(columns(1), 1, true).unwrap();
+        let asset = &page.items[0];
+        assert_eq!(asset.modified_unix_ms, Some(1_700_000_000_000));
+        assert_eq!(asset.is_favorite, Some(true));
+        assert_eq!(asset.burst_id, None);
+        assert_eq!(asset.file_name.as_deref(), Some("a.jpg"));
+        assert_eq!(asset.content_type.as_deref(), Some("image/jpeg"));
+    }
+
+    #[test]
+    fn a_missing_favourite_is_none_not_false() {
+        let mut c = columns(2);
+        c.favorites = vec![-1, 0];
+        let page = assets_from(c, 2, false).unwrap();
+        assert_eq!(page.items[0].is_favorite, None);
+        assert_eq!(page.items[1].is_favorite, Some(false));
+    }
+
+    #[test]
+    fn name_and_type_stay_none_without_details() {
+        let page = assets_from(columns(1), 1, false).unwrap();
+        assert_eq!(page.items[0].file_name, None);
+        assert_eq!(page.items[0].content_type, None);
+    }
+
+    #[test]
+    fn short_detail_arrays_are_a_protocol_error_only_with_details() {
+        let mut c = columns(2);
+        c.names.clear();
+        assert!(assets_from(c, 2, true).is_err());
+        let mut c = columns(2);
+        c.names.clear();
+        c.types.clear();
+        assert!(assets_from(c, 2, false).is_ok());
+    }
 }

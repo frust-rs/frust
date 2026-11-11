@@ -45,6 +45,25 @@ Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibra
   (`photo-library-thumbnail-cache-staleness` in [LIMITATIONS.md](../../docs/LIMITATIONS.md)).
 - With `library` on iOS, picks carry `PickedItem::asset_id`, and a HEIC pick can be shown through
   `thumbnail`.
+- Every `Asset` carries `modified_unix_ms`, `is_favorite` and `burst_id`. `is_favorite` is `None` below
+  Android API 30 and `burst_id` is always `None` on Android (`photo-library-android-asset-fields`).
+  `AssetQuery::with_details()` also fills `file_name` (untrusted, display only) and `content_type`, which is
+  platform-shaped: a MIME type on Android, a uniform type identifier on iOS
+  (`photo-library-content-type-platform-shaped`). They are off by default because on iOS each row then costs
+  one resource lookup (Android reads them in the same query). An asset has no cloud or locally-available
+  flag; an iCloud-only original shows as `NetworkRequired` when you ask for it
+  (`photo-library-no-local-availability`).
+- `PhotoLibrary::thumbnail_shared(&AssetId, &ThumbnailRequest, &CancelToken)` returns an `Arc<Thumbnail>`:
+  the cache never copies pixels and a hit shares the cached allocation, but building an `ImageSource` from the pixels copies them once; cancelling the token abandons
+  a miss on iOS and Android (`PhotoError::Cancelled`, nothing cached). `thumbnail` shares the same cache.
+  A token is single-use, so give each cell's load its own. Build one `ImageSource` per asset and keep it with
+  the cell's state: each `ImageSource` made from pixels is a new engine image.
+- `PhotoLibrary::asset_metadata(&AssetId, &MetadataOptions)` reads one asset's `ExifData` with only the
+  `library` feature (it links `ImageIO` on iOS, which the TUI's `library` option adds). An asset without EXIF,
+  a video included, gives an empty `ExifData`. On iOS Photos has no header-only read, so the call reads the
+  whole local original into one in-memory buffer that ImageIO reads in place (`photo-library-ios-metadata-reads-original`); a read with no data for 30 s times out, an original over 256 MiB is `InvalidRequest`, and an iCloud-only original
+  is `NetworkRequired` unless `MetadataOptions::allow_network(true)`. On Android GPS fields need
+  `ACCESS_MEDIA_LOCATION`. `MetadataOptions::cancel(token)` stops the read.
 - iOS shows its own prompt while access is Limited; to silence it add the boolean key
   `PHPhotoLibraryPreventAutomaticLimitedAccessAlert` to `Info.plist` by hand
   (`photo-library-limited-alert-plist-manual`). Android pages cost a count and a sort per page
@@ -169,6 +188,98 @@ impl Viewer {
 frust::app!(Viewer);
 ```
 
+## Read metadata and show a shared thumbnail
+
+```rust
+use frust::{
+    Component, Get, Image, ImageSource, RwSignal, Set, View, button, column, either, spawn_blocking,
+    spawn_local, text,
+};
+use frust_photo_library::{
+    AssetQuery, CancelToken, MetadataOptions, PhotoError, PhotoLibrary, ThumbnailMode, ThumbnailRequest,
+};
+
+#[derive(Default)]
+struct Newest;
+
+struct NewestState {
+    info: RwSignal<String>,
+    image: RwSignal<Option<ImageSource>>,
+    token: Option<CancelToken>,
+}
+
+impl Component for Newest {
+    type State = NewestState;
+
+    fn init(&self) -> NewestState {
+        NewestState {
+            info: RwSignal::new(String::from("Nothing loaded")),
+            image: RwSignal::new(None),
+            token: None,
+        }
+    }
+
+    fn build(&self, state: &mut NewestState) -> impl View<NewestState> {
+        let image = state.image.get();
+        column()
+            .child(text(state.info.get()))
+            .child(either(
+                image.is_some(),
+                move || Image(image.expect("checked above")),
+                || text("No thumbnail"),
+            ))
+            .child(Self::load_button())
+            .child(Self::cancel_button())
+    }
+}
+
+impl Newest {
+    /// The newest asset's name and camera, then its 256 px thumbnail. Blocks: call it off the UI thread.
+    fn load(token: &CancelToken) -> Result<(String, ImageSource), PhotoError> {
+        let page = PhotoLibrary::assets(&AssetQuery::new().limit(1).with_details())?;
+        let asset = page.items.first().ok_or(PhotoError::NotFound)?;
+        let exif = PhotoLibrary::asset_metadata(&asset.id, &MetadataOptions::new())?;
+        let request = ThumbnailRequest::new(256, 256, ThumbnailMode::Fill);
+        let thumb = PhotoLibrary::thumbnail_shared(&asset.id, &request, token)?;
+        let label = format!(
+            "{} ({})",
+            asset.file_name.as_deref().unwrap_or("unnamed"),
+            exif.camera_make.as_deref().unwrap_or("camera unknown"),
+        );
+        // One ImageSource per asset: made here, kept in state, never rebuilt in `build`.
+        Ok((label, ImageSource::from_rgba8(thumb.rgba.clone(), thumb.width, thumb.height)))
+    }
+
+    fn load_button() -> impl View<NewestState> {
+        button("Load newest", |state: &mut NewestState| {
+            let token = CancelToken::new();
+            state.token = Some(token.clone());
+            let (info, image) = (state.info, state.image);
+            spawn_local(async move {
+                match spawn_blocking(move || Self::load(&token)).await {
+                    Ok(Ok((label, source))) => {
+                        info.set(label);
+                        image.set(Some(source));
+                    }
+                    Ok(Err(err)) => info.set(format!("error: {err}")),
+                    Err(err) => info.set(format!("error: {err}")),
+                }
+            });
+        })
+    }
+
+    fn cancel_button() -> impl View<NewestState> {
+        button("Cancel", |state: &mut NewestState| {
+            if let Some(token) = &state.token {
+                token.cancel();
+            }
+        })
+    }
+}
+
+frust::app!(Newest);
+```
+
 ## Add the dependency
 
 ```toml
@@ -259,4 +370,5 @@ frust::app!(Gallery);
 | iPhone 13 mini, iOS 27.2 | passed (pick, loading progress, cancel, swipe-down, share picked, clear cache; browsing: albums, paging, thumbnails, Limited and Manage selection) |
 | Pixel 5, Android 14 | passed, browsing, export and save included; Xiaomi 12 (Android 17) passed the picker and share legs on an earlier build |
 | macOS | passed through the file dialog; `decode` has a host test that encoded and decoded a HEIC through ImageIO |
+| `with_details`, the new `Asset` fields, `asset_metadata` and `thumbnail_shared` (including a thumbnail cancel) | not device-tested; covered by host tests and the Android contract test only |
 | `decode` on iOS and Android devices, Android 10/11 fallback picker, Linux, Windows, DNG export on a phone | not device-tested (the API 29/30 leg is owed; so are API 29 paging and a second API 31+ device for browsing) |

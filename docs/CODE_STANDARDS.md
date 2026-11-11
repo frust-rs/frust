@@ -57,7 +57,7 @@ off this index — read this plus the one that covers what you are touching:
   - `frust-photo-library`'s `apple` backend — `new_unchecked()`, the `define_class!` picker/delegate, item-provider `msg_send!`/`NSProgress`;
     `apple_library`: PhotoKit fetches, three hand-sent messages, `CGBitmapContext`, `TargetSize` `Encode`; `apple_originals`: resource-manager export, hand-sent change requests;
     `apple_decode`: the hand-declared ImageIO `extern` block, the bitmap-context draw, CF casts; `android`: only JNI `#[unsafe(no_mangle)]`;
-    `android_decode`: one `NewDirectByteBuffer` over a Rust `Vec`.
+    `apple_metadata`: PhotoKit fetch, resource-data request, `cancelDataRequest:`; `android_decode`: one `NewDirectByteBuffer` over a Rust `Vec`.
   - `frust-url-launcher`'s `apple` backend (`new_unchecked()`, one `openURL:` call; `desktop`: `ShellExecuteW`) and `frust-haptics`'s (`new_unchecked()`).
   - `frust-gpu`'s Android `import` zone — the hand-opened Vulkan device (`open_with_callback` +
     `create_device_from_hal`, `context.rs`), `import_hardware_buffer` (`create_texture_from_hal`,

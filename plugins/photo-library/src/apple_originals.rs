@@ -98,7 +98,7 @@ fn is_granted(status: PHAuthorizationStatus) -> bool {
 }
 
 #[cfg(feature = "library")]
-pub(crate) use export::export_original;
+pub(crate) use export::{export_original, primary_names};
 #[cfg(feature = "save")]
 pub(crate) use saving::save;
 
@@ -237,6 +237,26 @@ mod export {
                 byte_len,
             })
         })
+    }
+
+    /// The original file name and uniform type identifier of the resource an
+    /// original export would pick (`AssetVersion::Original`), for the page
+    /// details. One `assetResourcesForAsset:` lookup; `None` when the asset has
+    /// no exportable resource.
+    pub(crate) fn primary_names(asset: &PHAsset) -> Option<(String, String)> {
+        // SAFETY: read-only getter of a live `PHAsset`.
+        let video = unsafe { asset.mediaType() } == PHAssetMediaType::Video;
+        let resource = resource_for(asset, video, AssetVersion::Original).ok()?;
+        // SAFETY: read-only getters of a live `PHAssetResource`;
+        // `uniformTypeIdentifier` is the pre-iOS 14 spelling kept for the floor.
+        #[allow(deprecated)]
+        let (name, uti) = unsafe {
+            (
+                resource.originalFilename().to_string(),
+                resource.uniformTypeIdentifier().to_string(),
+            )
+        };
+        Some((name, uti))
     }
 
     /// The resource to export, picked from the asset's resources.

@@ -83,6 +83,20 @@ pub struct Asset {
     pub created_unix_ms: Option<i64>,
     /// Video length in milliseconds; `None` for images.
     pub duration_ms: Option<u64>,
+    /// Last modification time, milliseconds since the Unix epoch, when known.
+    pub modified_unix_ms: Option<i64>,
+    /// Whether the user marked the asset a favourite; `None` when the platform does not
+    /// report it (Android below API 30).
+    pub is_favorite: Option<bool>,
+    /// The identifier shared by the shots of one burst, when the asset belongs to one. Android
+    /// has no burst identifier, so it is always `None` there.
+    pub burst_id: Option<String>,
+    /// The original file name. Untrusted: for display only. Filled only when the query set
+    /// [`AssetQuery::with_details`].
+    pub file_name: Option<String>,
+    /// The content type, platform-shaped: a MIME type on Android, a uniform type identifier on
+    /// iOS. Filled only when the query set [`AssetQuery::with_details`].
+    pub content_type: Option<String>,
 }
 
 /// Which assets to list, newest first. Pages with [`offset`](Self::offset) and
@@ -98,6 +112,8 @@ pub struct AssetQuery {
     pub offset: u64,
     /// Page size, `1..=500` ([`effective_limit`](Self::effective_limit) clamps a hand-set value).
     pub limit: u32,
+    /// Whether to fill [`Asset::file_name`] and [`Asset::content_type`]; off by default.
+    pub details: bool,
 }
 
 impl Default for AssetQuery {
@@ -107,6 +123,7 @@ impl Default for AssetQuery {
             filter: MediaFilter::ImagesAndVideos,
             offset: 0,
             limit: DEFAULT_PAGE_LIMIT,
+            details: false,
         }
     }
 }
@@ -141,9 +158,33 @@ impl AssetQuery {
         self
     }
 
+    /// Also fills [`Asset::file_name`] and [`Asset::content_type`]. On Android these ride the
+    /// same query at no extra round trip; on iOS they need a per-asset resource lookup, so a
+    /// page can cost noticeably more per row.
+    pub fn with_details(mut self) -> Self {
+        self.details = true;
+        self
+    }
+
     /// [`limit`](Self::limit) clamped to `1..=500`, for a value set through the field.
     pub fn effective_limit(&self) -> u32 {
         self.limit.clamp(1, MAX_PAGE_LIMIT)
+    }
+}
+
+/// `DATE_MODIFIED` seconds to milliseconds; a non-positive value is unknown.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn modified_ms_from_seconds(seconds: i64) -> Option<i64> {
+    (seconds > 0).then(|| seconds.saturating_mul(1000))
+}
+
+/// The host's favourite code: `1` and `0` are answers, anything else (`-1`) is unknown.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn favorite_from_code(code: i32) -> Option<bool> {
+    match code {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
     }
 }
 
@@ -252,6 +293,34 @@ mod tests {
             .offset(7);
         assert_eq!(q.album.as_ref().map(AlbumId::as_str), Some("x"));
         assert_eq!((q.filter, q.offset), (MediaFilter::Videos, 7));
+    }
+
+    #[test]
+    fn details_are_off_until_asked_for() {
+        assert!(!AssetQuery::new().details);
+        assert!(!AssetQuery::default().details);
+        let q = AssetQuery::new().limit(5).with_details();
+        assert!(q.details);
+        assert_eq!(q.limit, 5);
+    }
+
+    #[test]
+    fn modified_seconds_become_milliseconds() {
+        assert_eq!(
+            modified_ms_from_seconds(1_700_000_000),
+            Some(1_700_000_000_000)
+        );
+        assert_eq!(modified_ms_from_seconds(0), None);
+        assert_eq!(modified_ms_from_seconds(-3), None);
+        assert_eq!(modified_ms_from_seconds(i64::MAX), Some(i64::MAX));
+    }
+
+    #[test]
+    fn favourite_code_maps_and_unknown_is_none() {
+        assert_eq!(favorite_from_code(1), Some(true));
+        assert_eq!(favorite_from_code(0), Some(false));
+        assert_eq!(favorite_from_code(-1), None);
+        assert_eq!(favorite_from_code(7), None);
     }
 
     #[test]

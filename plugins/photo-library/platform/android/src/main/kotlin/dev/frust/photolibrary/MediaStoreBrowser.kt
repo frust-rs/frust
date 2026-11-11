@@ -9,6 +9,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
+import android.os.OperationCanceledException
 import android.provider.BaseColumns
 import android.provider.MediaStore
 import android.util.Log
@@ -17,7 +19,9 @@ import dev.frust.photolibrary.FrustPhotoLibraryHost.AlbumsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.ThumbnailResult
 import java.io.FileNotFoundException
+import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -37,7 +41,10 @@ import kotlin.math.roundToInt
  * - `ContentResolver.loadThumbnail` (API 29) decodes with
  *   `ImageDecoder.ALLOCATOR_SOFTWARE`, applies the provider's orientation, and
  *   a missing item surfaces as `FileNotFoundException`
- *   (`MediaProvider.ensureThumbnail`).
+ *   (`MediaProvider.ensureThumbnail`). Its `CancellationSignal` reaches the
+ *   provider's `openTypedAssetFile`; a cancelled load throws
+ *   `OperationCanceledException`, or an `IOException` from the stream it
+ *   abandoned, so any failure after a cancel is reported as a cancel.
  * - `MediaProvider` limits an app holding only
  *   `READ_MEDIA_VISUAL_USER_SELECTED` to the items the user selected
  *   (`hasUserSelectedAccess`, API 34), so partial access needs no special path
@@ -109,7 +116,26 @@ internal object MediaStoreBrowser {
         MediaStore.MediaColumns.DATE_ADDED,
         MediaStore.MediaColumns.DURATION,
         MediaStore.MediaColumns.ORIENTATION,
+        MediaStore.MediaColumns.DATE_MODIFIED,
     )
+
+    /** Projected only when the query asks for details: the file name and the MIME type. */
+    private val DETAIL_COLUMNS = arrayOf(
+        MediaStore.MediaColumns.DISPLAY_NAME,
+        MediaStore.MediaColumns.MIME_TYPE,
+    )
+
+    /**
+     * [ASSET_PROJECTION], plus `IS_FAVORITE` on API 30 and later (the column does
+     * not exist on 29), plus [DETAIL_COLUMNS] only when [details] is set. Columns
+     * are read back by name, so the positions here carry no meaning.
+     */
+    private fun projection(details: Boolean): Array<String> {
+        var columns = ASSET_PROJECTION
+        if (Build.VERSION.SDK_INT >= 30) columns += MediaStore.MediaColumns.IS_FAVORITE
+        if (details) columns += DETAIL_COLUMNS
+        return columns
+    }
 
     /** The photo permissions on [sdk] (`frust-permissions`' `Photos(ReadWrite)` set). */
     internal fun mediaPermissions(sdk: Int): List<String> = when {
@@ -158,7 +184,10 @@ internal object MediaStoreBrowser {
     private fun albumsFailed(code: Int) = AlbumsResult(code, emptyArray(), emptyArray(), LongArray(0))
 
     private fun assetsFailed(code: Int, total: Long = 0) =
-        AssetsResult(code, total, emptyArray(), IntArray(0), IntArray(0), IntArray(0), LongArray(0), LongArray(0))
+        AssetsResult(
+            code, total, emptyArray(), IntArray(0), IntArray(0), IntArray(0), LongArray(0), LongArray(0),
+            LongArray(0), IntArray(0), emptyArray(), emptyArray(),
+        )
 
     private fun thumbnailFailed(code: Int) = ThumbnailResult(code, 0, 0, 0, null)
 
@@ -202,6 +231,9 @@ internal object MediaStoreBrowser {
         AlbumsResult(FrustPhotoLibraryHost.OK, ids, titles, counts)
     }
 
+    /** `AssetsResult.favorites`: the platform does not report it (below API 30). */
+    private const val FAVORITE_UNKNOWN = -1
+
     private const val ALL_MEDIA_TITLE = "All Media"
 
     /** One row of a listing, read before it is split into parallel arrays. */
@@ -212,14 +244,19 @@ internal object MediaStoreBrowser {
         val height: Int,
         val date: Long,
         val duration: Long,
+        val modified: Long,
+        val favorite: Int,
+        val name: String?,
+        val type: String?,
     )
 
     /**
      * One page, newest first, with the total row count of the query. Pages with
      * `QUERY_ARG_OFFSET`/`QUERY_ARG_LIMIT` on API 30+ and
-     * `Cursor.moveToPosition` on API 29 (class doc).
+     * `Cursor.moveToPosition` on API 29 (class doc). [details] adds the file
+     * name and MIME type to the same query; there is no extra query per row.
      */
-    fun assets(ctx: Context?, albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult =
+    fun assets(ctx: Context?, albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult =
         browse(ctx, "assets", { assetsFailed(it) }) { context ->
             val mediaType = mediaSelection(filter)
                 ?: return@browse assetsFailed(FrustPhotoLibraryHost.QUERY_FAILED)
@@ -231,9 +268,9 @@ internal object MediaStoreBrowser {
                 ?: return@browse assetsFailed(FrustPhotoLibraryHost.QUERY_FAILED)
             if (offset >= total) return@browse assetsPage(emptyList(), total)
             // `offset < total`, and a row count fits in an Int.
-            val cursor = queryPage(resolver, selection, args, offset.toInt(), limit)
+            val cursor = queryPage(resolver, selection, args, offset.toInt(), limit, details)
                 ?: return@browse assetsFailed(FrustPhotoLibraryHost.QUERY_FAILED, total.toLong())
-            val rows = cursor.use { c -> readRows(c, offset.toInt(), limit) }
+            val rows = cursor.use { c -> readRows(c, offset.toInt(), limit, details) }
             assetsPage(rows, total)
         }
 
@@ -246,9 +283,11 @@ internal object MediaStoreBrowser {
         args: Array<String>?,
         offset: Int,
         limit: Int,
+        details: Boolean,
     ): Cursor? {
+        val projection = projection(details)
         if (Build.VERSION.SDK_INT < 30) {
-            return resolver.query(FILES_URI, ASSET_PROJECTION, selection, args, SORT_ORDER)
+            return resolver.query(FILES_URI, projection, selection, args, SORT_ORDER)
         }
         val queryArgs = Bundle().apply {
             putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
@@ -257,14 +296,19 @@ internal object MediaStoreBrowser {
             putInt(ContentResolver.QUERY_ARG_OFFSET, offset)
             putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
         }
-        return resolver.query(FILES_URI, ASSET_PROJECTION, queryArgs, null)
+        return resolver.query(FILES_URI, projection, queryArgs, null)
     }
 
     /** At most [limit] rows of [cursor]; on API 29 the cursor is unpaged, so it seeks [offset]. */
-    private fun readRows(cursor: Cursor, offset: Int, limit: Int): List<Row> {
+    private fun readRows(cursor: Cursor, offset: Int, limit: Int, details: Boolean): List<Row> {
         val first = if (Build.VERSION.SDK_INT < 30) offset else 0
         val rows = ArrayList<Row>()
         if (!cursor.moveToPosition(first)) return rows
+        val modifiedAt = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+        // Absent below API 30, where the favourite is unknown rather than false.
+        val favoriteAt = cursor.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)
+        val nameAt = if (details) cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME) else -1
+        val typeAt = if (details) cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE) else -1
         do {
             val video = cursor.getInt(1) == MEDIA_TYPE_VIDEO
             val base = if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -279,6 +323,11 @@ internal object MediaStoreBrowser {
                     height = height,
                     date = if (taken > 0) taken else cursor.getLong(5) * 1000,
                     duration = if (video) cursor.getLong(6) else 0,
+                    // Seconds; the Rust side converts to milliseconds.
+                    modified = cursor.getLong(modifiedAt),
+                    favorite = if (favoriteAt < 0) FAVORITE_UNKNOWN else cursor.getInt(favoriteAt).coerceIn(0, 1),
+                    name = if (nameAt < 0) null else cursor.getString(nameAt),
+                    type = if (typeAt < 0) null else cursor.getString(typeAt),
                 ),
             )
         } while (rows.size < limit && cursor.moveToNext())
@@ -298,26 +347,61 @@ internal object MediaStoreBrowser {
         IntArray(rows.size) { rows[it].height },
         LongArray(rows.size) { rows[it].date },
         LongArray(rows.size) { rows[it].duration },
+        LongArray(rows.size) { rows[it].modified },
+        IntArray(rows.size) { rows[it].favorite },
+        Array(rows.size) { rows[it].name },
+        Array(rows.size) { rows[it].type },
     )
+
+    /** The signal of each running [thumbnail], by request id, until it returns. */
+    private val thumbnailSignals = ConcurrentHashMap<Long, CancellationSignal>()
 
     /**
      * The thumbnail of [id] as RGBA8 bytes (premultiplied; the Rust side
      * unpremultiplies). [fill] centre-crops to [width] x
      * [height]; otherwise the image is scaled to fit inside that box. An id
      * that is not a `MediaStore` content URI, or a stale one, is
-     * [FrustPhotoLibraryHost.NOT_FOUND].
+     * [FrustPhotoLibraryHost.NOT_FOUND]. The load runs with a
+     * `CancellationSignal` registered under [requestId] for [cancelThumbnail];
+     * once it fires the answer is [FrustPhotoLibraryHost.CANCELLED].
      */
-    fun thumbnail(ctx: Context?, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
+    fun thumbnail(ctx: Context?, requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult {
+        val signal = CancellationSignal()
+        thumbnailSignals[requestId] = signal
+        try {
+            return loadThumbnail(ctx, signal, id, width, height, fill)
+        } finally {
+            thumbnailSignals.remove(requestId)
+        }
+    }
+
+    /** Fires the signal of thumbnail [requestId]. Any thread; an unknown or finished id is ignored. */
+    fun cancelThumbnail(requestId: Long) {
+        thumbnailSignals[requestId]?.cancel()
+    }
+
+    /** [code], or [FrustPhotoLibraryHost.CANCELLED] once [signal] has fired. */
+    internal fun cancelledOr(signal: CancellationSignal, code: Int): Int =
+        if (signal.isCanceled) FrustPhotoLibraryHost.CANCELLED else code
+
+    private fun loadThumbnail(ctx: Context?, signal: CancellationSignal, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
         browse(ctx, "thumbnail", ::thumbnailFailed) { context ->
             val uri = Uri.parse(id)
             if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY) {
                 return@browse thumbnailFailed(FrustPhotoLibraryHost.NOT_FOUND)
             }
             val loaded = try {
-                context.contentResolver.loadThumbnail(uri, Size(width, height), null)
+                context.contentResolver.loadThumbnail(uri, Size(width, height), signal)
+            } catch (e: OperationCanceledException) {
+                return@browse thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)
             } catch (e: FileNotFoundException) {
-                return@browse thumbnailFailed(FrustPhotoLibraryHost.NOT_FOUND)
+                return@browse thumbnailFailed(cancelledOr(signal, FrustPhotoLibraryHost.NOT_FOUND))
+            } catch (e: IOException) {
+                if (signal.isCanceled) return@browse thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)
+                throw e
             }
+            // Cancelled after the load: skip the crop and the copy.
+            if (signal.isCanceled) return@browse thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)
             val source = if (loaded.config == Bitmap.Config.ARGB_8888) {
                 loaded
             } else {

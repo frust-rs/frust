@@ -119,6 +119,13 @@
 //! (`save`) with its own request map, so neither takes the pick guard or the
 //! host's single pick slot; see that module.
 //!
+//! # Metadata
+//!
+//! With the `library` feature, `asset_metadata` refuses the UI thread and hands over to
+//! `android_metadata`, which adds the `assetMetadata` host call. That module also holds the
+//! `DecodeResult` read and the EXIF conversion the decoder shares, so it is compiled whenever
+//! `decode` or `library` is on; see that module.
+//!
 //! # Decoding
 //!
 //! With the `decode` feature, the crate root's shared precheck (a cancelled
@@ -810,6 +817,22 @@ mod android_originals;
 pub(crate) use android_originals::export_original;
 #[cfg(feature = "save")]
 pub(crate) use android_originals::save;
+
+// EXIF: the `DecodeResult` read both calls share, and `asset_metadata`'s host call.
+#[cfg(any(feature = "decode", feature = "library"))]
+#[path = "android_metadata.rs"]
+mod android_metadata;
+
+/// The crate root's `asset_metadata` arm. The crate root has already refused a cancelled token;
+/// this refuses the UI thread before any platform work, then reads in `android_metadata`.
+#[cfg(feature = "library")]
+pub(crate) fn asset_metadata(
+    id: &crate::AssetId,
+    options: &crate::MetadataOptions,
+) -> Result<crate::ExifData, PhotoError> {
+    with_host(|env, _class| ensure_off_ui_thread(env))?;
+    android_metadata::asset_metadata(id, options)
+}
 
 // Decode: `decode_file` through `ImageDecoder` into a direct `ByteBuffer`.
 #[cfg(feature = "decode")]

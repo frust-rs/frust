@@ -39,19 +39,26 @@
 //! still wins); the host checks between the decode and the copy. Abandoning a request after its
 //! header always tells the host, which otherwise drops it when `decodeInto` returns.
 //! `ImageDecoder` applies the EXIF orientation itself, so nothing here rotates.
+//!
+//! # EXIF
+//!
+//! `decodeInto`'s `DecodeResult` is read by `android_metadata`'s `read_result`, and its EXIF
+//! becomes [`ExifData`](crate::ExifData) through `exif_from`: the same path `asset_metadata`
+//! takes, so the two calls never disagree on a field.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
-use jni::objects::{JClass, JObject, JString, JValue};
+use jni::objects::{JClass, JValue};
 use jni::refs::Global;
 use jni::sys::{jint, jlong};
 use jni::{Env, jni_sig, jni_str};
 
+use super::android_metadata::{Filled, exif_from, int_field, read_result};
 use super::{CANCELLED, NEXT_REQUEST_ID, NOT_INITIALIZED, error_for, run_jni, with_host};
 use crate::decode::{self, DecodeOptions, DecodedImage, ImageColorSpace};
 use crate::pixels;
-use crate::types::{ExifData, PhotoError};
+use crate::types::PhotoError;
 
 /// The call succeeded.
 const OK: jint = 7;
@@ -89,24 +96,6 @@ struct Size {
     source_width: u32,
     source_height: u32,
     bytes: usize,
-}
-
-/// `DecodeResult` as the host reported it; absent EXIF values are `None`, 0 or NaN. The host
-/// reads `captureTime` from EXIF `DateTimeOriginal` only.
-#[derive(Debug, Clone, Default, PartialEq)]
-struct Filled {
-    code: jint,
-    color_space: jint,
-    capture_time: Option<String>,
-    camera_make: Option<String>,
-    camera_model: Option<String>,
-    lens: Option<String>,
-    iso: jint,
-    exposure_seconds: f64,
-    aperture: f64,
-    focal_length_mm: f64,
-    gps_latitude: f64,
-    gps_longitude: f64,
 }
 
 /// `android.rs`'s `decode_file` arm after the shared precheck and its UI-thread check. Blocks for
@@ -237,26 +226,6 @@ fn color_space(code: jint) -> ImageColorSpace {
     }
 }
 
-/// The EXIF fields the host found, or `None` when it found none.
-fn exif_from(filled: Filled) -> Option<ExifData> {
-    let text = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
-    let number = |v: f64| Some(v).filter(|v| v.is_finite());
-    // Zero, negative and non-finite measurements are absent, as on the Apple arm.
-    let exif = ExifData {
-        capture_time: text(filled.capture_time),
-        camera_make: text(filled.camera_make),
-        camera_model: text(filled.camera_model),
-        lens: text(filled.lens),
-        iso: u32::try_from(filled.iso).ok().filter(|iso| *iso > 0),
-        exposure_seconds: decode::positive_measure(filled.exposure_seconds),
-        aperture: decode::positive_measure(filled.aperture),
-        focal_length_mm: decode::positive_measure(filled.focal_length_mm),
-        gps_latitude: number(filled.gps_latitude),
-        gps_longitude: number(filled.gps_longitude),
-    };
-    (exif != ExifData::default()).then_some(exif)
-}
-
 /// The cancel hook for `request_id`, and the cleanup for a request abandoned after its header.
 /// Runs on whichever thread called [`CancelToken::cancel`].
 fn cancel_decode(request_id: u64) {
@@ -352,55 +321,8 @@ fn decode_into(
         );
         env.delete_local_ref(buffer);
         let result = result?.l()?;
-        Ok(Filled {
-            code: int_field(env, &result, jni_str!("code"))?,
-            color_space: int_field(env, &result, jni_str!("colorSpace"))?,
-            capture_time: string_field(env, &result, jni_str!("captureTime"))?,
-            camera_make: string_field(env, &result, jni_str!("cameraMake"))?,
-            camera_model: string_field(env, &result, jni_str!("cameraModel"))?,
-            lens: string_field(env, &result, jni_str!("lens"))?,
-            iso: int_field(env, &result, jni_str!("iso"))?,
-            exposure_seconds: double_field(env, &result, jni_str!("exposureSeconds"))?,
-            aperture: double_field(env, &result, jni_str!("aperture"))?,
-            focal_length_mm: double_field(env, &result, jni_str!("focalLengthMm"))?,
-            gps_latitude: double_field(env, &result, jni_str!("gpsLatitude"))?,
-            gps_longitude: double_field(env, &result, jni_str!("gpsLongitude"))?,
-        })
+        read_result(env, &result)
     })
-}
-
-fn int_field(
-    env: &mut Env<'_>,
-    object: &JObject<'_>,
-    name: &'static jni::strings::JNIStr,
-) -> Result<jint, jni::errors::Error> {
-    env.get_field(object, name, jni_sig!("I"))?.i()
-}
-
-fn double_field(
-    env: &mut Env<'_>,
-    object: &JObject<'_>,
-    name: &'static jni::strings::JNIStr,
-) -> Result<f64, jni::errors::Error> {
-    env.get_field(object, name, jni_sig!("D"))?.d()
-}
-
-/// A nullable `String` field; its local reference is released once read.
-fn string_field(
-    env: &mut Env<'_>,
-    object: &JObject<'_>,
-    name: &'static jni::strings::JNIStr,
-) -> Result<Option<String>, jni::errors::Error> {
-    let value = env
-        .get_field(object, name, jni_sig!("Ljava/lang/String;"))?
-        .l()?;
-    if value.is_null() {
-        return Ok(None);
-    }
-    let text = env.cast_local::<JString>(value)?;
-    let out = text.try_to_string(env)?;
-    env.delete_local_ref(text);
-    Ok(Some(out))
 }
 
 #[cfg(test)]
@@ -512,44 +434,6 @@ mod tests {
             checked_size(&header((40_000, 40_000), (40_000, 40_000)), 40_000),
             Err(PhotoError::InvalidRequest { .. })
         ));
-    }
-
-    #[test]
-    fn exif_is_none_when_empty_and_drops_placeholders() {
-        assert_eq!(exif_from(filled(OK)), None);
-        let exif = exif_from(Filled {
-            camera_make: Some("Make".to_string()),
-            lens: Some("  ".to_string()),
-            iso: 200,
-            aperture: 1.8,
-            gps_latitude: -33.5,
-            ..filled(OK)
-        })
-        .unwrap();
-        assert_eq!(exif.camera_make.as_deref(), Some("Make"));
-        assert_eq!(exif.lens, None);
-        assert_eq!(exif.iso, Some(200));
-        assert_eq!(exif.aperture, Some(1.8));
-        assert_eq!(exif.gps_latitude, Some(-33.5));
-        assert_eq!(exif.gps_longitude, None);
-        assert_eq!(exif.exposure_seconds, None);
-
-        // Zero, negative and non-finite measurements are absent.
-        for bad in [0.0, -1.0, f64::INFINITY] {
-            let exif = exif_from(Filled {
-                camera_make: Some("Make".to_string()),
-                iso: -5,
-                exposure_seconds: bad,
-                aperture: bad,
-                focal_length_mm: bad,
-                ..filled(OK)
-            })
-            .unwrap();
-            assert_eq!(exif.iso, None);
-            assert_eq!(exif.exposure_seconds, None);
-            assert_eq!(exif.aperture, None);
-            assert_eq!(exif.focal_length_mm, None);
-        }
     }
 
     #[test]

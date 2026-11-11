@@ -57,8 +57,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Kotlin → Rust | `nativeOnPickError(requestId: Long, code: Int)` | [NO_ACTIVITY], [LAUNCH_FAILED], [COPY_FAILED] or [CANCELLED] |
  * | Kotlin → Rust | `nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)` | copy progress, never an answer |
  * | Rust → Kotlin | `albums(): AlbumsResult` | an [AlbumsResult]; `code` is [OK], [NOT_INITIALIZED], [PERMISSION_DENIED] or [QUERY_FAILED] |
- * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult` | an [AssetsResult], same codes as `albums` |
- * | Rust → Kotlin | `thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] |
+ * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult` | an [AssetsResult], same codes as `albums` |
+ * | Rust → Kotlin | `thumbnail(requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] and [CANCELLED] |
+ * | Rust → Kotlin | `cancelThumbnail(requestId: Long)` — `(J)V` | nothing; an unknown or finished id is ignored |
  * | Rust → Kotlin | `manageLimitedSelection(requestId: Long): Int` — `(J)I` | [PENDING] after posting the prompt, [NOT_LIMITED], [NO_ACTIVITY], [BUSY] or [NOT_INITIALIZED]; answered through [nativeOnPickResult] (three empty arrays) or [nativeOnPickError] |
  * | Rust → Kotlin | `exportOriginal(requestId: Long, uri: String, destPath: String): Int` — `(JLjava/lang/String;Ljava/lang/String;)I` | [PENDING] after queuing the copy, [NOT_INITIALIZED], or [NOT_FOUND] for an id that is not a `MediaStore` image or video item on an external volume |
  * | Rust → Kotlin | `cancelExport(requestId: Long)` — `(J)V` | nothing; an unknown or already-answered id is ignored |
@@ -69,6 +70,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Rust → Kotlin | `decodeHeader(requestId: Long, path: String, maxDimension: Int): DecodeHeader` | a [DecodeHeader]; `code` is [OK], [NOT_FOUND], [NOT_INITIALIZED], [PERMISSION_DENIED], [NO_DECODER] or [DECODE_FAILED] |
  * | Rust → Kotlin | `decodeInto(requestId: Long, path: String, width: Int, height: Int, srgb: Boolean, pixels: ByteBuffer): DecodeResult` | a [DecodeResult]; the same codes plus [CANCELLED] |
  * | Rust → Kotlin | `cancelDecode(requestId: Long)` — `(J)V` | nothing; an unknown or finished id is ignored |
+ * | Rust → Kotlin | `assetMetadata(id: String): DecodeResult` | a [DecodeResult] carrying the asset's EXIF, `colorSpace` always [COLOR_OTHER]; `code` is [OK], [NOT_FOUND], [NOT_INITIALIZED], [PERMISSION_DENIED] or [DECODE_FAILED] |
  *
  * Every request that returned [PENDING] gets exactly one answer: a pick gets
  * [nativeOnPickResult] or [nativeOnPickError], an export [nativeOnExportDone],
@@ -96,11 +98,21 @@ import java.util.concurrent.atomic.AtomicBoolean
  * on the calling thread and never touch the pick slot or an executor.
  * [decodeInto] fills the caller's direct `ByteBuffer` and never keeps it.
  *
+ * ## Metadata
+ *
+ * [assetMetadata] runs in [AssetMetadataHost] on the calling thread: it opens
+ * the asset through [openOriginalStream], the export's own open (unredacted
+ * only with `ACCESS_MEDIA_LOCATION`), reads it with `ExifInterface`, and
+ * answers through [ImageDecodeHost]'s shared EXIF read. It never touches the
+ * pick slot or an executor.
+ *
  * ## Browsing
  *
  * [albums], [assets] and [thumbnail] run in [MediaStoreBrowser] on the calling
  * thread, return their result object synchronously, and never touch the
- * in-flight slot. [manageLimitedSelection] presents the Android 14 selection
+ * in-flight slot. A [thumbnail] load runs with a `CancellationSignal` held
+ * under its request id until it returns; [cancelThumbnail] fires it, and the
+ * load then answers [CANCELLED]. [manageLimitedSelection] presents the Android 14 selection
  * UI: `RequestMultiplePermissions` for the SDK media set, through the same
  * slot and launcher key as a pick.
  *
@@ -178,7 +190,7 @@ object FrustPhotoLibraryHost {
     const val LAUNCH_FAILED = 4
     /** A chosen item could not be copied. */
     const val COPY_FAILED = 5
-    /** The pick was cancelled through [cancel]. */
+    /** The pick, export, decode or thumbnail was cancelled. */
     const val CANCELLED = 6
     /** A browse call succeeded; the result object carries its data. */
     const val OK = 7
@@ -257,7 +269,12 @@ object FrustPhotoLibraryHost {
         @JvmField val counts: LongArray,
     )
 
-    /** [assets]: parallel arrays for one page; [total] counts the whole query. */
+    /**
+     * [assets]: parallel arrays for one page; [total] counts the whole query.
+     * [modified] is `DATE_MODIFIED` in seconds; [favorites] is 1, 0 or -1 when
+     * the platform does not report it; [names] and [types] are filled only when
+     * the call asked for details and hold only nulls otherwise.
+     */
     class AssetsResult(
         @JvmField val code: Int,
         @JvmField val total: Long,
@@ -267,6 +284,10 @@ object FrustPhotoLibraryHost {
         @JvmField val heights: IntArray,
         @JvmField val dates: LongArray,
         @JvmField val durations: LongArray,
+        @JvmField val modified: LongArray,
+        @JvmField val favorites: IntArray,
+        @JvmField val names: Array<String?>,
+        @JvmField val types: Array<String?>,
     )
 
     /** [thumbnail]: premultiplied RGBA8 with [rowBytes] per row. */
@@ -437,13 +458,22 @@ object FrustPhotoLibraryHost {
 
     /** One page of assets, newest first. Any thread but the main one (the query blocks). */
     @JvmStatic
-    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult =
-        MediaStoreBrowser.assets(appContext, albumId, filter, offset, limit)
+    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult =
+        MediaStoreBrowser.assets(appContext, albumId, filter, offset, limit, details)
 
-    /** One thumbnail. Any thread but the main one (the decode blocks). */
+    /**
+     * One thumbnail, loaded under [requestId] so [cancelThumbnail] can stop it.
+     * Any thread but the main one (the decode blocks).
+     */
     @JvmStatic
-    fun thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
-        MediaStoreBrowser.thumbnail(appContext, id, width, height, fill)
+    fun thumbnail(requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
+        MediaStoreBrowser.thumbnail(appContext, requestId, id, width, height, fill)
+
+    /** Cancel thumbnail [requestId]. Any thread; an unknown or finished id is ignored. */
+    @JvmStatic
+    fun cancelThumbnail(requestId: Long) {
+        MediaStoreBrowser.cancelThumbnail(requestId)
+    }
 
     /**
      * Re-show the Android 14 photo selection UI by requesting the SDK media
@@ -543,6 +573,13 @@ object FrustPhotoLibraryHost {
     fun cancelDecode(requestId: Long) {
         ImageDecodeHost.cancel(requestId)
     }
+
+    /**
+     * The EXIF of library asset [id] (a `MediaStore` content URI, else
+     * [NOT_FOUND]). Any thread but the main one (it reads the asset).
+     */
+    @JvmStatic
+    fun assetMetadata(id: String): DecodeResult = AssetMetadataHost.read(appContext, id)
 
     // --- Kotlin -> Rust -----------------------------------------------------
 
@@ -940,22 +977,30 @@ object FrustPhotoLibraryHost {
         }
     }
 
+    /** Opens [uri] for an export (see [openOriginalStream]). */
+    private fun openOriginal(ctx: Context, uri: Uri): InputStream = openOriginalStream(ctx, uri).stream
+
+    /** An opened asset; [unredacted] is true only for the `setRequireOriginal` bytes. */
+    internal class OriginalStream(val stream: InputStream, val unredacted: Boolean)
+
     /**
      * Opens [uri], asking for the unredacted bytes when `ACCESS_MEDIA_LOCATION`
-     * is held (class doc). A refused original falls back to the plain URI.
+     * is held (class doc). A refused original falls back to the plain URI,
+     * whose location EXIF `MediaStore` redacts. Shared by the export and
+     * [AssetMetadataHost]; the caller closes the stream.
      */
-    private fun openOriginal(ctx: Context, uri: Uri): InputStream {
+    internal fun openOriginalStream(ctx: Context, uri: Uri): OriginalStream {
         val resolver = ctx.contentResolver
         if (ctx.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED) {
             try {
-                resolver.openInputStream(MediaStore.setRequireOriginal(uri))?.let { return it }
+                resolver.openInputStream(MediaStore.setRequireOriginal(uri))?.let { return OriginalStream(it, true) }
             } catch (e: UnsupportedOperationException) {
                 Log.i(TAG, "frust-photo-library: original unavailable, using the plain uri: ${e.javaClass.name}")
             } catch (e: SecurityException) {
                 Log.i(TAG, "frust-photo-library: original unavailable, using the plain uri: ${e.javaClass.name}")
             }
         }
-        return resolver.openInputStream(uri) ?: throw IOException("no input stream")
+        return OriginalStream(resolver.openInputStream(uri) ?: throw IOException("no input stream"), false)
     }
 
     /**

@@ -172,9 +172,11 @@ pub struct ExifData {
     pub aperture: Option<f64>,
     /// Focal length in millimetres.
     pub focal_length_mm: Option<f64>,
-    /// GPS latitude in degrees, south negative.
+    /// GPS latitude in degrees, south negative. A redacted or placeholder 0, 0 location, an
+    /// out-of-range value, or a latitude without a longitude reads as absent.
     pub gps_latitude: Option<f64>,
-    /// GPS longitude in degrees, west negative.
+    /// GPS longitude in degrees, west negative. Absent exactly when the latitude is: a redacted
+    /// or placeholder 0, 0 location reads as absent.
     pub gps_longitude: Option<f64>,
 }
 

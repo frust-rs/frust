@@ -51,7 +51,11 @@
 //! }
 //! ```
 
-#[cfg(all(feature = "decode", any(target_os = "ios", target_os = "macos")))]
+// The ImageIO property reader serves `asset_metadata` (`library`) as well as the decoder.
+#[cfg(all(
+    any(feature = "decode", feature = "library"),
+    any(target_os = "ios", target_os = "macos")
+))]
 mod apple_decode;
 mod cancel;
 mod decode;
@@ -68,6 +72,7 @@ mod decode;
 ))]
 mod folder_scan;
 mod library;
+mod metadata;
 mod originals;
 mod types;
 
@@ -101,6 +106,7 @@ pub use library::{
     Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE,
     Thumbnail, ThumbnailMode, ThumbnailRequest,
 };
+pub use metadata::MetadataOptions;
 pub use originals::{
     AssetVersion, ExportOptions, ExportedOriginal, ProgressFn, SaveRequest, SavedAsset,
 };
@@ -253,14 +259,70 @@ impl PhotoLibrary {
     /// [`set_thumbnail_cache_budget(0)`](Self::set_thumbnail_cache_budget) also empties it. A
     /// selection changed any other way (such as a `frust-permissions` request on Android while
     /// access is limited) needs an explicit clear.
+    ///
+    /// The returned value is a copy of the cached pixels; [`thumbnail_shared`](Self::thumbnail_shared)
+    /// shares them instead and can be cancelled.
     pub fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thumbnail, PhotoError> {
         #[cfg(feature = "library")]
         {
-            cached_thumbnail(id, request, platform::thumbnail)
+            // A fresh token is never cancelled, so this is the uncancellable path.
+            cached_thumbnail(id, request, &CancelToken::new(), platform::thumbnail)
+                .map(std::sync::Arc::unwrap_or_clone)
         }
         #[cfg(not(feature = "library"))]
         {
             let _ = (id, request);
+            Err(library_disabled())
+        }
+    }
+
+    /// [`thumbnail`](Self::thumbnail) for a grid cell: the pixels are shared with the cache, and
+    /// `token` abandons a miss whose cell has left the screen. Blocks on a miss; needs the
+    /// `library` feature. The cache rules are those of `thumbnail`, and both calls share one
+    /// cache.
+    ///
+    /// A hit returns a clone of the cached [`Arc`](std::sync::Arc), so serving it copies no
+    /// pixel. A miss loads from the platform and caches the result.
+    ///
+    /// # Cancel
+    ///
+    /// A token cancelled before the call returns [`PhotoError::Cancelled`] before the cache or
+    /// the platform is consulted. A cancel during a miss returns [`PhotoError::Cancelled`]
+    /// and caches nothing, even when the pixels arrived first.
+    ///
+    /// - **iOS:** the cancel calls `cancelImageRequest:` on the in-flight Photos request and
+    ///   wakes the waiting thread at once. The 30 second request timeout stays as a backstop.
+    /// - **Android:** the load runs with a `CancellationSignal`, which the cancel fires; the
+    ///   decode stops where `MediaStore` honours the signal. A cancel that lands just before
+    ///   the host starts the load does not stop it, but the call still returns `Cancelled`.
+    /// - **Desktop and web:** there is no library, so the call returns what `thumbnail` returns
+    ///   there.
+    ///
+    /// A [`CancelToken`] is single-use: once cancelled it stays cancelled, so give each call
+    /// (each cell's load) its own token.
+    ///
+    /// # Showing it
+    ///
+    /// The cache itself never copies pixels: a hit shares the cached allocation. Building an
+    /// `ImageSource` from the pixels copies them once, though, so compared with
+    /// [`thumbnail`](Self::thumbnail) an app saves the cache-side copy only, not that one.
+    ///
+    /// Keep one image per asset: build an `ImageSource` from the pixels once and hold it with
+    /// the cell's state, rather than making a new one in every build. Each `ImageSource` made
+    /// from pixels is a new engine image, so one per build copies and uploads the same pixels
+    /// again and again even though the cache shares them.
+    pub fn thumbnail_shared(
+        id: &AssetId,
+        request: &ThumbnailRequest,
+        token: &CancelToken,
+    ) -> Result<std::sync::Arc<Thumbnail>, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            cached_thumbnail(id, request, token, platform::thumbnail)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = (id, request, token);
             Err(library_disabled())
         }
     }
@@ -305,6 +367,54 @@ impl PhotoLibrary {
                 return Err(PhotoError::Cancelled);
             }
             platform::export_original(id, options)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = (id, options);
+            Err(library_disabled())
+        }
+    }
+
+    /// Reads the EXIF of one library asset without the app exporting or decoding it. Blocks;
+    /// needs the `library` feature and photo access.
+    ///
+    /// A token cancelled before the call returns [`PhotoError::Cancelled`] before any platform
+    /// work. iOS and Android then return [`PhotoError::UiThread`] on their UI thread. A stale
+    /// `id` is [`PhotoError::NotFound`]. An asset with no EXIF, a video included, returns an
+    /// empty [`ExifData`] (every field `None`), not an error. Desktop and web have no photo
+    /// library and return [`PhotoError::Unsupported`]. The fields follow the rules
+    /// [`ExifData`] documents, as for [`decode_file`](Self::decode_file).
+    ///
+    /// - **iOS:** Photos offers no way to read an asset's metadata from its header alone, so the
+    ///   original's bytes must be on the device: the call reads the whole original resource into
+    ///   memory (never to a file) and hands it to the same ImageIO property reader
+    ///   [`decode_file`](Self::decode_file) uses, which reads that buffer in place. An original
+    ///   that is only in iCloud is downloaded when [`MetadataOptions::allow_network`] is set, and
+    ///   returns [`PhotoError::NetworkRequired`] otherwise (the default). A video is not read at
+    ///   all.
+    ///   - *Deadline:* with or without a token, a read that receives neither data nor its
+    ///     completion for 30 seconds is stopped and returns a [`PhotoError::Platform`] timeout.
+    ///     Each piece of data restarts that clock. Only delivered data counts: if Photos
+    ///     downloads an iCloud original for longer than that before it delivers the first piece,
+    ///     the read times out (not yet checked on a device). A cancel during the read stops the
+    ///     transfer sooner and returns [`PhotoError::Cancelled`].
+    ///   - *Size and memory:* an original over 256 MiB is refused with
+    ///     [`PhotoError::InvalidRequest`] once that much has arrived. The buffer holds the
+    ///     original once, with up to the same again in spare capacity; while it grows, the old
+    ///     and the new block are briefly both live, about three times the bytes received.
+    ///     An allocation the system refuses returns [`PhotoError::Platform`] rather than
+    ///     aborting, but iOS can still end the app under memory pressure while the buffer is
+    ///     large, so read originals one at a time.
+    /// - **Android:** the asset's content URI is opened as
+    ///   [`export_original`](Self::export_original) opens it, unredacted only when the app holds
+    ///   `ACCESS_MEDIA_LOCATION`, and read with `android.media.ExifInterface`. Without that
+    ///   permission the GPS fields are `None`, including when the platform returns a redacted 0, 0
+    ///   location. `allow_network` has no effect: `MediaStore` makes
+    ///   no network distinction. The token is checked before the read and after it.
+    pub fn asset_metadata(id: &AssetId, options: &MetadataOptions) -> Result<ExifData, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            metadata::asset_metadata_with(id, options, platform::asset_metadata)
         }
         #[cfg(not(feature = "library"))]
         {
@@ -431,27 +541,36 @@ impl PhotoLibrary {
     }
 }
 
-/// The cache-then-`load` path of [`PhotoLibrary::thumbnail`]; `load` is the platform call.
+/// The cache-then-`load` path of [`PhotoLibrary::thumbnail`] and
+/// [`PhotoLibrary::thumbnail_shared`]; `load` is the platform call.
 #[cfg(feature = "library")]
 fn cached_thumbnail(
     id: &AssetId,
     request: &ThumbnailRequest,
-    load: impl FnOnce(&AssetId, &ThumbnailRequest) -> Result<Thumbnail, PhotoError>,
-) -> Result<Thumbnail, PhotoError> {
+    token: &CancelToken,
+    load: impl FnOnce(&AssetId, &ThumbnailRequest, &CancelToken) -> Result<Thumbnail, PhotoError>,
+) -> Result<std::sync::Arc<Thumbnail>, PhotoError> {
+    if token.is_cancelled() {
+        return Err(PhotoError::Cancelled);
+    }
     let request = request.clamped();
     let key = thumb_cache::Key::new(id, &request);
     if let Some(hit) = thumb_cache::get(&key) {
         return Ok(hit);
     }
     let epoch = thumb_cache::epoch();
-    let loaded = load(id, &request);
-    match &loaded {
-        Ok(thumb) => thumb_cache::insert(epoch, key, thumb.clone()),
+    let loaded = load(id, &request, token);
+    if matches!(loaded, Err(PhotoError::PermissionDenied)) {
         // Access is gone, so everything cached under it is stale.
-        Err(PhotoError::PermissionDenied) => thumb_cache::clear(),
-        Err(_) => {}
+        thumb_cache::clear();
     }
-    loaded
+    // A cancel that raced the load wins, and its pixels are not cached.
+    if token.is_cancelled() {
+        return Err(PhotoError::Cancelled);
+    }
+    let shared = std::sync::Arc::new(loaded?);
+    thumb_cache::insert(epoch, key, std::sync::Arc::clone(&shared));
+    Ok(shared)
 }
 
 // `decode_asset` names it with `library` on and `decode` off, too.
@@ -511,51 +630,215 @@ mod tests {
         PhotoLibrary::clear_thumbnail_cache();
     }
 
-    /// One test, because the cache under test is process-wide.
+    /// Serialises the tests that drive the process-wide cache.
+    #[cfg(feature = "library")]
+    static CACHE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(feature = "library")]
+    fn cache_lock() -> std::sync::MutexGuard<'static, ()> {
+        CACHE_TESTS.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// A fake platform for the cache path, counting its calls.
+    #[cfg(feature = "library")]
+    #[derive(Default)]
+    struct FakeBackend {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(feature = "library")]
+    impl FakeBackend {
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// A loader answering `answer`, after running `during` (a cancel, say).
+        fn load<'a>(
+            &'a self,
+            answer: Result<Thumbnail, PhotoError>,
+            during: impl FnOnce(&CancelToken) + 'a,
+        ) -> impl FnOnce(&AssetId, &ThumbnailRequest, &CancelToken) -> Result<Thumbnail, PhotoError> + 'a
+        {
+            move |_, _, token| {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                during(token);
+                answer
+            }
+        }
+    }
+
+    #[cfg(feature = "library")]
+    fn pixels() -> Thumbnail {
+        Thumbnail::new(2, 1, vec![9; 8])
+    }
+
+    #[cfg(feature = "library")]
+    fn hit_only(
+        _: &AssetId,
+        _: &ThumbnailRequest,
+        _: &CancelToken,
+    ) -> Result<Thumbnail, PhotoError> {
+        panic!("a hit must not reach the platform")
+    }
+
+    /// The uncancellable path, as `PhotoLibrary::thumbnail` takes it.
+    #[cfg(feature = "library")]
+    fn copied(
+        id: &AssetId,
+        request: &ThumbnailRequest,
+        load: impl FnOnce(&AssetId, &ThumbnailRequest, &CancelToken) -> Result<Thumbnail, PhotoError>,
+    ) -> Result<Thumbnail, PhotoError> {
+        cached_thumbnail(id, request, &CancelToken::new(), load)
+            .map(std::sync::Arc::unwrap_or_clone)
+    }
+
     #[cfg(feature = "library")]
     #[test]
     fn the_cache_path_serves_hits_and_clears_on_denial() {
+        let _serial = cache_lock();
         let id = AssetId::from_raw("cache-path");
         let request = ThumbnailRequest::new(2, 1, ThumbnailMode::Fill);
-        let pixels = || Thumbnail::new(2, 1, vec![9; 8]);
-        let hit_only = |_: &AssetId, _: &ThumbnailRequest| -> Result<Thumbnail, PhotoError> {
-            panic!("a hit must not reach the platform")
-        };
 
         PhotoLibrary::clear_thumbnail_cache();
-        assert_eq!(
-            cached_thumbnail(&id, &request, |_, _| Ok(pixels())),
-            Ok(pixels())
-        );
-        assert_eq!(cached_thumbnail(&id, &request, hit_only), Ok(pixels()));
+        assert_eq!(copied(&id, &request, |_, _, _| Ok(pixels())), Ok(pixels()));
+        assert_eq!(copied(&id, &request, hit_only), Ok(pixels()));
 
         // Another failure leaves the cache alone.
         let other = AssetId::from_raw("cache-path-other");
         assert_eq!(
-            cached_thumbnail(&other, &request, |_, _| Err(PhotoError::NotFound)),
+            copied(&other, &request, |_, _, _| Err(PhotoError::NotFound)),
             Err(PhotoError::NotFound)
         );
-        assert_eq!(cached_thumbnail(&id, &request, hit_only), Ok(pixels()));
+        assert_eq!(copied(&id, &request, hit_only), Ok(pixels()));
 
         // A denied miss empties it: the earlier hit now reaches the platform.
         assert_eq!(
-            cached_thumbnail(&other, &request, |_, _| Err(PhotoError::PermissionDenied)),
+            copied(&other, &request, |_, _, _| Err(
+                PhotoError::PermissionDenied
+            )),
             Err(PhotoError::PermissionDenied)
         );
         assert_eq!(
-            cached_thumbnail(&id, &request, |_, _| Err(PhotoError::NotFound)),
+            copied(&id, &request, |_, _, _| Err(PhotoError::NotFound)),
             Err(PhotoError::NotFound)
         );
 
         // So does the public clear.
-        assert_eq!(
-            cached_thumbnail(&id, &request, |_, _| Ok(pixels())),
-            Ok(pixels())
-        );
+        assert_eq!(copied(&id, &request, |_, _, _| Ok(pixels())), Ok(pixels()));
         PhotoLibrary::clear_thumbnail_cache();
         assert_eq!(
-            cached_thumbnail(&id, &request, |_, _| Err(PhotoError::NotFound)),
+            copied(&id, &request, |_, _, _| Err(PhotoError::NotFound)),
             Err(PhotoError::NotFound)
+        );
+    }
+
+    #[cfg(feature = "library")]
+    #[test]
+    fn a_shared_hit_is_the_cached_allocation() {
+        let _serial = cache_lock();
+        PhotoLibrary::clear_thumbnail_cache();
+        let id = AssetId::from_raw("shared-hit");
+        let request = ThumbnailRequest::new(2, 1, ThumbnailMode::Fit);
+        let token = CancelToken::new();
+        let backend = FakeBackend::default();
+
+        let miss = cached_thumbnail(&id, &request, &token, backend.load(Ok(pixels()), |_| {}))
+            .expect("the miss loads");
+        let hit = cached_thumbnail(&id, &request, &token, hit_only).expect("the hit is served");
+        let again = cached_thumbnail(&id, &request, &token, hit_only).expect("the hit is served");
+        assert!(
+            std::sync::Arc::ptr_eq(&miss, &hit),
+            "the miss returns the cached Arc"
+        );
+        assert!(
+            std::sync::Arc::ptr_eq(&hit, &again),
+            "a hit copies no pixel"
+        );
+        assert_eq!(backend.calls(), 1);
+
+        // The copying path serves the same entry, as equal pixels.
+        assert_eq!(copied(&id, &request, hit_only), Ok(pixels()));
+        assert_eq!(*hit, pixels());
+    }
+
+    #[cfg(feature = "library")]
+    #[test]
+    fn a_cancelled_miss_is_not_stored() {
+        let _serial = cache_lock();
+        PhotoLibrary::clear_thumbnail_cache();
+        let id = AssetId::from_raw("cancelled-miss");
+        let request = ThumbnailRequest::new(2, 1, ThumbnailMode::Fill);
+        let backend = FakeBackend::default();
+
+        // The pixels arrive, but the cell was cancelled while they loaded.
+        let token = CancelToken::new();
+        assert_eq!(
+            cached_thumbnail(
+                &id,
+                &request,
+                &token,
+                backend.load(Ok(pixels()), CancelToken::cancel)
+            ),
+            Err(PhotoError::Cancelled)
+        );
+        // A platform answer of `Cancelled` is not stored either.
+        let token = CancelToken::new();
+        assert_eq!(
+            cached_thumbnail(
+                &id,
+                &request,
+                &token,
+                backend.load(Err(PhotoError::Cancelled), |_| {})
+            ),
+            Err(PhotoError::Cancelled)
+        );
+        assert_eq!(backend.calls(), 2);
+
+        // Nothing was cached: a fresh token reaches the backend again.
+        let fresh = CancelToken::new();
+        assert_eq!(
+            cached_thumbnail(&id, &request, &fresh, backend.load(Ok(pixels()), |_| {})).as_deref(),
+            Ok(&pixels())
+        );
+        assert_eq!(backend.calls(), 3);
+    }
+
+    #[cfg(feature = "library")]
+    #[test]
+    fn a_pre_cancelled_token_never_reaches_the_backend() {
+        let _serial = cache_lock();
+        PhotoLibrary::clear_thumbnail_cache();
+        let id = AssetId::from_raw("pre-cancelled");
+        let request = ThumbnailRequest::new(2, 1, ThumbnailMode::Fill);
+        let token = CancelToken::new();
+        token.cancel();
+        assert_eq!(
+            cached_thumbnail(&id, &request, &token, hit_only),
+            Err(PhotoError::Cancelled)
+        );
+        assert_eq!(
+            PhotoLibrary::thumbnail_shared(&id, &request, &token),
+            Err(PhotoError::Cancelled)
+        );
+
+        // Not even a cached entry is served to it.
+        let backend = FakeBackend::default();
+        let live = CancelToken::new();
+        assert!(cached_thumbnail(&id, &request, &live, backend.load(Ok(pixels()), |_| {})).is_ok());
+        assert_eq!(
+            cached_thumbnail(&id, &request, &token, hit_only),
+            Err(PhotoError::Cancelled)
+        );
+        assert_eq!(backend.calls(), 1);
+    }
+
+    #[cfg(not(feature = "library"))]
+    #[test]
+    fn thumbnail_shared_is_feature_gated() {
+        let request = ThumbnailRequest::new(8, 8, ThumbnailMode::Fill);
+        assert_eq!(
+            PhotoLibrary::thumbnail_shared(&AssetId::from_raw("a"), &request, &CancelToken::new()),
+            Err(PhotoError::FeatureDisabled { feature: "library" })
         );
     }
 }

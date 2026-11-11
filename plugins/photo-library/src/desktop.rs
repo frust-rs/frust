@@ -115,6 +115,7 @@ pub(crate) fn assets(_query: &crate::AssetQuery) -> Result<crate::AssetPage, Pho
 pub(crate) fn thumbnail(
     _id: &crate::AssetId,
     _request: &crate::ThumbnailRequest,
+    _token: &crate::CancelToken,
 ) -> Result<crate::Thumbnail, PhotoError> {
     Err(PhotoError::Unsupported)
 }
@@ -130,6 +131,15 @@ pub(crate) fn export_original(
     _id: &crate::AssetId,
     _options: &crate::ExportOptions,
 ) -> Result<crate::ExportedOriginal, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+// Metadata: desktop has no photo library to read from.
+#[cfg(feature = "library")]
+pub(crate) fn asset_metadata(
+    _id: &crate::AssetId,
+    _options: &crate::MetadataOptions,
+) -> Result<crate::ExifData, PhotoError> {
     Err(PhotoError::Unsupported)
 }
 
