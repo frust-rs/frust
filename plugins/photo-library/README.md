@@ -69,6 +69,74 @@ Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibra
   (`photo-library-limited-alert-plist-manual`). Android pages cost a count and a sort per page
   (`photo-library-android-paging-cost`).
 
+## Follow library changes and page by cursor
+
+With `library`, an app can keep its own copy of the library up to date instead of re-listing it:
+
+1. First run: store the bytes of `PhotoLibrary::current_change_token()` (`ChangeToken::as_bytes`).
+2. Later, restore it with `ChangeToken::from_bytes` and call `PhotoLibrary::changes_since(&token)`.
+3. A `LibraryChanges::Delta { inserted, updated, deleted, next }` lists asset ids to apply; a
+   `LibraryChanges::FullRescan { next }` means re-read the library. Either way store `next`.
+
+```rust
+use frust_photo_library::{ChangeToken, LibraryChanges, PhotoError, PhotoLibrary};
+
+// Blocking: call off the UI thread. `saved` holds the bytes stored last time, if any.
+fn sync(saved: Option<Vec<u8>>) -> Result<Vec<u8>, PhotoError> {
+    let Some(bytes) = saved else {
+        return Ok(PhotoLibrary::current_change_token()?.as_bytes().to_vec());
+    };
+    let next = match PhotoLibrary::changes_since(&ChangeToken::from_bytes(bytes))? {
+        LibraryChanges::Delta { inserted, updated, deleted, next } => {
+            // Apply the three id lists to the app's copy.
+            let _ = (inserted, updated, deleted);
+            next
+        }
+        LibraryChanges::FullRescan { next } => {
+            // Re-list with `assets` or `assets_after`.
+            next
+        }
+        _ => PhotoLibrary::current_change_token()?,
+    };
+    Ok(next.as_bytes().to_vec())
+}
+```
+
+- `PhotoLibrary::on_library_changed(|| ..)` returns a `ChangeSubscription`; dropping it unregisters the
+  callback. The callback only wakes the app: it carries no data and may be coalesced or spurious. It
+  runs inline on a platform notification thread (the Photos change queue on iOS, a binder thread on
+  Android), so it must only signal (set a flag, send on a channel, wake a task) and return; calling
+  `changes_since` or anything blocking from inside it delays other subscribers and the platform's
+  delivery. Answer the signal by calling `changes_since` off the UI thread.
+- Call `changes_since` once right after subscribing: a change that lands while subscribing may not
+  produce a wake.
+- A `Delta` evicts every id it names (inserted, updated and deleted) from the thumbnail cache, and a `FullRescan` clears it.
+  An id in a delta may already be gone by the time you use it (`PhotoError::NotFound`).
+- iOS keeps a change history from iOS 16; iOS 15 always answers `FullRescan`. Android needs API 30; on
+  API 29 every call is a `FullRescan`. A token from another device or platform, an expired token (iOS),
+  a changed `MediaStore` volume version (Android) or bytes that do not decode are also a `FullRescan`,
+  never an error. On Android a visible row missing from the token's id set counts as `inserted`. The
+  Android token is about 100 KB per 100,000 assets (about 200 KB when ids are very sparse), so store it
+  in a file or database (`photo-library-change-feed-full-rescan`, `photo-library-android-change-token-size`).
+  On Android the token also holds the list of the user's visible media ids plus the volume version, so
+  keep it in app-private storage and preferably exclude it from cloud backup.
+- `PhotoLibrary::assets_after(&AssetQuery, Option<&AssetCursor>)` returns an `AssetCursorPage` (`items`
+  and `next`, `None` on the last page), newest first and stable while the library changes between pages.
+  Start with `None`; the `AssetQuery` offset is ignored and no total is computed. `limit` and `details`
+  may change between pages, the album and filter may not, and a cursor is in memory only (restart from
+  `None` after a relaunch). Android pages by keyset with no count and no seek; iOS pins one snapshot per
+  session, so changes appear only in a new session, four sessions are kept and an evicted session's
+  cursor answers `InvalidRequest` (`photo-library-ios-cursor-pins-snapshot`). `assets` keeps offset paging.
+- `PhotoLibrary::cloud_identifiers(&[AssetId])` maps a whole batch to iCloud identifiers in one call
+  (`None` where an asset has none): iOS 15+ only, `Unsupported` elsewhere, and expensive and blocking, so
+  map every id at once and off the UI thread. A cloud identifier names the asset on every device of the
+  same iCloud Photos library.
+- An `AssetId` stays the same across launches on one device on a best-effort basis, so an app may store
+  it. It is not portable to another device or platform, and a restore from backup or a reinstall may
+  change it; use a cloud identifier to name an asset across devices.
+- The core paths ran on a Pixel 5 and an iPhone 13 mini; iOS updated and deleted deltas, `cloud_identifiers`,
+  iOS 15, API 29 and large Android libraries have not run on a device (`photo-library-change-feed-not-device-tested`).
+
 ## Export originals and save
 
 `PhotoLibrary::export_original(&AssetId, &ExportOptions)` (the `library` feature) writes an asset's

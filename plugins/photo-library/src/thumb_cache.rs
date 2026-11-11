@@ -1,6 +1,6 @@
 //! A process-wide, byte-budgeted LRU of decoded thumbnails.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::library::{Thumbnail, ThumbnailMode, ThumbnailRequest};
@@ -42,7 +42,8 @@ pub(crate) struct Lru {
     bytes: usize,
     budget: usize,
     tick: u64,
-    /// Bumped by every [`clear`](Self::clear).
+    /// Bumped by every [`clear`](Self::clear) and every non-empty
+    /// [`evict_ids`](Self::evict_ids).
     epoch: u64,
 }
 
@@ -109,6 +110,27 @@ impl Lru {
         self.epoch += 1;
     }
 
+    /// Drops every entry (all sizes and modes) of each id in `ids`. When any id is given, the
+    /// epoch is bumped as [`clear`](Self::clear) bumps it, so no load in flight (for these ids
+    /// or any other) is cached; an empty `ids` changes nothing.
+    fn evict_ids(&mut self, ids: &HashSet<&AssetId>) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut freed = 0;
+        let order = &mut self.order;
+        self.map.retain(|key, entry| {
+            let keep = !ids.contains(&key.id);
+            if !keep {
+                freed += entry.thumb.rgba.len();
+                order.remove(&entry.used);
+            }
+            keep
+        });
+        self.bytes -= freed;
+        self.epoch += 1;
+    }
+
     pub(crate) fn set_budget(&mut self, budget: usize) {
         self.budget = budget;
         self.evict();
@@ -154,8 +176,8 @@ pub(crate) fn epoch() -> u64 {
     lock().get_or_insert_with(|| Lru::new(DEFAULT_BUDGET)).epoch
 }
 
-/// Caches a thumbnail whose load started at `epoch`; a load older than the last [`clear`] is
-/// dropped.
+/// Caches a thumbnail whose load started at `epoch`; a load older than the last [`clear`] or
+/// [`evict_ids`] is dropped.
 pub(crate) fn insert(epoch: u64, key: Key, thumb: Arc<Thumbnail>) {
     lock()
         .get_or_insert_with(|| Lru::new(DEFAULT_BUDGET))
@@ -167,6 +189,15 @@ pub(crate) fn clear() {
     lock()
         .get_or_insert_with(|| Lru::new(DEFAULT_BUDGET))
         .clear();
+}
+
+/// Drops every cached size of each id in `ids` and, when any is given, refuses the insert of
+/// any load already in flight.
+pub(crate) fn evict_ids<'a>(ids: impl IntoIterator<Item = &'a AssetId>) {
+    let ids: HashSet<&AssetId> = ids.into_iter().collect();
+    lock()
+        .get_or_insert_with(|| Lru::new(DEFAULT_BUDGET))
+        .evict_ids(&ids);
 }
 
 pub(crate) fn set_budget(budget: usize) {
@@ -291,6 +322,57 @@ mod tests {
         assert!(c.get(&key("b")).is_none());
         c.insert_since(c.epoch, key("c"), thumb(40));
         assert!(c.get(&key("c")).is_some());
+    }
+
+    fn sized(name: &str, width: u32, mode: ThumbnailMode) -> Key {
+        Key::new(
+            &AssetId::from_raw(name),
+            &ThumbnailRequest::new(width, 1, mode),
+        )
+    }
+
+    #[test]
+    fn evicting_ids_drops_every_size_of_them_and_keeps_the_rest() {
+        let mut c = Lru::new(1000);
+        c.insert(sized("a", 1, ThumbnailMode::Fill), thumb(40));
+        c.insert(sized("a", 2, ThumbnailMode::Fit), thumb(40));
+        c.insert(sized("b", 1, ThumbnailMode::Fill), thumb(40));
+        c.insert(sized("c", 1, ThumbnailMode::Fill), thumb(40));
+        let (a, b) = (AssetId::from_raw("a"), AssetId::from_raw("b"));
+        c.evict_ids(&HashSet::from([&a, &b]));
+        assert!(c.get(&sized("a", 1, ThumbnailMode::Fill)).is_none());
+        assert!(c.get(&sized("a", 2, ThumbnailMode::Fit)).is_none());
+        assert!(c.get(&sized("b", 1, ThumbnailMode::Fill)).is_none());
+        assert!(c.get(&sized("c", 1, ThumbnailMode::Fill)).is_some());
+        assert_eq!((c.len(), c.bytes(), c.order.len()), (1, 40, 1));
+        // The order index stayed in step: eviction by budget still finds its victims.
+        c.set_budget(0);
+        assert_eq!((c.len(), c.bytes(), c.order.len()), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_load_older_than_an_id_eviction_is_not_cached() {
+        let mut c = Lru::new(100);
+        let before = c.epoch;
+        c.evict_ids(&HashSet::from([&AssetId::from_raw("a")]));
+        c.insert_since(before, key("a"), thumb(40));
+        assert!(c.get(&key("a")).is_none());
+        c.insert_since(c.epoch, key("a"), thumb(40));
+        assert!(c.get(&key("a")).is_some());
+    }
+
+    #[test]
+    fn evicting_no_ids_keeps_in_flight_loads() {
+        let mut c = Lru::new(100);
+        c.insert(key("a"), thumb(40));
+        let before = c.epoch;
+        c.evict_ids(&HashSet::new());
+        assert_eq!(c.epoch, before);
+        assert!(c.get(&key("a")).is_some());
+        // An id with nothing cached still refuses older loads.
+        c.evict_ids(&HashSet::from([&AssetId::from_raw("absent")]));
+        assert_ne!(c.epoch, before);
+        assert!(c.get(&key("a")).is_some());
     }
 
     #[test]

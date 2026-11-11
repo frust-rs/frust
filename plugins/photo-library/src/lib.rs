@@ -57,7 +57,13 @@
     any(target_os = "ios", target_os = "macos")
 ))]
 mod apple_decode;
+// The iOS change feed's pure half (the sentinel, the batch merge, the error mapping) has no Photos
+// dependency, so the host compiles it for its tests; on iOS `apple` declares the whole module.
+#[cfg(all(test, feature = "library", not(target_os = "ios")))]
+mod apple_changes;
 mod cancel;
+#[cfg_attr(not(feature = "library"), allow(dead_code))]
+mod changes;
 mod decode;
 #[cfg(any(
     target_os = "android",
@@ -89,6 +95,7 @@ mod pixels;
 mod thumb_cache;
 
 pub use cancel::CancelToken;
+pub use changes::{ChangeSubscription, ChangeToken, LibraryChanges};
 pub use decode::{DecodeOptions, DecodedImage, ImageColorSpace};
 #[cfg(any(
     target_os = "android",
@@ -103,8 +110,8 @@ pub use decode::{DecodeOptions, DecodedImage, ImageColorSpace};
 ))]
 pub use folder_scan::{FolderMedia, FolderPage, FolderScan};
 pub use library::{
-    Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE,
-    Thumbnail, ThumbnailMode, ThumbnailRequest,
+    Album, AlbumId, AlbumKind, Asset, AssetCursor, AssetCursorPage, AssetPage, AssetQuery,
+    MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE, Thumbnail, ThumbnailMode, ThumbnailRequest,
 };
 pub use metadata::MetadataOptions;
 pub use originals::{
@@ -247,13 +254,124 @@ impl PhotoLibrary {
         }
     }
 
+    /// One page of assets, newest first, resuming after `cursor`: paging that stays stable while
+    /// the library changes between pages. Blocks; see [`albums`](Self::albums) for the rules.
+    ///
+    /// `cursor: None` returns the first page; pass the returned [`AssetCursorPage::next`] for the
+    /// page after it, until `next` is `None` on the last page. The query's
+    /// [`offset`](AssetQuery::offset) is ignored and no total is computed. Its
+    /// [`limit`](AssetQuery::limit) and [`details`](AssetQuery::details) apply to each page and
+    /// may change between pages, but its album and filter may not: a cursor used with a query
+    /// whose album or filter differs from the one that made it, or a cursor from another
+    /// platform, answers [`PhotoError::InvalidRequest`]. A cursor lives in memory only; start
+    /// again from `None` after a relaunch.
+    ///
+    /// - **Android:** keyset paging on the order [`assets`](Self::assets) uses (the taken time,
+    ///   or the added time when there is none, then the `MediaStore` id, both descending). Each
+    ///   page resumes after the last row it returned, so an insert or a delete between pages
+    ///   neither repeats nor skips a row; an asset inserted with a time older than the cursor
+    ///   appears on a later page, and one newer than it does not appear until a new session.
+    ///   No row count is taken. On API 29, where `MediaStore` cannot limit a query, the page
+    ///   reads only its own rows from the start of the result.
+    /// - **iOS:** PhotoKit has neither a secondary sort on the identifier nor a keyset fetch, so
+    ///   a cursor session pins one snapshot of the library, fetched by the first page: inserts
+    ///   and deletes after the first page do not appear until a new session starts from `None`
+    ///   (an asset deleted since may answer [`PhotoError::NotFound`] from
+    ///   [`thumbnail`](Self::thumbnail)), and assets that share a creation date keep PhotoKit's
+    ///   order within the snapshot. The four most recently used sessions keep their snapshot;
+    ///   a cursor of an evicted session answers [`PhotoError::InvalidRequest`], and paging
+    ///   restarts from `None`.
+    /// - **Desktop and web:** [`PhotoError::Unsupported`], as for [`assets`](Self::assets).
+    pub fn assets_after(
+        query: &AssetQuery,
+        cursor: Option<&AssetCursor>,
+    ) -> Result<AssetCursorPage, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            platform::assets_after(query, cursor)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = (query, cursor);
+            Err(library_disabled())
+        }
+    }
+
+    /// The library's current [`ChangeToken`], to pass to [`changes_since`](Self::changes_since)
+    /// later. Blocks; see [`albums`](Self::albums) for the rules. Desktop and web have no photo
+    /// library and return [`PhotoError::Unsupported`].
+    ///
+    /// iOS keeps a change history from iOS 16; on iOS 15 the token is a fixed placeholder that
+    /// [`changes_since`](Self::changes_since) always answers with [`LibraryChanges::FullRescan`].
+    pub fn current_change_token() -> Result<ChangeToken, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            platform::current_change_token()
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            Err(library_disabled())
+        }
+    }
+
+    /// What changed in the library since `token`. Blocks; see [`albums`](Self::albums) for the
+    /// rules. A token from another device, platform or library, or one the platform no longer
+    /// tracks, answers [`LibraryChanges::FullRescan`], not an error.
+    ///
+    /// Before it returns, a [`LibraryChanges::Delta`] evicts every size of each asset it names
+    /// (inserted, updated or deleted) from the thumbnail cache, and a
+    /// [`LibraryChanges::FullRescan`] empties it. Any thumbnail still loading when either
+    /// happens, for any asset, is returned to its caller but not cached.
+    pub fn changes_since(token: &ChangeToken) -> Result<LibraryChanges, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            changes::changes_since_with(token, platform::changes_since)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = token;
+            Err(library_disabled())
+        }
+    }
+
+    /// Calls `callback` when the library may have changed, until the returned
+    /// [`ChangeSubscription`] is dropped. Needs the `library` feature and photo access; desktop
+    /// and web return [`PhotoError::Unsupported`].
+    ///
+    /// **The callback runs inline on a platform notification thread** (the Photos change queue
+    /// on iOS, a binder thread on Android): it must only signal (set a flag, send on a channel,
+    /// wake a task) and return. Calling [`changes_since`](Self::changes_since) or anything else
+    /// that blocks from it delays the other subscribers and the platform's delivery.
+    ///
+    /// The wake carries no data and may be coalesced or spurious: answer it with `changes_since`
+    /// off the UI thread, and call that once right after subscribing, as a change landing while
+    /// subscribing may not wake. The platform observer runs while any subscription lives.
+    pub fn on_library_changed(
+        callback: impl Fn() + Send + Sync + 'static,
+    ) -> Result<ChangeSubscription, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            changes::FEED.subscribe(
+                std::sync::Arc::new(callback),
+                platform::start_change_observer,
+                platform::stop_change_observer,
+            )
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = callback;
+            Err(library_disabled())
+        }
+    }
+
     /// A thumbnail as straight-alpha RGBA8, from the in-memory cache when present. Blocks on a
     /// miss; [`PhotoError::NotFound`] for a stale `id`. The request is clamped to `1..=2048`.
     ///
     /// # The cache
     ///
     /// A hit returns before any platform call, so it skips the access check, and an edited or
-    /// deleted asset can be served until [`clear_thumbnail_cache`](Self::clear_thumbnail_cache).
+    /// deleted asset can be served until [`clear_thumbnail_cache`](Self::clear_thumbnail_cache)
+    /// or until [`changes_since`](Self::changes_since) names it (inserted, updated or deleted).
     /// The cache empties itself when [`manage_limited_selection`](Self::manage_limited_selection)
     /// succeeds and when a miss answers [`PhotoError::PermissionDenied`];
     /// [`set_thumbnail_cache_budget(0)`](Self::set_thumbnail_cache_budget) also empties it. A
@@ -323,6 +441,32 @@ impl PhotoLibrary {
         #[cfg(not(feature = "library"))]
         {
             let _ = (id, request, token);
+            Err(library_disabled())
+        }
+    }
+
+    /// The iCloud identifier of each asset in `ids`: one entry per id, in order, `None` where the
+    /// asset has no cloud identifier or the lookup failed for that id. Unlike an [`AssetId`],
+    /// which is local to one device, a cloud identifier names the same asset on every device
+    /// signed in to the same iCloud Photos library.
+    ///
+    /// Expensive and blocking: Photos resolves the whole batch in one call, so map every id the
+    /// app needs at once (before persisting them, say) rather than one at a time. See
+    /// [`albums`](Self::albums) for the thread and access rules. iOS 15 and later only; every
+    /// other platform returns [`PhotoError::Unsupported`].
+    pub fn cloud_identifiers(ids: &[AssetId]) -> Result<Vec<Option<String>>, PhotoError> {
+        #[cfg(all(feature = "library", target_os = "ios"))]
+        {
+            platform::cloud_identifiers(ids)
+        }
+        #[cfg(all(feature = "library", not(target_os = "ios")))]
+        {
+            let _ = ids;
+            Err(PhotoError::Unsupported)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = ids;
             Err(library_disabled())
         }
     }
@@ -830,6 +974,64 @@ mod tests {
             Err(PhotoError::Cancelled)
         );
         assert_eq!(backend.calls(), 1);
+    }
+
+    #[cfg(not(feature = "library"))]
+    #[test]
+    fn the_change_feed_is_feature_gated() {
+        let disabled = PhotoError::FeatureDisabled { feature: "library" };
+        assert_eq!(PhotoLibrary::current_change_token(), Err(disabled.clone()));
+        assert_eq!(
+            PhotoLibrary::changes_since(&ChangeToken::from_bytes(*b"t")),
+            Err(disabled.clone())
+        );
+        assert_eq!(
+            PhotoLibrary::on_library_changed(|| {}).map(|_| ()),
+            Err(disabled)
+        );
+    }
+
+    // Desktop and web have no library, so their arms refuse the whole feed.
+    #[cfg(all(
+        feature = "library",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    #[test]
+    fn the_change_feed_is_unsupported_without_a_library() {
+        assert_eq!(
+            PhotoLibrary::current_change_token(),
+            Err(PhotoError::Unsupported)
+        );
+        assert_eq!(
+            PhotoLibrary::changes_since(&ChangeToken::from_bytes(*b"t")),
+            Err(PhotoError::Unsupported)
+        );
+        assert_eq!(
+            PhotoLibrary::on_library_changed(|| {}).map(|_| ()),
+            Err(PhotoError::Unsupported)
+        );
+    }
+
+    #[cfg(not(feature = "library"))]
+    #[test]
+    fn cloud_identifiers_are_feature_gated() {
+        assert_eq!(
+            PhotoLibrary::cloud_identifiers(&[AssetId::from_raw("a")]),
+            Err(PhotoError::FeatureDisabled { feature: "library" })
+        );
+    }
+
+    #[cfg(all(feature = "library", not(target_os = "ios")))]
+    #[test]
+    fn cloud_identifiers_are_ios_only() {
+        assert_eq!(
+            PhotoLibrary::cloud_identifiers(&[AssetId::from_raw("a")]),
+            Err(PhotoError::Unsupported)
+        );
+        assert_eq!(
+            PhotoLibrary::cloud_identifiers(&[]),
+            Err(PhotoError::Unsupported)
+        );
     }
 
     #[cfg(not(feature = "library"))]

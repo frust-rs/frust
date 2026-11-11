@@ -112,6 +112,14 @@ pub(crate) fn assets(_query: &crate::AssetQuery) -> Result<crate::AssetPage, Pho
 }
 
 #[cfg(feature = "library")]
+pub(crate) fn assets_after(
+    _query: &crate::AssetQuery,
+    _cursor: Option<&crate::AssetCursor>,
+) -> Result<crate::AssetCursorPage, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
 pub(crate) fn thumbnail(
     _id: &crate::AssetId,
     _request: &crate::ThumbnailRequest,
@@ -124,6 +132,27 @@ pub(crate) fn thumbnail(
 pub(crate) fn manage_limited_selection() -> Result<(), PhotoError> {
     Err(PhotoError::Unsupported)
 }
+
+// Change feed: desktop has no photo library to watch.
+#[cfg(feature = "library")]
+pub(crate) fn current_change_token() -> Result<crate::ChangeToken, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
+pub(crate) fn changes_since(
+    _token: &crate::ChangeToken,
+) -> Result<crate::LibraryChanges, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
+pub(crate) fn start_change_observer() -> Result<(), PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
+pub(crate) fn stop_change_observer() {}
 
 // Originals and saving: desktop has no photo library.
 #[cfg(feature = "library")]

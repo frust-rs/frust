@@ -16,6 +16,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AlbumsResult
+import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsAfterResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.ThumbnailResult
 import java.io.FileNotFoundException
@@ -37,7 +38,8 @@ import kotlin.math.roundToInt
  * - `MediaProvider.query` runs `DatabaseUtils.resolveQueryArgs` from
  *   `android11-release` (API 30) on, which turns `QUERY_ARG_OFFSET` /
  *   `QUERY_ARG_LIMIT` into SQL. `android10-release` (API 29) has no such call,
- *   so [assets] pages with `Cursor.moveToPosition` there.
+ *   so [assets] pages with `Cursor.moveToPosition` there, and [assetsAfter]
+ *   reads only its first rows.
  * - `ContentResolver.loadThumbnail` (API 29) decodes with
  *   `ImageDecoder.ALLOCATOR_SOFTWARE`, applies the provider's orientation, and
  *   a missing item surfaces as `FileNotFoundException`
@@ -106,6 +108,15 @@ internal object MediaStoreBrowser {
     private const val SORT_ORDER =
         "CASE WHEN ${MediaStore.MediaColumns.DATE_TAKEN} > 0 THEN ${MediaStore.MediaColumns.DATE_TAKEN} " +
             "ELSE ${MediaStore.MediaColumns.DATE_ADDED} * 1000 END DESC, ${BaseColumns._ID} DESC"
+
+    /**
+     * The first key of [SORT_ORDER] on its own, for [keysetSelection]. The
+     * same text as in [SORT_ORDER] (pinned by `tests/kotlin_contract.rs`), so
+     * the keyset compares exactly what the page is ordered by.
+     */
+    private const val SORT_KEY =
+        "CASE WHEN ${MediaStore.MediaColumns.DATE_TAKEN} > 0 THEN ${MediaStore.MediaColumns.DATE_TAKEN} " +
+            "ELSE ${MediaStore.MediaColumns.DATE_ADDED} * 1000 END"
 
     private val ASSET_PROJECTION = arrayOf(
         BaseColumns._ID,
@@ -189,6 +200,8 @@ internal object MediaStoreBrowser {
             LongArray(0), IntArray(0), emptyArray(), emptyArray(),
         )
 
+    private fun assetsAfterFailed(code: Int) = AssetsAfterResult(code, assetsFailed(code), 0, 0, false)
+
     private fun thumbnailFailed(code: Int) = ThumbnailResult(code, 0, 0, 0, null)
 
     /** The `media_type` selection of a filter code, or null for an unknown code. */
@@ -239,6 +252,8 @@ internal object MediaStoreBrowser {
     /** One row of a listing, read before it is split into parallel arrays. */
     private class Row(
         val id: String,
+        /** `_ID`, the [SORT_ORDER] tie-break. */
+        val rowId: Long,
         val kind: Int,
         val width: Int,
         val height: Int,
@@ -299,6 +314,79 @@ internal object MediaStoreBrowser {
         return resolver.query(FILES_URI, projection, queryArgs, null)
     }
 
+    /**
+     * One keyset page, newest first: the first [limit] rows after the cursor
+     * at ([afterKey], [afterId]) in [SORT_ORDER], or from the newest when
+     * [first] is set. No row is counted: the query reads one row past the page,
+     * and [AssetsAfterResult.hasMore] says whether it found one.
+     * [AssetsAfterResult.lastKey] and [AssetsAfterResult.lastId] are the
+     * page's last row's key (the reported timestamp, [readRows]) and `_ID`.
+     */
+    fun assetsAfter(
+        ctx: Context?,
+        albumId: String?,
+        filter: Int,
+        first: Boolean,
+        afterKey: Long,
+        afterId: Long,
+        limit: Int,
+        details: Boolean,
+    ): AssetsAfterResult =
+        browse(ctx, "assetsAfter", ::assetsAfterFailed) { context ->
+            val mediaType = mediaSelection(filter)
+                ?: return@browse assetsAfterFailed(FrustPhotoLibraryHost.QUERY_FAILED)
+            val bucket = albumId?.takeIf { it != FrustPhotoLibraryHost.ALL_MEDIA_ALBUM_ID }
+            val scoped = if (bucket == null) mediaType else "$mediaType AND ${MediaStore.MediaColumns.BUCKET_ID} = ?"
+            val selection = if (first) scoped else "$scoped AND ${keysetSelection(afterKey, afterId)}"
+            val args = bucket?.let { arrayOf(it) }
+            val pageSize = limit.coerceIn(1, Int.MAX_VALUE - 1)
+            val window = pageSize + 1
+            val cursor = queryAfter(context.contentResolver, selection, args, window, details)
+                ?: return@browse assetsAfterFailed(FrustPhotoLibraryHost.QUERY_FAILED)
+            val rows = cursor.use { c -> readRows(c, 0, window, details) }
+            val more = rows.size > pageSize
+            val page = if (more) rows.subList(0, pageSize) else rows
+            val last = page.lastOrNull()
+            AssetsAfterResult(FrustPhotoLibraryHost.OK, assetsPage(page, 0), last?.date ?: 0, last?.rowId ?: 0, more)
+        }
+
+    /**
+     * The rows after ([afterKey], [afterId]) in [SORT_ORDER]: an older key, or
+     * the same key and a smaller `_ID`. Both values are inlined as integer
+     * literals rather than bound as `?` arguments: a bound argument is text,
+     * and SQLite compares the affinity-less `CASE` key with text as greater
+     * than every number, which would match every row. A Kotlin `Long` prints
+     * as digits and a sign only.
+     */
+    internal fun keysetSelection(afterKey: Long, afterId: Long): String =
+        "(($SORT_KEY) < $afterKey OR (($SORT_KEY) = $afterKey AND ${BaseColumns._ID} < $afterId))"
+
+    /**
+     * At most [window] rows of [selection] in [SORT_ORDER], from the first:
+     * `QUERY_ARG_LIMIT` with no offset on API 30+. API 29 cannot limit a query
+     * (class doc), so there the cursor is unlimited and [readRows] reads only
+     * its first [window] rows, with no seek.
+     */
+    private fun queryAfter(
+        resolver: ContentResolver,
+        selection: String,
+        args: Array<String>?,
+        window: Int,
+        details: Boolean,
+    ): Cursor? {
+        val projection = projection(details)
+        if (Build.VERSION.SDK_INT < 30) {
+            return resolver.query(FILES_URI, projection, selection, args, SORT_ORDER)
+        }
+        val queryArgs = Bundle().apply {
+            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+            args?.let { putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, it) }
+            putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, SORT_ORDER)
+            putInt(ContentResolver.QUERY_ARG_LIMIT, window)
+        }
+        return resolver.query(FILES_URI, projection, queryArgs, null)
+    }
+
     /** At most [limit] rows of [cursor]; on API 29 the cursor is unpaged, so it seeks [offset]. */
     private fun readRows(cursor: Cursor, offset: Int, limit: Int, details: Boolean): List<Row> {
         val first = if (Build.VERSION.SDK_INT < 30) offset else 0
@@ -314,10 +402,12 @@ internal object MediaStoreBrowser {
             val base = if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             val (width, height) = displaySize(cursor.getInt(2), cursor.getInt(3), cursor.getInt(7))
             val taken = cursor.getLong(4)
+            val rowId = cursor.getLong(0)
             rows.add(
                 Row(
                     // The typed collection's URI: `loadThumbnail` resolves it on every API level.
-                    id = ContentUris.withAppendedId(base, cursor.getLong(0)).toString(),
+                    id = ContentUris.withAppendedId(base, rowId).toString(),
+                    rowId = rowId,
                     kind = if (video) FrustPhotoLibraryHost.KIND_VIDEO else FrustPhotoLibraryHost.KIND_IMAGE,
                     width = width,
                     height = height,

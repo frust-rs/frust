@@ -439,6 +439,12 @@ pub struct PlaygroundState {
     /// (`pages::shortcuts`) — `Copy` signal handles, so the page and a headless
     /// test read and drive the same values.
     pub shortcuts: pages::shortcuts::ShortcutsState,
+    /// The "Photos" section's library-change watch (`pages::photos`): the live
+    /// `ChangeSubscription` its Watch press takes out and the wake-up count its
+    /// callback bumps. Kept here rather than in the page's own state so a watch
+    /// outlives a switch to another section; clone-shares-one-handle like the
+    /// controllers above.
+    pub photo_watch: pages::photos::LibraryWatch,
 }
 
 impl PlaygroundState {
@@ -482,6 +488,7 @@ impl PlaygroundState {
             slivers_controller: ScrollController::new(),
             tabs: pages::tabs::TabsState::new(),
             shortcuts: pages::shortcuts::ShortcutsState::new(),
+            photo_watch: pages::photos::LibraryWatch::default(),
         }
     }
 }
