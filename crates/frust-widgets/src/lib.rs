@@ -190,7 +190,7 @@ pub use slivers::{
 };
 pub use stack::{Stack, StackView, StackWidget, stack};
 pub use text::{TextView, TextWidget, text};
-pub use textinput::{TextInput, TextInputView, TextInputWidget, text_input};
+pub use textinput::{CaretInfo, TextInput, TextInputView, TextInputWidget, text_input};
 pub use texture_view::{TextureFit, TextureView, TextureWidget, texture_fit_rect, texture_view};
 pub use viewport::{CustomScrollView, DEFAULT_CACHE_EXTENT, ViewportWidget, custom_scroll_view};
 pub use window_drag_region::{WindowDragRegionView, WindowDragRegionWidget, window_drag_region};
