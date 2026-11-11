@@ -57,11 +57,22 @@ impl PaintScene for NullScene {
     fn draw_text(&mut self, _origin: Point, _text: &str) {}
 }
 
+/// 40 px rows with two runs of three 0 px rows: rows 20..23 all start at
+/// 800, rows 40..43 at 1480.
+fn zero_run_extent(i: usize) -> f64 {
+    if (20..23).contains(&i) || (40..43).contains(&i) {
+        0.0
+    } else {
+        ROW
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Mode {
     Uniform,
     Estimated,
     Exact,
+    ExactZeroRuns,
 }
 
 /// What the handler saw.
@@ -93,6 +104,9 @@ impl Component for Screen {
             }
             Mode::Exact => {
                 ListView::builder(self.count, ROW, |_| Probe).item_extent_of(mixed_extent)
+            }
+            Mode::ExactZeroRuns => {
+                ListView::builder(self.count, ROW, |_| Probe).item_extent_of(zero_run_extent)
             }
         };
         list.on_visible_range(|seen: &mut Seen, first, last| {
@@ -278,5 +292,69 @@ fn a_jump_in_exact_mode_reports_the_landed_rows() {
     assert_eq!(
         (first, last),
         expected_range((0..100_000).map(mixed_extent), top)
+    );
+}
+
+#[test]
+fn zero_px_rows_on_the_top_and_bottom_edges_are_not_visible() {
+    let mut h = Harness::new(200, Mode::ExactZeroRuns);
+    let expected = |top| expected_range((0..200).map(zero_run_extent), top);
+
+    // The top edge on the first run (rows 20..23 at 800): row 23, the 40 px
+    // row sharing that top, leads; the bottom edge (1440) is row 39's top.
+    h.jump(800.0);
+    assert_eq!(h.last(), Some((23, 38)));
+    assert_eq!(h.last(), Some(expected(800.0)));
+
+    // The bottom edge on the second run (rows 40..43 at 1480): row 39, ending
+    // on that edge, closes the range; row 23 ends on the top edge (840).
+    h.jump(840.0);
+    assert_eq!(h.last(), Some((24, 39)));
+    assert_eq!(h.last(), Some(expected(840.0)));
+
+    // A run strictly inside the viewport is visible like any row.
+    h.jump(790.0);
+    assert_eq!(h.last(), Some(expected(790.0)));
+}
+
+#[test]
+fn an_exact_list_shrinking_reports_the_rows_it_lands_on() {
+    let mut h = Harness::new(1_000, Mode::Exact);
+    h.jump(1e9);
+    assert_eq!(h.last().map(|(_, last)| last), Some(999));
+
+    h.count = 500;
+    h.settle();
+    let total: f64 = (0..500).map(mixed_extent).sum();
+    let offset = h.controller.offset();
+    assert_eq!(offset, total - WINDOW.height, "clamped to the new end");
+    assert_eq!(
+        h.last(),
+        Some(expected_range((0..500).map(mixed_extent), offset))
+    );
+    assert_eq!(h.last().map(|(_, last)| last), Some(499));
+}
+
+#[test]
+fn turning_exact_extents_off_falls_back_to_the_uniform_range() {
+    let mut h = Harness::new(1_000, Mode::Exact);
+    let top: f64 = (0..300).map(mixed_extent).sum();
+    h.jump(top);
+
+    h.mode = Mode::Uniform;
+    h.settle();
+    let offset = h.controller.offset();
+    assert_eq!(
+        h.last(),
+        Some(expected_range(std::iter::repeat_n(ROW, 1_000), offset))
+    );
+
+    // And back again, on the prefix sum.
+    h.mode = Mode::Exact;
+    h.settle();
+    let offset = h.controller.offset();
+    assert_eq!(
+        h.last(),
+        Some(expected_range((0..1_000).map(mixed_extent), offset))
     );
 }

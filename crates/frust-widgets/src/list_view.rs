@@ -94,9 +94,12 @@
 //! prepend from a full mutation, so the correction would be a guess.
 //!
 //! **Exact extents** (*Exact extents*, below) replace the closed form with the
-//! anchor row's own move: `offset += new_top(anchor) − old_top(anchor)`, read off
-//! this frame's and the previous frame's prefix sums — exactly the summed
-//! extents of the rows that shifted in (or out) above it, whatever their heights.
+//! anchor row's own move, `offset += new_top(anchor) − old_top(anchor)` off this
+//! frame's and the previous frame's prefix sums, on *every* prefix change — a
+//! count change or a generation-only re-flow alike. The anchor is the row the
+//! viewport's top edge sat in when its key confirms the same shift, else the
+//! probe's row; a frame with no previous prefix (the list just entered exact
+//! mode) shifts nothing.
 //!
 //! # Variable extents (keyed lists only)
 //!
@@ -175,34 +178,25 @@
 //! # Exact extents (either constructor)
 //!
 //! [`ListView::item_extent_of`] declares every row's extent up front through a
-//! pure `index -> px` callback: a chat list whose bubble heights were computed
-//! off-screen, a feed of fixed-size cards of a few kinds. Nothing is measured or
-//! estimated, so the content extent, every row's position and a jump to any
-//! offset are exact from the first frame, and each row is laid out under a
-//! **tight** main-axis constraint at its declared extent (the uniform path's
-//! rule, per row). Positional and keyed lists both take it: an extent is a
-//! function of the index, not cached under an identity.
+//! pure `index -> px` callback — bubble heights computed off-screen, cards of a
+//! few fixed kinds. Nothing is measured or estimated: the content extent, every
+//! row's position and a jump to any offset are exact from the first frame, and
+//! each row is laid out under a **tight** main-axis constraint at its declared
+//! extent. Positional and keyed lists both take it: an extent is a function of
+//! the index, not cached under an identity.
 //!
-//! **The prefix sum.** The widget keeps `prefix[i]` = the content-space top of
-//! item `i` (`prefix[item_count]` = the total) in one `Vec<f64>`, so the
-//! content extent is O(1) and the offset → index lookup a binary search,
-//! O(log N). It is rebuilt — `item_count` callback calls, O(N) — only when
-//! `item_count` or [`ListView::extent_generation`] changes: closures are not
-//! comparable, so the callback alone cannot tell the widget that an extent
-//! moved under an unchanged count, and the generation is how the app says so.
-//! A callback returning a negative or non-finite extent trips a
-//! `debug_assert!` and counts as `0` in release.
-//!
-//! **One extent source.** Every geometry reader — the window plan, each row's
-//! origin, layout's row constraints, an item's span, the content extent —
-//! matches on one internal `ExtentSource` (uniform, estimated or exact), so the
-//! three modes never disagree about where a row sits. The uniform and estimated
-//! arms are the paths described above, unchanged.
-//!
-//! **Exclusive with [`ListView::estimated_item_extent`]**, enforced by a
-//! `debug_assert!` in either call order; release keeps the exact extents and
-//! ignores the estimate. The constructors' `item_extent` stays required and is
-//! unused while exact extents are installed.
+//! The extents are summed into a cached prefix (content extent O(1), offset →
+//! row O(log N)) rebuilt only when `item_count` or
+//! [`ListView::extent_generation`] changes — `item_count` callback calls each
+//! time, so the callback must be cheap and pure. Closures are not comparable:
+//! **bump the generation whenever an extent changes under an unchanged count**.
+//! A negative or non-finite extent trips a `debug_assert!` and is 0 px in
+//! release; rows of 0 px whose top lies inside the viewport are all
+//! materialized. A keyed list keeps its anchor row in place across a re-flow
+//! above the viewport (*Prepend/removal scroll anchoring*, above).
+//! **Exclusive with [`ListView::estimated_item_extent`]** (a `debug_assert!` in
+//! either call order; release keeps the exact extents); the constructors'
+//! `item_extent` stays required and unused.
 //!
 //! # Measured anchor correction (variable extents only)
 //!
@@ -561,6 +555,21 @@ fn sanitize_exact_extent(extent: f64) -> f64 {
     if valid { extent } else { 0.0 }
 }
 
+/// Row `index`'s content-space top in an exact-extent prefix sum, clamped to
+/// the content's end — the one way any pass reads a prefix by row. A
+/// materialized key at or past the item count (a shrink the window has not
+/// been reconciled to yet) reads the total rather than panicking.
+fn prefix_top(prefix: &[f64], index: usize) -> f64 {
+    let last = prefix.len().saturating_sub(1);
+    prefix.get(index.min(last)).copied().unwrap_or(0.0)
+}
+
+/// Row `index`'s extent in an exact-extent prefix sum, through
+/// [`prefix_top`]: `0` for a row at or past the item count.
+fn prefix_extent(prefix: &[f64], index: usize) -> f64 {
+    prefix_top(prefix, index.saturating_add(1)) - prefix_top(prefix, index)
+}
+
 /// The motion tokens a controller command is applied with, resolved from the
 /// theme at every layout and paint and cached on the widget so the
 /// rebuild-time drain (whose `BuildCtx` threads no theme) applies a command
@@ -857,17 +866,15 @@ impl<State: 'static> ListView<State> {
     }
 
     /// Declare every row's extent up front: row `index` is exactly
-    /// `extent_of(index)` logical pixels tall — **exact-extent mode**, on a
-    /// [`ListView::builder`] or a [`ListView::builder_keyed`] list alike.
-    ///
-    /// Overrides the constructor's `item_extent`, which stays required and is
-    /// unused while this is set. Each materialized row is laid out under a
-    /// tight main-axis constraint at its declared extent, and the content
-    /// extent, every row's position and a [`ScrollController::jump_to`] to any
-    /// offset are exact from the first frame — nothing is estimated or
-    /// measured. The widget reads the callback into a cached prefix sum, so
-    /// the content extent is O(1) and finding the row at an offset is
-    /// O(log `item_count`).
+    /// `extent_of(index)` logical pixels tall (**exact-extent mode**, either
+    /// constructor; the constructor's `item_extent` stays required and
+    /// unused). **Bump [`ListView::extent_generation`] whenever an extent
+    /// changes under an unchanged item count.** `extent_of` runs `item_count`
+    /// times on every count or generation change, so it must be cheap and
+    /// pure; a negative or non-finite answer debug-asserts and is 0 px in
+    /// release. **Exclusive with [`ListView::estimated_item_extent`]** (a
+    /// `debug_assert!` in either call order). See the [module docs]' *Exact
+    /// extents* section.
     ///
     /// ```
     /// use std::rc::Rc;
@@ -894,18 +901,6 @@ impl<State: 'static> ListView<State> {
     /// }
     /// # let _ = Feed { heights: Rc::from([48.0, 96.0]), revision: 0 };
     /// ```
-    ///
-    /// # Contract
-    ///
-    /// `extent_of` must be a pure function of the index for one
-    /// [`ListView::extent_generation`]: the widget calls it `item_count` times
-    /// to rebuild its prefix sum, and only when `item_count` or the generation
-    /// changes — **bump the generation whenever an extent changes under an
-    /// unchanged item count**, or the list keeps the old extents. A negative or
-    /// non-finite answer trips a `debug_assert!` and counts as `0` in release.
-    /// **Exclusive with [`ListView::estimated_item_extent`]** (a
-    /// `debug_assert!` in either call order; release keeps the exact extents).
-    /// See the [module docs]' *Exact extents* section.
     ///
     /// [module docs]: self
     pub fn item_extent_of(mut self, extent_of: impl Fn(usize) -> f64 + 'static) -> Self {
@@ -1542,12 +1537,14 @@ pub struct ListViewWidget {
     /// A [`ScrollController::scroll_to_item`] request still settling, or
     /// `None`. See the [module docs](self)' *Programmatic scrolling* section.
     item_target: Option<ItemTarget>,
-    /// Whether a controller jump — or a frame of a controller tween — recorded
-    /// a near-start/near-end fire since the last paint: the paint that sees it
-    /// requests the `Housekeeping` flush that delivers it (the fire has no
-    /// `EventCtx` to go through when the position moves at layout or paint).
-    /// The near-edge counterpart of the core's own owed `on_scroll` flush.
-    jump_notify_owed: bool,
+    /// Whether something since the last paint is owed the `Housekeeping`
+    /// flush that delivers it — a near-start/near-end fire a controller jump
+    /// (or a frame of a controller tween) recorded, or a visible range layout
+    /// left pending for `on_visible_range`. Neither has an `EventCtx` to go
+    /// through when the position moves at layout or paint, so the paint that
+    /// sees this requests the flush. The counterpart of the core's own owed
+    /// `on_scroll` flush.
+    flush_owed: bool,
 }
 
 /// The in-file tests predate the core and name its state as this widget's own
@@ -1608,7 +1605,7 @@ impl ListViewWidget {
             pending_near_end: false,
             motion: ControllerMotion::from_theme(None),
             item_target: None,
-            jump_notify_owed: false,
+            flush_owed: false,
         }
     }
 
@@ -1722,7 +1719,7 @@ impl ListViewWidget {
             self.pending_visible = None;
         } else if self.pending_visible != Some(range) {
             self.pending_visible = Some(range);
-            self.jump_notify_owed = true;
+            self.flush_owed = true;
         }
     }
 
@@ -1937,14 +1934,21 @@ impl ListViewWidget {
         let vh = self.viewport.height;
         let first = (self.offset / extent).floor() as isize - BUFFER;
         let last = ((self.offset + vh) / extent).ceil() as isize + BUFFER;
-        let start = first.max(0) as usize;
-        let end = (last.max(0) as usize).min(self.item_count);
-        let start = start.min(end);
+        let (start, end) = self.clamp_window(first, last);
         WindowPlan {
             start,
             end,
             y_start: start as f64 * extent,
         }
+    }
+
+    /// Clamp a planned `[first, last)` row run, either end possibly past the
+    /// list's, to `[0, item_count]` with `start` never past `end` — the tail
+    /// the uniform and exact window plans share.
+    fn clamp_window(&self, first: isize, last: isize) -> (usize, usize) {
+        let end = (last.max(0) as usize).min(self.item_count);
+        let start = (first.max(0) as usize).min(end);
+        (start, end)
     }
 
     /// The exact-extent counterpart of the uniform closed form, over the
@@ -1960,9 +1964,7 @@ impl ListViewWidget {
         let bottom = self.offset + self.viewport.height;
         let first = self.exact_index_at(self.offset) as isize - BUFFER;
         let last = self.exact_rows_above(bottom) as isize + BUFFER;
-        let start = first.max(0) as usize;
-        let end = (last.max(0) as usize).min(self.item_count);
-        let start = start.min(end);
+        let (start, end) = self.clamp_window(first, last);
         WindowPlan {
             start,
             end,
@@ -2002,7 +2004,7 @@ impl ListViewWidget {
             ExtentSource::Exact => {
                 let prefix = &self.extent_prefix;
                 for (index, pod) in self.keys.iter().zip(self.children.iter_mut()) {
-                    pod.set_origin(Point::new(0.0, prefix[*index] - painted));
+                    pod.set_origin(Point::new(0.0, prefix_top(prefix, *index) - painted));
                 }
             }
             ExtentSource::Uniform(extent) => {
@@ -2059,16 +2061,12 @@ impl ListViewWidget {
 
     /// Item `index`'s content-space top (clamped to the content's end).
     fn exact_top(&self, index: usize) -> f64 {
-        let last = self.extent_prefix.len().saturating_sub(1);
-        self.extent_prefix
-            .get(index.min(last))
-            .copied()
-            .unwrap_or(0.0)
+        prefix_top(&self.extent_prefix, index)
     }
 
-    /// Item `index`'s declared (sanitized) extent.
+    /// Item `index`'s declared (sanitized) extent; `0` past the item count.
     fn exact_extent(&self, index: usize) -> f64 {
-        self.exact_top(index + 1) - self.exact_top(index)
+        prefix_extent(&self.extent_prefix, index)
     }
 
     /// The row whose span holds content-space `y`: the last one whose top lies
@@ -2091,19 +2089,45 @@ impl ListViewWidget {
         &self.extent_prefix[..rows]
     }
 
-    /// Apply a confirmed scroll-anchor shift in exact mode: the offset moves by
-    /// exactly as far as the anchor row's own top did — its top in this
-    /// frame's prefix sum minus its top in `old_prefix`, the previous frame's —
-    /// which is the summed extent of the rows that shifted in (or out) above
-    /// it. A previous frame with no prefix (the list entered exact mode on this
-    /// very frame) falls back to the uniform step.
-    fn apply_exact_anchor_shift(&mut self, prev_index: usize, items: isize, old_prefix: &[f64]) {
-        let new_index = (prev_index as isize + items).max(0) as usize;
-        let moved = match old_prefix.get(prev_index) {
-            Some(old_top) => self.exact_top(new_index) - old_top,
-            None => items as f64 * self.unmeasured_extent(),
+    /// Exact mode's one anchoring rule, run whenever the prefix sum was
+    /// replaced (a count or a generation change): the offset moves by exactly
+    /// as far as the anchor row's top did between `old_prefix` and this
+    /// frame's prefix, so that row stays put on screen. `probe` is
+    /// [`ListView::anchor_shift_items`]' confirmed `(previous index, shift)`;
+    /// the anchor is the row the viewport's top edge sat in when `same_row`
+    /// confirms it moved by that shift, else the probe's own row. No valid old
+    /// row (the list just entered exact mode, or an index at or past the old
+    /// count) skips the shift. Returns whether the offset moved.
+    fn apply_exact_anchor_shift(
+        &mut self,
+        probe: (usize, isize),
+        old_prefix: &[f64],
+        same_row: impl Fn(usize, usize) -> bool,
+    ) -> bool {
+        let Some(old_count) = old_prefix.len().checked_sub(1) else {
+            return false;
         };
-        self.set_offset(self.offset + moved);
+        let (prev_index, items) = probe;
+        let new_count = self.item_count;
+        let shifted = |old: usize| {
+            usize::try_from(old as isize + items)
+                .ok()
+                .filter(|&new| new < new_count)
+        };
+        let offset = self.offset;
+        let at_top = old_prefix[..old_count]
+            .partition_point(|&top| top <= offset)
+            .saturating_sub(1);
+        let anchor = [at_top, prev_index].into_iter().find_map(|old| {
+            let new = shifted(old).filter(|_| old < old_count)?;
+            (old == prev_index || same_row(old, new)).then_some((old, new))
+        });
+        let Some((old, new)) = anchor else {
+            return false;
+        };
+        let moved = self.exact_top(new) - prefix_top(old_prefix, old);
+        self.set_offset(offset + moved);
+        self.offset != offset
     }
 
     // --- Variable extents (keyed lists only). See the module docs' *Variable
@@ -2738,11 +2762,11 @@ impl ScrollSurface for ListViewWidget {
     fn after_motion_frame(&mut self, tween: bool) {
         if self.evaluate_near_start() {
             self.pending_near_start = true;
-            self.jump_notify_owed |= tween;
+            self.flush_owed |= tween;
         }
         if self.evaluate_near_end() {
             self.pending_near_end = true;
-            self.jump_notify_owed |= tween;
+            self.flush_owed |= tween;
         }
     }
 
@@ -2751,11 +2775,11 @@ impl ScrollSurface for ListViewWidget {
     fn after_jump(&mut self) {
         if self.evaluate_near_start() {
             self.pending_near_start = true;
-            self.jump_notify_owed = true;
+            self.flush_owed = true;
         }
         if self.evaluate_near_end() {
             self.pending_near_end = true;
-            self.jump_notify_owed = true;
+            self.flush_owed = true;
         }
     }
 
@@ -2981,21 +3005,31 @@ impl<State: 'static> View<State> for ListView<State> {
         let mut anchor_probe_missed = false;
         if let Some(key_of) = self.key_of.as_ref() {
             match Self::anchor_shift_items(prev, element, old_item_count, key_of) {
-                Some((prev_index, shift_items)) if shift_items != 0 => {
-                    match element.extent_source() {
-                        ExtentSource::Exact => element.apply_exact_anchor_shift(
-                            prev_index,
-                            shift_items,
-                            replaced_prefix.as_deref().unwrap_or(&[]),
-                        ),
-                        ExtentSource::Uniform(_) | ExtentSource::Estimated(_) => {
-                            element.apply_anchor_shift(shift_items)
+                Some((prev_index, shift_items)) => {
+                    match (element.extent_source(), replaced_prefix.as_deref()) {
+                        // Exact extents anchor on every prefix change, a
+                        // generation-only re-flow included; an unchanged
+                        // prefix moved nothing.
+                        (ExtentSource::Exact, Some(old_prefix)) => {
+                            let prev_key_of = prev.key_of.as_ref();
+                            let same_row = |old: usize, new: usize| {
+                                prev_key_of
+                                    .is_some_and(|prev_key_of| prev_key_of(old) == key_of(new))
+                            };
+                            let probe = (prev_index, shift_items);
+                            if element.apply_exact_anchor_shift(probe, old_prefix, same_row) {
+                                flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+                            }
                         }
+                        (ExtentSource::Exact, None) => {}
+                        _ if shift_items != 0 => element.apply_anchor_shift(shift_items),
+                        _ => {}
                     }
-                    flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
-                    prepend_correction = shift_items > 0;
+                    if shift_items != 0 {
+                        flags |= ChangeFlags::LAYOUT | ChangeFlags::PAINT;
+                        prepend_correction = shift_items > 0;
+                    }
                 }
-                Some(_) => {}
                 None => {
                     anchor_probe_missed = true;
                     // A pending measured-anchor correction describes rows
@@ -3139,7 +3173,7 @@ impl Widget for ListViewWidget {
             ExtentSource::Exact => {
                 let prefix = &self.extent_prefix;
                 for (index, pod) in self.keys.iter().zip(self.children.iter_mut()) {
-                    let height = prefix[*index + 1] - prefix[*index];
+                    let height = prefix_extent(prefix, *index);
                     pod.layout_child(ctx, &BoxConstraints::tight(Size::new(vw, height)));
                 }
             }
@@ -3170,7 +3204,7 @@ impl Widget for ListViewWidget {
         // see `ScrollSurface::paint_motion`.
         self.motion = ControllerMotion::from_theme(Theme::from_paint_ctx(ctx));
         self.paint_motion(ctx, self.motion.reduce_motion);
-        if std::mem::take(&mut self.jump_notify_owed)
+        if std::mem::take(&mut self.flush_owed)
             && (self.pending_near_start || self.pending_near_end || self.pending_visible.is_some())
         {
             // Paint has no `&mut State`: owe the jump's (or tween's) edge fire
