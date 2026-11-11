@@ -112,6 +112,36 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
 
 Run: `cargo test -p frust-ui --features test-support --lib`.
 
+### Moving a home-made headless rig to frust::testing
+
+`frust-testing` is not published (`publish = false`). An app's public route is the facade's
+`test-support` feature and `frust::testing`, which re-exports `Tester`, `TesterOptions`,
+`PumpOutcome`, `Finder`, `Gesture` and `TextRun`. A rig built by hand on `frust-core` or
+`frust-widgets` `test-support` (a `RenderRoot`, rebuild, layout, paint and `event` calls) maps as
+follows.
+
+| Rig piece | Tester call |
+|---|---|
+| Mount a root: `RenderRoot::new`, rebuild, layout | `Tester::new(state, build, size)`; `with_options(state, build, size, &options)` for theme, scale, insets, start time; `new_with` when setup must run in the Tester's owner |
+| Run one frame at a clock value | `pump(dt)`; `pump_and_settle()` until idle; `pump_until(what, timeout, predicate)` for background work |
+| Change the window | `set_metrics(metrics)`, `resize(size)` |
+| Read or change app state | `state()`, `state_mut()` (shows from the next pump) |
+| Pointer events built by hand | `tap`, `press`, `long_press`, `drag`, `timed_drag`; `start_gesture` then `move_by`, `move_to`, `up`, `cancel` |
+| Any other `InputEvent`, such as a key | `send(&event)` |
+| Accessibility action | `perform_action(target, action)` |
+| Read the semantics tree | `semantics()`; `find(&finder)`, `get_semantics`, `bounds`, `texts` |
+| Read the recorded scene | `scene()` |
+| Walk the retained tree | `inspect()` |
+| Check text fit | `text_runs()`, `text_overflows()`, `assert_no_text_overflow()` |
+| Drive time | `pump(dt)` advances a virtual clock |
+
+`semantics_of(build, size)` builds a stateless view and returns its tree without a Tester.
+
+An integration test file that uses `frust::testing` must start with `#![cfg(feature =
+"test-support")]` and be run with `--features test-support`; without the feature the module does
+not exist. `tester.semantics().focus_id()` reports focus only for widgets that publish it
+(`TextInput` today); for anything else it returns the root node.
+
 ### Host-dependent tests
 
 A test that needs a host facility (macOS CoreText, a system emoji font; the `apple_raster` emoji tests run on iOS via the simulator runner and are ignored on macOS) checks its

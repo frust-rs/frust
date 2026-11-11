@@ -361,6 +361,46 @@ to 10 s; API 29-30 may flash one) and never requests `POST_NOTIFICATIONS`.
 - **iPhone:** run the 40 s leg, background the app, and confirm the write finishes or `expired()` is reported.
 - Device results are in `docs/LIMITATIONS.md` (`background-task-android-refusal-cases`).
 
+## Reaching the JavaVM and Context from an app crate (Android)
+
+The `frust` facade has no `frust-plugin` dependency and does not re-export it. An app crate that
+needs JNI adds `frust-plugin` to its own `Cargo.toml` and uses `frust_plugin::android::{vm, context,
+with_jni_env}`. These exist only under `cfg(target_os = "android")`. Off Android a stub
+`with_jni_env` with a no-argument closure is compiled instead, so gate app code that calls them
+with `#[cfg(target_os = "android")]`.
+
+They work once the shell has run `initialize`. The shell does this in `native_init_platform`
+(`frust-shell-android`'s `jni_glue.rs`), which installs the `JavaVM` and a global reference to the
+application `Context` into `ndk-context` and then sets the ready flag, so `ndk_context` is
+initialised too. Before that, each call returns `PlatformHandleError::NotInitialized`.
+`with_jni_env` attaches the calling thread to the `JavaVM` for the closure and detaches when it
+returns, so any thread may call it, a tokio worker included. `context()` returns a raw pointer
+that is valid only on an attached thread; prefer `with_jni_env`, which passes both.
+
+```rust
+#[cfg(target_os = "android")]
+fn with_context() -> Result<(), frust_plugin::PlatformHandleError> {
+    frust_plugin::android::with_jni_env(|env, context| {
+        // `env: &mut jni::Env`, `context: &jni::objects::JObject`
+        let _ = (env, context);
+    })
+}
+```
+
+### TLS trust on Android
+
+Frust sets up no TLS for app network code. `frust-network-image` uses `reqwest` with `rustls` and
+`webpki-roots` (root `Cargo.toml`). The comment there says Android's platform verifier is not
+consulted, because it reports `Revoked` for CRL-only roots. The system and user trust stores are
+therefore not used by that plugin. `rustls-platform-verifier` is in `Cargo.lock` only as a
+transitive dependency of `reqwest`; no frust crate declares or initialises it.
+
+An app that uses `tonic` or `reqwest` with `rustls` can use `webpki-roots` as well, or use
+`rustls-platform-verifier`. Its Android init takes the JNI environment and a `Context` (check the
+crate's README for the version you use). It also needs its Kotlin/Maven component added to the
+app's Gradle project by hand, because no frust plugin contributes it. Frust does not test this
+path.
+
 ## Material asset regeneration
 
 `frust-material`'s generated/bundled assets are checked in, not built by `build.rs`; regenerate by

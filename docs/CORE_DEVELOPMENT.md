@@ -35,6 +35,42 @@ or runtime; each shell logs one info line `layout skip=.. audit=..` at startup. 
 | `FRUST_LAYOUT_AUDIT` | Any value other than `0` calls `set_layout_audit(true)`: each skipped pass is compared against a forced one and mismatches log `layout-audit:` warnings (debug aid, doubles layout cost) |
 | `FRUST_NO_RETAINED_LAYERS` | Any value calls `RenderRoot::set_retained_layers(false)`: `PaintCtx::subtree_clean` answers `false` everywhere, so `repaint_boundary`, navigator pages and cached opacity paint plain bodies and the scene never carries `PushRetained`/`DrawRetained`. Engine-side counterpart: `FRUST_ENGINE_NO_LAYERS` ([RENDER_DEVELOPMENT.md](RENDER_DEVELOPMENT.md)) |
 
+## Async work in an app
+
+Frust runs its own multi-threaded tokio runtime on every non-wasm target, Android and iOS
+included. The facade does not expose its handle. Use these entry points instead:
+
+- `frust::use_task`: run work off the UI thread and deliver the result to a signal on the UI
+  thread. This is the supported way to load data.
+- `frust::spawn`: run a `Send` future on the runtime.
+- `frust::spawn_blocking`: run blocking or CPU-bound work.
+- `frust::spawn_local` and `frust::spawn_local_scoped`: run a `!Send` future on the UI thread.
+
+Signals are written and read on the UI thread. Results cross threads through `use_task` or a
+channel.
+
+A scoped future or `frust::time::Timer` started in a component's event handler is bound to that
+component and stops when the component is removed (see
+[CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md), "Contexts are visible inside both build and event
+passes"). Work that must outlive a page is started under a longer-lived owner or with
+`frust::spawn`.
+
+An app that needs its own runtime, for example for a long-lived gRPC channel, may create one on
+its own thread. The framework does not pause or resume it. Register an `AppLifecycleListener`
+(re-exported by `frust`; `frust::app_lifecycle()` reads the state) and close or re-establish
+connections in `on_hide` and `on_resume`. The shell calls these on the UI thread, so hand the work
+to your runtime rather than blocking there. Timers do not fire while the app is backgrounded
+(`time-no-firing-while-backgrounded` in [LIMITATIONS.md](LIMITATIONS.md)), and iOS never reports
+`Detached` (`app-lifecycle-ios-no-detached`).
+
+```rust
+let _listener = frust::AppLifecycleListener::new()
+    .on_hide(|| { /* close the channel */ })
+    .on_resume(|| { /* reconnect */ });
+```
+
+Keep the listener alive: dropping it unregisters it.
+
 ## See Also
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) — prerequisites, build/run/test gates, version-pin policy
