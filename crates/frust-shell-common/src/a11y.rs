@@ -19,7 +19,7 @@
 //! the stamped transform can never carry a `NaN`, infinite or zero factor.
 
 use frust_core::SemanticsUpdate;
-use frust_core::accesskit::{Affine, Node, NodeId, Tree, TreeId, TreeUpdate};
+use frust_core::accesskit::{Affine, Node, NodeId, TreeId, TreeInfo, TreeUpdate};
 
 /// Assemble the accesskit [`TreeUpdate`] for one full semantics pass, with the
 /// root carrying `Affine::scale(scale)` (see the module docs' coordinate
@@ -56,7 +56,7 @@ pub fn tree_update_from_parts(
     }
     TreeUpdate {
         nodes,
-        tree: Some(Tree::new(root)),
+        tree: Some(TreeInfo::new(root)),
         tree_id: TreeId::ROOT,
         focus,
     }
@@ -66,7 +66,7 @@ pub fn tree_update_from_parts(
 mod tests {
     use super::{build_tree_update, tree_update_from_parts};
     use frust_core::SemanticsUpdate;
-    use frust_core::accesskit::{Affine, Node, NodeId, Rect, Role, Tree, TreeId};
+    use frust_core::accesskit::{Affine, Node, NodeId, Rect, Role, TreeId, TreeInfo};
 
     /// A window root with one bounded button child, focused on the child.
     fn window_with_button() -> SemanticsUpdate {
@@ -89,7 +89,7 @@ mod tests {
         let update = window_with_button();
         let tree_update = build_tree_update(&update, 1.0);
         assert_eq!(tree_update.nodes, update.nodes);
-        assert_eq!(tree_update.tree, Some(Tree::new(NodeId(1))));
+        assert_eq!(tree_update.tree, Some(TreeInfo::new(NodeId(1))));
         assert_eq!(tree_update.tree_id, TreeId::ROOT);
         assert_eq!(tree_update.focus, NodeId(2));
     }
@@ -130,7 +130,7 @@ mod tests {
             assert_eq!(root.role(), Role::Window);
             assert_eq!(root.children(), &[NodeId(2)]);
             assert_eq!(button, &update.nodes[0].1);
-            assert_eq!(tree_update.tree, Some(Tree::new(NodeId(1))));
+            assert_eq!(tree_update.tree, Some(TreeInfo::new(NodeId(1))));
             assert_eq!(tree_update.focus, NodeId(2));
         }
     }
@@ -146,6 +146,6 @@ mod tests {
         assert_eq!(tree_update.nodes[0].1.transform(), None);
         let empty = tree_update_from_parts(Vec::new(), NodeId(1), NodeId(1), 2.75);
         assert!(empty.nodes.is_empty());
-        assert_eq!(empty.tree, Some(Tree::new(NodeId(1))));
+        assert_eq!(empty.tree, Some(TreeInfo::new(NodeId(1))));
     }
 }

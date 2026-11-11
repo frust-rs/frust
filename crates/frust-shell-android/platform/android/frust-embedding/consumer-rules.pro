@@ -14,7 +14,7 @@
 # the whole class.
 -keep class dev.frust.** { *; }
 
-# `dev.accesskit.android.Delegate` (vendored from accesskit_android 0.7.5) is
+# `dev.accesskit.android.Delegate` (vendored from accesskit_android 0.9.1) is
 # located at runtime via a string class lookup
 # (`JNIEnv::find_class("dev/accesskit/android/Delegate")`) and its native methods
 # are bound dynamically via `RegisterNatives`, not the

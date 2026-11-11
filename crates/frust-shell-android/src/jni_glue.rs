@@ -3392,7 +3392,7 @@ pub fn native_on_back_press(handle: jlong) -> jboolean {
 ///
 /// # jni version bridge
 ///
-/// accesskit_android 0.7.5 is built against `jni` 0.21 while this shell uses
+/// accesskit_android 0.9.1 is built against `jni` 0.21 while this shell uses
 /// `jni` 0.22 — two distinct crate versions. Their `JNIEnv`/`jobject` handles
 /// are both `#[repr(C)]` opaque pointers with identical layout, so the raw
 /// pointers cross between them by a plain cast (the same technique

@@ -20,7 +20,7 @@ use super::input::under_root_owner;
 /// adapter plus the two UI-thread-shared channels its handlers use to talk to
 /// the frame loop.
 ///
-/// # Threading model (verified against `accesskit_android` 0.7.5)
+/// # Threading model (verified against `accesskit_android` 0.9.1)
 ///
 /// Every accesskit callback into this shell — `request_initial_tree` (via
 /// `AccessibilityNodeProvider.createAccessibilityNodeInfo`/`findFocus`) and
@@ -34,6 +34,10 @@ use super::input::under_root_owner;
 /// enqueues, and the `&mut self` frame pass drains that queue and calls
 /// [`AppTree::perform_accessibility_action`](frust_shell_common::AppTree::perform_accessibility_action)
 /// itself — so an assistive-tech action can never alias the handle mid-frame.
+///
+/// Since 0.9 `InjectingAdapter::update_if_active` may be called from any thread
+/// (it attaches the caller to the JVM and posts to the UI thread); this shell
+/// still calls it on the UI thread only, which that contract permits.
 pub(super) struct AndroidA11y {
     /// The accesskit_android injecting adapter. On construction it attaches a
     /// `View.AccessibilityDelegate` + `OnHoverListener` to the host
@@ -260,7 +264,7 @@ impl AndroidAppHandle {
 mod tests {
     use super::tree_update_from_semantics;
     use frust_core::SemanticsUpdate;
-    use frust_core::accesskit::{Affine, Node, NodeId, Rect, Role, Tree, TreeId};
+    use frust_core::accesskit::{Affine, Node, NodeId, Rect, Role, TreeId, TreeInfo};
 
     /// A Pixel 5's display density: the scale the root must carry so a logical
     /// rect becomes the physical one `accesskit_android` reports.
@@ -278,7 +282,7 @@ mod tests {
         };
         let tree_update = tree_update_from_semantics(update, PIXEL_5_DENSITY);
         assert_eq!(tree_update.nodes.len(), 2);
-        assert_eq!(tree_update.tree, Some(Tree::new(NodeId(1))));
+        assert_eq!(tree_update.tree, Some(TreeInfo::new(NodeId(1))));
         assert_eq!(tree_update.tree_id, TreeId::ROOT);
         // A focused node is reported directly.
         assert_eq!(tree_update.focus, NodeId(5));
