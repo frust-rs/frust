@@ -60,7 +60,8 @@
 //!
 //! A keyed list also corrects the scroll offset so a mutation **above** the
 //! viewport — a "load older" prepend, a removal above the screen — doesn't
-//! visually jump the content the user is looking at. It runs inside
+//! visually jump the content the user is looking at (within the known limits
+//! below). It runs inside
 //! [`View::rebuild`], **before** this frame's window is recomputed, so layout and
 //! paint agree on one corrected offset; never during paint.
 //!
@@ -92,6 +93,12 @@
 //!
 //! **Positional lists are never anchored** — position-only identity cannot tell a
 //! prepend from a full mutation, so the correction would be a guess.
+//!
+//! **Known limits.** When the viewport-top row itself is removed, the anchor
+//! falls back to the first surviving row of the previous window, which can sit up
+//! to [`BUFFER`] rows above the viewport. A single row inserted or removed
+//! between the window's first row and the viewport top is not corrected, in any
+//! extent mode.
 //!
 //! **Exact extents** (*Exact extents*, below) replace the closed form with the
 //! anchor row's own move, `offset += new_top(anchor) − old_top(anchor)` off this
@@ -2118,6 +2125,9 @@ impl ListViewWidget {
         let at_top = old_prefix[..old_count]
             .partition_point(|&top| top <= offset)
             .saturating_sub(1);
+        // If the top-edge row did not survive, the probe's row (the first
+        // surviving row of the previous window) anchors instead, and can sit
+        // above the viewport.
         let anchor = [at_top, prev_index].into_iter().find_map(|old| {
             let new = shifted(old).filter(|_| old < old_count)?;
             (old == prev_index || same_row(old, new)).then_some((old, new))
