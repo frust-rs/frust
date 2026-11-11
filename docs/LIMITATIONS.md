@@ -8391,3 +8391,17 @@ shows the guard works, not that it was needed. Notification display was not obse
 **Evidence**: reproduced deterministically on a Pixel 5 in profile and debug builds: `adb shell uiautomator dump` followed by a rotation aborts within a second, 2 of 2; plain rotations with no accessibility client, 8 of 8 stayed alive. Symbolized frames: `accesskit_android` `event.rs` `send_completed_event` / `send_window_content_changed`, called from `dev.accesskit.android.Delegate`'s posted runnable. First seen 2026-09-30; seen again in device gates on 2026-11-01 and 2026-11-03.
 
 ---
+
+### `list-view-leading-buffer-edit-not-anchored` — a keyed `ListView` does not correct a single row edit just above the viewport
+
+**Observed**: a keyed exact-extent `ListView` keeps its anchor row in place when rows change above the viewport, but a single row inserted or removed between the window's first buffered row (the leading buffer is 2 rows) and the viewport top is not corrected. The scroll offset stays put and the content under the viewport moves by that row's extent: up on removal, down on insert. An edit at the window's first row or anywhere above it is corrected. The same probe serves the estimated keyed mode, so it is expected there too, but it was not observed there.
+
+**Applies to**: keyed `ListView`s (`builder_keyed`); for example a message deleted just off-screen.
+
+**Workaround**: none in the framework. An app can compensate with `ScrollController::jump_to` by the row's extent.
+
+**Why accepted**: it predates the exact-extent mode and is bounded to one row's extent per edit; the anchor cannot see a row it never materialized.
+
+**Evidence**: established from code and a headless test, not from a device observation: `crates/frust-widgets/src/list_view.rs` (`apply_exact_anchor_shift`, `anchor_shift_items`) and `crates/frust-widgets/tests/list_item_extent.rs` (`a_single_row_edit_inside_the_leading_buffer_is_not_corrected`).
+
+---

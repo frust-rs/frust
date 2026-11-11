@@ -501,8 +501,10 @@ come from the shared core; the clamped-windowing/paint-only-overscroll split (`l
 **Two row-identity models.** `ListView::builder` reconciles by raw index (right for append-only,
 truncate-only or full-replace data; a mid-list mutation reattaches state to whatever now sits at the
 index). `builder_keyed` adds a `ChildKey` per row (as `keyed()` does for `Flex`, see WIDGETS_CODE_STANDARDS.md) so state follows the row, and re-anchors its offset in `rebuild`, before
-windowing, so a single-sided prepend/removal above the viewport never visibly jumps the content. A
-same-frame mutation on both sides of the anchor can still miss that correction (registered). A
+windowing, so a single-sided prepend/removal above the viewport does not visibly jump the content,
+except one edit between the window's first buffered row and the viewport top, which is not corrected
+(`list-view-leading-buffer-edit-not-anchored` in [LIMITATIONS.md](LIMITATIONS.md)). A
+same-frame mutation on both sides of the anchor can also miss it (registered). A
 duplicate key `debug_assert!`s with no positional fallback in release: the first slot wins.
 
 **Variable extents are keyed-only.** `.estimated_item_extent(px)` switches a keyed list from the
@@ -517,7 +519,8 @@ their declared extent. A cached prefix sum gives an O(1) total and an O(log N) o
 (O(N) callback calls) only when `item_count` or `.extent_generation(u64)` changes; closures are not
 comparable, so the app bumps the generation when extents change under an unchanged count. It is exclusive
 with `estimated_item_extent` (`debug_assert!`; release keeps the exact extents), and the builders' required
-`item_extent` is overridden. Pick by knowledge: **uniform** when every row is the same height, **estimated
+`item_extent` is overridden. A keyed exact list keeps its anchor row in place across a count or generation
+re-flow above the viewport; a positional one never anchors, and the first exact frame shifts nothing. Pick by knowledge: **uniform** when every row is the same height, **estimated
 keyed** when heights are only known by laying rows out, **exact** when the app can state every height.
 
 **Visible range.** `.on_visible_range(|state, first, last|)` reports the inclusive indexes of rows

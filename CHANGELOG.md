@@ -23,7 +23,8 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   and a `jump_to` to any offset are exact from the first frame. The list keeps a cached prefix sum
   (O(1) total, O(log N) offset-to-row lookup), rebuilt only when the item count or the generation
   changes, so bump the generation when extents change under an unchanged count. It is exclusive with
-  `estimated_item_extent`; the builders' `item_extent` argument is unchanged and is overridden.
+  `estimated_item_extent`; the builders' `item_extent` argument is unchanged and is overridden. A keyed
+  exact list keeps its anchor row in place across count and generation changes above the viewport.
 - `ListView::on_visible_range(|state, first, last| ..)`: the inclusive first and last indexes of the
   rows intersecting the viewport, with the cache buffer excluded, in all three extent modes. It runs
   one event late like `on_near_start`/`on_near_end`, and only when the range changes.
