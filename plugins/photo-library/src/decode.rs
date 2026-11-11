@@ -30,7 +30,8 @@ pub enum ImageColorSpace {
 /// hold its own full-size bitmap while it scales. Every returned buffer is also held under a
 /// byte ceiling of `i32::MAX` bytes (just under 2 GiB) on every platform: a request whose capped
 /// image would need more is [`PhotoError::InvalidRequest`] before the buffer is allocated, and an
-/// allocation the system cannot satisfy is a [`PhotoError::Platform`] error, never an abort. For
+/// allocation the allocator refuses is a [`PhotoError::Platform`] error. That does not stop the
+/// system from ending the app when memory runs out while a very large buffer is filled, so for
 /// an untrusted file, cap near the size you display rather than near the ceiling.
 #[derive(Debug, Clone)]
 #[non_exhaustive]

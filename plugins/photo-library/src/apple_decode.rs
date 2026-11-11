@@ -12,7 +12,8 @@
 //!    [`DecodeOptions::max_dimension`]. A smaller image keeps its size.
 //! 4. The decoded image is checked again before any buffer exists: a long edge over
 //!    `max_dimension` is an error, and so is a buffer over the ceiling. The buffer is then
-//!    allocated fallibly ([`decode::allocate_rgba`]), so a shortage is an error, never an abort.
+//!    allocated fallibly ([`decode::allocate_rgba`]), so an allocation the allocator refuses is an
+//!    error. The system can still end the process if memory runs out while the buffer is filled.
 //! 5. A premultiplied RGBA8 bitmap context in an explicitly chosen space draws it: Display P3
 //!    when the image is wide-gamut and [`DecodeOptions::srgb`] is off, sRGB otherwise.
 //!    [`DecodedImage::color_space`] names the space drawn into. The pixels are then converted

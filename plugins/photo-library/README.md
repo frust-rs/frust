@@ -110,9 +110,10 @@ decodes it and deletes the exported file, even when the decode fails, is cancell
 - `max_dimension` bounds the returned image and its buffer, not the platform's own decode work, which reads the
   whole file (on Android the platform bitmap is held beside the buffer). Every buffer is also held under a byte
   ceiling of `i32::MAX` bytes (just under 2 GiB): a capped image that would need more is
-  `PhotoError::InvalidRequest` before anything is allocated, and an allocation the system refuses is an error,
-  not an abort. A full-size decode is large (a 48 MP image is about 192 MB of RGBA8), so for an untrusted file
-  cap `max_dimension` near the size you display.
+  `PhotoError::InvalidRequest` before anything is allocated, and an allocation the allocator refuses is an
+  error. The system can still end the app if memory runs out while a very large buffer is filled. A full-size
+  decode is large (a 48 MP image is about 192 MB of RGBA8), so for an untrusted file cap `max_dimension` near
+  the size you display.
 - `ExifData::capture_time` is EXIF `DateTimeOriginal` only, never the last-modified TIFF `DateTime`; an ISO,
   exposure, aperture or focal length recorded as zero or negative is `None`.
 
