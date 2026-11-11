@@ -404,6 +404,17 @@ impl TextEditor {
         })
     }
 
+    /// The zero-based visual line the caret (the selection's focus) draws on.
+    ///
+    /// Soft-wrapped and newline-split lines each count. `0` before the first
+    /// layout refresh.
+    pub fn caret_line(&self) -> usize {
+        self.view
+            .as_ref()
+            .and_then(|view| self.selection.focus().line(&view.layout))
+            .unwrap_or(0)
+    }
+
     /// The rectangles covering the current (non-collapsed) selection.
     pub fn selection_rects(&self) -> Vec<Rect> {
         let mut rects = Vec::new();
@@ -1192,6 +1203,21 @@ mod tests {
             ime.x1 >= ime.x0 && ime.y1 >= ime.y0,
             "ime area must be ordered"
         );
+    }
+
+    #[test]
+    fn caret_line_counts_visual_lines() {
+        let (mut ed, mut cx) = editor();
+        assert_eq!(ed.caret_line(), 0);
+        ed.apply(EditOp::Insert("ab".into()), &mut cx);
+        assert_eq!(ed.caret_line(), 0);
+        ed.apply(EditOp::InsertNewline, &mut cx);
+        assert_eq!(ed.caret_line(), 1);
+        ed.apply(EditOp::Insert("c".into()), &mut cx);
+        ed.apply(EditOp::InsertNewline, &mut cx);
+        assert_eq!(ed.caret_line(), 2);
+        ed.apply(EditOp::MoveLeft { select: false }, &mut cx);
+        assert_eq!(ed.caret_line(), 1);
     }
 
     #[test]
