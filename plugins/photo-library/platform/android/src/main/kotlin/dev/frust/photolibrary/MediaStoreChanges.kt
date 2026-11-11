@@ -47,9 +47,11 @@ import dev.frust.photolibrary.FrustPhotoLibraryHost.ChangesResult
  * calls [FrustPhotoLibraryHost.notifyLibraryChanged] with no data and no lock
  * held, so a subscriber may stop the observer from inside the wake. The
  * observer is published before it is registered (and unpublished if
- * registering fails), so every change delivered to the registered observer
- * wakes. [stopObserver] unregisters it; a wake already in flight from an
- * unregistered observer is dropped.
+ * registering fails), so a change delivered while it registers reaches the
+ * native wake. The Rust registry adds its first subscriber only after start
+ * returns, so that early wake reaches no callback: the app calls
+ * `changes_since` once after subscribing. [stopObserver] unregisters it; a
+ * wake already in flight from an unregistered observer is dropped.
  */
 internal object MediaStoreChanges {
     private const val TAG = "frust"
@@ -155,7 +157,8 @@ internal object MediaStoreChanges {
             val created = WakeObserver()
             val resolver = ctx.contentResolver
             // Published before registering: a change delivered while the second collection is
-            // still registering reaches the wake instead of being dropped as a stale observer's.
+            // still registering reaches the native wake. No subscriber is registered yet on the
+            // Rust side, so the app covers that window by calling changes_since after subscribing.
             observer = created
             val code = try {
                 resolver.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, created)

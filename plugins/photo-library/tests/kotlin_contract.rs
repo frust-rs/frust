@@ -2312,7 +2312,7 @@ fn the_observer_wakes_from_every_overload_and_stops_outside_its_lock() {
     assert!(start.contains("if (observer != null) return FrustPhotoLibraryHost.OK"));
     assert!(start.contains("unregister(ctx, created)"));
     // The wake drops callbacks from an observer that is not the published one, so publishing
-    // after registering would lose a change delivered in between.
+    // after registering would drop, in Kotlin, a change delivered in between.
     let published = start
         .find("observer = created")
         .expect("the observer is published");
@@ -2321,7 +2321,7 @@ fn the_observer_wakes_from_every_overload_and_stops_outside_its_lock() {
         .expect("the observer is registered");
     assert!(
         published < registered,
-        "the observer is published before it is registered, so no early wake is dropped"
+        "the observer is published before it is registered, so an early wake reaches native"
     );
     let failure = start
         .find("if (code != FrustPhotoLibraryHost.OK) {")
