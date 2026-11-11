@@ -96,9 +96,9 @@
 //!
 //! **Known limits.** When the viewport-top row itself is removed, the anchor
 //! falls back to the first surviving row of the previous window, which can sit up
-//! to [`BUFFER`] rows above the viewport. A single row inserted or removed
-//! between the window's first row and the viewport top is not corrected, in any
-//! extent mode.
+//! to [`BUFFER`] rows above the viewport. Rows inserted between the window's
+//! first row and the viewport-top row, or the one row removed there, go
+//! uncorrected and the content moves by their summed extent, in any extent mode.
 //!
 //! **Exact extents** (*Exact extents*, below) replace the closed form with the
 //! anchor row's own move, `offset += new_top(anchor) − old_top(anchor)` off this

@@ -583,28 +583,32 @@ fn painted_ids(feed: &Harness) -> Vec<u64> {
 }
 
 #[test]
-fn removing_the_viewport_top_row_anchors_on_a_surviving_neighbour() {
+fn removing_the_row_holding_the_top_edge_falls_back_to_a_row_above() {
+    // Row 504 is 132 px, so a 7.5 px in-row offset really leaves the top edge
+    // inside it (row 500 is only 1.25 px and could not).
     let mut feed = Harness::new(FeedData::mixed(2_000), true, Extents::Exact);
-    let top = feed.prefix()[500] + 7.5;
+    assert_eq!(mixed_extent(504), 132.0);
+    let top = feed.prefix()[504] + 7.5;
     feed.controller.jump_to(top);
     feed.settle();
-    let (y, _) = feed.log.row(500).expect("row 500 holds the top edge");
+    let (y, height) = feed.log.row(504).expect("row 504 holds the top edge");
+    assert!(y <= 0.0 && 0.0 < y + height, "the top edge sits in row 504");
     assert_eq!(y, -7.5);
 
     // The row the top edge sits in is itself removed in one frame.
     {
         let mut data = feed.data.borrow_mut();
-        data.ids_mut().remove(500);
-        data.extents_mut().remove(500);
+        data.ids_mut().remove(504);
+        data.extents_mut().remove(504);
     }
     feed.settle();
 
     let offset = feed.controller.offset();
     assert!((0.0..=feed.controller.max_offset()).contains(&offset));
-    assert!(feed.log.row(500).is_none(), "the removed row is gone");
-    // The anchor fell back to a surviving row above the viewport, so the
-    // offset is not corrected and the first visible row is the removed row's
-    // successor, now under the top edge.
+    assert!(feed.log.row(504).is_none(), "the removed row is gone");
+    // The anchor fell back to a surviving row above the viewport, so nothing
+    // corrects the offset and the removed row's successor slides under the
+    // top edge.
     assert_eq!(offset, top, "no surviving anchor moved, so no correction");
     let first_visible = painted_ids(&feed)
         .into_iter()
@@ -613,12 +617,8 @@ fn removing_the_viewport_top_row_anchors_on_a_surviving_neighbour() {
             y + height > 0.0
         })
         .expect("a row is visible");
-    assert!(
-        (498..=502).contains(&first_visible),
-        "the first visible row {first_visible} is a neighbour of the removed row"
-    );
-    assert_eq!(first_visible, 501);
-    assert_eq!(feed.log.row(501).map(|(y, _)| y), Some(-7.5));
+    assert_eq!(first_visible, 505);
+    assert_eq!(feed.log.row(505), Some((-7.5, 132.0)));
 }
 
 /// A documented limit (recorded in the `list_view.rs` module docs, *Known
@@ -662,6 +662,79 @@ fn a_single_row_edit_inside_the_leading_buffer_is_not_corrected() {
     assert_eq!(feed.controller.offset(), top);
     let (y, _) = feed.log.row(504).expect("row 504 painted");
     assert_eq!(y, before_y - removed + inserted);
+}
+
+/// The corrected side of the boundary: the window's first row is the previous
+/// frame's own anchor candidate, so its removal or insertion shifts the offset
+/// by exactly that row's extent and the top-edge row stays put.
+#[test]
+fn editing_the_windows_first_row_is_corrected() {
+    let mut feed = Harness::new(FeedData::mixed(2_000), true, Extents::Exact);
+    let top = feed.prefix()[504] + 7.5;
+    feed.controller.jump_to(top);
+    feed.settle();
+    assert_eq!(
+        painted_ids(&feed).first(),
+        Some(&502),
+        "the window starts at 502"
+    );
+    let before = feed.log.row(504).expect("row 504 holds the top edge");
+
+    let removed = mixed_extent(502);
+    {
+        let mut data = feed.data.borrow_mut();
+        data.ids_mut().remove(502);
+        data.extents_mut().remove(502);
+    }
+    feed.settle();
+    assert_eq!(feed.controller.offset(), top - removed);
+    assert_eq!(
+        feed.log.row(504),
+        Some(before),
+        "the top-edge row stays put"
+    );
+
+    // An insert at the window's first row, on a fresh feed, is corrected too:
+    // the offset grows by the new row's extent.
+    let mut feed = Harness::new(FeedData::mixed(2_000), true, Extents::Exact);
+    feed.controller.jump_to(top);
+    feed.settle();
+    let inserted = 56.25;
+    {
+        let mut data = feed.data.borrow_mut();
+        data.ids_mut().insert(502, 2_000_000);
+        data.extents_mut().insert(502, inserted);
+    }
+    feed.settle();
+    assert_eq!(feed.controller.offset(), top + inserted);
+    assert_eq!(
+        feed.log.row(504),
+        Some(before),
+        "the top-edge row stays put"
+    );
+}
+
+/// Several rows inserted into the gap between the window's first row and the
+/// viewport-top row in one frame are not corrected either: the content moves
+/// by their summed extent.
+#[test]
+fn two_rows_inserted_in_the_leading_gap_move_the_content_by_their_sum() {
+    let mut feed = Harness::new(FeedData::mixed(2_000), true, Extents::Exact);
+    let top = feed.prefix()[504] + 7.5;
+    feed.controller.jump_to(top);
+    feed.settle();
+    let (before_y, _) = feed.log.row(504).expect("row 504 holds the top edge");
+
+    let (a, b) = (56.25, 88.5);
+    {
+        let mut data = feed.data.borrow_mut();
+        data.ids_mut().splice(503..503, [2_000_000, 2_000_001]);
+        data.extents_mut().splice(503..503, [a, b]);
+    }
+    feed.settle();
+    assert_eq!(feed.controller.offset(), top, "the offset is left alone");
+    let (y, _) = feed.log.row(504).expect("row 504 painted");
+    assert_eq!(y, before_y + a + b);
 }
 
 #[test]
