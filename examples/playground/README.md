@@ -245,9 +245,19 @@ The sections, in order:
     read on **Refresh**), a **Manage selection** banner while access is Limited, an
     album selector, and a keyed lazy list of rows of four thumbnails (each
     requested off the UI thread at 3x the cell size) loaded in pages of 60 by an
-    explicit **Load more** button, with the loaded and total counts shown. When a
+    explicit **Load more** button, with the loaded and total counts shown. A
+    **Cursor paging** toggle pages with `PhotoLibrary::assets_after` instead: no
+    total, Load more follows the returned cursor and is disabled on the last page,
+    and switching the toggle or the album reloads the first page. When a
     picked item carries a library asset id (iOS) the Picker preview uses the same
-    native thumbnail path, so a HEIC pick previews. A **Folders** panel below
+    native thumbnail path, so a HEIC pick previews. A **Changes** panel below
+    Browse drives the change feed: **Save token** stores the library's current
+    change token in shared preferences (key `playground.change_token`, as hex) and
+    the next launch reads it back (the panel shows only its byte length);
+    **Check** shows `Delta: +inserted ~updated -deleted` or `Full rescan` since the
+    stored token and stores the token it answers with; **Watch** counts the
+    library's change wake-ups until **Stop**, and the watch survives a switch to
+    another section. A **Folders** panel below
     Originals keeps a user-chosen folder: **Pick folder** stores the grant token in
     shared preferences (key `playground.folder_token`) and the next launch restores
     it, or says "Folder access was lost. Pick folder again." when the system no
@@ -389,6 +399,12 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Browse panel Manage selection (limited access) | iPhone | OWED |
 | Photos: Browse panel Manage selection (limited access) | Android device | OWED |
 | Photos: Picker preview of a HEIC pick through the native thumbnail | iPhone | OWED |
+| Photos: Changes panel Save token, relaunch shows the stored token, then Check reports a delta after an insert, an edit and a delete | iPhone | OWED |
+| Photos: Changes panel Save token, relaunch shows the stored token, then Check reports a delta after an insert, an edit and a delete | Android device | OWED |
+| Photos: Changes panel Watch, the wake counter moves when the library changes; Stop holds it | iPhone | OWED |
+| Photos: Changes panel Watch, the wake counter moves when the library changes; Stop holds it | Android device | OWED |
+| Photos: Browse panel Cursor paging loads every page, and stays stable when an item is added mid-way | iPhone | OWED |
+| Photos: Browse panel Cursor paging loads every page, and stays stable when an item is added mid-way | Android device | OWED |
 | Desktop page: Open file / Open files copy the picked file into the app and list its name | iPhone | OWED |
 | Desktop page: Open file / Open files copy the picked file into the app and list its name | Android device | OWED |
 | Desktop page: Export file writes the generated text file through Files / the system save dialog | iPhone | OWED |
