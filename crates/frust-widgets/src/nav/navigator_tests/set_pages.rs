@@ -1663,3 +1663,89 @@ fn an_empty_set_pages_leaves_the_queue_and_the_stack_alone() {
     h.frame(32);
     assert_eq!(h.controller.depth(), 2);
 }
+
+// --- pop_with_result resolves its page once ---
+
+type Sink = Rc<RefCell<Vec<i32>>>;
+
+/// A harness with `/b` and `/c` pushed over the root; `/b` and `/c` each carry
+/// a result callback recording into the returned sinks (b, c).
+fn depth_three_with_result_sinks() -> (Harness, Sink, Sink) {
+    let log = Log::default();
+    let b_sink = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let c_sink = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let mut h = Harness::new();
+    for (name, sink) in [("b", &b_sink), ("c", &c_sink)] {
+        let sink = Rc::clone(sink);
+        let builder = probe(name, 20.0, &log);
+        h.controller.push_with_options(
+            move || builder(),
+            PushOptions::opaque()
+                .key(path_key(&format!("/{name}")))
+                .on_result(move |_, result| {
+                    sink.borrow_mut().extend(result.take::<i32>());
+                }),
+        );
+        h.frame(0);
+    }
+    assert_eq!(h.controller.depth(), 3);
+    (h, b_sink, c_sink)
+}
+
+#[test]
+fn a_repeated_pop_with_result_before_a_frame_pops_one_page() {
+    let (mut h, b_sink, c_sink) = depth_three_with_result_sinks();
+
+    h.controller.pop_with_result(PopResult::of(1i32));
+    h.controller.pop_with_result(PopResult::of(2i32));
+    h.frame(16);
+
+    assert_eq!(h.controller.depth(), 2);
+    assert_eq!(*c_sink.borrow(), [1], "the first result, exactly once");
+    assert!(b_sink.borrow().is_empty(), "the page beneath is not popped");
+}
+
+#[test]
+fn two_plain_pops_before_a_frame_still_pop_two_pages() {
+    let (mut h, _b, _c) = depth_three_with_result_sinks();
+
+    h.controller.pop();
+    h.controller.pop();
+    h.frame(16);
+
+    assert_eq!(h.controller.depth(), 1);
+}
+
+#[test]
+fn a_pop_with_result_after_the_first_was_applied_pops_the_next_page() {
+    let (mut h, b_sink, c_sink) = depth_three_with_result_sinks();
+
+    h.controller.pop_with_result(PopResult::of(1i32));
+    h.frame(16);
+    h.controller.pop_with_result(PopResult::of(2i32));
+    h.frame(32);
+
+    assert_eq!(h.controller.depth(), 1);
+    assert_eq!(*c_sink.borrow(), [1]);
+    assert_eq!(*b_sink.borrow(), [2]);
+}
+
+#[test]
+fn a_pop_with_result_a_push_and_a_pop_with_result_pop_the_new_page() {
+    let (mut h, b_sink, c_sink) = depth_three_with_result_sinks();
+    let d_sink = Rc::new(RefCell::new(Vec::<i32>::new()));
+    let sink = Rc::clone(&d_sink);
+
+    h.controller.pop_with_result(PopResult::of(1i32));
+    h.controller.push_for_result(
+        || sized_page(100.0, 100.0),
+        move |_, result| sink.borrow_mut().extend(result.take::<i32>()),
+    );
+    h.controller.pop_with_result(PopResult::of(2i32));
+    h.frame(16);
+
+    assert_eq!(h.controller.depth(), 2);
+    assert_eq!(*c_sink.borrow(), [1]);
+    assert_eq!(*d_sink.borrow(), [2]);
+    assert!(b_sink.borrow().is_empty());
+}
