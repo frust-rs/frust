@@ -21,13 +21,18 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `on_cleanup`, `spawn_local_scoped`) is disposed with the component, not on rebuild, so a signal kept
   somewhere that outlives the component is disposed with it. Migration: arm a timer or scoped future
   meant to outlive a page under a longer-lived owner, one the app captured higher up (for example
-  `Owner::current()` in a parent component's `init`) and enters with `owner.with(..)`.
+  `Owner::current()` in a parent component's `init`) and enters with `owner.with(..)`. Likewise
+  `provide_context` called from a handler inside a component now lands on that component's owner
+  (visible to that component's subtree only, gone when it is disposed), where before it landed on the
+  app's root owner; to provide app-wide from a handler, enter a longer-lived owner first.
 
 ### Added
 
 - `frust::Owner`: the reactive owner, re-exported so an app can hold a child owner
-  (`Owner::current()` then `.child()`), arm timers under it with `owner.with(..)`, and cancel them
-  together with `owner.cleanup()`. See the debounce example on `Timer::new`.
+  (`Owner::current()` then `.child()`) and arm timers under it with `owner.with(..)`. Keep ONE child
+  owner in state and call `cleanup()` on it before re-arming under it, because each new child adds an
+  entry to its parent that stays until the parent is cleaned up. See the debounce example on
+  `Timer::new`.
 - `FolderGrant::entry(relative_path)` in `frust-file-dialogs`: reopen one file of a granted folder by
   its stored relative path without listing the folder. It returns the entry, or `None` for a missing
   file or a directory. On Android each path segment costs one directory listing, so keep the entry
