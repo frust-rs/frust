@@ -47,13 +47,17 @@
 //!   — an export's answer, with the provider's MIME type and display name.
 //! - `Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnSaveDone(env, class, requestId: jlong, code: jint, uri: String)`
 //!   — a save's answer, with the new asset's URI.
+//! - `Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnLibraryChanged(env, class)`
+//!   — the change observer's wake (`library`); carries no data.
 //!
 //! Every export upgrades its [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind`, and
 //! resolve with [`LogErrorAndDefault`] — the crate's no-unwind-across-FFI
 //! guarantee (`docs/CODE_STANDARDS.md`'s Language Idioms), with no direct
-//! `catch_unwind` here. This module holds no `unsafe` block; each export's
-//! `#[unsafe(no_mangle)]` attribute is its only `unsafe` token.
+//! `catch_unwind` here. The pick exports live in this module, the export and
+//! save ones in `android_originals`, and `nativeOnLibraryChanged` in
+//! `android_changes`; none of the three holds an `unsafe` block, so each
+//! export's `#[unsafe(no_mangle)]` attribute is its only `unsafe` token.
 //!
 //! # Copies and names
 //!

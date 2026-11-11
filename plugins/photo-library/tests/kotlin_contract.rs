@@ -2311,6 +2311,29 @@ fn the_observer_wakes_from_every_overload_and_stops_outside_its_lock() {
     }
     assert!(start.contains("if (observer != null) return FrustPhotoLibraryHost.OK"));
     assert!(start.contains("unregister(ctx, created)"));
+    // The wake drops callbacks from an observer that is not the published one, so publishing
+    // after registering would lose a change delivered in between.
+    let published = start
+        .find("observer = created")
+        .expect("the observer is published");
+    let registered = start
+        .find("resolver.registerContentObserver(")
+        .expect("the observer is registered");
+    assert!(
+        published < registered,
+        "the observer is published before it is registered, so no early wake is dropped"
+    );
+    let failure = start
+        .find("if (code != FrustPhotoLibraryHost.OK) {")
+        .expect("a failed registration is handled");
+    let failed = &start[failure..];
+    let reset = failed
+        .find("observer = null")
+        .expect("a failed registration unpublishes the observer");
+    assert!(
+        reset < failed.find("unregister(ctx, created)").unwrap(),
+        "a failed registration unpublishes the observer before unregistering it"
+    );
 
     let observer = function(
         &changes,

@@ -75,8 +75,8 @@ pub enum LibraryChanges {
 }
 
 /// The `changes_since` path of the crate root; `load` is the platform call. A `Delta` evicts
-/// its updated and deleted ids from the thumbnail cache, a `FullRescan` clears it, both before
-/// the value is returned.
+/// every id it names from the thumbnail cache (an inserted id may be a row made visible again,
+/// edited while hidden), a `FullRescan` clears it, both before the value is returned.
 pub(crate) fn changes_since_with(
     token: &ChangeToken,
     load: impl FnOnce(&ChangeToken) -> Result<LibraryChanges, PhotoError>,
@@ -84,8 +84,11 @@ pub(crate) fn changes_since_with(
     let changes = load(token)?;
     match &changes {
         LibraryChanges::Delta {
-            updated, deleted, ..
-        } => thumb_cache::evict_ids(updated.iter().chain(deleted)),
+            inserted,
+            updated,
+            deleted,
+            ..
+        } => thumb_cache::evict_ids(inserted.iter().chain(updated).chain(deleted)),
         LibraryChanges::FullRescan { .. } => thumb_cache::clear(),
     }
     Ok(changes)
@@ -270,7 +273,7 @@ mod tests {
     }
 
     #[test]
-    fn a_delta_evicts_updated_and_deleted_ids_only() {
+    fn a_delta_evicts_every_id_it_names_and_keeps_the_rest() {
         let _serial = cache_lock();
         thumb_cache::clear();
         for name in ["delta-ins", "delta-upd", "delta-del", "delta-keep"] {
@@ -290,10 +293,14 @@ mod tests {
             }),
             Ok(delta)
         );
+        // An inserted id may be a row made visible again after an edit while it was hidden.
+        assert!(!cached("delta-ins"), "an inserted id is evicted");
         assert!(!cached("delta-upd"));
         assert!(!cached("delta-del"));
-        assert!(cached("delta-ins"));
-        assert!(cached("delta-keep"));
+        assert!(
+            cached("delta-keep"),
+            "an id the delta does not name is kept"
+        );
     }
 
     #[test]

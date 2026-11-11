@@ -318,9 +318,10 @@ impl PhotoLibrary {
     /// rules. A token from another device, platform or library, or one the platform no longer
     /// tracks, answers [`LibraryChanges::FullRescan`], not an error.
     ///
-    /// Before it returns, a [`LibraryChanges::Delta`] evicts every size of each updated and
-    /// deleted asset from the thumbnail cache, and a [`LibraryChanges::FullRescan`] empties it.
-    /// A thumbnail still loading when either happens is returned to its caller but not cached.
+    /// Before it returns, a [`LibraryChanges::Delta`] evicts every size of each asset it names
+    /// (inserted, updated or deleted) from the thumbnail cache, and a
+    /// [`LibraryChanges::FullRescan`] empties it. A thumbnail still loading when either happens
+    /// is returned to its caller but not cached.
     pub fn changes_since(token: &ChangeToken) -> Result<LibraryChanges, PhotoError> {
         #[cfg(feature = "library")]
         {
@@ -337,10 +338,14 @@ impl PhotoLibrary {
     /// [`ChangeSubscription`] is dropped. Needs the `library` feature and photo access; desktop
     /// and web return [`PhotoError::Unsupported`].
     ///
-    /// The callback only wakes the app: it carries no data, may run on any thread, and may be
-    /// coalesced or spurious. Answer it by calling [`changes_since`](Self::changes_since) off
-    /// the UI thread, and keep the callback itself short. The platform observer starts with
-    /// the first subscription and stops when the last one drops.
+    /// **The callback runs inline on a platform notification thread** (the Photos change queue
+    /// on iOS, a binder thread on Android): it must only signal (set a flag, send on a channel,
+    /// wake a task) and return. Calling [`changes_since`](Self::changes_since) or anything else
+    /// that blocks from it delays the other subscribers and the platform's delivery.
+    ///
+    /// The wake carries no data and may be coalesced or spurious: answer it with `changes_since`
+    /// off the UI thread, and call that once right after subscribing, as a change landing while
+    /// subscribing may not wake. The platform observer runs while any subscription lives.
     pub fn on_library_changed(
         callback: impl Fn() + Send + Sync + 'static,
     ) -> Result<ChangeSubscription, PhotoError> {
@@ -366,7 +371,7 @@ impl PhotoLibrary {
     ///
     /// A hit returns before any platform call, so it skips the access check, and an edited or
     /// deleted asset can be served until [`clear_thumbnail_cache`](Self::clear_thumbnail_cache)
-    /// or until [`changes_since`](Self::changes_since) reports it.
+    /// or until [`changes_since`](Self::changes_since) names it (inserted, updated or deleted).
     /// The cache empties itself when [`manage_limited_selection`](Self::manage_limited_selection)
     /// succeeds and when a miss answers [`PhotoError::PermissionDenied`];
     /// [`set_thumbnail_cache_budget(0)`](Self::set_thumbnail_cache_budget) also empties it. A
