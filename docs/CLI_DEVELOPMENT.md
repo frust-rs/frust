@@ -66,7 +66,7 @@ cargo metadata (fallback: manifest read; default `frust`).
 
 No command does this. The CLI commands are `create`, `doctor`, `devices`, `clean`, `plugin`,
 `tui`, `run` and `build`, and `frust create` refuses a non-empty directory unless `--overwrite`
-is passed. This procedure was run on 2026-11-12 on a Linux host (`precision`, Manjaro) against a
+is passed. This procedure was run on 2026-11-12 on a Linux host (Manjaro) against a
 checkout, with `--frust-path` and no network. Run from the crate directory; `<name>` is the
 crate name and `<org>` its reverse-DNS prefix:
 
