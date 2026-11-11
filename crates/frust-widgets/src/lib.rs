@@ -65,6 +65,7 @@ pub mod scroll_controller;
 mod scroll_core;
 mod scrollbar;
 mod selection_toolbar;
+mod semantics;
 mod shortcuts;
 mod sized;
 mod slider;
@@ -170,6 +171,10 @@ pub use scroll::{ScrollInfo, ScrollView, ScrollWidget, scroll_view};
 pub use scroll_controller::{AnimateTo, ScrollController, ScrollSubscription};
 pub use scrollbar::{ScrollbarShow, ScrollbarStyle};
 pub use selection_toolbar::selection_toolbar;
+pub use semantics::{
+    SemanticsLabelView, SemanticsLabelWidget, SemanticsView, SemanticsWidget, semantics,
+    semantics_label,
+};
 pub use shortcuts::{ShortcutsView, ShortcutsWidget, shortcuts};
 pub use sized::{SizedBox, SizedBoxView, SizedBoxWidget};
 pub use slider::{Slider, SliderView, SliderWidget, slider};
