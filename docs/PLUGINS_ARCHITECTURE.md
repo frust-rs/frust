@@ -415,8 +415,8 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   Android's token is the plugin's own versioned encoding of the `MediaStore` volume version, the generation
   (API 30+) and the sorted id sets; a row visible but missing from the id set counts as inserted, and an
   undecodable token or a changed volume version is a `FullRescan` (see `photo-library-change-feed-full-rescan`,
-  `photo-library-android-change-token-size` in [LIMITATIONS.md](LIMITATIONS.md)). A `Delta` evicts its
-  updated and deleted ids from the thumbnail LRU and a `FullRescan` clears it, inside `changes_since`.
+  `photo-library-android-change-token-size` in [LIMITATIONS.md](LIMITATIONS.md)). A `Delta` evicts every
+  id it names (inserted, updated and deleted) from the thumbnail LRU and a `FullRescan` clears it, inside `changes_since`.
   `assets_after(&AssetQuery, Option<&AssetCursor>)` pages without an offset or total: Android by keyset on
   the `assets` order (no count, no seek), iOS by position in one `PHFetchResult` snapshot per cursor session
   (four kept; an evicted session's cursor is `InvalidRequest`; `photo-library-ios-cursor-pins-snapshot`). An

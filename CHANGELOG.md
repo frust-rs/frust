@@ -82,7 +82,7 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `MediaStore` generations (API 30+) and the token's id set. A `FullRescan` answers iOS 15, Android API 29,
   a token from another device or platform, an expired token (iOS), a changed `MediaStore` volume version
   (Android) and bytes that do not decode. On Android an id that is visible but absent from the token's id
-  set counts as inserted. A `Delta` evicts the updated and deleted ids from the thumbnail cache, and a
+  set counts as inserted. A `Delta` evicts every id it names (inserted, updated and deleted) from the thumbnail cache, and a
   `FullRescan` clears it, before `changes_since` returns. Desktop and web return `Unsupported`.
 - `frust-photo-library` cursor paging: `PhotoLibrary::assets_after(&AssetQuery, Option<&AssetCursor>)`
   returns an `AssetCursorPage` (`items`, and `next` until the last page) that stays stable while the

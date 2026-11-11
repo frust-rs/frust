@@ -56,7 +56,7 @@ off this index — read this plus the one that covers what you are touching:
     init and the `respondsToSelector`-guarded subject `setValue_forKey`; its `macos` arm the same for `NSSharingServicePicker`.
   - `frust-photo-library`'s `apple` backend — `new_unchecked()`, the `define_class!` picker/delegate, item-provider `msg_send!`/`NSProgress`;
     `apple_library`: PhotoKit fetches, three hand-sent messages, `CGBitmapContext`, `TargetSize` `Encode`; `apple_originals`: resource-manager export, hand-sent change requests;
-    `apple_decode`: the hand-declared ImageIO `extern` block, the bitmap-context draw, CF casts; `android`: only JNI `#[unsafe(no_mangle)]`;
+    `apple_decode`: the hand-declared ImageIO `extern` block, the bitmap-context draw, CF casts; `android`, and `android_changes` (`nativeOnLibraryChanged`, the change-observer wake): JNI `#[unsafe(no_mangle)]` exports;
     `apple_metadata`: PhotoKit fetch, resource-data request, `cancelDataRequest:`; `android_decode`: one `NewDirectByteBuffer` over a Rust `Vec`;
     `apple_changes`: the PhotoKit persistent-change fetch and enumeration, keyed archiving, the `define_class!` change observer with its `Send`/`Sync` impls, the cloud-identifier mapping; `apple_library`'s fetch-result `Snapshot` wrapper (`Send`/`Sync`, read-only use).
   - `frust-url-launcher`'s `apple` backend (`new_unchecked()`, one `openURL:` call; `desktop`: `ShellExecuteW`) and `frust-haptics`'s (`new_unchecked()`).
