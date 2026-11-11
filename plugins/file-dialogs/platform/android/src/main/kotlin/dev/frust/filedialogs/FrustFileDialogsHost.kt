@@ -50,6 +50,7 @@ import java.util.concurrent.Executors
  * | Rust to Kotlin | `exportFile(requestId: Long, sourcePath: String, suggestedName: String, mime: String): Int` | as above |
  * | Rust to Kotlin | `pickTree(requestId: Long): Int` | as above |
  * | Rust to Kotlin | `listTree(requestId: Long, uri: String, recursive: Boolean, maxDepth: Int, maxEntries: Int, extensions: Array<String>, includeHidden: Boolean): Int` | [PENDING] after queuing the walk, or [NOT_INITIALIZED] |
+ * | Rust to Kotlin | `resolveEntry(requestId: Long, treeUri: String, segments: Array<String>): Int` | [PENDING] after queuing the lookup, or [NOT_INITIALIZED]; answered through [nativeOnListing] with zero entries (not found) or one |
  * | Rust to Kotlin | `copyDocument(requestId: Long, uri: String, destPath: String, maxBytes: Long): Int` | [PENDING] after queuing the copy, or [NOT_INITIALIZED]; a negative `maxBytes` means no limit |
  * | Rust to Kotlin | `cancel(requestId: Long)` | nothing; an unknown or already-answered id is ignored |
  * | Rust to Kotlin | `isTreeGranted(uri: String): Boolean` | whether a persisted read grant covers `uri` |
@@ -77,7 +78,7 @@ import java.util.concurrent.Executors
  * Activity it launched from is destroyed while the dialog is up (its callback
  * can no longer fire), which answers as a dismissal so Rust never waits forever.
  *
- * [listTree] and [copyDocument] open no dialog and take no slot: each runs on
+ * [listTree], [resolveEntry] and [copyDocument] open no dialog and take no slot: each runs on
  * [workExecutor] under its own entry in [jobs].
  *
  * ## Cancel and progress
@@ -330,6 +331,21 @@ object FrustFileDialogsHost {
         jobs[requestId] = job
         val query = TreeQuery(Uri.parse(uri), recursive, maxDepth, maxEntries, extensions.toSet(), includeHidden)
         workExecutor.execute { runListing(ctx, requestId, query, job) }
+        return PENDING
+    }
+
+    /**
+     * Find the file at [segments] under [treeUri] on [workExecutor], one folder listing per
+     * segment. Answered through [nativeOnListing] with zero entries (not found) or one, or
+     * through [nativeOnCode].
+     */
+    @JvmStatic
+    fun resolveEntry(requestId: Long, treeUri: String, segments: Array<String>): Int {
+        val ctx = appContext ?: return NOT_INITIALIZED
+        val job = Job()
+        jobs[requestId] = job
+        val path = segments.toList()
+        workExecutor.execute { runResolve(ctx, requestId, treeUri, path, job) }
         return PENDING
     }
 
@@ -975,6 +991,72 @@ object FrustFileDialogsHost {
             if (children.size >= room) return truncatedVisit(skippedNames)
             for (subdir in subdirs.asReversed()) pending.addLast(subdir)
         }
+    }
+
+    /**
+     * One [resolveEntry], on [workExecutor]: answers Rust exactly once. A tree no
+     * persisted read grant covers, or a [SecurityException], is [ACCESS_LOST]; any
+     * other provider failure is [ERROR].
+     */
+    private fun runResolve(ctx: Context, requestId: Long, treeUri: String, segments: List<String>, job: Job) {
+        val listing = Listing()
+        val failure = try {
+            if (!isTreeGranted(treeUri)) {
+                ACCESS_LOST
+            } else {
+                resolveTree(ctx, Uri.parse(treeUri), segments, job, listing)
+            }
+        } catch (e: SecurityException) {
+            ACCESS_LOST
+        } catch (e: Exception) {
+            Log.w(TAG, "frust-file-dialogs: resolving an entry failed: ${e.javaClass.name}")
+            ERROR
+        }
+        jobs.remove(requestId)
+        if (failure == null) notifyListing(requestId, listing) else notifyCode(requestId, failure)
+    }
+
+    /**
+     * Adds to [listing] the regular file at [segments] under [tree], if there is one.
+     * Starting at the tree's root document, each segment lists one folder with
+     * [readChildren] (sorted by name, as [walkTree] sorts) and takes the first child whose
+     * display name equals the segment and passes the rules [walkTree] applies: a safe,
+     * non-hidden name, a folder for every segment but the last, and a non-virtual
+     * document for the last. Document ids come only from the provider, never from path
+     * text. Returns null when finished, otherwise the failure code; an unreadable root
+     * is [ACCESS_LOST].
+     */
+    private fun resolveTree(ctx: Context, tree: Uri, segments: List<String>, job: Job, listing: Listing): Int? {
+        var folder = DocumentsContract.getTreeDocumentId(tree)
+        for ((index, segment) in segments.withIndex()) {
+            if (job.cancelled) return CANCELLED
+            val children = readChildren(ctx, tree, folder, job, Int.MAX_VALUE)
+                ?: return if (index == 0) ACCESS_LOST else null
+            if (job.cancelled) return CANCELLED
+            val last = index == segments.lastIndex
+            val child = children.firstOrNull { it.name == segment && isResolvable(it, last) } ?: return null
+            if (!last) {
+                folder = child.documentId
+                continue
+            }
+            listing.names.add(child.name)
+            listing.relativePaths.add(segments.joinToString("/"))
+            listing.sizes.add(child.size)
+            listing.modified.add(child.modified)
+            listing.uris.add(DocumentsContract.buildDocumentUriUsingTree(tree, child.documentId).toString())
+        }
+        return null
+    }
+
+    /**
+     * Whether [walkTree] would reach [child] by name: a safe, non-hidden name, and a
+     * folder unless it is the path's [last] segment, which must be a non-virtual file.
+     */
+    private fun isResolvable(child: Child, last: Boolean): Boolean {
+        if (!isSafeEntryName(child.name) || child.name.startsWith(".")) return false
+        val isFolder = child.mime == DocumentsContract.Document.MIME_TYPE_DIR
+        if (!last) return isFolder
+        return !isFolder && child.flags and DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT == 0
     }
 
     /** The walk visited as many folders and children as it may: a truncated listing. Logs counts only. */

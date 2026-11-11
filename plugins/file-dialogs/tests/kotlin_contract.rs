@@ -19,7 +19,9 @@
 //! - cancel reaches the host, ends the wait locally, stops copies between
 //!   chunks and listings between entries, and removes partial output;
 //! - a user dismissal stays distinct from a cancel;
-//! - progress is never forwarded under a lock on either side.
+//! - progress is never forwarded under a lock on either side;
+//! - an entry lookup resolves one listed folder per segment by exact display
+//!   name, under the listing's name rules, and never builds a document id.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -245,6 +247,11 @@ fn rust_calls_match_the_kotlin_declarations() {
             "fun listTree(\n        requestId: Long,\n        uri: String,\n        recursive: Boolean,\n        maxDepth: Int,\n        maxEntries: Int,\n        extensions: Array<String>,\n        includeHidden: Boolean,\n    ): Int",
         ),
         (
+            "resolveEntry",
+            "(JLjava/lang/String;[Ljava/lang/String;)I",
+            "fun resolveEntry(requestId: Long, treeUri: String, segments: Array<String>): Int",
+        ),
+        (
             "copyDocument",
             "(JLjava/lang/String;Ljava/lang/String;J)I",
             "fun copyDocument(requestId: Long, uri: String, destPath: String, maxBytes: Long): Int",
@@ -433,6 +440,7 @@ fn the_rust_wait_has_no_deadline_and_every_blocking_call_refuses_the_ui_thread()
         "pub(crate) fn pick_folder(",
         "pub(crate) fn restore_folder(",
         "pub(crate) fn list_folder(",
+        "pub(crate) fn resolve_entry(",
         "pub(crate) fn export_file(",
         "pub(crate) fn copy_content_uri(",
         "pub(crate) fn read_content_uri(",
@@ -520,6 +528,7 @@ fn work_runs_on_the_executor_never_the_main_thread() {
     let kotlin = read(KOTLIN_HOST);
     for marker in [
         "fun listTree(",
+        "fun resolveEntry(",
         "fun copyDocument(",
         "private fun onOpened(",
         "private fun onCreated(",
@@ -708,5 +717,92 @@ fn a_refused_persisted_grant_is_a_distinct_payload_free_outcome() {
     assert!(
         !tree.contains("uri}") && !tree.contains("${e.message"),
         "the log carries the exception class only"
+    );
+}
+
+#[test]
+fn an_entry_lookup_resolves_one_listed_folder_per_segment() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID);
+    assert!(
+        rust.contains(
+            "//! | `resolveEntry` | `(long requestId, String treeUri, String[] segments) -> int` |"
+        ),
+        "the Rust contract table names resolveEntry"
+    );
+    assert!(
+        kotlin.contains(" * | Rust to Kotlin | `resolveEntry(requestId: Long, treeUri: String, segments: Array<String>): Int` |"),
+        "the Kotlin contract table names resolveEntry"
+    );
+
+    let entry = function(&kotlin, "fun resolveEntry(");
+    assert!(
+        entry.contains("jobs[requestId] = job")
+            && entry.contains(
+                "workExecutor.execute { runResolve(ctx, requestId, treeUri, path, job) }"
+            ),
+        "a lookup is a job on the work executor, cancellable by request id"
+    );
+
+    let run = function(&kotlin, "private fun runResolve(");
+    assert!(
+        run.contains("if (!isTreeGranted(treeUri)) {") && run.contains("ACCESS_LOST"),
+        "a tree without a persisted grant is ACCESS_LOST"
+    );
+    assert!(run.contains("catch (e: SecurityException) {\n            ACCESS_LOST"));
+    assert!(run.contains("catch (e: Exception) {") && run.contains("ERROR"));
+    assert!(run.contains("jobs.remove(requestId)"));
+    assert!(
+        run.contains("notifyListing(requestId, listing) else notifyCode(requestId, failure)"),
+        "the lookup answers through the listing export or a code, exactly once"
+    );
+
+    let resolve = function(&kotlin, "private fun resolveTree(");
+    assert!(resolve.contains("DocumentsContract.getTreeDocumentId(tree)"));
+    assert!(
+        resolve.contains("readChildren(ctx, tree, folder, job, Int.MAX_VALUE)")
+            && function(&kotlin, "private fun readChildren(")
+                .contains("DocumentsContract.buildChildDocumentsUriUsingTree(tree, documentId)"),
+        "each segment lists its folder through readChildren"
+    );
+    assert!(
+        resolve.contains("children.firstOrNull { it.name == segment && isResolvable(it, last) }"),
+        "display names match by equality, first in name order"
+    );
+    assert!(
+        resolve.contains("DocumentsContract.buildDocumentUriUsingTree(tree, child.documentId)"),
+        "the result's uri is built from the provider's own document id"
+    );
+    assert!(resolve.contains("listing.relativePaths.add(segments.joinToString(\"/\"))"));
+    assert!(resolve.contains("if (job.cancelled) return CANCELLED"));
+    for line in code(resolve)
+        .lines()
+        .filter(|l| l.contains("documentId") || l.contains("folder"))
+    {
+        assert!(
+            !line.contains('+') && !line.contains('$') && !line.contains("\"/\""),
+            "a document id is opaque and never built from path text: `{}`",
+            line.trim()
+        );
+    }
+
+    let rules = function(&kotlin, "private fun isResolvable(");
+    assert!(
+        rules.contains("isSafeEntryName(child.name)")
+            && rules.contains("child.name.startsWith(\".\")"),
+        "the listing's name and hidden rules apply"
+    );
+    assert!(
+        rules.contains("DocumentsContract.Document.MIME_TYPE_DIR")
+            && rules.contains("DocumentsContract.Document.FLAG_VIRTUAL_DOCUMENT == 0"),
+        "folders lead, a non-virtual file ends the path"
+    );
+
+    let rust_entry = function(&rust, "pub(crate) fn resolve_entry(");
+    assert!(rust_entry.contains("let Answer::Listing(mut entries) = answer else {"));
+    assert!(
+        rust_entry.contains("Ok(Some(folder_entry(entry)))")
+            && rust_entry.contains("entry.relative_path == relative_path"),
+        "one entry for the asked path maps through folder_entry"
     );
 }

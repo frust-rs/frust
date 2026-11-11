@@ -19,6 +19,7 @@
 //! | `exportFile` | `(long requestId, String sourcePath, String suggestedName, String mime) -> int` | as above; answered through `nativeOnCode` ([`SAVED`], [`DISMISSED`], ...) |
 //! | `pickTree` | `(long requestId) -> int` | as above; answered through `nativeOnTree` or `nativeOnCode` |
 //! | `listTree` | `(long requestId, String uri, boolean recursive, int maxDepth, int maxEntries, String[] extensions, boolean includeHidden) -> int` | [`PENDING`] or [`NOT_INITIALIZED`]; answered through `nativeOnListing` or `nativeOnCode` |
+//! | `resolveEntry` | `(long requestId, String treeUri, String[] segments) -> int` | [`PENDING`] or [`NOT_INITIALIZED`]; answered through `nativeOnListing` with zero entries (not found) or one, or `nativeOnCode` |
 //! | `copyDocument` | `(long requestId, String uri, String destPath, long maxBytes) -> int` | [`PENDING`] or [`NOT_INITIALIZED`]; answered through `nativeOnCode`; a negative `maxBytes` means no limit |
 //! | `cancel` | `(long requestId) -> void` | nothing; an unknown or already-answered id is ignored |
 //! | `isTreeGranted` | `(String uri) -> boolean` | whether a persisted read grant covers `uri` |
@@ -93,6 +94,9 @@
 //! under a held grant surfaces as [`FileDialogError::AccessLost`] from the
 //! first [`FolderGrant::list`](crate::FolderGrant::list). The system caps the
 //! persisted grants per app and silently drops the oldest beyond the cap.
+//! [`resolve_entry`] finds one file by its relative path without a full
+//! listing: the host lists one folder per segment and matches display names
+//! exactly, never building a document id from the path text.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -362,6 +366,46 @@ pub(crate) fn list_folder(
     let mut entries: Vec<FolderEntry> = entries.into_iter().map(folder_entry).collect();
     entries.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(entries)
+}
+
+/// Looks up the file at `segments` under the grant's tree: the host lists one folder per
+/// segment and answers a listing of zero entries (not found) or one.
+pub(crate) fn resolve_entry(
+    grant: &FolderGrant,
+    segments: &[&str],
+) -> Result<Option<FolderEntry>, FileDialogError> {
+    refuse_ui_thread()?;
+    let answer = run_request(None, None, |env, class, id| {
+        run_jni(env, "FrustFileDialogsHost.resolveEntry", |env| {
+            let uri = env.new_string(&grant.token)?;
+            let segments = string_array(env, segments)?;
+            env.call_static_method(
+                class,
+                jni_str!("resolveEntry"),
+                jni_sig!("(JLjava/lang/String;[Ljava/lang/String;)I"),
+                &[
+                    JValue::Long(id),
+                    JValue::Object(&uri),
+                    JValue::Object(&segments),
+                ],
+            )?
+            .i()
+        })
+    })?;
+    let Answer::Listing(mut entries) = answer else {
+        return Err(failure(answer));
+    };
+    let relative_path = segments.join("/");
+    match entries.pop() {
+        None => Ok(None),
+        Some(entry) if entries.is_empty() && entry.relative_path == relative_path => {
+            Ok(Some(folder_entry(entry)))
+        }
+        Some(_) => {
+            log::warn!("frust-file-dialogs: the host answered a lookup with another entry");
+            Err(FileDialogError::Platform)
+        }
+    }
 }
 
 /// Gives up the persisted grant. Never blocks on the user, so any thread may call it.

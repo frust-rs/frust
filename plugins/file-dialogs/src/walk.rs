@@ -1,5 +1,7 @@
-//! Lists a folder with `std::fs`: the desktop and iOS listing backend.
+//! Lists a folder with `std::fs`, and looks up one file in it: the desktop and iOS listing
+//! backend.
 
+use std::ffi::OsStr;
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -82,13 +84,7 @@ pub(crate) fn list(
                     log::warn!("frust-file-dialogs: listing truncated at {max_entries} entries");
                     break 'walk;
                 }
-                found.push(FolderEntry {
-                    name,
-                    relative_path: relative,
-                    size: Some(metadata.len()),
-                    modified_unix_ms: modified_unix_ms(&metadata),
-                    location: EntryLocation::Path(path),
-                });
+                found.push(file_entry(name, relative, path, &metadata));
             }
         }
         pending.extend(subdirs.into_iter().rev());
@@ -96,6 +92,78 @@ pub(crate) fn list(
 
     found.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     Ok(found)
+}
+
+/// The regular file at `segments` under `root`, as [`list`] reports it, or `None` when
+/// there is none: nothing by that name, a folder, or a link or hidden entry at any segment
+/// (the walk neither follows nor lists links, and skips hidden entries by default).
+///
+/// Each segment is matched against its folder's children byte for byte, so a
+/// case-insensitive or normalising filesystem cannot hand back a differently spelled file.
+/// An unreadable `root` is an error as in [`list`]; a folder that vanishes part way is
+/// `None`. `segments` must already be validated (no empty, `.` or `..` segment).
+pub(crate) fn entry(
+    root: &Path,
+    segments: &[&str],
+) -> Result<Option<FolderEntry>, FileDialogError> {
+    let mut dir = root.to_path_buf();
+    for (index, segment) in segments.iter().enumerate() {
+        let found = match child_named(&dir, segment) {
+            Ok(found) => found,
+            Err(err) if index == 0 => return Err(root_error(err)),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(err) => return Err(crate::export::io_error(err)),
+        };
+        let Some(path) = found else {
+            return Ok(None);
+        };
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            return Ok(None);
+        };
+        let name = entry_name(&path);
+        if is_reparse_point(&metadata) || is_hidden(&name, &metadata) {
+            return Ok(None);
+        }
+        if index + 1 < segments.len() {
+            if !metadata.is_dir() {
+                return Ok(None);
+            }
+            dir = path;
+        } else if metadata.is_file() {
+            return Ok(Some(file_entry(name, segments.join("/"), path, &metadata)));
+        }
+    }
+    Ok(None)
+}
+
+/// The child of `dir` named exactly `name`, or `None`.
+fn child_named(dir: &Path, name: &str) -> io::Result<Option<PathBuf>> {
+    for child in fs::read_dir(dir)? {
+        let child = child?;
+        if child.file_name() == OsStr::new(name) {
+            return Ok(Some(child.path()));
+        }
+    }
+    Ok(None)
+}
+
+/// The entry for the regular file at `path`, shared by [`list`] and [`entry`] so that a
+/// looked-up entry equals the listed one field for field.
+fn file_entry(name: String, relative: String, path: PathBuf, metadata: &Metadata) -> FolderEntry {
+    FolderEntry {
+        name,
+        relative_path: relative,
+        size: Some(metadata.len()),
+        modified_unix_ms: modified_unix_ms(metadata),
+        location: EntryLocation::Path(path),
+    }
 }
 
 /// One directory's children in name order, so that which entries survive the

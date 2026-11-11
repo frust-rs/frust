@@ -6684,7 +6684,7 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 **Observed**: the Android listing keeps one path component per provider name and stops after 16 times `max_entries` visits. A tree with many entries that do not match returns a shorter list with no marker that it stopped.
 
-**Applies to**: Android; `FolderGrant::list` and `PhotoLibrary::scan_folder` over large trees.
+**Applies to**: Android; `FolderGrant::list` and `PhotoLibrary::scan_folder` over large trees. `FolderGrant::entry` does not depend on a listing and is not cut short by this bound.
 
 **Workaround**: filter by extension and narrow the folder; page with `scan_folder`.
 
@@ -6693,6 +6693,22 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 **Trigger for removal**: a truncation flag on the listing result.
 
 **Evidence**: `FrustFileDialogsHost.kt` (`WALK_VISIT_MULTIPLE`); `plugins/file-dialogs/src/android.rs`.
+
+---
+
+### `file-dialogs-android-entry-name-match` — an Android `FolderGrant::entry` lookup matches display names, one listing per segment
+
+**Observed**: on Android `entry` resolves a relative path by listing each folder on the way and comparing provider display names exactly and case-sensitively. Where a provider returns two documents with the same display name in one folder, the first in name order wins and the other cannot be reached by path. The cost is one directory listing per path segment, so a lookup in a deep tree is slow on a slow provider. The lookup reads every child of a folder, so it is not cut short by the visit bound in `file-dialogs-android-listing-truncation-unflagged`.
+
+**Applies to**: Android; `FolderGrant::entry`, and apps that store a relative path and reopen it. Desktop and iOS resolve through the filesystem.
+
+**Workaround**: keep the `FolderEntry` from a listing when reading many files in one session; do not rely on two same-named files in one folder being told apart by path.
+
+**Why accepted**: the Storage Access Framework has no path-to-document call; a document id comes only from the provider, so the plugin walks listings.
+
+**Trigger for removal**: a provider-side path lookup, or an id-based entry API.
+
+**Evidence**: `plugins/file-dialogs/src/folder.rs` (`FolderGrant::entry`); `FrustFileDialogsHost.kt` (`resolveTree`); OnePlus 9 (Android 15) run recorded in `examples/playground/README.md` (*Photos: Folders panel Open stored path*): a top-level and a nested file found with the listing's sizes, a missing path not found, found again after relaunch and reboot with no re-pick. That run used primary shared storage only. A non-primary provider and duplicate display names were NOT RUN, so neither the first-match rule nor a second provider is device-verified.
 
 ---
 

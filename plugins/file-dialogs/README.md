@@ -75,6 +75,17 @@ change on restore, so persist the restored grant's token again.
 `FileDialogError::AccessLost` means the token is no longer honoured (the folder
 is gone or the grant was revoked): ask the user again.
 
+`grant.entry(relative_path)` reopens one file whose relative path the app stored,
+without listing the folder. It takes the `/`-separated string a listing puts in
+`FolderEntry::relative_path` and returns `Ok(Some(entry))`, readable like a listed
+one, or `Ok(None)` when there is no regular file there (nothing at the path, a
+folder, a link, or a hidden segment). Matching is exact and case-sensitive. A path
+a listing cannot produce (empty, leading `/`, `\`, NUL, or an empty, `.` or `..`
+segment) is `Io`; a revoked grant is `AccessLost`; Android and iOS refuse the UI
+thread with `UiThread`. On Android each path segment costs one directory listing,
+so when reading many files in one session keep the `FolderEntry` from a listing
+instead of calling `entry` for each.
+
 On iOS the grant holds the folder's security scope while it lives, so a listed
 `FolderEntry` can only be read while its `FolderGrant` is alive. Once the grant
 is released or dropped, `copy_to` and `read_to_vec` fail: with `AccessLost` when

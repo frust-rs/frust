@@ -912,6 +912,17 @@ pub(crate) fn list_folder(
     crate::walk::list(root, options)
 }
 
+/// Like [`list_folder`]: the grant holds the folder's security scope for as long as it
+/// lives, so the lookup runs inside it.
+pub(crate) fn resolve_entry(
+    grant: &FolderGrant,
+    segments: &[&str],
+) -> Result<Option<FolderEntry>, FileDialogError> {
+    refuse_main_thread()?;
+    let root = grant.local_path().ok_or(FileDialogError::AccessLost)?;
+    crate::walk::entry(root, segments)
+}
+
 pub(crate) fn release_folder(state: GrantState, _token: &str) {
     drop(state);
 }
