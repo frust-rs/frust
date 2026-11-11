@@ -366,9 +366,15 @@ impl ScrollController {
     ///   stops where it stands and an earlier request stops correcting, while a
     ///   user's own fling, settle or drag is left alone. `Nearest` on a row
     ///   already fully visible behaves the same way.
-    /// - **Lists only.** A [`ScrollView`](crate::ScrollView) holding this handle
-    ///   ignores the request (debug-build log); its offset commands are
-    ///   unaffected.
+    /// - **Keyed lists only.** Only a keyed [`ListView`](crate::ListView)
+    ///   honours this request. A [`ScrollView`](crate::ScrollView) holding this
+    ///   handle ignores it (debug-build log), and a
+    ///   [`CustomScrollView`](crate::CustomScrollView) drops it without a log;
+    ///   their offset commands are unaffected. To bring a sliver grid cell into
+    ///   view, compute its offset with
+    ///   [`SliverGridDelegate::offset_of_index`](crate::SliverGridDelegate::offset_of_index)
+    ///   and pass the result to [`jump_to`](Self::jump_to) or
+    ///   [`animate_to`](Self::animate_to).
     ///
     /// `animated` eases through the same tween [`ScrollController::animate_to`]
     /// runs, timed from the theme's motion tokens (`motion.durations.slow` and

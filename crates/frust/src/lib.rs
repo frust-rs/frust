@@ -4284,6 +4284,12 @@ mod lazy_slivers_reexport {
             sliver_grid_keyed(10, ChildKey::new, |i| text(format!("photo {i}")));
         let view: CustomScrollView<()> = custom_scroll_view((rows, grid, keyed));
         let _ = view;
+        // The default delegate is two square 212 px cells per row at 424 px
+        // across, so item 5 sits in row 2 at 424 px.
+        assert_eq!(
+            SliverGridDelegate::default().offset_of_index(5, 424.0),
+            424.0
+        );
         assert!(
             KeepAliveHandle::acquire().is_none(),
             "no lazy-list row is being built here"
