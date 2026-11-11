@@ -45,13 +45,16 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   is `None` below Android API 30, `burst_id` is always `None` on Android, and `content_type` is a MIME type
   on Android and a uniform type identifier on iOS.
 - `PhotoLibrary::asset_metadata(&AssetId, &MetadataOptions)` and `MetadataOptions` (`allow_network`,
-  `cancel`): one library asset's `ExifData` with only the `library` feature. On iOS the call reads the whole
-  local original into memory, and an iCloud-only original is `NetworkRequired` unless `allow_network` is
-  set. On Android GPS fields need `ACCESS_MEDIA_LOCATION`. Desktop returns `Unsupported`.
-- `PhotoLibrary::thumbnail_shared(&AssetId, &ThumbnailRequest, &CancelToken)`: returns an `Arc<Thumbnail>`.
-  A cache hit shares the cached pixels instead of copying them, and a miss can be cancelled on iOS and
-  Android with `PhotoError::Cancelled`, caching nothing. `thumbnail` keeps its signature and shares the
-  same cache.
+  `cancel`): one library asset's `ExifData` with only the `library` feature. On iOS the call reads
+  the whole local original into one buffer that ImageIO reads in place, a read with no data for 30 s
+  times out, an original over 256 MiB is refused with `InvalidRequest`, and an iCloud-only original
+  is `NetworkRequired` unless `allow_network` is set. On Android GPS fields need
+  `ACCESS_MEDIA_LOCATION`. Desktop returns `Unsupported`.
+- `PhotoLibrary::thumbnail_shared(&AssetId, &ThumbnailRequest, &CancelToken)`: returns an
+  `Arc<Thumbnail>`. The cache never copies pixels and a hit shares the cached allocation, but
+  building an `ImageSource` from them copies them once; a miss can be cancelled on iOS and Android
+  with `PhotoError::Cancelled`, caching nothing. `thumbnail` keeps its signature and shares the same
+  cache.
 
 ### Changed
 

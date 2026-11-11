@@ -8217,17 +8217,31 @@ Media location has no user-facing switch on Android 14: it is granted along with
 
 ### `photo-library-ios-metadata-reads-original` — on iOS `asset_metadata` reads the whole local original
 
-**Observed**: Photos has no call that returns an asset's EXIF from its header alone, so `asset_metadata` reads the original photo resource in full into memory (never to a file) and hands the bytes to ImageIO. Cost grows with the original's size, and an iCloud-only original is downloaded when `MetadataOptions::allow_network` is set. A cancel stops the transfer.
+**Observed**: Photos has no call that returns an asset's EXIF from its header alone, so `asset_metadata` reads the original photo resource in full into one in-memory buffer (never to a file) and ImageIO reads that buffer in place, with no second copy. Peak memory is that one buffer plus growth slack (its capacity is at most twice the bytes received while it grows). Cost grows with the original's size, and an iCloud-only original is downloaded when `MetadataOptions::allow_network` is set. A read that receives neither data nor its completion for the inactivity interval (`INACTIVITY_TIMEOUT`, 30 s) is cancelled and returns a `PhotoError::Platform` timeout, with or without a cancel token; each chunk restarts the interval. An original above `MAX_ORIGINAL_BYTES` (256 MiB) is refused with `PhotoError::InvalidRequest`. A cancel through the token stops the transfer sooner.
 
 **Applies to**: iOS; apps that read metadata for many assets, or for very large originals, in a row.
 
-**Workaround**: read metadata for the asset the user opened rather than for a whole page, keep `allow_network` off unless the user asked, and cancel through `MetadataOptions::cancel` when the view goes away.
+**Workaround**: read metadata for the asset the user opened rather than for a whole page, one original at a time, keep `allow_network` off unless the user asked, and cancel through `MetadataOptions::cancel` when the view goes away.
 
-**Why accepted**: no header-only path exists in Photos or ImageIO for a library asset; Android reads through an opened stream with `ExifInterface`.
+**Why accepted**: no header-only path exists in Photos or ImageIO for a library asset; Android reads through an opened stream with `ExifInterface`. The ceiling and deadline bound the cost; iOS can still end the app under memory pressure while a large buffer is held.
 
 **Trigger for removal**: a Photos API that returns EXIF without the full resource.
 
-**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_metadata.rs` (*No header-only path*, *Network*); `plugins/photo-library/src/lib.rs` (`asset_metadata` rustdoc). Memory and time not measured on a device.
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_metadata.rs` (*Byte ceiling and memory*, *Inactivity deadline and cancel*, `INACTIVITY_TIMEOUT`, `MAX_ORIGINAL_BYTES`); `plugins/photo-library/src/apple_decode.rs` (`exif_from_data`); `plugins/photo-library/src/lib.rs` (`asset_metadata` rustdoc). Memory and time not measured on a device.
+
+---
+
+### `photo-library-android-metadata-not-cancellable` — an Android `asset_metadata` cancel does not interrupt the `ExifInterface` read
+
+**Observed**: the cancel token is checked before the Kotlin host call and once after it, not during. `AssetMetadataHost.read` opens the stream and runs `ExifInterface` to the end, so a slow provider stream is read in full; if the token was cancelled meanwhile, the result is discarded and the call returns `PhotoError::Cancelled`.
+
+**Applies to**: Android; apps that cancel metadata reads as views go away while the provider is slow (for example a cloud-backed `MediaStore` item).
+
+**Workaround**: none needed for correctness; the wasted work is bounded by one metadata read per such cancel, and the caller's thread is held until it ends.
+
+**Why accepted**: `ExifInterface` over a stream exposes no interruption point, and the result is correct either way.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/android_metadata.rs` (`asset_metadata`); `plugins/photo-library/src/android.rs` (`asset_metadata` arm); `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/AssetMetadataHost.kt` (`read`). Code paths only; not run on a device.
 
 ---
 

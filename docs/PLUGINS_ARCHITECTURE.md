@@ -394,10 +394,10 @@ Design-System Contract for the toolkit they all build against). Their shared cha
   there. `asset_metadata(&AssetId, &MetadataOptions)` needs only `library`, which is why that registry feature
   links `ImageIO` on iOS; it feeds the one EXIF read the decoder uses (the ImageIO property reader on Apple,
   `ImageDecodeHost.withExif` on Android), so `decode_file` and `asset_metadata` fill `ExifData` identically.
-  iOS has no header-only Photos read, so it pulls the whole local original into memory (an iCloud-only one is
-  `NetworkRequired` unless `allow_network`); Android opens the content URI as `export_original` does.
+  iOS has no header-only Photos read, so it pulls the whole local original into one buffer that ImageIO reads in place
+  (an iCloud-only one is `NetworkRequired` unless `allow_network`; 30 s without data times out, over 256 MiB is `InvalidRequest`); Android opens the content URI as `export_original` does.
   `thumbnail_shared(&AssetId, &ThumbnailRequest, &CancelToken)` shares the process-wide LRU with `thumbnail`
-  and returns an `Arc<Thumbnail>`, so a hit copies no pixel; a cancelled miss is never cached. Cancel is
+  and returns an `Arc<Thumbnail>`, so a hit shares the cached allocation (building an `ImageSource` from the pixels still copies them once); a cancelled miss is never cached. Cancel is
   per platform: iOS calls `cancelImageRequest:` and wakes the waiter at once; Android's hook calls the Kotlin
   `cancelThumbnail(requestId)`, which fires the `CancellationSignal` the host holds for that load (a cancel
   landing before the host registers it lets that load finish, and the call still returns `Cancelled`).
