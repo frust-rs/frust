@@ -60,6 +60,12 @@
 //! in memory, through the ImageIO property reader `apple_decode` shares with the decoder; see
 //! that module.
 //!
+//! # Change feed
+//!
+//! With the `library` feature, `apple_changes` answers the change token, the changes since one
+//! (Photos' persistent change history on iOS 16 and later, a full rescan below), the change
+//! observer and the cloud-identifier mapping; see that module.
+//!
 //! # Results
 //!
 //! Items come back in selection order. A single item that cannot be copied is
@@ -67,6 +73,9 @@
 //! [`PhotoError::Platform`]. A cancelled or failed call removes its cache
 //! directory.
 
+#[cfg(feature = "library")]
+#[path = "apple_changes.rs"]
+mod apple_changes;
 #[cfg(feature = "library")]
 #[path = "apple_library.rs"]
 mod apple_library;
@@ -80,6 +89,11 @@ mod apple_originals;
 mod apple_picker;
 
 #[cfg(feature = "library")]
+pub(crate) use apple_changes::{
+    changes_since, cloud_identifiers, current_change_token, start_change_observer,
+    stop_change_observer,
+};
+#[cfg(feature = "library")]
 pub(crate) use apple_library::{albums, assets, manage_limited_selection, thumbnail};
 #[cfg(feature = "library")]
 pub(crate) use apple_metadata::asset_metadata;
@@ -87,25 +101,6 @@ pub(crate) use apple_metadata::asset_metadata;
 pub(crate) use apple_originals::export_original;
 #[cfg(feature = "save")]
 pub(crate) use apple_originals::save;
-
-// Change feed placeholder (full rescan, no observer) until `apple_changes.rs` lands.
-#[cfg(feature = "library")]
-pub(crate) fn current_change_token() -> Result<crate::ChangeToken, PhotoError> {
-    Ok(crate::ChangeToken::from_bytes(Vec::new()))
-}
-#[cfg(feature = "library")]
-pub(crate) fn changes_since(
-    _token: &crate::ChangeToken,
-) -> Result<crate::LibraryChanges, PhotoError> {
-    let next = current_change_token()?;
-    Ok(crate::LibraryChanges::FullRescan { next })
-}
-#[cfg(feature = "library")]
-pub(crate) fn start_change_observer() -> Result<(), PhotoError> {
-    Ok(())
-}
-#[cfg(feature = "library")]
-pub(crate) fn stop_change_observer() {}
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
