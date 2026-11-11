@@ -436,7 +436,7 @@ use frust_theme::{MotionScheme, Theme};
 use kurbo::{Point, Size};
 
 use crate::ChildKey;
-use crate::authoring::ErasedCallback;
+use crate::authoring::{ErasedArgCallback, ErasedCallback};
 use crate::physics::effect::OverscrollEffect;
 use crate::physics::{ScrollPhysics, default_overscroll_effect};
 use crate::scroll::ScrollInfo;
@@ -515,6 +515,10 @@ type OnNearStart<State> = Rc<dyn Fn(&mut State)>;
 /// A view-held near-end "load newer" callback (erased to [`ErasedCallback`] on
 /// build). Mirrors [`OnNearStart`].
 type OnNearEnd<State> = Rc<dyn Fn(&mut State)>;
+
+/// A view-held visible-range callback, receiving the first and last visible row
+/// (erased to an [`ErasedArgCallback`] on build).
+type OnVisibleRange<State> = crate::authoring::TypedArgCallback<State, (usize, usize)>;
 
 /// A view-held pull-to-refresh release callback (erased to [`ErasedCallback`]
 /// on build). Mirrors [`crate::ScrollView`]'s type of the same shape exactly —
@@ -657,6 +661,9 @@ pub struct ListView<State: 'static> {
     on_near_end: Option<OnNearEnd<State>>,
     /// Distance from content end (px) at which `on_near_end` fires.
     near_end_threshold: f64,
+    /// Told which rows intersect the viewport. See
+    /// [`ListView::on_visible_range`].
+    on_visible_range: Option<OnVisibleRange<State>>,
     /// Fired on pointer `Up` when the past-top overscroll exceeded
     /// `REFRESH_TRIGGER_PX` (shared with [`crate::ScrollView`]). See
     /// [`ListView::on_refresh_release`].
@@ -727,6 +734,7 @@ impl<State: 'static> ListView<State> {
             near_start_threshold: 0.0,
             on_near_end: None,
             near_end_threshold: 0.0,
+            on_visible_range: None,
             on_refresh_release: None,
             physics: None,
             effect: default_overscroll_effect(),
@@ -790,6 +798,7 @@ impl<State: 'static> ListView<State> {
             near_start_threshold: 0.0,
             on_near_end: None,
             near_end_threshold: 0.0,
+            on_visible_range: None,
             on_refresh_release: None,
             physics: None,
             effect: default_overscroll_effect(),
@@ -972,6 +981,54 @@ impl<State: 'static> ListView<State> {
     ) -> Self {
         self.on_near_end = Some(Rc::new(callback));
         self.near_end_threshold = threshold_px;
+        self
+    }
+
+    /// Tell `handler` which rows are on screen: the state, then the **first**
+    /// and **last** index (inclusive) of the rows intersecting the viewport.
+    ///
+    /// The range excludes the cache buffer the list materializes beyond the
+    /// viewport, and a row that only touches a viewport edge (zero overlap) is
+    /// not visible. It is computed at layout from the offset and viewport the
+    /// window is planned against, in every extent mode (uniform, estimated and
+    /// exact), so no builder call is needed to learn it.
+    ///
+    /// The handler runs only when the range **changes** (the first laid-out
+    /// range included); an unchanged range requests no rebuild and no layout. A
+    /// list with no rows delivers nothing. Delivery goes through the same
+    /// pending-flush path as [`ListView::on_near_start`] and
+    /// [`ListView::on_near_end`], so it is one event late, like them: the range
+    /// laid out in one frame reaches the handler on the next event.
+    ///
+    /// ```
+    /// use frust_core::{Component, View, component};
+    /// use frust_widgets::{ListView, text};
+    ///
+    /// struct Feed;
+    ///
+    /// impl Component for Feed {
+    ///     type State = (usize, usize);
+    ///
+    ///     fn init(&self) -> Self::State {
+    ///         (0, 0)
+    ///     }
+    ///
+    ///     fn build(&self, _state: &mut Self::State) -> impl View<Self::State> {
+    ///         ListView::builder(100, 40.0, |i| text(i.to_string()))
+    ///             .on_visible_range(|range: &mut (usize, usize), first, last| {
+    ///                 *range = (first, last);
+    ///             })
+    ///     }
+    /// }
+    /// # let _ = component(Feed);
+    /// ```
+    pub fn on_visible_range<F: Fn(&mut State, usize, usize) + 'static>(
+        mut self,
+        handler: F,
+    ) -> Self {
+        self.on_visible_range = Some(Rc::new(move |state: &mut State, (first, last)| {
+            handler(state, first, last)
+        }));
         self
     }
 
@@ -1461,6 +1518,13 @@ pub struct ListViewWidget {
     /// A near-start fire detected by the paint-time fling pump (no `EventCtx`);
     /// delivered on the next event, cleared by a `Cancel` without firing.
     pending_near_start: bool,
+    /// The visible-range callback (`None` if the view set none).
+    on_visible_range: Option<ErasedArgCallback<(usize, usize)>>,
+    /// The visible range last handed to `on_visible_range`.
+    delivered_visible: Option<(usize, usize)>,
+    /// A visible range laid out and not yet delivered; handed over by the next
+    /// event, like a pending near-edge fire.
+    pending_visible: Option<(usize, usize)>,
     /// The near-end "load newer" callback (`None` if the view set none).
     on_near_end: Option<ErasedCallback>,
     /// Distance from content end (px) at which `on_near_end` fires.
@@ -1535,6 +1599,9 @@ impl ListViewWidget {
             near_start_threshold: 0.0,
             near_start_armed: true,
             pending_near_start: false,
+            on_visible_range: None,
+            delivered_visible: None,
+            pending_visible: None,
             on_near_end: None,
             near_end_threshold: 0.0,
             near_end_armed: true,
@@ -1588,6 +1655,83 @@ impl ListViewWidget {
             self.pending_near_start = false;
             if let Some(cb) = self.on_near_start.as_mut() {
                 cb(ctx);
+            }
+        }
+    }
+
+    /// The first and last (inclusive) rows intersecting the viewport, buffer
+    /// excluded, through the same placement offset and extent source the window
+    /// is planned against. `None` for an empty list or a viewport with no
+    /// height. A row meeting a viewport edge with zero overlap is not visible.
+    fn compute_visible_range(&self) -> Option<(usize, usize)> {
+        let count = self.item_count;
+        let height = self.viewport.height;
+        if count == 0 || height <= 0.0 {
+            return None;
+        }
+        let top = self.placement_offset();
+        let bottom = top + height;
+        match self.extent_source() {
+            ExtentSource::Uniform(extent) => {
+                let first = ((top / extent).floor().max(0.0) as usize).min(count - 1);
+                let end = ((bottom / extent).ceil().max(0.0) as usize).min(count);
+                (end > first).then(|| (first, end - 1))
+            }
+            ExtentSource::Exact => {
+                let mut first = self.exact_index_at(top);
+                while first < count && self.exact_top(first + 1) <= top {
+                    first += 1;
+                }
+                let mut end = self.exact_rows_above(bottom).min(count);
+                while end > first && self.exact_extent(end - 1) <= 0.0 {
+                    end -= 1;
+                }
+                (first < count && end > first).then(|| (first, end - 1))
+            }
+            ExtentSource::Estimated(estimate) => {
+                let mut range: Option<(usize, usize)> = None;
+                for (slot, &index) in self.keys.iter().enumerate() {
+                    let Some(&y) = self.slot_y.get(slot) else {
+                        break;
+                    };
+                    let extent = self.extent_at(index, estimate);
+                    if y + extent > top && y < bottom {
+                        range = Some(range.map_or((index, index), |(f, _)| (f, index)));
+                    }
+                }
+                range
+            }
+        }
+    }
+
+    /// Record this layout's visible range as owed to the handler when it
+    /// differs from the last one delivered. Unchanged ranges leave every field
+    /// alone, so they cost no flush, frame or rebuild.
+    fn note_visible_range(&mut self) {
+        if self.on_visible_range.is_none() {
+            return;
+        }
+        let range = self.compute_visible_range();
+        let Some(range) = range else {
+            // Nothing to report; a list that refills reports afresh.
+            self.pending_visible = None;
+            self.delivered_visible = None;
+            return;
+        };
+        if self.delivered_visible == Some(range) {
+            self.pending_visible = None;
+        } else if self.pending_visible != Some(range) {
+            self.pending_visible = Some(range);
+            self.jump_notify_owed = true;
+        }
+    }
+
+    /// Hand a pending visible range to the handler on the next event.
+    fn deliver_pending_visible(&mut self, ctx: &mut EventCtx) {
+        if let Some(range) = self.pending_visible.take() {
+            self.delivered_visible = Some(range);
+            if let Some(cb) = self.on_visible_range.as_mut() {
+                cb(ctx, range);
             }
         }
     }
@@ -2447,6 +2591,7 @@ impl ListViewWidget {
             self.deliver_pending_scroll(ctx);
             self.deliver_pending_near_start(ctx);
             self.deliver_pending_near_end(ctx);
+            self.deliver_pending_visible(ctx);
         }
         match event {
             // A broadcast reaches every realized child unconditionally and is
@@ -2692,6 +2837,10 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         widget.near_end_threshold = self.near_end_threshold;
+        widget.on_visible_range = self
+            .on_visible_range
+            .as_ref()
+            .map(crate::authoring::erase_callback_arg);
         widget.core.on_refresh_release = self
             .on_refresh_release
             .as_ref()
@@ -2754,6 +2903,10 @@ impl<State: 'static> View<State> for ListView<State> {
             .as_ref()
             .map(crate::authoring::erase_callback);
         element.near_end_threshold = self.near_end_threshold;
+        element.on_visible_range = self
+            .on_visible_range
+            .as_ref()
+            .map(crate::authoring::erase_callback_arg);
         element.core.on_refresh_release = self
             .on_refresh_release
             .as_ref()
@@ -3005,6 +3158,7 @@ impl Widget for ListViewWidget {
         self.drain_controller(self.motion.reduce_motion);
         self.settle_item_target();
         self.sync_child_origins();
+        self.note_visible_range();
         self.publish_to_controller();
         bc.constrain(self.viewport)
     }
@@ -3017,7 +3171,7 @@ impl Widget for ListViewWidget {
         self.motion = ControllerMotion::from_theme(Theme::from_paint_ctx(ctx));
         self.paint_motion(ctx, self.motion.reduce_motion);
         if std::mem::take(&mut self.jump_notify_owed)
-            && (self.pending_near_start || self.pending_near_end)
+            && (self.pending_near_start || self.pending_near_end || self.pending_visible.is_some())
         {
             // Paint has no `&mut State`: owe the jump's (or tween's) edge fire
             // to the next frame's Housekeeping flush (the `ScrollWidget`
