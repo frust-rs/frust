@@ -133,6 +133,15 @@ pub(crate) fn export_original(
     Err(PhotoError::Unsupported)
 }
 
+// Metadata: desktop has no photo library to read from.
+#[cfg(feature = "library")]
+pub(crate) fn asset_metadata(
+    _id: &crate::AssetId,
+    _options: &crate::MetadataOptions,
+) -> Result<crate::ExifData, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
 #[cfg(feature = "save")]
 pub(crate) fn save(
     _request: &crate::SaveRequest,

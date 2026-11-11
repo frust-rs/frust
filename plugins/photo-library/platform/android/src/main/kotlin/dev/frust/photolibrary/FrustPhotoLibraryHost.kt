@@ -69,6 +69,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Rust → Kotlin | `decodeHeader(requestId: Long, path: String, maxDimension: Int): DecodeHeader` | a [DecodeHeader]; `code` is [OK], [NOT_FOUND], [NOT_INITIALIZED], [PERMISSION_DENIED], [NO_DECODER] or [DECODE_FAILED] |
  * | Rust → Kotlin | `decodeInto(requestId: Long, path: String, width: Int, height: Int, srgb: Boolean, pixels: ByteBuffer): DecodeResult` | a [DecodeResult]; the same codes plus [CANCELLED] |
  * | Rust → Kotlin | `cancelDecode(requestId: Long)` — `(J)V` | nothing; an unknown or finished id is ignored |
+ * | Rust → Kotlin | `assetMetadata(id: String): DecodeResult` | a [DecodeResult] carrying the asset's EXIF, `colorSpace` always [COLOR_OTHER]; `code` is [OK], [NOT_FOUND], [NOT_INITIALIZED], [PERMISSION_DENIED] or [DECODE_FAILED] |
  *
  * Every request that returned [PENDING] gets exactly one answer: a pick gets
  * [nativeOnPickResult] or [nativeOnPickError], an export [nativeOnExportDone],
@@ -95,6 +96,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * [decodeHeader], [decodeInto] and [cancelDecode] run in [ImageDecodeHost]
  * on the calling thread and never touch the pick slot or an executor.
  * [decodeInto] fills the caller's direct `ByteBuffer` and never keeps it.
+ *
+ * ## Metadata
+ *
+ * [assetMetadata] runs in [AssetMetadataHost] on the calling thread: it opens
+ * the asset through [openOriginalStream], the export's own open (unredacted
+ * only with `ACCESS_MEDIA_LOCATION`), reads it with `ExifInterface`, and
+ * answers through [ImageDecodeHost]'s shared EXIF read. It never touches the
+ * pick slot or an executor.
  *
  * ## Browsing
  *
@@ -553,6 +562,13 @@ object FrustPhotoLibraryHost {
         ImageDecodeHost.cancel(requestId)
     }
 
+    /**
+     * The EXIF of library asset [id] (a `MediaStore` content URI, else
+     * [NOT_FOUND]). Any thread but the main one (it reads the asset).
+     */
+    @JvmStatic
+    fun assetMetadata(id: String): DecodeResult = AssetMetadataHost.read(appContext, id)
+
     // --- Kotlin -> Rust -----------------------------------------------------
 
     /**
@@ -949,22 +965,30 @@ object FrustPhotoLibraryHost {
         }
     }
 
+    /** Opens [uri] for an export (see [openOriginalStream]). */
+    private fun openOriginal(ctx: Context, uri: Uri): InputStream = openOriginalStream(ctx, uri).stream
+
+    /** An opened asset; [unredacted] is true only for the `setRequireOriginal` bytes. */
+    internal class OriginalStream(val stream: InputStream, val unredacted: Boolean)
+
     /**
      * Opens [uri], asking for the unredacted bytes when `ACCESS_MEDIA_LOCATION`
-     * is held (class doc). A refused original falls back to the plain URI.
+     * is held (class doc). A refused original falls back to the plain URI,
+     * whose location EXIF `MediaStore` redacts. Shared by the export and
+     * [AssetMetadataHost]; the caller closes the stream.
      */
-    private fun openOriginal(ctx: Context, uri: Uri): InputStream {
+    internal fun openOriginalStream(ctx: Context, uri: Uri): OriginalStream {
         val resolver = ctx.contentResolver
         if (ctx.checkSelfPermission(Manifest.permission.ACCESS_MEDIA_LOCATION) == PackageManager.PERMISSION_GRANTED) {
             try {
-                resolver.openInputStream(MediaStore.setRequireOriginal(uri))?.let { return it }
+                resolver.openInputStream(MediaStore.setRequireOriginal(uri))?.let { return OriginalStream(it, true) }
             } catch (e: UnsupportedOperationException) {
                 Log.i(TAG, "frust-photo-library: original unavailable, using the plain uri: ${e.javaClass.name}")
             } catch (e: SecurityException) {
                 Log.i(TAG, "frust-photo-library: original unavailable, using the plain uri: ${e.javaClass.name}")
             }
         }
-        return resolver.openInputStream(uri) ?: throw IOException("no input stream")
+        return OriginalStream(resolver.openInputStream(uri) ?: throw IOException("no input stream"), false)
     }
 
     /**

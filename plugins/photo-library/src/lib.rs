@@ -51,7 +51,11 @@
 //! }
 //! ```
 
-#[cfg(all(feature = "decode", any(target_os = "ios", target_os = "macos")))]
+// The ImageIO property reader serves `asset_metadata` (`library`) as well as the decoder.
+#[cfg(all(
+    any(feature = "decode", feature = "library"),
+    any(target_os = "ios", target_os = "macos")
+))]
 mod apple_decode;
 mod cancel;
 mod decode;
@@ -68,6 +72,7 @@ mod decode;
 ))]
 mod folder_scan;
 mod library;
+mod metadata;
 mod originals;
 mod types;
 
@@ -101,6 +106,7 @@ pub use library::{
     Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE,
     Thumbnail, ThumbnailMode, ThumbnailRequest,
 };
+pub use metadata::MetadataOptions;
 pub use originals::{
     AssetVersion, ExportOptions, ExportedOriginal, ProgressFn, SaveRequest, SavedAsset,
 };
@@ -313,6 +319,40 @@ impl PhotoLibrary {
         }
     }
 
+    /// Reads the EXIF of one library asset without the app exporting or decoding it. Blocks;
+    /// needs the `library` feature and photo access.
+    ///
+    /// A token cancelled before the call returns [`PhotoError::Cancelled`] before any platform
+    /// work. iOS and Android then return [`PhotoError::UiThread`] on their UI thread. A stale
+    /// `id` is [`PhotoError::NotFound`]. An asset with no EXIF, a video included, returns an
+    /// empty [`ExifData`] (every field `None`), not an error. Desktop and web have no photo
+    /// library and return [`PhotoError::Unsupported`]. The fields follow the rules
+    /// [`ExifData`] documents, as for [`decode_file`](Self::decode_file).
+    ///
+    /// - **iOS:** Photos offers no way to read an asset's metadata from its header alone, so the
+    ///   original's bytes must be on the device: the call reads the whole original resource into
+    ///   memory (never to a file) and hands it to the same ImageIO property reader
+    ///   [`decode_file`](Self::decode_file) uses. An original that is only in iCloud is
+    ///   downloaded when [`MetadataOptions::allow_network`] is set, and returns
+    ///   [`PhotoError::NetworkRequired`] otherwise (the default). A cancel during the read stops
+    ///   the transfer and returns [`PhotoError::Cancelled`]. A video is not read at all.
+    /// - **Android:** the asset's content URI is opened as
+    ///   [`export_original`](Self::export_original) opens it, unredacted only when the app holds
+    ///   `ACCESS_MEDIA_LOCATION`, and read with `android.media.ExifInterface`. Without that
+    ///   permission the GPS fields are `None`. `allow_network` has no effect: `MediaStore` makes
+    ///   no network distinction. The token is checked before the read and after it.
+    pub fn asset_metadata(id: &AssetId, options: &MetadataOptions) -> Result<ExifData, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            metadata::asset_metadata_with(id, options, platform::asset_metadata)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = (id, options);
+            Err(library_disabled())
+        }
+    }
+
     /// Decodes an image file at its full resolution, downscaled so neither side exceeds
     /// [`DecodeOptions::max_dimension`], into straight-alpha RGBA8. Blocks; needs the `decode`
     /// feature.
@@ -454,7 +494,8 @@ fn cached_thumbnail(
     loaded
 }
 
-#[cfg(not(feature = "library"))]
+// `decode_asset` names it with `library` on and `decode` off, too.
+#[cfg(not(all(feature = "library", feature = "decode")))]
 fn library_disabled() -> PhotoError {
     PhotoError::FeatureDisabled { feature: "library" }
 }

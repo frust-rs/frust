@@ -65,6 +65,9 @@ import kotlin.math.roundToInt
  * otherwise; the reported space is the decoded bitmap's own. EXIF is read with
  * `android.media.ExifInterface` from the same path or content URI; the capture
  * time is `DateTimeOriginal` only, never the last-modified `DateTime`.
+ * [withExif] is the one place the tags are read: [AssetMetadataHost] answers
+ * `assetMetadata` through it too, so the decode and the metadata call fill the
+ * same fields the same way.
  *
  * ## Cancel
  *
@@ -355,13 +358,19 @@ internal object ImageDecodeHost {
 
     private fun headerFailed(code: Int): DecodeHeader = DecodeHeader(code, 0, 0, 0, 0)
 
-    private fun decodeFailed(code: Int): DecodeResult = DecodeResult(
+    /** A failed [DecodeResult]: [code] with every EXIF value absent. Shared with [AssetMetadataHost]. */
+    internal fun decodeFailed(code: Int): DecodeResult = DecodeResult(
         code, FrustPhotoLibraryHost.COLOR_OTHER, null, null, null, null, 0,
         Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN,
     )
 
-    /** An [FrustPhotoLibraryHost.OK] result; absent EXIF values are null, 0 or NaN. */
-    private fun withExif(colorSpace: Int, exif: ExifInterface?): DecodeResult {
+    /**
+     * An [FrustPhotoLibraryHost.OK] result; absent EXIF values are null, 0 or
+     * NaN. With [withLocation] false the GPS values are NaN whatever [exif]
+     * holds (a redacted read). Shared with [AssetMetadataHost].
+     */
+    internal fun withExif(colorSpace: Int, exif: ExifInterface?, withLocation: Boolean = true): DecodeResult {
+        val located = exif?.takeIf { withLocation }
         return DecodeResult(
             FrustPhotoLibraryHost.OK,
             colorSpace,
@@ -375,9 +384,9 @@ internal object ImageDecodeHost {
             exif?.getAttributeDouble(ExifInterface.TAG_EXPOSURE_TIME, Double.NaN) ?: Double.NaN,
             exif?.getAttributeDouble(ExifInterface.TAG_F_NUMBER, Double.NaN) ?: Double.NaN,
             exif?.getAttributeDouble(ExifInterface.TAG_FOCAL_LENGTH, Double.NaN) ?: Double.NaN,
-            exif?.let { coordinate(it, ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF, "S") }
+            located?.let { coordinate(it, ExifInterface.TAG_GPS_LATITUDE, ExifInterface.TAG_GPS_LATITUDE_REF, "S") }
                 ?: Double.NaN,
-            exif?.let { coordinate(it, ExifInterface.TAG_GPS_LONGITUDE, ExifInterface.TAG_GPS_LONGITUDE_REF, "W") }
+            located?.let { coordinate(it, ExifInterface.TAG_GPS_LONGITUDE, ExifInterface.TAG_GPS_LONGITUDE_REF, "W") }
                 ?: Double.NaN,
         )
     }
