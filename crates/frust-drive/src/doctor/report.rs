@@ -16,6 +16,7 @@ use std::collections::HashSet;
 use crate::android_run::preflight::{self, PreflightCtx};
 use crate::ios_build::team;
 
+use super::android_sdk::default_ndk_package;
 use super::mobile_targets::{self, ANDROID_TARGETS, IOS_TARGETS};
 use super::{
     AndroidSdkValidator, CargoNdkValidator, DoctorCtx, RustToolchainValidator, Status, Validation,
@@ -430,7 +431,10 @@ fn android_sdk_component(ctx: &DoctorCtx) -> Component {
     let fix_commands = match status {
         ComponentStatus::Ok => Vec::new(),
         _ => vec![FixCommand::guidance(
-            "Install Android Studio (SDK), then `sdkmanager --install \"ndk;28.2.13676358\"`, and set ANDROID_HOME/ANDROID_NDK_HOME",
+            format!(
+                "Install Android Studio (SDK) and set ANDROID_HOME, then `sdkmanager --install \"{}\"` (or set FRUST_ANDROID_NDK_VERSION to an installed r28+ version)",
+                default_ndk_package()
+            ),
             Some("https://developer.android.com/studio"),
         )],
     };
@@ -505,6 +509,7 @@ fn signing_component(ctx: &DoctorCtx) -> Component {
 mod tests {
     use super::*;
     use crate::doctor::FakeEnv;
+    use crate::doctor::android_sdk::test_support::TempSdk;
     use crate::process::{FakeProcessRunner, Output};
 
     fn ok(stdout: &str) -> Output {
@@ -564,17 +569,20 @@ mod tests {
             )
     }
 
-    fn all_green_env() -> FakeEnv {
-        FakeEnv::new()
+    /// The all-green environment plus the temporary SDK it points at; keep the
+    /// guard alive for the whole test (it removes the directory on drop).
+    fn all_green_env() -> (TempSdk, FakeEnv) {
+        let sdk = TempSdk::with_default_ndk();
+        let env = FakeEnv::new()
             .set("JAVA_HOME", "/opt/jdk17")
-            .set("ANDROID_HOME", "/sdk")
-            .set("ANDROID_NDK_HOME", "/sdk/ndk/28.2.13676358")
+            .set("ANDROID_HOME", sdk.str());
+        (sdk, env)
     }
 
     #[test]
     fn all_green_report_rolls_up_ok() {
         let runner = all_green_runner();
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -601,7 +609,7 @@ mod tests {
     #[test]
     fn missing_cargo_ndk_emits_auto_runnable_fix() {
         let runner = all_green_runner().missing("cargo ndk --version");
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -628,7 +636,7 @@ mod tests {
     #[test]
     fn missing_xcode_on_macos_is_guidance_only() {
         let runner = all_green_runner().missing("xcode-select -p");
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -694,7 +702,7 @@ mod tests {
                 ok_stderr("openjdk version \"17.0.9\" 2024-01-16\n"),
             )
             .with("adb version", ok("Android Debug Bridge version 1.0.41\n"));
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -708,11 +716,13 @@ mod tests {
 
     #[test]
     fn env_var_gap_reports_partial_android_sdk_with_guidance_fix() {
-        // ANDROID_NDK_HOME unset: AndroidSdkValidator degrades to Partial.
+        // The SDK exists but the pinned NDK is not installed under it: AndroidSdkValidator
+        // degrades to Partial.
         let runner = all_green_runner();
+        let sdk = TempSdk::new();
         let env = FakeEnv::new()
             .set("JAVA_HOME", "/opt/jdk17")
-            .set("ANDROID_HOME", "/sdk");
+            .set("ANDROID_HOME", sdk.str());
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -728,6 +738,8 @@ mod tests {
         assert_eq!(sdk.status, ComponentStatus::Partial);
         assert_eq!(sdk.fix_commands.len(), 1);
         assert!(!sdk.fix_commands[0].auto_runnable);
+        assert!(sdk.fix_commands[0].display.contains("ndk;28.2.13676358"));
+        assert!(!sdk.fix_commands[0].display.contains("ANDROID_NDK_HOME"));
         assert_eq!(report.rollup(), ComponentStatus::Partial);
     }
 
@@ -737,7 +749,7 @@ mod tests {
             "rustup target list --installed",
             ok("aarch64-linux-android\nwasm32-unknown-unknown\n"),
         );
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -760,7 +772,7 @@ mod tests {
     #[test]
     fn missing_rustc_gates_rollup_to_missing() {
         let runner = all_green_runner().missing("rustc --version");
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -780,7 +792,7 @@ mod tests {
             "security find-identity -v -p codesigning",
             ok("0 valid identities found\n"),
         );
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -798,7 +810,7 @@ mod tests {
     #[test]
     fn a_complete_web_toolchain_is_an_ok_area_on_any_host() {
         let runner = all_green_runner();
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -823,7 +835,7 @@ mod tests {
             )
             .missing("wasm-bindgen --version")
             .missing("wasm-opt --version");
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -852,7 +864,7 @@ mod tests {
             )
             .missing("wasm-bindgen --version")
             .missing("wasm-opt --version");
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -910,7 +922,7 @@ mod tests {
     fn a_bindgen_version_mismatch_is_partial_with_the_pinned_install_command() {
         let runner =
             all_green_runner().with("wasm-bindgen --version", ok("wasm-bindgen 0.2.100\n"));
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -947,7 +959,7 @@ mod tests {
             )
             .missing("wasm-bindgen --version")
             .missing("wasm-opt --version");
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -994,7 +1006,7 @@ mod tests {
     #[test]
     fn jdk_component_reports_env_var_as_its_resolution_source() {
         let runner = all_green_runner();
-        let env = all_green_env();
+        let (_sdk, env) = all_green_env();
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -1018,9 +1030,8 @@ mod tests {
             "/usr/lib/jvm/java-17-openjdk/bin/java -version",
             ok_stderr("openjdk version \"17.0.9\" 2024-01-16\n"),
         );
-        let env = FakeEnv::new()
-            .set("ANDROID_HOME", "/sdk")
-            .set("ANDROID_NDK_HOME", "/sdk/ndk/28.2.13676358"); // no JAVA_HOME
+        let sdk = TempSdk::with_default_ndk();
+        let env = FakeEnv::new().set("ANDROID_HOME", sdk.str()); // no JAVA_HOME
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,

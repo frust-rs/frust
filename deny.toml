@@ -8,11 +8,11 @@
 # The standalone workspaces excluded in the root Cargo.toml have their own
 # lockfiles and are NOT covered by this file.
 #
-# Every `ignore` entry is an advisory this repository cannot retire inside the
-# current version pins (docs/DEVELOPMENT.md, Version-Pin Policy). Each reason
-# names the advisory kind, the frust crate that pulls the dependency in, and what
-# must move for the entry to be removed. Removing an entry makes the check fail
-# with that id, so an entry is deleted the moment its upgrade lands.
+# Every `ignore` entry records its advisory kind, the frust crate that pulls the dependency in, and
+# what must move for the entry to be removed. The unmaintained entries have no upgrade. The entries
+# under the vulnerabilities heading have a patched release; they are recorded pending an owner
+# decision on lockfile or pin updates (docs/DEVELOPMENT.md, Version-Pin Policy). Removing an entry
+# makes the check fail with that id, so an entry is deleted the moment its upgrade lands.
 
 [advisories]
 ignore = [
