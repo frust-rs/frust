@@ -145,12 +145,18 @@ pub struct PickedItem {
     pub is_copy: bool,
 }
 
-/// Capture metadata read from an image's EXIF block. Every field is optional: a file carries
-/// only what its camera or editor wrote.
+/// Capture metadata read from an image's EXIF block, returned by
+/// [`PhotoLibrary::decode_file`](crate::PhotoLibrary::decode_file) and
+/// [`PhotoLibrary::decode_asset`](crate::PhotoLibrary::decode_asset) in
+/// [`DecodedImage::exif`](crate::DecodedImage::exif). Every field is optional: a file carries
+/// only what its camera or editor wrote. An ISO, exposure time, aperture or focal length the
+/// file records as zero, negative or non-finite is `None`.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct ExifData {
-    /// When the photo was taken, as the file records it (`YYYY:MM:DD HH:MM:SS`, local time).
+    /// When the photo was taken: the EXIF `DateTimeOriginal` tag as the file records it
+    /// (`YYYY:MM:DD HH:MM:SS`, local time). Never the TIFF `DateTime` tag, which records when
+    /// the file was last changed, so a file with only that tag leaves this `None`.
     pub capture_time: Option<String>,
     /// Camera manufacturer.
     pub camera_make: Option<String>,

@@ -141,8 +141,9 @@ pub(crate) fn save(
     Err(PhotoError::Unsupported)
 }
 
-// Decode: macOS uses the shared ImageIO decoder, on any thread (desktop has no UI-thread
-// refusal, as for `pick`). The other desktops have no native decoder.
+// Decode, after the crate root's shared precheck (a cancelled token, a zero cap): macOS uses
+// the shared ImageIO decoder on the calling thread and does not refuse the main thread (desktop
+// has no UI-thread refusal, as for `pick`). The other desktops have no native decoder.
 #[cfg(all(feature = "decode", target_os = "macos"))]
 pub(crate) fn decode_file(
     path: &std::path::Path,

@@ -4,14 +4,25 @@
 //! 1. The file URL becomes an image source with `kCGImageSourceShouldCache` off, so ImageIO keeps
 //!    no full-size copy of the pixels around.
 //! 2. The first image's properties give the source size (upright, after its EXIF orientation)
-//!    and the EXIF, TIFF and GPS dictionaries that fill [`ExifData`].
+//!    and the EXIF, TIFF and GPS dictionaries that fill [`ExifData`]. When the size is known,
+//!    a capped image over the shared byte ceiling ([`decode::MAX_BUFFER_BYTES`]) is refused
+//!    here, before ImageIO decodes anything.
 //! 3. `CGImageSourceCreateThumbnailAtIndex` builds the image from the full data (never an
 //!    embedded preview), applies the orientation and scales the long edge down to
 //!    [`DecodeOptions::max_dimension`]. A smaller image keeps its size.
-//! 4. A premultiplied RGBA8 bitmap context in an explicitly chosen space draws it: Display P3
+//! 4. The decoded image is checked again before any buffer exists: a long edge over
+//!    `max_dimension` is an error, and so is a buffer over the ceiling. The buffer is then
+//!    allocated fallibly ([`decode::allocate_rgba`]), so a shortage is an error, never an abort.
+//! 5. A premultiplied RGBA8 bitmap context in an explicitly chosen space draws it: Display P3
 //!    when the image is wide-gamut and [`DecodeOptions::srgb`] is off, sRGB otherwise.
 //!    [`DecodedImage::color_space`] names the space drawn into. The pixels are then converted
 //!    to straight alpha.
+//!
+//! # EXIF
+//!
+//! `capture_time` comes only from EXIF `DateTimeOriginal`, never the TIFF `DateTime` (the
+//! last-modified time). An ISO, exposure time, aperture or focal length that is zero, negative
+//! or non-finite is absent, as on Android ([`decode::positive_measure`]).
 //!
 //! # Cancel
 //!
@@ -21,9 +32,10 @@
 //!
 //! # Errors
 //!
-//! A missing file is [`PhotoError::NotFound`]. A file ImageIO cannot read, one cut short inside
-//! its headers, or one without an image is a [`PhotoError::Platform`] decode error, never a panic.
-//! Messages never echo the path.
+//! A missing file is [`PhotoError::NotFound`], as on every arm ([`decode::require_file`]). A
+//! capped image over the byte ceiling is [`PhotoError::InvalidRequest`]. A file ImageIO cannot
+//! read, one cut short inside its headers, or one without an image is a [`PhotoError::Platform`]
+//! decode error, never a panic. Messages never echo the path.
 //!
 //! ImageIO is lenient with a file whose pixel data stops early: JPEG, PNG and HEIC alike decode,
 //! with the missing part left blank, and ImageIO reports the source as complete. Such a file is
@@ -42,8 +54,7 @@ use objc2_core_graphics::{
     CGImageByteOrderInfo, kCGColorSpaceDisplayP3, kCGColorSpaceSRGB,
 };
 
-use crate::cancel::CancelToken;
-use crate::decode::{DecodeOptions, DecodedImage, ImageColorSpace};
+use crate::decode::{self, DecodeOptions, DecodedImage, ImageColorSpace};
 use crate::pixels;
 use crate::types::{ExifData, PhotoError};
 
@@ -94,15 +105,15 @@ unsafe extern "C" {
     static kCGImagePropertyExifLensModel: &'static CFString;
     static kCGImagePropertyTIFFMake: &'static CFString;
     static kCGImagePropertyTIFFModel: &'static CFString;
-    static kCGImagePropertyTIFFDateTime: &'static CFString;
     static kCGImagePropertyGPSLatitude: &'static CFString;
     static kCGImagePropertyGPSLatitudeRef: &'static CFString;
     static kCGImagePropertyGPSLongitude: &'static CFString;
     static kCGImagePropertyGPSLongitudeRef: &'static CFString;
 }
 
-/// Decodes `path` per `options`. The caller has run [`crate::decode::precheck`] and, on iOS,
-/// refused the main thread.
+/// Decodes `path` per `options`. The caller has run the shared [`decode::precheck`] (so
+/// `max_dimension` is non-zero) and then, on iOS only, refused the main thread; macOS decodes on
+/// the calling thread.
 pub(crate) fn decode_file(
     path: &Path,
     options: &DecodeOptions,
@@ -111,14 +122,10 @@ pub(crate) fn decode_file(
 }
 
 fn decode_in_pool(path: &Path, options: &DecodeOptions) -> Result<DecodedImage, PhotoError> {
-    if cancelled(options) {
+    if options.is_cancelled() {
         return Err(PhotoError::Cancelled);
     }
-    match std::fs::metadata(path) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(PhotoError::NotFound),
-        Err(e) => return Err(e.into()),
-    }
+    decode::require_file(path)?;
     let url = CFURL::from_file_path(path)
         .ok_or_else(|| PhotoError::Platform("the path is not a valid file URL".to_owned()))?;
     let no_cache = flag_options(&[
@@ -148,16 +155,17 @@ fn decode_in_pool(path: &Path, options: &DecodeOptions) -> Result<DecodedImage, 
         .map(|ptr| unsafe { CFRetained::<Properties>::from_raw(ptr.cast()) })
         .ok_or_else(undecodable)?;
     let info = SourceInfo::read(&properties);
+    info.check_capped_len(options.max_dimension)?;
 
-    if cancelled(options) {
+    if options.is_cancelled() {
         return Err(PhotoError::Cancelled);
     }
     let image = thumbnail(&source, &info, options.max_dimension)?;
 
-    if cancelled(options) {
+    if options.is_cancelled() {
         return Err(PhotoError::Cancelled);
     }
-    let drawn = draw(&image, options.srgb)?;
+    let drawn = draw(&image, options.srgb, options.max_dimension)?;
     let (source_width, source_height) = info.upright_size().unwrap_or((drawn.width, drawn.height));
     Ok(DecodedImage {
         width: drawn.width,
@@ -168,13 +176,6 @@ fn decode_in_pool(path: &Path, options: &DecodeOptions) -> Result<DecodedImage, 
         color_space: drawn.color_space,
         exif: info.exif,
     })
-}
-
-fn cancelled(options: &DecodeOptions) -> bool {
-    options
-        .cancel
-        .as_ref()
-        .is_some_and(CancelToken::is_cancelled)
 }
 
 fn undecodable() -> PhotoError {
@@ -193,11 +194,12 @@ fn thumbnail(
     info: &SourceInfo,
     max_dimension: u32,
 ) -> Result<CFRetained<CGImage>, PhotoError> {
-    // Never ask for more than the source has: the cap only ever shrinks.
+    // Never ask for more than the source has: the cap only ever shrinks. Both sides are at
+    // least 1 (`SourceInfo::read`) and the precheck refused a zero cap.
     let long_edge = info
         .upright_size()
         .map_or(max_dimension, |(w, h)| w.max(h).min(max_dimension));
-    let size = CFNumber::new_i64(i64::from(long_edge.max(1)));
+    let size = CFNumber::new_i64(i64::from(long_edge));
     let yes = CFBoolean::new(true);
     let no = CFBoolean::new(false);
     // SAFETY: reading ImageIO constant keys, valid for the life of the process.
@@ -227,17 +229,33 @@ struct Drawn {
     color_space: ImageColorSpace,
 }
 
-/// Draw `image` 1:1 into a fresh RGBA8 context and return straight-alpha pixels.
-fn draw(image: &CGImage, srgb: bool) -> Result<Drawn, PhotoError> {
-    let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
-    let (Ok(out_width), Ok(out_height)) = (u32::try_from(width), u32::try_from(height)) else {
-        return Err(too_large());
-    };
+/// The checked output size of a decoded `width x height` image: both sides non-zero, the long
+/// edge within `max_dimension`, and the buffer within the shared byte ceiling. Runs before any
+/// buffer is allocated.
+fn checked_output(
+    width: usize,
+    height: usize,
+    max_dimension: u32,
+) -> Result<(u32, u32, usize), PhotoError> {
     if width == 0 || height == 0 {
         return Err(undecodable());
     }
-    let stride = width.checked_mul(4).ok_or_else(too_large)?;
-    let len = stride.checked_mul(height).ok_or_else(too_large)?;
+    let within_cap = |side: usize| u32::try_from(side).ok().filter(|v| *v <= max_dimension);
+    let (Some(out_width), Some(out_height)) = (within_cap(width), within_cap(height)) else {
+        return Err(PhotoError::Platform(
+            "the decoded image is larger than max_dimension".to_owned(),
+        ));
+    };
+    let len = decode::rgba_len(out_width, out_height)?;
+    Ok((out_width, out_height, len))
+}
+
+/// Draw `image` 1:1 into a fresh RGBA8 context and return straight-alpha pixels.
+fn draw(image: &CGImage, srgb: bool, max_dimension: u32) -> Result<Drawn, PhotoError> {
+    let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+    let (out_width, out_height, len) = checked_output(width, height, max_dimension)?;
+    // Cannot overflow: `len` is `stride * height` and fits in `usize`.
+    let stride = width * 4;
     let wide = !srgb && CGImage::color_space(Some(image)).is_some_and(|s| s.is_wide_gamut_rgb());
     // SAFETY: reading Core Graphics' constant colour-space names.
     let (p3_name, srgb_name) = unsafe { (kCGColorSpaceDisplayP3, kCGColorSpaceSRGB) };
@@ -248,7 +266,7 @@ fn draw(image: &CGImage, srgb: bool) -> Result<Drawn, PhotoError> {
     };
     let space = CGColorSpace::with_name(Some(name))
         .ok_or_else(|| PhotoError::Platform("the output colour space is unavailable".to_owned()))?;
-    let mut rgba = vec![0u8; len];
+    let mut rgba = decode::allocate_rgba(len)?;
     let info =
         CGBitmapInfo(CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0);
     // SAFETY: `rgba` holds exactly `stride * height` writable bytes and outlives the context,
@@ -279,10 +297,6 @@ fn draw(image: &CGImage, srgb: bool) -> Result<Drawn, PhotoError> {
         rgba,
         color_space,
     })
-}
-
-fn too_large() -> PhotoError {
-    PhotoError::Platform("the decoded image is too large".to_owned())
 }
 
 /// What the image's properties say before any pixel is decoded.
@@ -323,6 +337,21 @@ impl SourceInfo {
         }
     }
 
+    /// Refuses a request whose capped output would exceed the shared byte ceiling, from the
+    /// source size alone, so an oversized request fails before ImageIO decodes anything. The
+    /// short side is rounded down, so a request at the edge passes here and is caught exactly
+    /// after the decode ([`checked_output`]). An unknown size passes.
+    fn check_capped_len(&self, max_dimension: u32) -> Result<(), PhotoError> {
+        let Some((w, h)) = self.upright_size() else {
+            return Ok(());
+        };
+        let (long, short) = (w.max(h), w.min(h));
+        let capped_long = long.min(max_dimension);
+        let capped_short = u64::from(short) * u64::from(capped_long) / u64::from(long);
+        let capped_short = u32::try_from(capped_short).unwrap_or(u32::MAX).max(1);
+        decode::rgba_len(capped_long, capped_short).map(|_| ())
+    }
+
     /// The source size as displayed: orientations 5 to 8 turn the image a quarter.
     fn upright_size(&self) -> Option<(u32, u32)> {
         let (w, h) = (self.width?, self.height?);
@@ -347,6 +376,7 @@ fn read_exif(properties: &Properties) -> Option<ExifData> {
     let exif_string = |key| exif.and_then(|d| string(d, key));
     let exif_number = |key| exif.and_then(|d| number(d, key));
     let tiff_string = |key| tiff.and_then(|d| string(d, key));
+    let measure = |key| exif_number(key).and_then(decode::positive_measure);
 
     let iso = exif.and_then(|d| {
         let key = unsafe { kCGImagePropertyExifISOSpeedRatings };
@@ -360,17 +390,19 @@ fn read_exif(properties: &Properties) -> Option<ExifData> {
     };
 
     let data = ExifData {
-        capture_time: exif_string(unsafe { kCGImagePropertyExifDateTimeOriginal })
-            .or_else(|| tiff_string(unsafe { kCGImagePropertyTIFFDateTime })),
+        // The original capture only; TIFF `DateTime` is the last-modified time.
+        capture_time: exif_string(unsafe { kCGImagePropertyExifDateTimeOriginal }),
         camera_make: tiff_string(unsafe { kCGImagePropertyTIFFMake }),
         camera_model: tiff_string(unsafe { kCGImagePropertyTIFFModel }),
         lens: exif_string(unsafe { kCGImagePropertyExifLensModel }),
         iso: iso
-            .filter(|v| *v >= 0.0 && *v <= f64::from(u32::MAX))
-            .map(|v| v.round() as u32),
-        exposure_seconds: exif_number(unsafe { kCGImagePropertyExifExposureTime }),
-        aperture: exif_number(unsafe { kCGImagePropertyExifFNumber }),
-        focal_length_mm: exif_number(unsafe { kCGImagePropertyExifFocalLength }),
+            .and_then(decode::positive_measure)
+            .filter(|v| *v <= f64::from(u32::MAX))
+            .map(|v| v.round() as u32)
+            .filter(|v| *v > 0),
+        exposure_seconds: measure(unsafe { kCGImagePropertyExifExposureTime }),
+        aperture: measure(unsafe { kCGImagePropertyExifFNumber }),
+        focal_length_mm: measure(unsafe { kCGImagePropertyExifFocalLength }),
         gps_latitude: coordinate(
             unsafe { kCGImagePropertyGPSLatitude },
             unsafe { kCGImagePropertyGPSLatitudeRef },
@@ -428,6 +460,7 @@ fn sub_dictionary(dict: &Properties, key: &CFString) -> Option<CFRetained<Proper
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancel::CancelToken;
     use objc2_core_graphics::CGBitmapContextCreateImage;
     use std::path::PathBuf;
 
@@ -447,6 +480,8 @@ mod tests {
             properties: Option<&CFDictionary>,
         );
         fn CGImageDestinationFinalize(idst: &CFType) -> bool;
+
+        static kCGImagePropertyTIFFDateTime: &'static CFString;
     }
 
     /// ImageIO loads its private codecs by leaf name through `DYLD_LIBRARY_PATH`, so a directory
@@ -799,6 +834,156 @@ mod tests {
             decode_file(&missing.0, &DecodeOptions::new(8).cancel(token)).map(|_| ()),
             Err(PhotoError::Cancelled)
         );
+    }
+
+    /// Properties holding an EXIF and a TIFF dictionary with the given entries.
+    fn exif_properties(
+        exif: &[(&CFString, &CFType)],
+        tiff: &[(&CFString, &CFType)],
+    ) -> CFRetained<Properties> {
+        let dict = |entries: &[(&CFString, &CFType)]| {
+            let keys: Vec<&CFString> = entries.iter().map(|(k, _)| *k).collect();
+            let values: Vec<&CFType> = entries.iter().map(|(_, v)| *v).collect();
+            CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
+        };
+        let (exif, tiff) = (dict(exif), dict(tiff));
+        // SAFETY: reading ImageIO constant keys.
+        let keys: [&CFString; 2] = unsafe {
+            [
+                kCGImagePropertyExifDictionary,
+                kCGImagePropertyTIFFDictionary,
+            ]
+        };
+        let values: [&CFType; 2] = [&exif, &tiff];
+        CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
+    }
+
+    #[test]
+    fn capture_time_comes_only_from_the_original_capture_tag() {
+        let modified = CFString::from_str("2025:01:02 03:04:05");
+        let original = CFString::from_str("2024:05:06 07:08:09");
+        let make = CFString::from_str("Frust");
+        // SAFETY (every `unsafe` read here): ImageIO constant keys.
+        let (date_time, date_time_original, make_key) = unsafe {
+            (
+                kCGImagePropertyTIFFDateTime,
+                kCGImagePropertyExifDateTimeOriginal,
+                kCGImagePropertyTIFFMake,
+            )
+        };
+
+        // Only the TIFF (last-modified) time: no capture time.
+        let props = exif_properties(&[], &[(date_time, &modified), (make_key, &make)]);
+        let exif = read_exif(&props).expect("the make is still read");
+        assert_eq!(exif.capture_time, None);
+        assert_eq!(exif.camera_make.as_deref(), Some("Frust"));
+        // Nothing but the TIFF time: no EXIF at all.
+        assert_eq!(
+            read_exif(&exif_properties(&[], &[(date_time, &modified)])),
+            None
+        );
+
+        // Both: the original wins.
+        let props = exif_properties(
+            &[(date_time_original, &original)],
+            &[(date_time, &modified)],
+        );
+        assert_eq!(
+            read_exif(&props).and_then(|e| e.capture_time).as_deref(),
+            Some("2024:05:06 07:08:09")
+        );
+    }
+
+    #[test]
+    fn zero_negative_and_non_finite_measures_are_absent() {
+        // SAFETY (every `unsafe` read here): ImageIO constant keys.
+        let (iso_key, exposure_key, f_key, focal_key, lens_key) = unsafe {
+            (
+                kCGImagePropertyExifISOSpeedRatings,
+                kCGImagePropertyExifExposureTime,
+                kCGImagePropertyExifFNumber,
+                kCGImagePropertyExifFocalLength,
+                kCGImagePropertyExifLensModel,
+            )
+        };
+        let lens = CFString::from_str("Fixture lens");
+        for bad in [0.0, -2.0, f64::INFINITY, 0.2] {
+            let iso_value = CFNumber::new_f64(bad);
+            let iso = CFArray::<CFNumber>::from_objects(&[&iso_value]);
+            let value = CFNumber::new_f64(if bad == 0.2 { 0.0 } else { bad });
+            let props = exif_properties(
+                &[
+                    (iso_key, &iso),
+                    (exposure_key, &value),
+                    (f_key, &value),
+                    (focal_key, &value),
+                    (lens_key, &lens),
+                ],
+                &[],
+            );
+            let exif = read_exif(&props).expect("the lens is still read");
+            // 0.2 rounds to an ISO of 0, which is absent too.
+            assert_eq!(exif.iso, None, "{bad}");
+            assert_eq!(exif.exposure_seconds, None, "{bad}");
+            assert_eq!(exif.aperture, None, "{bad}");
+            assert_eq!(exif.focal_length_mm, None, "{bad}");
+            assert_eq!(exif.lens.as_deref(), Some("Fixture lens"));
+        }
+
+        // A scalar (not array) ISO and positive measures are kept.
+        let iso = CFNumber::new_i32(100);
+        let exposure = CFNumber::new_f64(0.5);
+        let props = exif_properties(&[(iso_key, &iso), (exposure_key, &exposure)], &[]);
+        let exif = read_exif(&props).expect("exif");
+        assert_eq!(exif.iso, Some(100));
+        assert_eq!(exif.exposure_seconds, Some(0.5));
+    }
+
+    // A real file cannot reach the ceiling in a host test: ImageIO itself refuses a JPEG header
+    // of 16384 x 16384 or more as undecodable. This test and the next drive the arm's own checks
+    // with the sizes a decoder would report.
+    #[test]
+    fn an_output_over_the_cap_or_the_ceiling_is_refused_before_allocating() {
+        assert_eq!(checked_output(400, 300, 400), Ok((400, 300, 400 * 300 * 4)));
+        assert_eq!(checked_output(0, 300, 400), Err(undecodable()));
+        assert!(matches!(
+            checked_output(401, 300, 400),
+            Err(PhotoError::Platform(_))
+        ));
+        assert!(matches!(
+            checked_output(usize::MAX, 1, u32::MAX),
+            Err(PhotoError::Platform(_))
+        ));
+        // Within the cap but over the byte ceiling: refused, never allocated.
+        assert!(matches!(
+            checked_output(40_000, 40_000, 40_000),
+            Err(PhotoError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn an_oversized_request_is_refused_before_the_decode() {
+        let info = |w, h| SourceInfo {
+            width: Some(w),
+            height: Some(h),
+            orientation: 1,
+            exif: None,
+        };
+        // 60000 x 60000 capped at 60000 needs 14.4 GB: refused from the header alone.
+        assert!(matches!(
+            info(60_000, 60_000).check_capped_len(60_000),
+            Err(PhotoError::InvalidRequest { .. })
+        ));
+        // The same source capped near the display size is fine.
+        assert_eq!(info(60_000, 60_000).check_capped_len(2048), Ok(()));
+        // A long, thin source: the short side scales with the long one.
+        assert_eq!(info(100_000, 10).check_capped_len(60_000), Ok(()));
+        // An unknown size is left to the post-decode check.
+        let unknown = SourceInfo {
+            orientation: 1,
+            ..SourceInfo::default()
+        };
+        assert_eq!(unknown.check_capped_len(60_000), Ok(()));
     }
 
     #[test]

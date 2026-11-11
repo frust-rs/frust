@@ -473,7 +473,8 @@ fn anchor_window(mtm: MainThreadMarker) -> Option<Retained<UIWindow>> {
     fallback
 }
 
-// Decode: the shared ImageIO decoder, after the same main-thread refusal as browsing (a
+// Decode: the shared ImageIO decoder. The crate root's shared precheck (a cancelled token, a
+// zero cap) has already run; the main-thread refusal follows, as for browsing (a
 // full-resolution decode can take long enough to stall the UI).
 #[cfg(feature = "decode")]
 pub(crate) fn decode_file(

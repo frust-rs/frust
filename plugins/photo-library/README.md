@@ -92,7 +92,7 @@ TUI's Add Plugin `decode` option, which also links `ImageIO` on iOS) `PhotoLibra
 &DecodeOptions)` decodes an image at full resolution, HEIC included, into a `DecodedImage`: straight-alpha
 RGBA8 (ready for `ImageSource::from_rgba8`), its size and the source size, an `ImageColorSpace` and optional
 `ExifData`. `decode_asset(&AssetId, &DecodeOptions, &ExportOptions)` (also needs `library`) exports an asset,
-decodes it and deletes the exported file.
+decodes it and deletes the exported file, even when the decode fails, is cancelled or panics.
 
 - `DecodeOptions::new(max_dimension)` has no uncapped form: larger images are downscaled to fit, and zero is
   `PhotoError::InvalidRequest`. `.srgb()` converts to sRGB (Display P3 is kept for wide-gamut images otherwise);
@@ -103,9 +103,18 @@ decodes it and deletes the exported file.
   `photo-library-android-heif-device-optional`). A file truncated inside its pixel data decodes with the missing
   part blank on iOS and macOS (`photo-library-apple-decode-truncated-pixels`). Without the feature both calls
   return `PhotoError::FeatureDisabled`.
-- Calls block and refuse the mobile UI thread (`PhotoError::UiThread`); macOS runs on any thread. A full-size
-  decode is large (a 48 MP image is about 192 MB of RGBA8, and on Android the platform bitmap is held beside
-  it), so cap `max_dimension` to what you display.
+- Calls block. A shared precheck runs first on every platform (a cancelled token is `PhotoError::Cancelled`, a
+  zero cap `PhotoError::InvalidRequest`); the UI-thread refusal follows, so iOS and Android return
+  `PhotoError::UiThread` on their UI thread, while macOS decodes on the calling thread and does not refuse the main
+  one. A missing file is `PhotoError::NotFound` everywhere (a plain path or a content URI on Android).
+- `max_dimension` bounds the returned image and its buffer, not the platform's own decode work, which reads the
+  whole file (on Android the platform bitmap is held beside the buffer). Every buffer is also held under a byte
+  ceiling of `i32::MAX` bytes (just under 2 GiB): a capped image that would need more is
+  `PhotoError::InvalidRequest` before anything is allocated, and an allocation the system refuses is an error,
+  not an abort. A full-size decode is large (a 48 MP image is about 192 MB of RGBA8), so for an untrusted file
+  cap `max_dimension` near the size you display.
+- `ExifData::capture_time` is EXIF `DateTimeOriginal` only, never the last-modified TIFF `DateTime`; an ISO,
+  exposure, aperture or focal length recorded as zero or negative is `None`.
 
 ```rust
 use frust::{
