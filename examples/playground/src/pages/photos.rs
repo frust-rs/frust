@@ -3222,6 +3222,12 @@ impl Component for ChangesPanel {
 /// The shared-preferences key holding the picked folder's grant token.
 pub(super) const FOLDER_TOKEN_KEY: &str = "playground.folder_token";
 
+/// The shared-preferences key holding the first scanned file's relative path, beside the token.
+pub(super) const FOLDER_ENTRY_PATH_KEY: &str = "playground.folder_entry_path";
+
+/// A relative path no folder holds, for the missing-path control.
+const MISSING_ENTRY_PATH: &str = "frust-playground-missing/no-such-file.bin";
+
 /// Files per scan page; **Load more** fetches the next page.
 const FOLDER_PAGE: u32 = 50;
 
@@ -3256,6 +3262,10 @@ enum FoldersAction {
         recursive: bool,
     },
     Release,
+    /// Look up the stored first-file path through `FolderGrant::entry`.
+    OpenStored,
+    /// Look up a path that cannot exist through `FolderGrant::entry`.
+    OpenMissing,
 }
 
 /// What a background step produced, applied to the signals by the task future.
@@ -3393,6 +3403,7 @@ fn scan_step(
 fn release_step(prefs: &SharedPreferences, grants: &GrantCell) -> FoldersStep {
     let grant = grants.lock().expect("grant cell poisoned").take();
     let _ = prefs.remove(FOLDER_TOKEN_KEY);
+    let _ = prefs.remove(FOLDER_ENTRY_PATH_KEY);
     match grant.map(Arc::try_unwrap) {
         None => FoldersStep::cleared("No folder to release."),
         Some(Ok(grant)) => {
@@ -3400,6 +3411,50 @@ fn release_step(prefs: &SharedPreferences, grants: &GrantCell) -> FoldersStep {
             FoldersStep::cleared("Released the folder and forgot its token.")
         }
         Some(Err(_)) => FoldersStep::cleared("Forgot the folder token (a scan still held it)."),
+    }
+}
+
+/// Stores the first file of a first scan page, so a later launch can look it up by path.
+fn remember_first_path(prefs: &SharedPreferences, step: &FoldersStep) {
+    if let FoldersStep::Page {
+        page, offset: 0, ..
+    } = step
+        && let Some(first) = page.items.first()
+    {
+        let _ = prefs.set_string(FOLDER_ENTRY_PATH_KEY, &first.entry.relative_path);
+    }
+}
+
+/// Looks `path` up in the held grant, restoring the stored one first when none is held
+/// (call inside `spawn_blocking`): `found <name> <n> bytes`, `not found`, or the error's
+/// Debug name.
+fn open_path_step(prefs: &SharedPreferences, grants: &GrantCell, path: &str) -> FoldersStep {
+    let held = grants.lock().expect("grant cell poisoned").is_some();
+    if !held {
+        let restored = restore_step(prefs, grants);
+        if grants.lock().expect("grant cell poisoned").is_none() {
+            return restored;
+        }
+    }
+    let grant = grants.lock().expect("grant cell poisoned").clone();
+    let Some(grant) = grant else {
+        return FoldersStep::message("Pick a folder first.");
+    };
+    FoldersStep::message(match grant.entry(path) {
+        Ok(Some(entry)) => match entry.read_to_vec(MAX_PREVIEW_BYTES) {
+            Ok(bytes) => format!("found {} {} bytes", entry.name, bytes.len()),
+            Err(err) => format!("{err:?}"),
+        },
+        Ok(None) => "not found".to_string(),
+        Err(err) => format!("{err:?}"),
+    })
+}
+
+/// The stored path's lookup, or a hint when nothing was scanned yet.
+fn open_stored_step(prefs: &SharedPreferences, grants: &GrantCell) -> FoldersStep {
+    match prefs.get_string(FOLDER_ENTRY_PATH_KEY) {
+        Some(path) => open_path_step(prefs, grants, &path),
+        None => FoldersStep::message("No stored path. Scan a folder first."),
     }
 }
 
@@ -3417,8 +3472,14 @@ fn run_folders_action(
     match action {
         FoldersAction::Restore => restore_step(&prefs, grants),
         FoldersAction::Pick => pick_step(&prefs, grants, cancel, sink),
-        FoldersAction::Scan { offset, recursive } => scan_step(grants, offset, recursive, cancel),
+        FoldersAction::Scan { offset, recursive } => {
+            let step = scan_step(grants, offset, recursive, cancel);
+            remember_first_path(&prefs, &step);
+            step
+        }
         FoldersAction::Release => release_step(&prefs, grants),
+        FoldersAction::OpenStored => open_stored_step(&prefs, grants),
+        FoldersAction::OpenMissing => open_path_step(&prefs, grants, MISSING_ENTRY_PATH),
     }
 }
 
@@ -3572,6 +3633,7 @@ fn start_phase(action: FoldersAction) -> &'static str {
         FoldersAction::Pick => "Waiting for the picker\u{2026}",
         FoldersAction::Scan { .. } => "Scanning the folder\u{2026}",
         FoldersAction::Release => "Releasing the folder\u{2026}",
+        FoldersAction::OpenStored | FoldersAction::OpenMissing => "Looking up the path\u{2026}",
     }
 }
 
@@ -3702,7 +3764,9 @@ impl Component for FoldersPanel {
                     "Pick folder keeps a grant on a folder and stores its token in shared \
                      preferences; the next launch restores it (or asks to pick again when \
                      access was lost). Scan lists its images and videos newest first and \
-                     decodes the first eight images. Release gives the folder up.",
+                     decodes the first eight images and remembers the first file's path. Open stored \
+                     path looks that path up in the folder; Open missing path looks up one that \
+                     cannot exist. Release gives the folder up.",
                 )
                 .size(11.0)
                 .color(muted),
@@ -3736,6 +3800,20 @@ impl Component for FoldersPanel {
                         state,
                         busy,
                         !holds,
+                    ))
+                    .child(press_button(
+                        "Open stored path",
+                        FoldersAction::OpenStored,
+                        state,
+                        busy,
+                        false,
+                    ))
+                    .child(press_button(
+                        "Open missing path",
+                        FoldersAction::OpenMissing,
+                        state,
+                        busy,
+                        false,
                     ))
                     .child(folders_cancel_button(state, busy)),
             )
@@ -4445,6 +4523,43 @@ mod tests {
         cancel.cancel();
         let step = scan_step(&grants, 0, false, &cancel);
         assert_eq!(message_of(&step), "Cancelled");
+    }
+
+    #[test]
+    fn a_scan_remembers_the_first_path_and_open_stored_finds_it() {
+        let dir = Scratch::new("open-stored");
+        std::fs::write(dir.0.join("a.png"), b"xyz").unwrap();
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        restore_step(&prefs, &grants);
+        let step = scan_step(&grants, 0, false, &FolderCancel::new());
+        remember_first_path(&prefs, &step);
+        assert_eq!(
+            prefs.get_string(FOLDER_ENTRY_PATH_KEY).as_deref(),
+            Some("a.png")
+        );
+        // A fresh cell: the grant is restored from the token first.
+        let step = open_stored_step(&prefs, &no_grants());
+        assert_eq!(message_of(&step), "found a.png 3 bytes");
+    }
+
+    #[test]
+    fn open_missing_says_not_found_and_open_stored_without_a_path_hints() {
+        let dir = Scratch::new("open-missing");
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
+            .unwrap();
+        let grants = no_grants();
+        let step = open_path_step(&prefs, &grants, MISSING_ENTRY_PATH);
+        assert_eq!(message_of(&step), "not found");
+        let step = open_stored_step(&prefs, &grants);
+        assert!(message_of(&step).starts_with("No stored path"));
+        let step = open_path_step(&prefs, &grants, "../up");
+        assert!(message_of(&step).starts_with("Io"), "{}", message_of(&step));
     }
 
     #[test]

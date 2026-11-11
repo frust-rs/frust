@@ -26,6 +26,10 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `FolderGrant::entry(relative_path)` in `frust-file-dialogs`: reopen one file of a granted folder by
+  its stored relative path without listing the folder. It returns the entry, or `None` for a missing
+  file or a directory. On Android each path segment costs one directory listing, so keep the entry
+  from a listing when reading many files.
 - `ListView::item_extent_of(|index| px)` and `extent_generation(u64)`: declare every row's extent up
   front, for a list whose row heights the app already knows. The content extent, every row's position
   and a `jump_to` to any offset are exact from the first frame. The list keeps a cached prefix sum

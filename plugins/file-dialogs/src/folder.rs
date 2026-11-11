@@ -69,6 +69,31 @@ impl FolderGrant {
         backend::list_folder(self, &options.normalized())
     }
 
+    /// Looks up one file by its path from the folder: the same `/`-separated string a
+    /// listing puts in [`FolderEntry::relative_path`]. Blocks.
+    ///
+    /// Returns the file's entry, readable through [`FolderEntry::read_to_vec`] and
+    /// [`FolderEntry::copy_to`] like a listed one, or `Ok(None)` when there is no regular
+    /// file at that path: nothing there, a folder, a link at any segment (links are neither
+    /// followed nor listed), or a hidden segment (a name starting with `.`, which a listing
+    /// skips by default). Matching is exact and case-sensitive, also on a filesystem that
+    /// is not.
+    ///
+    /// A path a listing cannot produce is refused with [`FileDialogError::Io`] before any
+    /// platform call: empty, starting with `/`, holding `\` or NUL, or with a segment that is
+    /// empty, `.` or `..`. [`FileDialogError::AccessLost`] means the grant is no longer
+    /// honoured, as for [`FolderGrant::list`]; like it, this refuses the Android and iOS UI
+    /// thread with [`FileDialogError::UiThread`].
+    ///
+    /// On Android each segment of the path costs one listing of a folder, and where a folder
+    /// holds two documents with the same display name, the first in name order wins.
+    pub fn entry(&self, relative_path: &str) -> Result<Option<FolderEntry>, FileDialogError> {
+        match entry_segments(relative_path)? {
+            Some(segments) => backend::resolve_entry(self, &segments),
+            None => Ok(None),
+        }
+    }
+
     /// Gives up the access this grant holds.
     ///
     /// On iOS this leaves the security scope. Every [`FolderEntry`] this grant
@@ -264,6 +289,35 @@ impl FolderEntry {
     }
 }
 
+/// The segments of a [`FolderGrant::entry`] path, checked before any platform call.
+///
+/// `Err(Io)` for a path no listing can produce: empty, starting with `/`, holding `\` or
+/// NUL, or with a segment the listing's own name rule ([`is_safe_entry_name`]) refuses.
+/// `Ok(None)` when every segment is safe but one is hidden (starts with `.`), since a
+/// listing skips those. Otherwise the segments, in order.
+fn entry_segments(relative_path: &str) -> Result<Option<Vec<&str>>, FileDialogError> {
+    let refused = relative_path.is_empty()
+        || relative_path.starts_with('/')
+        || relative_path.contains(['\\', '\0']);
+    let segments: Vec<&str> = relative_path.split('/').collect();
+    if refused || !segments.iter().all(|segment| is_safe_entry_name(segment)) {
+        log::warn!("frust-file-dialogs: refusing an entry path a listing cannot produce");
+        return Err(FileDialogError::Io);
+    }
+    if segments.iter().any(|segment| segment.starts_with('.')) {
+        return Ok(None);
+    }
+    Ok(Some(segments))
+}
+
+/// Whether `name` is one path component by the rule the Android listing applies to a
+/// provider's display names (`isSafeEntryName` in the Kotlin host): not empty, `.` or `..`
+/// once trimmed, and free of `/`, `\` and NUL.
+fn is_safe_entry_name(name: &str) -> bool {
+    let trimmed = name.trim();
+    !(trimmed.is_empty() || trimmed == "." || trimmed == "..") && !name.contains(['/', '\\', '\0'])
+}
+
 /// True for a bare file name; a name from a document provider is untrusted and
 /// must not be able to climb out of the destination directory.
 fn is_single_component(name: &str) -> bool {
@@ -417,6 +471,72 @@ mod tests {
         let e = entry("missing.png", dir.path().join("missing.png"));
         assert_eq!(e.copy_to(&out), Err(FileDialogError::Io));
         assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn entry_paths_a_listing_cannot_produce_are_refused() {
+        for path in [
+            "",
+            "/",
+            "/a.txt",
+            "/sub/a.txt",
+            "a\\b.txt",
+            "sub\\a.txt",
+            "a\0.txt",
+            "sub/\0",
+            "a//b.txt",
+            "sub/",
+            "/sub/",
+            ".",
+            "..",
+            "./a.txt",
+            "../a.txt",
+            "sub/./a.txt",
+            "sub/../a.txt",
+            "sub/..",
+            " ",
+            "sub/ /a.txt",
+            " .. ",
+            "sub/ . /a.txt",
+            ".hidden/..",
+        ] {
+            assert_eq!(
+                entry_segments(path),
+                Err(FileDialogError::Io),
+                "{path:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn entry_paths_with_a_hidden_segment_find_nothing() {
+        for path in [".env", ".cache/a.txt", "sub/.hidden.txt", "sub/.deep/a.txt"] {
+            assert_eq!(entry_segments(path), Ok(None), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn entry_paths_a_listing_produces_are_split_into_segments() {
+        for (path, expected) in [
+            ("a.txt", vec!["a.txt"]),
+            ("noext", vec!["noext"]),
+            ("sub/deep/two.png", vec!["sub", "deep", "two.png"]),
+            ("with space.txt", vec!["with space.txt"]),
+            ("a..b/c.d.e", vec!["a..b", "c.d.e"]),
+            ("ünï/文件.txt", vec!["ünï", "文件.txt"]),
+        ] {
+            assert_eq!(entry_segments(path), Ok(Some(expected)), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn the_entry_name_rule_matches_the_listing() {
+        for name in ["a", "a.txt", ".env", "...", " a "] {
+            assert!(is_safe_entry_name(name), "{name:?}");
+        }
+        for name in ["", " ", ".", "..", " .. ", "a/b", "a\\b", "a\0b"] {
+            assert!(!is_safe_entry_name(name), "{name:?}");
+        }
     }
 
     #[test]
