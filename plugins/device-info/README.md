@@ -15,7 +15,7 @@ alongside `frust`; the `frust` facade does not re-export it.
 
 ## 1. Add the dependency
 
-Add `device-info` from the `frust` TUI's Add Plugin dialog, or add the dependency yourself:
+Add `device-info` from the `frust` TUI's Add Plugin dialog, or from a shell with `frust plugin add device-info`, or add the dependency yourself:
 
 ```toml
 # app Cargo.toml — [dependencies]

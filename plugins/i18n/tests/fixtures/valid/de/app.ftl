@@ -9,3 +9,9 @@ cart-items =
         [one] ein Artikel
        *[other] { $count } Artikel
     }
+
+editor-notice = Arbeit { $working } von { $full }
+
+unused-pair = Ungenutzt { $left } und { $right }
+
+pass-through = Durchgereicht { $args }

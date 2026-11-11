@@ -39,6 +39,7 @@ icu_datetime = { workspace = true, optional = true }
 icu_plurals = { workspace = true, optional = true }
 icu_list = { workspace = true, optional = true }
 jiff = { workspace = true, optional = true }
+iana-time-zone = { workspace = true, optional = true }
 icu_experimental = { workspace = true, optional = true }
 icu_locale_core = { workspace = true, optional = true }
 tinystr = { workspace = true, optional = true }
@@ -64,6 +65,7 @@ formatting = [
     "dep:icu_plurals",
     "dep:icu_list",
     "dep:jiff",
+    "dep:iana-time-zone",
     "dep:icu_experimental",
     "dep:icu_locale_core",
     "dep:tinystr",

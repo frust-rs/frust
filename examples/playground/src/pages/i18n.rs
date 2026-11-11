@@ -173,6 +173,11 @@ impl Component for I18nDemoPage {
         let active = i18n.locale();
         let format_locale = i18n.format_locale();
 
+        // Tracked read: a resume (or any lifecycle step) rebuilds this page,
+        // which re-reads the device zone below.
+        let _lifecycle = frust::app_lifecycle().state();
+        let device_zone = Self::device_zone_line(&format_locale);
+
         let plural_count = state.plural_count.get();
         let theme_choice = state.theme_choice.get();
         let muted = muted();
@@ -195,6 +200,9 @@ impl Component for I18nDemoPage {
             .child(text(format!("Message locale: {active}")).size(12.0))
             .child(text(format!("Format locale: {format_locale}")).size(12.0))
             .child(switcher_row(&i18n, &active))
+            .child(SizedBox(None, Some(SECTION_GAP)))
+            .child(section_heading("Device time zone"))
+            .child(text(device_zone).size(12.0))
             .child(SizedBox(None, Some(SECTION_GAP)))
             .child(section_heading("Plural — cart-items"))
             .child(plural_stepper_row(state.plural_count, plural_count))
@@ -241,6 +249,27 @@ impl Component for I18nDemoPage {
             .cross_axis(CrossAxisAlignment::Start);
 
         Padding(EdgeInsets::all(CONTENT_PAD), body)
+    }
+}
+
+impl I18nDemoPage {
+    /// The device zone and today's local date in it, read fresh from the
+    /// platform on every call (so a zone change shows up on the next rebuild).
+    fn device_zone_line(format_locale: &Locale) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(0));
+        // One zone read serves both the label and the offset, so the two
+        // always describe the same zone.
+        let zone = fmt::device_time_zone();
+        let zone_label = zone.as_deref().unwrap_or("unknown");
+        let local_date = zone
+            .as_deref()
+            .and_then(|zone| fmt::zone_offset_seconds(now, zone).ok())
+            .and_then(|offset| fmt::civil_at_offset(now, offset).ok())
+            .and_then(|(date, _)| fmt::date(format_locale, date, DateLength::Medium).ok())
+            .unwrap_or_else(|| "unavailable".to_owned());
+        format!("zone: {zone_label}  |  local date: {local_date}")
     }
 }
 

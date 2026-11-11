@@ -77,8 +77,8 @@ pub use relative::{RelativeDayStyle, relative_day, relative_day_civil};
 pub use units::{Unit, UnitStyle, duration_minutes, units, units_by_id, units_decimal};
 pub use zone::{
     civil_at_offset, date_in_zone, date_in_zone_with, datetime_at_offset, datetime_at_offset_with,
-    datetime_in_zone, datetime_in_zone_with, time_in_zone, time_in_zone_with, zone_offset_seconds,
-    zoned_civil,
+    datetime_in_zone, datetime_in_zone_with, device_offset_seconds, device_time_zone, time_in_zone,
+    time_in_zone_with, zone_offset_seconds, zoned_civil,
 };
 
 /// A calendar date with no time zone, in the proleptic Gregorian calendar

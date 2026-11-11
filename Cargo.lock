@@ -2493,6 +2493,7 @@ dependencies = [
  "frust-reactive",
  "frust-shared-preferences",
  "frust-ui",
+ "iana-time-zone",
  "icu_datetime",
  "icu_decimal",
  "icu_experimental",

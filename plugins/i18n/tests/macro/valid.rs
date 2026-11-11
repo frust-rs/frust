@@ -14,6 +14,16 @@ fn main() {
         "Hallo, Ada!"
     );
     assert_eq!(keys::cart_items(&plain.with_chain(&chain), 5), "5 Artikel");
+    assert_eq!(
+        keys::editor_notice(
+            &plain.with_chain(&chain),
+            keys::EditorNoticeArgs {
+                full: 50,
+                working: 60
+            }
+        ),
+        "Arbeit 60 von 50"
+    );
     // `only-en` lives in the fallback alone and still resolves.
     assert_eq!(keys::only_en(&plain.with_chain(&chain)), "English only");
 

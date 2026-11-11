@@ -28,6 +28,10 @@
 //!   (`save =` + `.tooltip = …`) contributes no function, and no function is
 //!   generated *for* an attribute; attributes stay reachable through the
 //!   dynamic `key.attribute` lookup.
+//! - **Named arguments from two variables up.** Zero or one variable keeps a
+//!   plain signature; two or more take a generated `<PascalKey>Args` struct
+//!   (one generic field per variable), so a swapped pair is a compile error
+//!   rather than a silently wrong string.
 //! - **Direct variable references only.** Variables a message reaches
 //!   indirectly, through a message reference (`{ other-message }`), are not
 //!   part of its signature — Fluent's own tooling doesn't chase them either,
@@ -163,6 +167,7 @@ pub fn missing(
 /// nobody wrote.
 pub fn keys_module(messages: &[Message], span: Span) -> Result<TokenStream, syn::Error> {
     let mut taken: BTreeMap<String, &str> = BTreeMap::new();
+    let mut args_taken: BTreeMap<String, &str> = BTreeMap::new();
     let mut failure: Option<syn::Error> = None;
     let mut functions = Vec::with_capacity(messages.len());
 
@@ -176,6 +181,23 @@ pub fn keys_module(messages: &[Message], span: Span) -> Result<TokenStream, syn:
                     format!(
                         "`locales!`: messages `{previous}` and `{}` both name the generated \
                          function `keys::{name}` — rename one",
+                        message.key
+                    ),
+                ),
+            );
+            continue;
+        }
+        let args_name = pascal_for(&name);
+        if message.vars.len() > 1
+            && let Some(previous) = args_taken.insert(args_name.clone(), &message.key)
+        {
+            combine(
+                &mut failure,
+                syn::Error::new(
+                    span,
+                    format!(
+                        "`locales!`: messages `{previous}` and `{}` both name the generated \
+                         struct `keys::{args_name}Args` — rename one",
                         message.key
                     ),
                 ),
@@ -198,8 +220,11 @@ pub fn keys_module(messages: &[Message], span: Span) -> Result<TokenStream, syn:
         ///
         /// Each takes the resolver to format through — an
         /// `Engine::with_chain` pairing, or any other `Resolve`
-        /// implementation — plus one argument per `$variable` the message
-        /// references, and returns the formatted string. A message that
+        /// implementation — and returns the formatted string. A message
+        /// with one `$variable` takes it as a second parameter; a message
+        /// with two or more takes a single generated `<Key>Args` struct
+        /// with one named field per variable, so two values of the same
+        /// type cannot be transposed at a call site. A message that
         /// cannot be resolved logs a warning and renders as its own key,
         /// so a translation gap degrades a label rather than a screen.
         pub mod keys {
@@ -208,7 +233,7 @@ pub fn keys_module(messages: &[Message], span: Span) -> Result<TokenStream, syn:
             /// The single resolution path every generated function takes.
             #[doc(hidden)]
             #[allow(dead_code)]
-            fn resolve_or_key(
+            fn __frust_resolve_or_key(
                 resolver: &impl ::frust_i18n::Resolve,
                 key: &str,
                 args: ::core::option::Option<
@@ -233,11 +258,13 @@ fn function(message: &Message, name: &str, span: Span) -> Result<TokenStream, sy
     let ident = Ident::new(name, span);
     let doc = format!("Formats the `{key}` message.");
 
-    // A Fluent identifier always starts with a letter, so no argument can
-    // ever be named `_resolver` — which is what makes the resolver
-    // parameter's name collision-proof against a `$variable` of any name.
-    let mut params = Vec::with_capacity(message.vars.len());
-    let mut sets = Vec::with_capacity(message.vars.len());
+    // A Fluent identifier always starts with a letter, so the snake-casing of
+    // a `$variable` can never start with an underscore. Every name the
+    // generated body introduces itself — the `_resolver` parameter, the
+    // `__frust_args` local, the `__frust_arguments` struct parameter and the
+    // `__frust_resolve_or_key` helper — starts with one, which is what makes
+    // them collision-proof against a `$variable` of any name.
+    let mut fields = Vec::with_capacity(message.vars.len());
     let mut taken: BTreeMap<String, &str> = BTreeMap::new();
     for var in &message.vars {
         let name = ident_for(var);
@@ -250,37 +277,91 @@ fn function(message: &Message, name: &str, span: Span) -> Result<TokenStream, sy
                 ),
             ));
         }
-        let param = Ident::new(&name, span);
-        params.push(quote! {
-            #param: impl ::core::convert::Into<
-                ::frust_i18n::__private::fluent_bundle::FluentValue<'a>,
-            >
-        });
-        sets.push(quote! { args.set(#var, #param); });
+        fields.push((Ident::new(&name, span), var.as_str()));
     }
 
-    if params.is_empty() {
+    if fields.is_empty() {
         return Ok(quote! {
             #[doc = #doc]
             #[allow(dead_code)]
             pub fn #ident(_resolver: &impl ::frust_i18n::Resolve) -> ::std::string::String {
-                resolve_or_key(_resolver, #key, ::core::option::Option::None)
+                __frust_resolve_or_key(_resolver, #key, ::core::option::Option::None)
             }
         });
     }
 
+    let value = quote! {
+        ::core::convert::Into<::frust_i18n::__private::fluent_bundle::FluentValue<'a>>
+    };
+
+    if let [(param, var)] = fields.as_slice() {
+        return Ok(quote! {
+            #[doc = #doc]
+            #[allow(dead_code)]
+            pub fn #ident<'a>(
+                _resolver: &impl ::frust_i18n::Resolve,
+                #param: impl #value,
+            ) -> ::std::string::String {
+                let mut __frust_args = ::frust_i18n::__private::fluent_bundle::FluentArgs::new();
+                __frust_args.set(#var, #param);
+                __frust_resolve_or_key(_resolver, #key, ::core::option::Option::Some(&__frust_args))
+            }
+        });
+    }
+
+    // Two or more variables: a struct with one named field each, so a call
+    // site cannot transpose two values of the same type.
+    let args_ident = Ident::new(&format!("{}Args", pascal_for(name)), span);
+    let args_doc = format!("The named arguments of the `{key}` message.");
+    let generics: Vec<Ident> = (0..fields.len())
+        .map(|index| Ident::new(&format!("T{index}"), span))
+        .collect();
+    let field_defs = fields.iter().zip(&generics).map(|((field, var), generic)| {
+        let field_doc = format!("The `${var}` value.");
+        quote! {
+            #[doc = #field_doc]
+            pub #field: #generic
+        }
+    });
+    let bounds = generics.iter().map(|generic| quote! { #generic: #value });
+    let sets = fields.iter().map(|(field, var)| {
+        quote! { __frust_args.set(#var, __frust_arguments.#field); }
+    });
+
     Ok(quote! {
+        #[doc = #args_doc]
+        #[allow(dead_code)]
+        pub struct #args_ident<#(#generics),*> {
+            #(#field_defs,)*
+        }
+
         #[doc = #doc]
-        #[allow(dead_code, clippy::too_many_arguments)]
-        pub fn #ident<'a>(
+        #[allow(dead_code)]
+        pub fn #ident<'a, #(#bounds),*>(
             _resolver: &impl ::frust_i18n::Resolve,
-            #(#params),*
+            __frust_arguments: #args_ident<#(#generics),*>,
         ) -> ::std::string::String {
-            let mut args = ::frust_i18n::__private::fluent_bundle::FluentArgs::new();
+            let mut __frust_args = ::frust_i18n::__private::fluent_bundle::FluentArgs::new();
             #(#sets)*
-            resolve_or_key(_resolver, #key, ::core::option::Option::Some(&args))
+            __frust_resolve_or_key(_resolver, #key, ::core::option::Option::Some(&__frust_args))
         }
     })
+}
+
+/// Pascal-cases an already snake-cased identifier (`editor_notice` becomes
+/// `EditorNotice`; a keyword's trailing underscore is dropped).
+fn pascal_for(snake: &str) -> String {
+    snake
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 /// Snake-cases a Fluent identifier into a Rust one.
@@ -381,6 +462,13 @@ mod tests {
         assert_eq!(ident_for("hello"), "hello");
         assert_eq!(ident_for("HTTPStatus"), "http_status");
         assert_eq!(ident_for("already_snake"), "already_snake");
+    }
+
+    #[test]
+    fn pascal_cases_a_snake_identifier() {
+        assert_eq!(pascal_for("editor_notice"), "EditorNotice");
+        assert_eq!(pascal_for("type_"), "Type");
+        assert_eq!(pascal_for("hello"), "Hello");
     }
 
     #[test]

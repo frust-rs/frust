@@ -72,6 +72,41 @@ fn a_typed_key_selects_a_plural_category() {
 }
 
 #[test]
+fn a_multi_variable_key_binds_each_field_to_its_own_placeholder() {
+    let engine = plain();
+    let chain = engine.negotiate(&[locale("en")]);
+    let resolver = engine.with_chain(&chain);
+
+    let in_order = keys::editor_notice(
+        &resolver,
+        keys::EditorNoticeArgs {
+            working: 60,
+            full: 50,
+        },
+    );
+    let reversed = keys::editor_notice(
+        &resolver,
+        keys::EditorNoticeArgs {
+            full: 50,
+            working: 60,
+        },
+    );
+    assert_eq!(in_order, "Working 60 of 50");
+    assert_eq!(reversed, in_order);
+}
+
+#[test]
+fn a_single_variable_named_args_binds_to_its_placeholder() {
+    let engine = plain();
+    let chain = engine.negotiate(&[locale("en")]);
+
+    assert_eq!(
+        keys::pass_through(&engine.with_chain(&chain), "value"),
+        "Passed value"
+    );
+}
+
+#[test]
 fn a_message_only_the_fallback_has_resolves_through_the_chain() {
     let engine = plain();
     let chain = engine.negotiate(&[locale("de")]);
