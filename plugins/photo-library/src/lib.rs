@@ -454,7 +454,8 @@ fn cached_thumbnail(
     loaded
 }
 
-#[cfg(not(feature = "library"))]
+// `decode_asset` names it with `library` on and `decode` off, too.
+#[cfg(not(all(feature = "library", feature = "decode")))]
 fn library_disabled() -> PhotoError {
     PhotoError::FeatureDisabled { feature: "library" }
 }
