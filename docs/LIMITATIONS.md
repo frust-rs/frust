@@ -8035,7 +8035,7 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 **Applies to**: Android; libraries with tens of thousands of items or more, and an app that persists the token or calls `changes_since` often.
 
-**Workaround**: call `changes_since` from a coalesced wake (`on_library_changed`) off the UI thread rather than on a timer, and store the token in a file or database rather than a preference. The plugin does not coalesce wakes, so an app should coalesce a burst of them before calling `changes_since`; the cost of a call has not been measured on a device.
+**Workaround**: call `changes_since` off the UI thread in answer to `on_library_changed` rather than on a timer, and store the token in a file or database rather than a preference. The plugin does not coalesce wakes, so the app should coalesce a burst of them into one `changes_since` call; the cost of a call has not been measured on a device.
 
 **Why accepted**: the id set is how rows that became visible without being added (a published pending item, a restored item, a widened selection) are reported as inserted, and how deletions are found without `MediaStore.DeletedFiles`.
 

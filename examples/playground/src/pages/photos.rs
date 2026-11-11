@@ -110,7 +110,7 @@ use frust::authoring::Rect;
 use frust::{
     Align, Alignment, AsyncValue, ButtonStyle, ChildKey, Component, EdgeInsets, GestureDetector,
     Get, GetUntracked, Image, ImageFit, ImageSource, ListView, Padding, RwSignal, ScrollbarStyle,
-    Set, SizedBox, Theme, UseTask, View, button, colored_box, column, component,
+    Set, SizedBox, Theme, Update, UseTask, View, button, colored_box, column, component,
     decode_image_async, either, on_cleanup, row, spawn_blocking, stack, text, use_context,
     use_task, wrap,
 };
@@ -3101,14 +3101,20 @@ impl Component for ChangesPanel {
                     let Some(current) = wakes.try_get_untracked() else {
                         return Ok(None);
                     };
+                    // `try_update`: the panel can be torn down between the read above and this
+                    // write, and `set` panics on a disposed signal.
                     let latest = watch.wakes();
-                    if latest != current {
-                        wakes.set(latest);
+                    if latest != current && wakes.try_update(|count| *count = latest).is_none() {
+                        return Ok(None);
                     }
                     let _ = spawn_blocking(move || std::thread::sleep(WAKE_POLL)).await;
                 }
-                if wakes.try_get_untracked().is_some() {
-                    wakes.set(watch.wakes());
+                let latest = watch.wakes();
+                if wakes
+                    .try_get_untracked()
+                    .is_some_and(|current| current != latest)
+                {
+                    let _ = wakes.try_update(|count| *count = latest);
                 }
                 Ok::<Option<String>, JoinFailure>(None)
             }

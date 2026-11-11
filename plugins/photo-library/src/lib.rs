@@ -320,8 +320,8 @@ impl PhotoLibrary {
     ///
     /// Before it returns, a [`LibraryChanges::Delta`] evicts every size of each asset it names
     /// (inserted, updated or deleted) from the thumbnail cache, and a
-    /// [`LibraryChanges::FullRescan`] empties it. A thumbnail still loading when either happens
-    /// is returned to its caller but not cached.
+    /// [`LibraryChanges::FullRescan`] empties it. Any thumbnail still loading when either
+    /// happens, for any asset, is returned to its caller but not cached.
     pub fn changes_since(token: &ChangeToken) -> Result<LibraryChanges, PhotoError> {
         #[cfg(feature = "library")]
         {
