@@ -66,20 +66,30 @@
 //! background step, and the task's value carries it with the source and output sizes, the colour
 //! space and an EXIF summary, so `build` never creates an image and no signal is set inside the
 //! future. A failed decode shows the typed error. **Cancel decode** cancels the decode's token.
+//!
+//! Browse queries with `AssetQuery::with_details`, so each cell badges its content type (a MIME
+//! type on Android, a uniform type identifier on iOS, both mapped by [`type_badge`]) and marks a
+//! favourite. Cells load through `PhotoLibrary::thumbnail_shared` with a [`CancelToken`] their
+//! teardown cancels, and keep one [`ImageSource`] in the task value. The counters line shows
+//! the thumbnails served from the cache and the cancelled requests. **Metadata** reads
+//! `PhotoLibrary::asset_metadata` for the target in its own task, network off unless toggled.
+//! Button rows use `wrap()` so every button stays reachable on a phone width.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use frust::authoring::Rect;
 use frust::{
-    AsyncValue, ButtonStyle, ChildKey, Component, EdgeInsets, GestureDetector, Get, GetUntracked,
-    Image, ImageFit, ImageSource, ListView, Padding, RwSignal, ScrollbarStyle, Set, SizedBox,
-    Theme, UseTask, View, button, colored_box, column, component, decode_image_async, either, row,
-    spawn_blocking, text, use_context, use_task,
+    Align, Alignment, AsyncValue, ButtonStyle, ChildKey, Component, EdgeInsets, GestureDetector,
+    Get, GetUntracked, Image, ImageFit, ImageSource, ListView, Padding, RwSignal, ScrollbarStyle,
+    Set, SizedBox, Theme, UseTask, View, button, colored_box, column, component,
+    decode_image_async, either, on_cleanup, row, spawn_blocking, stack, text, use_context,
+    use_task, wrap,
 };
 use frust_file_dialogs::{
     CancelToken as FolderCancel, FileDialog, FileDialogError, FileProgress, FolderGrant,
@@ -91,8 +101,8 @@ use frust_photo_library::folder::FolderEntry;
 use frust_photo_library::{
     Album, AlbumId, Asset, AssetId, AssetPage, AssetQuery, AssetVersion, CancelToken,
     DecodeOptions, ExifData, ExportOptions, ExportedOriginal, FolderMedia, FolderPage, FolderScan,
-    ImageColorSpace, MediaFilter, MediaKind, PhotoError, PhotoLibrary, PickOptions, PickProgress,
-    PickedItem, SaveRequest, ThumbnailMode, ThumbnailRequest,
+    ImageColorSpace, MediaFilter, MediaKind, MetadataOptions, PhotoError, PhotoLibrary,
+    PickOptions, PickProgress, PickedItem, SaveRequest, Thumbnail, ThumbnailMode, ThumbnailRequest,
 };
 use frust_shared_preferences::SharedPreferences;
 
@@ -666,7 +676,7 @@ impl Component for PickerPanel {
         let busy = matches!(outcome, AsyncValue::Loading(_));
         let progress = state.progress.get();
 
-        let mut filters = row();
+        let mut filters = wrap().spacing(8.0).run_spacing(8.0);
         for (index, (label, _)) in FILTERS.iter().enumerate() {
             let signal = state.filter;
             filters = filters.child(
@@ -676,9 +686,8 @@ impl Component for PickerPanel {
                 .style(selector_style(index == selected_filter))
                 .small(),
             );
-            filters = filters.child(SizedBox(Some(8.0), None));
         }
-        let mut limits = row();
+        let mut limits = wrap().spacing(8.0).run_spacing(8.0);
         for (index, (label, _)) in LIMITS.iter().enumerate() {
             let signal = state.limit;
             limits = limits.child(
@@ -688,7 +697,6 @@ impl Component for PickerPanel {
                 .style(selector_style(index == selected_limit))
                 .small(),
             );
-            limits = limits.child(SizedBox(Some(8.0), None));
         }
 
         let mut paths: Vec<PathBuf> = Vec::new();
@@ -730,9 +738,10 @@ impl Component for PickerPanel {
             .child(
                 text(
                     "Pick runs the system photo picker off the UI thread. The first \
-                     image is previewed (PNG and JPEG decode; HEIC, WebP and GIF show \
-                     a decode error, unless an item with a library asset id previews \
-                     through the native thumbnail first). Share picked sends the files; \
+                     image is previewed (PNG and JPEG decode; HEIC, WebP and GIF fall back \
+                     to the native decode where the platform has one, and an item with a \
+                     library asset id previews through the native thumbnail first). Share \
+                     picked sends the files; \
                      Clear cache removes the copies made on mobile.",
                 )
                 .size(11.0)
@@ -746,13 +755,12 @@ impl Component for PickerPanel {
             .child(limits)
             .child(SizedBox(None, Some(8.0)))
             .child(
-                row()
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
                     .child(pick_button(state, busy))
-                    .child(SizedBox(Some(8.0), None))
                     .child(share_button(state, paths))
-                    .child(SizedBox(Some(8.0), None))
                     .child(clear_button(state, busy))
-                    .child(SizedBox(Some(8.0), None))
                     .child(cancel_button(state, busy)),
             )
             .child(SizedBox(None, Some(8.0)))
@@ -871,10 +879,75 @@ const LIST_VIEWPORT_H: f64 = 340.0;
 /// Album buttons shown before the selector truncates.
 const MAX_ALBUM_BUTTONS: usize = 12;
 
-/// The asset ids loaded so far for the selected album, and the library's total for it.
+/// One grid asset: its id and what its cell shows besides the thumbnail.
+#[derive(Clone, Debug, PartialEq)]
+struct GridAsset {
+    id: AssetId,
+    /// The type badge from the asset's content type; `None` when it is unknown or unmapped.
+    badge: Option<&'static str>,
+    /// Whether the cell shows the favourite mark.
+    favorite: bool,
+}
+
+impl GridAsset {
+    /// The cell data of an asset id and the details of its listing.
+    fn new(id: AssetId, content_type: Option<&str>, is_favorite: Option<bool>) -> Self {
+        Self {
+            badge: type_badge(content_type),
+            favorite: is_favorite == Some(true),
+            id,
+        }
+    }
+
+    /// The cell data of a listed asset. The badge needs the query's details.
+    fn from_asset(asset: Asset) -> Self {
+        Self::new(asset.id, asset.content_type.as_deref(), asset.is_favorite)
+    }
+}
+
+/// The badge of a content type. Android reports a MIME type (`image/heic`) and iOS a uniform
+/// type identifier (`public.heic`); both shapes map to the same badge. `None` for a type the
+/// grid has no badge for.
+fn type_badge(content_type: Option<&str>) -> Option<&'static str> {
+    const RAW_MARKERS: [&str; 10] = [
+        "raw",
+        "dng",
+        "x-sony-arw",
+        "x-canon-cr",
+        "x-nikon-nef",
+        "x-olympus-orf",
+        "x-fuji-raf",
+        "x-panasonic-rw2",
+        "x-pentax-pef",
+        "x-samsung-srw",
+    ];
+    let kind = content_type?.to_ascii_lowercase();
+    let has = |needle: &str| kind.contains(needle);
+    if has("heic") || has("heif") {
+        Some("HEIC")
+    } else if RAW_MARKERS.iter().any(|marker| has(marker)) {
+        Some("RAW")
+    } else if has("jpeg") || has("jpg") {
+        Some("JPEG")
+    } else if has("png") {
+        Some("PNG")
+    } else if has("gif") {
+        Some("GIF")
+    } else if has("webp") {
+        Some("WEBP")
+    } else if has("quicktime") {
+        Some("MOV")
+    } else if has("mp4") || has("mpeg-4") {
+        Some("MP4")
+    } else {
+        None
+    }
+}
+
+/// The assets loaded so far for the selected album, and the library's total for it.
 #[derive(Clone, Default)]
 struct Listing {
-    ids: Arc<Vec<AssetId>>,
+    ids: Arc<Vec<GridAsset>>,
     total: u64,
 }
 
@@ -884,7 +957,7 @@ fn row_count(count: usize) -> usize {
 }
 
 /// The asset ids of list row `row`.
-fn row_ids(ids: &[AssetId], row: usize) -> &[AssetId] {
+fn row_ids(ids: &[GridAsset], row: usize) -> &[GridAsset] {
     let start = (row * COLUMNS).min(ids.len());
     let end = (start + COLUMNS).min(ids.len());
     &ids[start..end]
@@ -892,22 +965,28 @@ fn row_ids(ids: &[AssetId], row: usize) -> &[AssetId] {
 
 /// A row's identity: the ids of its assets, so a row keeps its thumbnail tasks across a Load
 /// more and gets fresh ones when an album switch puts other assets in the same slot.
-fn row_key(ids: &[AssetId], row: usize) -> ChildKey {
-    let names: Vec<&str> = row_ids(ids, row).iter().map(AssetId::as_str).collect();
+fn row_key(ids: &[GridAsset], row: usize) -> ChildKey {
+    let names: Vec<&str> = row_ids(ids, row)
+        .iter()
+        .map(|asset| asset.id.as_str())
+        .collect();
     ChildKey::new(names)
 }
 
 /// `existing` followed by the `page` ids it does not already hold.
-fn merge_page(existing: &[AssetId], page: Vec<AssetId>) -> Vec<AssetId> {
-    let mut seen: HashSet<AssetId> = existing.iter().cloned().collect();
+fn merge_page(existing: &[GridAsset], page: Vec<GridAsset>) -> Vec<GridAsset> {
+    let mut seen: HashSet<AssetId> = existing.iter().map(|asset| asset.id.clone()).collect();
     let mut merged = existing.to_vec();
-    merged.extend(page.into_iter().filter(|id| seen.insert(id.clone())));
+    merged.extend(
+        page.into_iter()
+            .filter(|asset| seen.insert(asset.id.clone())),
+    );
     merged
 }
 
-/// The ids of a page's assets.
-fn page_ids(items: Vec<Asset>) -> Vec<AssetId> {
-    items.into_iter().map(|asset| asset.id).collect()
+/// The grid entries of a page's assets.
+fn page_ids(items: Vec<Asset>) -> Vec<GridAsset> {
+    items.into_iter().map(GridAsset::from_asset).collect()
 }
 
 /// Whether another page can exist: fewer assets loaded than the total.
@@ -922,7 +1001,10 @@ fn count_line(loaded: usize, total: u64) -> String {
 
 /// The query for the page starting at `offset`.
 fn browse_query(album: &Option<AlbumId>, offset: u64) -> AssetQuery {
-    let query = AssetQuery::new().limit(PAGE_SIZE).offset(offset);
+    let query = AssetQuery::new()
+        .limit(PAGE_SIZE)
+        .offset(offset)
+        .with_details();
     match album {
         Some(id) => query.album(id.clone()),
         None => query,
@@ -1084,74 +1166,293 @@ impl BrowseSignals {
     }
 }
 
+/// Thumbnail counters for the device gate, shared by every cell. Atomics, not signals: the
+/// cells count on a background thread, and [`ThumbStatsLine`] reads them through a task.
+struct ThumbStats {
+    /// Served by the cache (the same shared pixels as an earlier request for the asset).
+    cached: AtomicU64,
+    /// Loaded from the platform.
+    loaded: AtomicU64,
+    /// Requests that ended `Cancelled`, because their cell was torn down.
+    cancelled: AtomicU64,
+    /// Requests that failed for another reason.
+    failed: AtomicU64,
+}
+
+static THUMB_STATS: ThumbStats = ThumbStats {
+    cached: AtomicU64::new(0),
+    loaded: AtomicU64::new(0),
+    cancelled: AtomicU64::new(0),
+    failed: AtomicU64::new(0),
+};
+
+/// The pixels last served per asset, weakly. A later serve of the same allocation was a cache
+/// hit; the cache is the only owner that outlives a cell.
+static SERVED: Mutex<Option<HashMap<AssetId, Weak<Thumbnail>>>> = Mutex::new(None);
+
+/// Entries after which [`SERVED`] starts over, so it stays small on a long scroll.
+const SERVED_LIMIT: usize = 4096;
+
+/// How one thumbnail request ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThumbServe {
+    Cached,
+    Loaded,
+    Cancelled,
+    Failed,
+}
+
+/// Whether `served` is the allocation `previous` still points at, which is how a cache hit
+/// looks from outside: the cache hands out a clone of the `Arc` it holds.
+fn is_cache_hit(previous: Option<&Weak<Thumbnail>>, served: &Arc<Thumbnail>) -> bool {
+    previous
+        .and_then(Weak::upgrade)
+        .is_some_and(|earlier| Arc::ptr_eq(&earlier, served))
+}
+
+/// Classifies a served thumbnail against the last one served for `id`, and remembers it.
+fn note_served(
+    seen: &mut HashMap<AssetId, Weak<Thumbnail>>,
+    id: &AssetId,
+    served: &Arc<Thumbnail>,
+) -> ThumbServe {
+    if seen.len() >= SERVED_LIMIT {
+        seen.clear();
+    }
+    let hit = is_cache_hit(seen.get(id), served);
+    seen.insert(id.clone(), Arc::downgrade(served));
+    if hit {
+        ThumbServe::Cached
+    } else {
+        ThumbServe::Loaded
+    }
+}
+
+/// The serve kind of a failed request.
+fn failure_serve(err: &PhotoError) -> ThumbServe {
+    match err {
+        PhotoError::Cancelled => ThumbServe::Cancelled,
+        _ => ThumbServe::Failed,
+    }
+}
+
+/// A point-in-time copy of the counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ThumbCounts {
+    cached: u64,
+    loaded: u64,
+    cancelled: u64,
+    failed: u64,
+}
+
+impl ThumbCounts {
+    /// The counters as the visible line.
+    fn line(&self) -> String {
+        format!(
+            "Thumbnails: {} from cache, {} loaded, {} cancelled, {} failed",
+            self.cached, self.loaded, self.cancelled, self.failed
+        )
+    }
+}
+
+impl ThumbStats {
+    fn record(&self, serve: ThumbServe) {
+        let counter = match serve {
+            ThumbServe::Cached => &self.cached,
+            ThumbServe::Loaded => &self.loaded,
+            ThumbServe::Cancelled => &self.cancelled,
+            ThumbServe::Failed => &self.failed,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> ThumbCounts {
+        ThumbCounts {
+            cached: self.cached.load(Ordering::Relaxed),
+            loaded: self.loaded.load(Ordering::Relaxed),
+            cancelled: self.cancelled.load(Ordering::Relaxed),
+            failed: self.failed.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// One cell's thumbnail as an image source (call inside `spawn_blocking`). The pixels come
+/// shared from the cache and `token` abandons the request; the source is made once here, so a
+/// build only clones it.
+fn load_cell_thumbnail(id: &AssetId, token: &CancelToken) -> Result<ImageSource, String> {
+    let request = ThumbnailRequest::new(CELL_EDGE_PX, CELL_EDGE_PX, ThumbnailMode::Fill);
+    match PhotoLibrary::thumbnail_shared(id, &request, token) {
+        Ok(thumb) => {
+            let serve = {
+                let mut guard = SERVED.lock().expect("served map poisoned");
+                note_served(guard.get_or_insert_with(HashMap::new), id, &thumb)
+            };
+            THUMB_STATS.record(serve);
+            Ok(ImageSource::from_rgba8(
+                thumb.rgba.clone(),
+                thumb.width,
+                thumb.height,
+            ))
+        }
+        Err(err) => {
+            THUMB_STATS.record(failure_serve(&err));
+            Err(err.to_string())
+        }
+    }
+}
+
 /// One thumbnail cell. Its task is keyed by the asset id: the cell is built for one asset and
-/// requests that asset's thumbnail once, off the UI thread.
+/// requests that asset's thumbnail once, off the UI thread, with a token of its own that
+/// teardown cancels.
 struct ThumbCell {
-    id: AssetId,
+    asset: GridAsset,
     /// Set to this cell's asset on a tap; the cell insets itself while it is the selection.
     selected: RwSignal<Option<AssetId>>,
 }
 
+struct ThumbCellState {
+    /// The one image source for this asset, in the task's value.
+    thumb: UseTask<Result<ImageSource, String>>,
+}
+
 impl Component for ThumbCell {
-    type State = UseTask<Result<ImageSource, String>>;
+    type State = ThumbCellState;
 
     fn init(&self) -> Self::State {
-        let id = self.id.clone();
-        use_task(move || {
-            let id = id.clone();
+        let token = CancelToken::new();
+        let on_teardown = token.clone();
+        on_cleanup(move || on_teardown.cancel());
+        let id = self.asset.id.clone();
+        let thumb = use_task(move || {
+            let (id, token) = (id.clone(), token.clone());
             async move {
-                spawn_blocking(move || load_thumbnail(&id, CELL_EDGE_PX, ThumbnailMode::Fill))
+                spawn_blocking(move || load_cell_thumbnail(&id, &token))
                     .await
                     .map_err(|err| JoinFailure(err.to_string()))
             }
-        })
+        });
+        ThumbCellState { thumb }
     }
 
     fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
         let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
         let scheme = theme.scheme();
-        let value = state.signal().get();
+        let value = state.thumb.signal().get();
         let (source, failed) = match value {
             AsyncValue::Ready(Ok(source)) => (Some(source), false),
             AsyncValue::Ready(Err(_)) | AsyncValue::Error(_) => (None, true),
             _ => (None, false),
         };
         let (empty, error_fill) = (scheme.surface_container_highest, scheme.error_container);
-        let is_selected = self.selected.get().as_ref() == Some(&self.id);
-        let target = self.id.clone();
+        let (pill, pill_text) = (scheme.primary, scheme.on_primary);
+        let is_selected = self.selected.get().as_ref() == Some(&self.asset.id);
+        let target = self.asset.id.clone();
         let selected = self.selected;
-        let content = move || thumb_content(source.clone(), failed, empty, error_fill);
+        let content = move || Self::picture(source.clone(), failed, empty, error_fill);
         let inset_content = content.clone();
-        GestureDetector(SizedBox(Some(CELL), Some(CELL)).child(either(
-            is_selected,
-            move || Padding(EdgeInsets::all(SELECTED_INSET), inset_content()),
-            move || Padding(EdgeInsets::all(0.0), content()),
-        )))
+        let (badge, favorite) = (self.asset.badge, self.asset.favorite);
+        GestureDetector(
+            SizedBox(Some(CELL), Some(CELL)).child(
+                stack()
+                    .child(either(
+                        is_selected,
+                        move || Padding(EdgeInsets::all(SELECTED_INSET), inset_content()),
+                        move || Padding(EdgeInsets::all(0.0), content()),
+                    ))
+                    .when_some(badge, |layers, label| {
+                        layers.child(Align(
+                            Alignment::BOTTOM_RIGHT,
+                            Self::mark(label, BADGE_W, pill, pill_text),
+                        ))
+                    })
+                    .when(favorite, |layers| {
+                        layers.child(Align(
+                            Alignment::TOP_LEFT,
+                            Self::mark("FAV", FAV_W, pill, pill_text),
+                        ))
+                    }),
+            ),
+        )
         .on_tap(move |_state: &mut Self::State| selected.set(Some(target.clone())))
     }
 }
 
+/// The type badge's width, in logical points.
+const BADGE_W: f64 = 34.0;
+
+/// The favourite mark's width, in logical points.
+const FAV_W: f64 = 28.0;
+
+/// A mark's height, in logical points.
+const MARK_H: f64 = 14.0;
+
 /// The inset around the selected cell's thumbnail, in logical points.
 const SELECTED_INSET: f64 = 8.0;
 
-/// A cell's picture: the thumbnail, or a flat placeholder (tinted when its load failed).
-fn thumb_content(
-    source: Option<ImageSource>,
-    failed: bool,
-    empty: frust::Color,
-    error_fill: frust::Color,
-) -> impl View<UseTask<Result<ImageSource, String>>> {
-    either(
-        source.is_some(),
-        move || Image(source.clone().expect("checked above")).fit(ImageFit::Cover),
-        move || {
-            either(
-                failed,
-                move || colored_box().fill(error_fill).radius(4.0),
-                move || colored_box().fill(empty).radius(4.0),
+impl ThumbCell {
+    /// A cell's picture: the thumbnail, or a flat placeholder (tinted when its load failed).
+    fn picture(
+        source: Option<ImageSource>,
+        failed: bool,
+        empty: frust::Color,
+        error_fill: frust::Color,
+    ) -> impl View<ThumbCellState> {
+        either(
+            source.is_some(),
+            move || Image(source.clone().expect("checked above")).fit(ImageFit::Cover),
+            move || {
+                either(
+                    failed,
+                    move || colored_box().fill(error_fill).radius(4.0),
+                    move || colored_box().fill(empty).radius(4.0),
+                )
+            },
+        )
+    }
+
+    /// A small pill carrying `label`, for the type badge and the favourite mark.
+    fn mark(
+        label: &'static str,
+        width: f64,
+        fill: frust::Color,
+        ink: frust::Color,
+    ) -> impl View<ThumbCellState> {
+        SizedBox(Some(width), Some(MARK_H)).child(
+            stack()
+                .child(colored_box().fill(fill).radius(3.0))
+                .child(Align(Alignment::CENTER, text(label).size(9.0).color(ink))),
+        )
+    }
+}
+
+/// The live thumbnail counters: one task whose value is a snapshot, re-read by **Refresh
+/// counters**. The cells count on background threads, so nothing sets a signal for them.
+struct ThumbStatsLine;
+
+impl Component for ThumbStatsLine {
+    type State = UseTask<ThumbCounts>;
+
+    fn init(&self) -> Self::State {
+        use_task(|| async { Ok::<ThumbCounts, JoinFailure>(THUMB_STATS.snapshot()) })
+    }
+
+    fn build(&self, state: &mut Self::State) -> impl View<Self::State> {
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+        let muted = theme.scheme().on_surface_variant;
+        let counts = state.signal().get().value().copied().unwrap_or_default();
+        let task = state.clone();
+        wrap()
+            .spacing(8.0)
+            .run_spacing(4.0)
+            .child(text(counts.line()).size(11.0).color(muted))
+            .child(
+                button("Refresh counters", move |_state: &mut Self::State| {
+                    task.restart();
+                })
+                .style(ButtonStyle::Secondary)
+                .small(),
             )
-        },
-    )
+    }
 }
 
 struct BrowsePanel {
@@ -1276,8 +1577,11 @@ impl Component for BrowsePanel {
                     "Lists the photo library through frust-photo-library: Refresh reads \
                      the access status and the albums, then the first page of 60 assets \
                      as thumbnails. Load more fetches the next page. With limited access \
-                     Manage selection reopens the system selection. Tap a thumbnail to \
-                     select it for the Originals panel.",
+                     Manage selection reopens the system selection. Cells badge the \
+                     content type (HEIC, RAW, ...) and mark favourites. Thumbnails share \
+                     the cache's pixels and a cell that leaves the screen cancels its \
+                     request; the counters below show both. Tap a thumbnail to select it \
+                     for the Originals panel.",
                 )
                 .size(11.0)
                 .color(muted),
@@ -1320,6 +1624,7 @@ impl Component for BrowsePanel {
                         listing.ids.len() as u64,
                     )),
             )
+            .child(component(ThumbStatsLine))
             .child(text(message).size(11.0).color(muted))
     }
 }
@@ -1329,16 +1634,16 @@ const UNREAD_ACCESS: &str = "Photo access: not read yet";
 
 /// One list row: up to [`COLUMNS`] thumbnail cells with a gap between them.
 fn thumb_row(
-    ids: Vec<AssetId>,
+    assets: Vec<GridAsset>,
     selected: RwSignal<Option<AssetId>>,
 ) -> impl View<BrowsePanelState> {
     let mut cells = row();
-    for (index, id) in ids.iter().enumerate() {
+    for (index, asset) in assets.iter().enumerate() {
         if index > 0 {
             cells = cells.child(SizedBox(Some(GAP), None));
         }
         cells = cells.child(component(ThumbCell {
-            id: id.clone(),
+            asset: asset.clone(),
             selected,
         }));
     }
@@ -1764,6 +2069,30 @@ fn run_decode(action: Option<DecodeAction>) -> Option<DecodeOutcome> {
     )
 }
 
+/// A pending metadata read: the asset and whether an iCloud-only original may be downloaded.
+struct MetadataAction {
+    id: AssetId,
+    allow_network: bool,
+}
+
+/// A metadata result as one line: the EXIF summary, or the typed error (a `NetworkRequired`
+/// shows as such, with its variant).
+fn metadata_text(result: Result<ExifData, PhotoError>) -> String {
+    match result {
+        Ok(exif) => exif_summary(Some(&exif)),
+        Err(err) => format!("metadata error: {err} ({err:?})"),
+    }
+}
+
+/// Reads one asset's metadata (call inside `spawn_blocking`). `None` is the mount-time fetch.
+fn run_metadata(action: Option<MetadataAction>) -> Option<String> {
+    let action = action?;
+    let options = MetadataOptions::new().allow_network(action.allow_network);
+    Some(metadata_text(PhotoLibrary::asset_metadata(
+        &action.id, &options,
+    )))
+}
+
 /// The decode edge of the decoded image's display box, in logical points.
 const DECODE_BOX: f64 = 240.0;
 
@@ -1803,6 +2132,12 @@ struct OriginalsPanelState {
     decode: UseTask<Option<DecodeOutcome>>,
     /// The running decode's token; Cancel decode takes it, each press replaces it.
     decode_token: Arc<Mutex<Option<CancelToken>>>,
+    /// Whether the metadata read may download an iCloud-only original (default off).
+    metadata_network: RwSignal<bool>,
+    /// The pending metadata read; `None` resolves to nothing.
+    metadata_action: Arc<Mutex<Option<MetadataAction>>>,
+    /// The latest metadata read; its value is the summary or error line.
+    metadata: UseTask<Option<String>>,
 }
 
 impl Component for OriginalsPanel {
@@ -1857,6 +2192,16 @@ impl Component for OriginalsPanel {
                     .map_err(|err| JoinFailure(err.to_string()))
             }
         });
+        let metadata_action: Arc<Mutex<Option<MetadataAction>>> = Arc::new(Mutex::new(None));
+        let metadata_cell = metadata_action.clone();
+        let metadata = use_task(move || {
+            let requested = metadata_cell.lock().expect("metadata cell poisoned").take();
+            async move {
+                spawn_blocking(move || run_metadata(requested))
+                    .await
+                    .map_err(|err| JoinFailure(err.to_string()))
+            }
+        });
         OriginalsPanelState {
             selected: self.selected,
             picked: self.picked,
@@ -1873,6 +2218,9 @@ impl Component for OriginalsPanel {
             decode_action,
             decode,
             decode_token: Arc::new(Mutex::new(None)),
+            metadata_network: RwSignal::new(false),
+            metadata_action,
+            metadata,
         }
     }
 
@@ -1892,8 +2240,11 @@ impl Component for OriginalsPanel {
         let can_save = state.exported.get().is_some() && !busy;
         let decoded = state.decode.signal().get();
         let decoding = matches!(decoded, AsyncValue::Loading(_));
+        let metadata_value = state.metadata.signal().get();
+        let metadata_busy = matches!(metadata_value, AsyncValue::Loading(_));
+        let metadata_network_on = state.metadata_network.get();
 
-        let mut versions = row();
+        let mut versions = wrap().spacing(8.0).run_spacing(8.0);
         for (index, (label, _)) in VERSIONS.iter().enumerate() {
             let signal = state.version;
             versions = versions.child(
@@ -1904,7 +2255,6 @@ impl Component for OriginalsPanel {
                 .disabled(busy)
                 .small(),
             );
-            versions = versions.child(SizedBox(Some(8.0), None));
         }
         let network_signal = state.network;
         let network_toggle = button(
@@ -1969,6 +2319,27 @@ impl Component for OriginalsPanel {
             _ => {}
         }
         let decode_target = target.as_ref().map(|(id, _)| id.clone());
+        let metadata_target = decode_target.clone();
+        let metadata_line = match &metadata_value {
+            AsyncValue::Loading(_) => "Reading metadata\u{2026}".to_string(),
+            AsyncValue::Ready(Some(line)) => line.clone(),
+            AsyncValue::Error(err) => err.to_string(),
+            _ => String::new(),
+        };
+        let metadata_network_signal = state.metadata_network;
+        let metadata_network_toggle = button(
+            if metadata_network_on {
+                "Metadata network: allowed"
+            } else {
+                "Metadata network: off"
+            },
+            move |_state: &mut OriginalsPanelState| {
+                metadata_network_signal.set(!metadata_network_signal.get_untracked());
+            },
+        )
+        .style(selector_style(metadata_network_on))
+        .disabled(metadata_busy)
+        .small();
 
         column()
             .child(text("Originals").size(13.0).color(accent))
@@ -1978,7 +2349,8 @@ impl Component for OriginalsPanel {
                      rendition) into the app cache off the UI thread; an iCloud-only \
                      original downloads with progress when the network is allowed, and \
                      Cancel stops it. The result line shows the file's name, mime, size and \
-                     first bytes. Save copy back files the exported copy into the library.",
+                     first bytes. Save copy back files the exported copy into the library. \
+                     Metadata reads the asset's EXIF without exporting it.",
                 )
                 .size(11.0)
                 .color(muted),
@@ -1992,9 +2364,10 @@ impl Component for OriginalsPanel {
             .child(network_toggle)
             .child(SizedBox(None, Some(8.0)))
             .child(
-                row()
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
                     .child(export_button(state, target.map(|(id, _)| id), busy))
-                    .child(SizedBox(Some(8.0), None))
                     .child(originals_cancel_button(state, busy)),
             )
             .child(SizedBox(None, Some(8.0)))
@@ -2002,15 +2375,18 @@ impl Component for OriginalsPanel {
             .child(text(result).size(11.0))
             .child(SizedBox(None, Some(8.0)))
             .child(
-                row()
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
                     .child(save_button(state, "Save copy back", true, can_save))
-                    .child(SizedBox(Some(8.0), None))
                     .child(save_button(state, "Save (no album)", false, can_save)),
             )
             .child(text(saved).size(11.0).color(muted))
             .child(SizedBox(None, Some(8.0)))
             .child(
-                row()
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
                     .child(decode_button(
                         state,
                         "Decode (2048)",
@@ -2018,7 +2394,6 @@ impl Component for OriginalsPanel {
                         decode_target.clone(),
                         busy || decoding,
                     ))
-                    .child(SizedBox(Some(8.0), None))
                     .child(decode_button(
                         state,
                         "Decode (full, cap 16384)",
@@ -2026,11 +2401,20 @@ impl Component for OriginalsPanel {
                         decode_target,
                         busy || decoding,
                     ))
-                    .child(SizedBox(Some(8.0), None))
                     .child(decode_cancel_button(state, decoding)),
             )
             .child(SizedBox(None, Some(4.0)))
             .child(decode_body)
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
+                    .child(metadata_button(state, metadata_target, metadata_busy))
+                    .child(metadata_network_toggle),
+            )
+            .child(SizedBox(None, Some(4.0)))
+            .child(text(metadata_line).size(11.0).color(muted))
     }
 }
 
@@ -2066,6 +2450,32 @@ fn decode_button(
             cancel,
         });
         decode.restart();
+    })
+    .style(ButtonStyle::Secondary)
+    .disabled(disabled)
+    .small()
+}
+
+fn metadata_button(
+    state: &OriginalsPanelState,
+    target: Option<AssetId>,
+    busy: bool,
+) -> impl View<OriginalsPanelState> {
+    let (action, metadata, network) = (
+        state.metadata_action.clone(),
+        state.metadata.clone(),
+        state.metadata_network,
+    );
+    let disabled = busy || target.is_none();
+    button("Metadata", move |_state: &mut OriginalsPanelState| {
+        let Some(id) = target.clone() else {
+            return;
+        };
+        *action.lock().expect("metadata cell poisoned") = Some(MetadataAction {
+            id,
+            allow_network: network.get_untracked(),
+        });
+        metadata.restart();
     })
     .style(ButtonStyle::Secondary)
     .disabled(disabled)
@@ -2660,7 +3070,9 @@ impl Component for FoldersPanel {
             )
             .child(SizedBox(None, Some(8.0)))
             .child(
-                row()
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
                     .child(press_button(
                         "Pick folder",
                         FoldersAction::Pick,
@@ -2668,7 +3080,6 @@ impl Component for FoldersPanel {
                         busy,
                         false,
                     ))
-                    .child(SizedBox(Some(8.0), None))
                     .child(press_button(
                         "Scan",
                         FoldersAction::Scan {
@@ -2679,9 +3090,7 @@ impl Component for FoldersPanel {
                         busy,
                         !holds,
                     ))
-                    .child(SizedBox(Some(8.0), None))
                     .child(recursive_button(state, recursive))
-                    .child(SizedBox(Some(8.0), None))
                     .child(press_button(
                         "Release",
                         FoldersAction::Release,
@@ -2689,7 +3098,6 @@ impl Component for FoldersPanel {
                         busy,
                         !holds,
                     ))
-                    .child(SizedBox(Some(8.0), None))
                     .child(folders_cancel_button(state, busy)),
             )
             .child(SizedBox(None, Some(8.0)))
@@ -2858,8 +3266,15 @@ mod tests {
         assert!(pick_error_text(&PhotoError::Busy).starts_with("error: "));
     }
 
-    fn ids(names: &[&str]) -> Vec<AssetId> {
-        names.iter().map(|n| AssetId::from_raw(*n)).collect()
+    fn ids(names: &[&str]) -> Vec<GridAsset> {
+        names
+            .iter()
+            .map(|n| GridAsset {
+                id: AssetId::from_raw(*n),
+                badge: None,
+                favorite: false,
+            })
+            .collect()
     }
 
     #[test]
@@ -2923,6 +3338,113 @@ mod tests {
     fn thumbnails_are_requested_at_three_times_the_cell() {
         assert_eq!(CELL_EDGE_PX, 228);
         assert_eq!(PREVIEW_EDGE_PX, 480);
+    }
+
+    #[test]
+    fn both_platform_shapes_map_to_one_badge() {
+        for (android, ios, badge) in [
+            ("image/heic", "public.heic", "HEIC"),
+            ("image/heif", "public.heif", "HEIC"),
+            ("image/jpeg", "public.jpeg", "JPEG"),
+            ("image/png", "public.png", "PNG"),
+            ("image/x-adobe-dng", "com.adobe.raw-image", "RAW"),
+            ("image/x-sony-arw", "public.camera-raw-image", "RAW"),
+            ("video/quicktime", "com.apple.quicktime-movie", "MOV"),
+            ("video/mp4", "public.mpeg-4", "MP4"),
+        ] {
+            assert_eq!(type_badge(Some(android)), Some(badge), "{android}");
+            assert_eq!(type_badge(Some(ios)), Some(badge), "{ios}");
+        }
+        assert_eq!(type_badge(Some("IMAGE/HEIC")), Some("HEIC"));
+        assert_eq!(type_badge(Some("application/x-unknown")), None);
+        assert_eq!(type_badge(None), None);
+    }
+
+    #[test]
+    fn details_fill_the_badge_and_the_favourite_mark() {
+        let cell = GridAsset::new(AssetId::from_raw("a"), Some("public.heic"), Some(true));
+        assert_eq!((cell.badge, cell.favorite), (Some("HEIC"), true));
+        let cell = GridAsset::new(AssetId::from_raw("a"), None, None);
+        assert_eq!((cell.badge, cell.favorite), (None, false));
+        let cell = GridAsset::new(AssetId::from_raw("a"), Some("image/png"), Some(false));
+        assert_eq!((cell.badge, cell.favorite), (Some("PNG"), false));
+    }
+
+    #[test]
+    fn browse_queries_ask_for_details() {
+        assert!(browse_query(&None, 0).details);
+    }
+
+    fn pixels() -> Arc<Thumbnail> {
+        Arc::new(Thumbnail::new(1, 1, vec![0; 4]))
+    }
+
+    #[test]
+    fn the_same_allocation_served_again_is_a_cache_hit() {
+        let id = AssetId::from_raw("a");
+        let mut seen = HashMap::new();
+        let first = pixels();
+        assert_eq!(note_served(&mut seen, &id, &first), ThumbServe::Loaded);
+        assert_eq!(
+            note_served(&mut seen, &id, &Arc::clone(&first)),
+            ThumbServe::Cached
+        );
+        // A different allocation for the asset is a fresh load.
+        assert_eq!(note_served(&mut seen, &id, &pixels()), ThumbServe::Loaded);
+    }
+
+    #[test]
+    fn a_dropped_allocation_is_not_a_hit() {
+        let id = AssetId::from_raw("a");
+        let mut seen = HashMap::new();
+        let first = pixels();
+        note_served(&mut seen, &id, &first);
+        drop(first);
+        assert_eq!(note_served(&mut seen, &id, &pixels()), ThumbServe::Loaded);
+    }
+
+    #[test]
+    fn counters_count_each_outcome_and_read_as_a_line() {
+        let stats = ThumbStats {
+            cached: AtomicU64::new(0),
+            loaded: AtomicU64::new(0),
+            cancelled: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+        };
+        for serve in [
+            ThumbServe::Cached,
+            ThumbServe::Cached,
+            ThumbServe::Loaded,
+            failure_serve(&PhotoError::Cancelled),
+            failure_serve(&PhotoError::Busy),
+        ] {
+            stats.record(serve);
+        }
+        let counts = stats.snapshot();
+        assert_eq!(
+            counts,
+            ThumbCounts {
+                cached: 2,
+                loaded: 1,
+                cancelled: 1,
+                failed: 1
+            }
+        );
+        assert_eq!(
+            counts.line(),
+            "Thumbnails: 2 from cache, 1 loaded, 1 cancelled, 1 failed"
+        );
+    }
+
+    #[test]
+    fn metadata_shows_the_summary_or_the_typed_error() {
+        let mut exif = ExifData::default();
+        exif.iso = Some(200);
+        assert_eq!(metadata_text(Ok(exif)), "EXIF: ISO 200");
+        let line = metadata_text(Err(PhotoError::NetworkRequired));
+        assert!(line.starts_with("metadata error: "), "{line}");
+        assert!(line.contains("NetworkRequired"), "{line}");
+        assert!(run_metadata(None).is_none());
     }
 
     #[test]
