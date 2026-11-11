@@ -70,8 +70,7 @@ jobs:
             # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
           )
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+          bash scripts/ci/apt-install.sh "${pkgs[@]}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The workspace run leaves the frust-ui feature `test-support` off, so the
@@ -114,8 +113,7 @@ jobs:
             # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
           )
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+          bash scripts/ci/apt-install.sh "${pkgs[@]}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Disk before the build
         run: df -h /
@@ -197,8 +195,7 @@ jobs:
             # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
           )
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+          bash scripts/ci/apt-install.sh "${pkgs[@]}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: ${{ matrix.dir }}
@@ -282,8 +279,7 @@ jobs:
             # X11: the desktop shells' windowing and clipboard (x11-dl, x11rb)
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxcb1-dev
           )
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends "${pkgs[@]}"
+          bash scripts/ci/apt-install.sh "${pkgs[@]}"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: bash scripts/ci/hotpatch-feature-gate.sh
 
