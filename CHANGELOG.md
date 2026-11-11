@@ -18,6 +18,21 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Added
 
+- `ListView::item_extent_of(|index| px)` and `extent_generation(u64)`: declare every row's extent up
+  front, for a list whose row heights the app already knows. The content extent, every row's position
+  and a `jump_to` to any offset are exact from the first frame. The list keeps a cached prefix sum
+  (O(1) total, O(log N) offset-to-row lookup), rebuilt only when the item count or the generation
+  changes, so bump the generation when extents change under an unchanged count. It is exclusive with
+  `estimated_item_extent`; the builders' `item_extent` argument is unchanged and is overridden.
+- `ListView::on_visible_range(|state, first, last| ..)`: the inclusive first and last indexes of the
+  rows intersecting the viewport, with the cache buffer excluded, in all three extent modes. It runs
+  one event late like `on_near_start`/`on_near_end`, and only when the range changes.
+- `SliverGridDelegate::offset_of_index(index, cross_extent)`: a grid item's row offset in the grid's
+  own coordinates. Add the extent of the slivers above the grid and pass the sum to `jump_to` or
+  `animate_to`. `scroll_to_item` is documented as honoured only by a keyed `ListView`; a
+  `CustomScrollView` drops item commands.
+- The playground's Scroll page gains a 100,000-row exact-extent list with jump-to-row and a
+  visible-range readout.
 - `frust-photo-library` `decode` feature: `PhotoLibrary::decode_file(path, &DecodeOptions)` and
   `decode_asset(&AssetId, &DecodeOptions, &ExportOptions)` (with `library`) decode an image at full
   resolution, capped to `DecodeOptions::max_dimension`, into a `DecodedImage` of straight-alpha RGBA8

@@ -263,7 +263,7 @@ Design-System Contract*).
 | `Navigator` / `Router` / `hero()` | Page-stack and declarative routing plus shared-element transitions; a custom transition is authored through the facade's `Layer` + `resolve_layers` |
 | `ButtonStyle`, `ScrollInfo`, `ScrollbarStyle`/`ScrollbarShow`, `IconData`/`IconSource`/`StrokedIconSource`/`IconElement`, `ImageSource`/`ImageFit` | Small per-widget config/state types shared across the baseline widget set (`ScrollbarShow`: `Never`, `WhileScrolling` — the default — `Hover`, `Always`); an icon is a filled `IconSource` or a stroked, multi-element `StrokedIconSource` (round caps/joins, scaled with the icon, inked in the resolved icon colour; an `IconElement` may carry opacity, one dash pattern and its own stroke width, runtime-built through `IconData::from_styled_elements`; `IconData::resolve` returns one fillable outline, each stroke expanded at 0.02 design units, which fill-only slots ink filled, baking the dash and dropping opacity, and ignore `stroke_width` overrides for) |
 | `ScrollController` / `ScrollSubscription` / `AnimateTo` / `ItemAlignment` | Programmatic-scroll handle for `ScrollView`/`ListView`, its `on_change` guard, the animate-to duration/curve, and the keyed-row landing alignment — see *Scroll Physics* and *Virtualized ListView* |
-| `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable extents, refresh/overscroll parity with `ScrollView` |
+| `ListView` / `ListViewWidget` | Baseline virtualized list: windowed rebuild-time materialization, positional or keyed (`ChildKey`) row identity, optional variable (estimated keyed) or exact declared extents, `on_visible_range`, refresh/overscroll parity with `ScrollView` |
 | `CustomScrollView` / `ViewportWidget` / `SliverBoxView` / `ScrollAxis` | Sliver viewport and its box adapter (`ViewportWidget`, `SliverBoxWidget` are frust-widgets-only); `ScrollAxis` is re-exported flat from frust-widgets and the facade |
 | `NavigatorController::transition()` / `TransitionState` / `PageVisibility` | Navigation state observation seams |
 | `RouteNavigator` / `NavRequest` | Off-thread-safe navigation handle (Arc-backed plain data, no reactive types) |
@@ -511,6 +511,20 @@ once visited); on a positional list it `debug_assert!`s and is inert. A measurem
 above the viewport's top is committed on the following rebuild so the anchor row never moves; during
 a fling it accumulates and commits at settle.
 
+**Exact extents.** `.item_extent_of(|index| px)` (positional or keyed) declares every row's extent up front, so
+the content extent, row positions and a `jump_to` landing are exact from frame one; rows lay out tight at
+their declared extent. A cached prefix sum gives an O(1) total and an O(log N) offset-to-row lookup, rebuilt
+(O(N) callback calls) only when `item_count` or `.extent_generation(u64)` changes; closures are not
+comparable, so the app bumps the generation when extents change under an unchanged count. It is exclusive
+with `estimated_item_extent` (`debug_assert!`; release keeps the exact extents), and the builders' required
+`item_extent` is overridden. Pick by knowledge: **uniform** when every row is the same height, **estimated
+keyed** when heights are only known by laying rows out, **exact** when the app can state every height.
+
+**Visible range.** `.on_visible_range(|state, first, last|)` reports the inclusive indexes of rows
+intersecting the viewport (cache buffer excluded; a row only touching an edge is not visible) in all three
+modes, beside `on_near_start`/`on_near_end`: computed at layout, delivered one event late through the same
+flush, and only when the range changes.
+
 **Scroll-to-item.** `scroll_to_item(key, ItemAlignment, animated)` (`Start`/`Center`/`End`/`Nearest`)
 resolves `key` from measured extents plus the estimate for unlaid rows; a key outside the window
 costs one O(item count) `key_of` scan, not per frame. The jump lands on the estimate first when
@@ -541,7 +555,7 @@ horizontal viewport builds its core on its own axis (only the stretch overscroll
 | `sliver_fill_remaining(child)` | `has_scroll_body(true)`: tight to the remaining paint extent. `false`: fills viewport minus preceding scroll extent, or the child's extent if larger |
 | `sliver_fixed_extent_list` / `_keyed` | Lazy list of equal-extent rows, closed-form geometry |
 | `sliver_list(...)` | Lazy keyed rows that size themselves; measured-by-key extents shared with `ListView` |
-| `sliver_grid` / `_keyed` | Lazy grid; `SliverGridDelegate::FixedCrossAxisCount` or `MaxCrossAxisExtent` |
+| `sliver_grid` / `_keyed` | Lazy grid; `SliverGridDelegate::FixedCrossAxisCount` or `MaxCrossAxisExtent`; `delegate.offset_of_index(i, cross_extent)` is a cell's row offset in the grid's own coordinates (add the preceding slivers' extent, then `jump_to`/`animate_to`) |
 | `sliver_persistent_header(delegate)` | `{min_extent, max_extent, build(shrink_offset, overlaps_content)}`, `.pinned`/`.floating` |
 | `keep_alive(child)` | Row scope of `sliver_list` only (a request in a nested list's row pins the enclosing `sliver_list` row): parked rows sit uncapped in a `ChildKey` side map, re-adopted when the key returns, released when it leaves the data or the list tears down; parking cancels a gesture |
 
@@ -569,6 +583,9 @@ requests a frame when stale; the next `View::rebuild` calls `build` (against the
 0.5 px tolerance (`SHRINK_REBUILD_TOLERANCE`, crate-internal) skips the rebuild unless it lands on 0 or
 `max_extent`. An outside sliver can hold `SliverPersistentHeaderWidget` (frust-widgets-only; not yet in
 the facade) as a geometry core, as Material's `sliver_app_bar` does.
+
+**Item commands.** `ScrollController::scroll_to_item` reaches only a keyed `ListView`; a `CustomScrollView` drops it
+(offset commands still work), hence `offset_of_index` for grid cells.
 
 **Forwarding wrappers** forward `Widget::as_sliver`: `Either`/`EitherOf3..8`, `hero`, `shield`,
 `auto_scroll_zone`, `GestureDetector`, plus `AnyView`/component boundaries (CORE). Others are boxes.
