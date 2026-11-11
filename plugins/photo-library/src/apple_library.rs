@@ -26,6 +26,12 @@
 //! [`PhotoError::Platform`]. The handler only hands the `UIImage` over; drawing
 //! happens on the waiting thread, leaving the main queue free.
 //!
+//! The call's [`CancelToken`] hook cancels the in-flight request the same way
+//! and wakes the waiter through its own sender on the handler's channel, so a
+//! cancel never waits for Photos to answer (which it "may not" do at all). A
+//! cancelled token wins over whatever the handler delivered ([`cancel_wins`]),
+//! and the draw is skipped once it is cancelled.
+//!
 //! `requestImageForAsset:...` is bound for macOS only (`NSImage`), so it is sent
 //! by hand with `UIImage`. The header promises "as asked or better", so the
 //! delivered size may exceed the box and only the drawing step can honour the
@@ -81,6 +87,7 @@ use objc2_photos::{
 use objc2_ui_kit::{UIImage, UIImageOrientation, UIViewController};
 
 use super::{PRESENT_GRACE, presenter};
+use crate::cancel::CancelToken;
 use crate::library::{
     Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, Thumbnail, ThumbnailMode,
     ThumbnailRequest,
@@ -340,7 +347,11 @@ fn asset_of(asset: &PHAsset, details: bool) -> Asset {
     }
 }
 
-pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thumbnail, PhotoError> {
+pub(crate) fn thumbnail(
+    id: &AssetId,
+    request: &ThumbnailRequest,
+    token: &CancelToken,
+) -> Result<Thumbnail, PhotoError> {
     refuse_main_thread()?;
     autoreleasepool(|_| {
         ensure_readable()?;
@@ -352,7 +363,11 @@ pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thum
                 .firstObject()
                 .ok_or(PhotoError::NotFound)?
         };
-        let image = request_image(&asset, request)?;
+        let image = request_image(&asset, request, token)?;
+        // A cancel after the delivery skips the draw.
+        if token.is_cancelled() {
+            return Err(PhotoError::Cancelled);
+        }
         rgba_of(&image, request)
     })
 }
@@ -372,10 +387,12 @@ fn content_mode(mode: ThumbnailMode) -> PHImageContentMode {
     }
 }
 
-/// One final image from the manager, or the reason there is none.
+/// One final image from the manager, or the reason there is none. A cancel of
+/// `token` cancels the request and ends the wait at once.
 fn request_image(
     asset: &PHAsset,
     request: &ThumbnailRequest,
+    token: &CancelToken,
 ) -> Result<Retained<UIImage>, PhotoError> {
     let manager = manager();
     // SAFETY: `new` and the setters are plain messages to the fresh options
@@ -393,6 +410,7 @@ fn request_image(
         height: f64::from(request.height),
     };
     let (tx, rx) = mpsc::channel();
+    let wake = tx.clone();
     let handler = RcBlock::new(
         move |image: *mut UIImage, info: *mut NSDictionary<NSString, AnyObject>| {
             // Runs on a Photos queue: never unwind into its frame.
@@ -428,8 +446,18 @@ fn request_image(
             resultHandler: &*handler
         ]
     };
-    match rx.recv_timeout(THUMBNAIL_TIMEOUT) {
-        Ok(answer) => answer,
+    // Set after the request exists, so the hook always has an id to cancel; a
+    // token cancelled before this runs the hook here, at once.
+    token.set_hook(move || {
+        // SAFETY: as for the timeout's cancel below. The manager is a
+        // process-wide `Send + Sync` instance.
+        unsafe { manager.cancelImageRequest(id) };
+        let _ = wake.send(Err(PhotoError::Cancelled));
+    });
+    let received = rx.recv_timeout(THUMBNAIL_TIMEOUT);
+    token.clear_hook();
+    match received {
+        Ok(answer) => cancel_wins(answer, token.is_cancelled()),
         Err(RecvTimeoutError::Timeout) => {
             // SAFETY: `id` is the live request from this manager; a request that
             // has finished by now ignores the cancel.
@@ -442,6 +470,17 @@ fn request_image(
         Err(RecvTimeoutError::Disconnected) => Err(PhotoError::Platform(
             "no thumbnail was delivered".to_owned(),
         )),
+    }
+}
+
+/// The waiter's outcome once `cancelled` is known: a cancelled token answers
+/// [`PhotoError::Cancelled`] whatever was delivered, including the Photos
+/// "cancelled" answer that its own `cancelImageRequest:` provokes.
+fn cancel_wins<T>(answer: Result<T, PhotoError>, cancelled: bool) -> Result<T, PhotoError> {
+    if cancelled {
+        Err(PhotoError::Cancelled)
+    } else {
+        answer
     }
 }
 
@@ -862,6 +901,25 @@ mod tests {
         assert_eq!(
             media_predicate(MediaFilter::ImagesAndVideos),
             "mediaType == 1 OR mediaType == 2"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_token_wins_over_the_delivery() {
+        assert_eq!(cancel_wins(Ok(1), true), Err(PhotoError::Cancelled));
+        assert_eq!(
+            cancel_wins::<()>(
+                Err(PhotoError::Platform(
+                    "the thumbnail request was cancelled".to_owned()
+                )),
+                true
+            ),
+            Err(PhotoError::Cancelled)
+        );
+        assert_eq!(cancel_wins(Ok(1), false), Ok(1));
+        assert_eq!(
+            cancel_wins::<()>(Err(PhotoError::NotFound), false),
+            Err(PhotoError::NotFound)
         );
     }
 

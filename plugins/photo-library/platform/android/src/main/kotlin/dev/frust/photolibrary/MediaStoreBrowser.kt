@@ -9,6 +9,8 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
+import android.os.OperationCanceledException
 import android.provider.BaseColumns
 import android.provider.MediaStore
 import android.util.Log
@@ -17,7 +19,9 @@ import dev.frust.photolibrary.FrustPhotoLibraryHost.AlbumsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.ThumbnailResult
 import java.io.FileNotFoundException
+import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -37,7 +41,10 @@ import kotlin.math.roundToInt
  * - `ContentResolver.loadThumbnail` (API 29) decodes with
  *   `ImageDecoder.ALLOCATOR_SOFTWARE`, applies the provider's orientation, and
  *   a missing item surfaces as `FileNotFoundException`
- *   (`MediaProvider.ensureThumbnail`).
+ *   (`MediaProvider.ensureThumbnail`). Its `CancellationSignal` reaches the
+ *   provider's `openTypedAssetFile`; a cancelled load throws
+ *   `OperationCanceledException`, or an `IOException` from the stream it
+ *   abandoned, so any failure after a cancel is reported as a cancel.
  * - `MediaProvider` limits an app holding only
  *   `READ_MEDIA_VISUAL_USER_SELECTED` to the items the user selected
  *   (`hasUserSelectedAccess`, API 34), so partial access needs no special path
@@ -346,24 +353,55 @@ internal object MediaStoreBrowser {
         Array(rows.size) { rows[it].type },
     )
 
+    /** The signal of each running [thumbnail], by request id, until it returns. */
+    private val thumbnailSignals = ConcurrentHashMap<Long, CancellationSignal>()
+
     /**
      * The thumbnail of [id] as RGBA8 bytes (premultiplied; the Rust side
      * unpremultiplies). [fill] centre-crops to [width] x
      * [height]; otherwise the image is scaled to fit inside that box. An id
      * that is not a `MediaStore` content URI, or a stale one, is
-     * [FrustPhotoLibraryHost.NOT_FOUND].
+     * [FrustPhotoLibraryHost.NOT_FOUND]. The load runs with a
+     * `CancellationSignal` registered under [requestId] for [cancelThumbnail];
+     * once it fires the answer is [FrustPhotoLibraryHost.CANCELLED].
      */
-    fun thumbnail(ctx: Context?, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
+    fun thumbnail(ctx: Context?, requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult {
+        val signal = CancellationSignal()
+        thumbnailSignals[requestId] = signal
+        try {
+            return loadThumbnail(ctx, signal, id, width, height, fill)
+        } finally {
+            thumbnailSignals.remove(requestId)
+        }
+    }
+
+    /** Fires the signal of thumbnail [requestId]. Any thread; an unknown or finished id is ignored. */
+    fun cancelThumbnail(requestId: Long) {
+        thumbnailSignals[requestId]?.cancel()
+    }
+
+    /** [code], or [FrustPhotoLibraryHost.CANCELLED] once [signal] has fired. */
+    internal fun cancelledOr(signal: CancellationSignal, code: Int): Int =
+        if (signal.isCanceled) FrustPhotoLibraryHost.CANCELLED else code
+
+    private fun loadThumbnail(ctx: Context?, signal: CancellationSignal, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
         browse(ctx, "thumbnail", ::thumbnailFailed) { context ->
             val uri = Uri.parse(id)
             if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY) {
                 return@browse thumbnailFailed(FrustPhotoLibraryHost.NOT_FOUND)
             }
             val loaded = try {
-                context.contentResolver.loadThumbnail(uri, Size(width, height), null)
+                context.contentResolver.loadThumbnail(uri, Size(width, height), signal)
+            } catch (e: OperationCanceledException) {
+                return@browse thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)
             } catch (e: FileNotFoundException) {
-                return@browse thumbnailFailed(FrustPhotoLibraryHost.NOT_FOUND)
+                return@browse thumbnailFailed(cancelledOr(signal, FrustPhotoLibraryHost.NOT_FOUND))
+            } catch (e: IOException) {
+                if (signal.isCanceled) return@browse thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)
+                throw e
             }
+            // Cancelled after the load: skip the crop and the copy.
+            if (signal.isCanceled) return@browse thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)
             val source = if (loaded.config == Bitmap.Config.ARGB_8888) {
                 loaded
             } else {

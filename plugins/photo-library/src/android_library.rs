@@ -16,6 +16,14 @@
 //!
 //! Every blocking call refuses the UI thread with [`PhotoError::UiThread`]
 //! before any work.
+//!
+//! `thumbnail` carries a request id. The call's [`CancelToken`] hook calls the
+//! host's `cancelThumbnail` with it, which fires the `CancellationSignal` the
+//! host passed to `loadThumbnail`; the host answers `CANCELLED` for a load that
+//! stopped or finished after the cancel. The hook is set before the host call
+//! and cleared after it, and the token is checked on both sides of the call, so
+//! a cancel wins even when it lands before the host has registered the signal
+//! (that load then runs to its end, and its pixels are dropped).
 
 use std::sync::atomic::Ordering;
 
@@ -24,9 +32,11 @@ use jni::sys::{jint, jlong};
 use jni::{Env, jni_sig, jni_str};
 
 use super::{
-    Answer, LAUNCH_FAILED, NEXT_REQUEST_ID, NOT_INITIALIZED, PENDING, Slot, WAITS, await_answer,
-    ensure_off_ui_thread, error_for, filter_code, lock, read_strings, run_jni, with_host,
+    Answer, CANCELLED, LAUNCH_FAILED, NEXT_REQUEST_ID, NOT_INITIALIZED, PENDING, Slot, WAITS,
+    await_answer, ensure_off_ui_thread, error_for, filter_code, lock, read_strings, run_jni,
+    with_host,
 };
+use crate::cancel::CancelToken;
 use crate::library::{
     Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, Thumbnail, ThumbnailMode,
     ThumbnailRequest, favorite_from_code, modified_ms_from_seconds,
@@ -249,12 +259,23 @@ fn mismatched_arrays() -> PhotoError {
 }
 
 /// The crate root's `thumbnail` arm; `lib.rs` serves cache hits before this.
-pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thumbnail, PhotoError> {
+pub(crate) fn thumbnail(
+    id: &AssetId,
+    request: &ThumbnailRequest,
+    token: &CancelToken,
+) -> Result<Thumbnail, PhotoError> {
     let width = jint::try_from(request.width).unwrap_or(jint::MAX);
     let height = jint::try_from(request.height).unwrap_or(jint::MAX);
     let fill = matches!(request.mode, ThumbnailMode::Fill);
-    with_host(|env, class| {
+    let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+    // Outside `with_host`: a token already cancelled runs the hook here, and
+    // the hook attaches to the JVM itself.
+    token.set_hook(move || cancel_thumbnail(request_id));
+    let outcome = with_host(|env, class| {
         ensure_off_ui_thread(env)?;
+        if token.is_cancelled() {
+            return Err(PhotoError::Cancelled);
+        }
         run_jni(env, "FrustPhotoLibraryHost.thumbnail", |env| {
             let raw_id = env.new_string(id.as_str())?;
             let result = env
@@ -262,9 +283,10 @@ pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thum
                     class,
                     jni_str!("thumbnail"),
                     jni_sig!(
-                        "(Ljava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;"
+                        "(JLjava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;"
                     ),
                     &[
+                        JValue::Long(request_id as jlong),
                         JValue::Object(&raw_id),
                         JValue::Int(width),
                         JValue::Int(height),
@@ -286,7 +308,32 @@ pub(crate) fn thumbnail(id: &AssetId, request: &ThumbnailRequest) -> Result<Thum
             let pixels = env.convert_byte_array(&pixels)?;
             Ok(thumbnail_from(width, height, row_bytes, pixels))
         })?
-    })
+    });
+    token.clear_hook();
+    // A cancel that raced the host's answer still wins.
+    if token.is_cancelled() {
+        return Err(PhotoError::Cancelled);
+    }
+    outcome
+}
+
+/// The cancel hook of thumbnail `request_id`. Runs on whichever thread called
+/// [`CancelToken::cancel`]; the host ignores an id it is not loading.
+fn cancel_thumbnail(request_id: u64) {
+    let sent = with_host(|env, class| {
+        run_jni(env, "FrustPhotoLibraryHost.cancelThumbnail", |env| {
+            env.call_static_method(
+                class,
+                jni_str!("cancelThumbnail"),
+                jni_sig!("(J)V"),
+                &[JValue::Long(request_id as jlong)],
+            )?
+            .v()
+        })
+    });
+    if let Err(err) = sent {
+        log::debug!("frust-photo-library: cancelling the thumbnail on the host failed: {err}");
+    }
 }
 
 /// Tightens the host's premultiplied rows to straight-alpha RGBA8.
@@ -364,6 +411,7 @@ fn browse_error(code: jint) -> PhotoError {
         PERMISSION_DENIED => PhotoError::PermissionDenied,
         NOT_FOUND => PhotoError::NotFound,
         QUERY_FAILED => PhotoError::Platform("the media library query failed".to_string()),
+        CANCELLED => PhotoError::Cancelled,
         other => error_for(other),
     }
 }
@@ -439,6 +487,16 @@ mod tests {
             names: vec![Some("a.jpg".into()); n],
             types: vec![Some("image/jpeg".into()); n],
         }
+    }
+
+    #[test]
+    fn a_cancelled_load_is_typed_and_other_codes_keep_theirs() {
+        assert_eq!(browse_error(CANCELLED), PhotoError::Cancelled);
+        assert_eq!(browse_error(NOT_FOUND), PhotoError::NotFound);
+        assert_eq!(
+            browse_error(PERMISSION_DENIED),
+            PhotoError::PermissionDenied
+        );
     }
 
     #[test]

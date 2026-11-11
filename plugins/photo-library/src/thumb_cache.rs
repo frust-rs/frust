@@ -29,7 +29,7 @@ impl Key {
 }
 
 struct Entry {
-    /// Shared, so a hit leaves the lock holding only a reference to copy from.
+    /// Shared, so a hit hands out a reference and never copies the pixels.
     thumb: Arc<Thumbnail>,
     used: u64,
 }
@@ -71,7 +71,7 @@ impl Lru {
 
     /// Caches `thumb`, evicting least-recently-used entries until under budget. An entry
     /// larger than the whole budget is not cached.
-    pub(crate) fn insert(&mut self, key: Key, thumb: Thumbnail) {
+    pub(crate) fn insert(&mut self, key: Key, thumb: Arc<Thumbnail>) {
         let size = thumb.rgba.len();
         if let Some(old) = self.map.remove(&key) {
             self.bytes -= old.thumb.rgba.len();
@@ -86,7 +86,7 @@ impl Lru {
         self.map.insert(
             key,
             Entry {
-                thumb: Arc::new(thumb),
+                thumb,
                 used: self.tick,
             },
         );
@@ -95,7 +95,7 @@ impl Lru {
 
     /// [`insert`](Self::insert), unless the cache was cleared since `epoch` was read: pixels
     /// loaded before a clear must not repopulate the cache after it.
-    fn insert_since(&mut self, epoch: u64, key: Key, thumb: Thumbnail) {
+    fn insert_since(&mut self, epoch: u64, key: Key, thumb: Arc<Thumbnail>) {
         if epoch == self.epoch {
             self.insert(key, thumb);
         }
@@ -142,12 +142,11 @@ fn lock() -> MutexGuard<'static, Option<Lru>> {
     CACHE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// A cached copy of the thumbnail, copied after the lock is released.
-pub(crate) fn get(key: &Key) -> Option<Thumbnail> {
-    let hit = lock()
+/// The cached thumbnail, shared with the cache: no pixel is copied.
+pub(crate) fn get(key: &Key) -> Option<Arc<Thumbnail>> {
+    lock()
         .get_or_insert_with(|| Lru::new(DEFAULT_BUDGET))
-        .get(key);
-    hit.map(|shared| Thumbnail::clone(&shared))
+        .get(key)
 }
 
 /// The value to pass to [`insert`] for a load starting now.
@@ -157,7 +156,7 @@ pub(crate) fn epoch() -> u64 {
 
 /// Caches a thumbnail whose load started at `epoch`; a load older than the last [`clear`] is
 /// dropped.
-pub(crate) fn insert(epoch: u64, key: Key, thumb: Thumbnail) {
+pub(crate) fn insert(epoch: u64, key: Key, thumb: Arc<Thumbnail>) {
     lock()
         .get_or_insert_with(|| Lru::new(DEFAULT_BUDGET))
         .insert_since(epoch, key, thumb);
@@ -188,8 +187,8 @@ mod tests {
     }
 
     /// A thumbnail of exactly `bytes` pixel bytes (a multiple of 4).
-    fn thumb(bytes: usize) -> Thumbnail {
-        Thumbnail::new(1, (bytes / 4) as u32, vec![0; bytes])
+    fn thumb(bytes: usize) -> Arc<Thumbnail> {
+        Arc::new(Thumbnail::new(1, (bytes / 4) as u32, vec![0; bytes]))
     }
 
     #[test]
@@ -262,10 +261,12 @@ mod tests {
     #[test]
     fn a_hit_shares_the_cached_pixels() {
         let mut c = Lru::new(100);
-        c.insert(key("a"), thumb(40));
+        let stored = thumb(40);
+        c.insert(key("a"), Arc::clone(&stored));
         let first = c.get(&key("a")).expect("cached");
         let second = c.get(&key("a")).expect("cached");
         assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &stored));
     }
 
     #[test]
