@@ -71,8 +71,9 @@
 //! type on Android, a uniform type identifier on iOS, both mapped by [`type_badge`]) and marks a
 //! favourite. Cells load through `PhotoLibrary::thumbnail_shared` with a [`CancelToken`] their
 //! teardown cancels, and keep one [`ImageSource`] in the task value. The counters line shows
-//! the thumbnails served from the cache and the cancelled requests. **Metadata** reads
-//! `PhotoLibrary::asset_metadata` for the target in its own task, network off unless toggled.
+//! the thumbnails served from the cache (a lower bound) and the cancelled requests. **Metadata**
+//! reads `PhotoLibrary::asset_metadata` for the target in its own task, network off unless
+//! toggled; **Cancel metadata** cancels that read's own token.
 //! Button rows use `wrap()` so every button stays reachable on a phone width.
 
 use std::collections::{HashMap, HashSet};
@@ -80,7 +81,7 @@ use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use frust::authoring::Rect;
@@ -1190,6 +1191,12 @@ static THUMB_STATS: ThumbStats = ThumbStats {
 /// hit; the cache is the only owner that outlives a cell.
 static SERVED: Mutex<Option<HashMap<AssetId, Weak<Thumbnail>>>> = Mutex::new(None);
 
+/// Locks a cell through a poisoned lock: a panic on one worker must not make every later
+/// cell panic during build, and the guarded value is still usable.
+fn lock_cell<T>(cell: &Mutex<T>) -> MutexGuard<'_, T> {
+    cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Entries after which [`SERVED`] starts over, so it stays small on a long scroll.
 const SERVED_LIMIT: usize = 4096;
 
@@ -1249,7 +1256,7 @@ impl ThumbCounts {
     /// The counters as the visible line.
     fn line(&self) -> String {
         format!(
-            "Thumbnails: {} from cache, {} loaded, {} cancelled, {} failed",
+            "Thumbnails: {} from cache (lower bound), {} loaded, {} cancelled, {} failed",
             self.cached, self.loaded, self.cancelled, self.failed
         )
     }
@@ -1284,7 +1291,7 @@ fn load_cell_thumbnail(id: &AssetId, token: &CancelToken) -> Result<ImageSource,
     match PhotoLibrary::thumbnail_shared(id, &request, token) {
         Ok(thumb) => {
             let serve = {
-                let mut guard = SERVED.lock().expect("served map poisoned");
+                let mut guard = lock_cell(&SERVED);
                 note_served(guard.get_or_insert_with(HashMap::new), id, &thumb)
             };
             THUMB_STATS.record(serve);
@@ -1579,8 +1586,9 @@ impl Component for BrowsePanel {
                      as thumbnails. Load more fetches the next page. With limited access \
                      Manage selection reopens the system selection. Cells badge the \
                      content type (HEIC, RAW, ...) and mark favourites. Thumbnails share \
-                     the cache's pixels and a cell that leaves the screen cancels its \
-                     request; the counters below show both. Tap a thumbnail to select it \
+                     the cache's allocation without copying it, and each cell copies the \
+                     pixels once to build its image; a cell that leaves the screen cancels \
+                     its request, and the counters below show both. Tap a thumbnail to select it \
                      for the Originals panel.",
                 )
                 .size(11.0)
@@ -2073,13 +2081,16 @@ fn run_decode(action: Option<DecodeAction>) -> Option<DecodeOutcome> {
 struct MetadataAction {
     id: AssetId,
     allow_network: bool,
+    /// The token **Cancel metadata** cancels; fresh for every read.
+    cancel: CancelToken,
 }
 
-/// A metadata result as one line: the EXIF summary, or the typed error (a `NetworkRequired`
-/// shows as such, with its variant).
+/// A metadata result as one line: the EXIF summary, a cancelled read as `Cancelled`, or the typed
+/// error (a `NetworkRequired` shows as such, with its variant).
 fn metadata_text(result: Result<ExifData, PhotoError>) -> String {
     match result {
         Ok(exif) => exif_summary(Some(&exif)),
+        Err(PhotoError::Cancelled) => "Cancelled".to_string(),
         Err(err) => format!("metadata error: {err} ({err:?})"),
     }
 }
@@ -2087,7 +2098,9 @@ fn metadata_text(result: Result<ExifData, PhotoError>) -> String {
 /// Reads one asset's metadata (call inside `spawn_blocking`). `None` is the mount-time fetch.
 fn run_metadata(action: Option<MetadataAction>) -> Option<String> {
     let action = action?;
-    let options = MetadataOptions::new().allow_network(action.allow_network);
+    let options = MetadataOptions::new()
+        .allow_network(action.allow_network)
+        .cancel(action.cancel);
     Some(metadata_text(PhotoLibrary::asset_metadata(
         &action.id, &options,
     )))
@@ -2136,6 +2149,8 @@ struct OriginalsPanelState {
     metadata_network: RwSignal<bool>,
     /// The pending metadata read; `None` resolves to nothing.
     metadata_action: Arc<Mutex<Option<MetadataAction>>>,
+    /// The running metadata read's token; Cancel metadata takes it, each Metadata press replaces it.
+    metadata_token: Arc<Mutex<Option<CancelToken>>>,
     /// The latest metadata read; its value is the summary or error line.
     metadata: UseTask<Option<String>>,
 }
@@ -2195,7 +2210,7 @@ impl Component for OriginalsPanel {
         let metadata_action: Arc<Mutex<Option<MetadataAction>>> = Arc::new(Mutex::new(None));
         let metadata_cell = metadata_action.clone();
         let metadata = use_task(move || {
-            let requested = metadata_cell.lock().expect("metadata cell poisoned").take();
+            let requested = lock_cell(&metadata_cell).take();
             async move {
                 spawn_blocking(move || run_metadata(requested))
                     .await
@@ -2220,6 +2235,7 @@ impl Component for OriginalsPanel {
             decode_token: Arc::new(Mutex::new(None)),
             metadata_network: RwSignal::new(false),
             metadata_action,
+            metadata_token: Arc::new(Mutex::new(None)),
             metadata,
         }
     }
@@ -2411,6 +2427,7 @@ impl Component for OriginalsPanel {
                     .spacing(8.0)
                     .run_spacing(8.0)
                     .child(metadata_button(state, metadata_target, metadata_busy))
+                    .child(metadata_cancel_button(state, metadata_busy))
                     .child(metadata_network_toggle),
             )
             .child(SizedBox(None, Some(4.0)))
@@ -2461,24 +2478,48 @@ fn metadata_button(
     target: Option<AssetId>,
     busy: bool,
 ) -> impl View<OriginalsPanelState> {
-    let (action, metadata, network) = (
+    let (action, metadata, network, token) = (
         state.metadata_action.clone(),
         state.metadata.clone(),
         state.metadata_network,
+        state.metadata_token.clone(),
     );
     let disabled = busy || target.is_none();
     button("Metadata", move |_state: &mut OriginalsPanelState| {
         let Some(id) = target.clone() else {
             return;
         };
-        *action.lock().expect("metadata cell poisoned") = Some(MetadataAction {
+        // A fresh token for every read; the read and Cancel metadata share it.
+        let cancel = CancelToken::new();
+        *lock_cell(&token) = Some(cancel.clone());
+        *lock_cell(&action) = Some(MetadataAction {
             id,
             allow_network: network.get_untracked(),
+            cancel,
         });
         metadata.restart();
     })
     .style(ButtonStyle::Secondary)
     .disabled(disabled)
+    .small()
+}
+
+fn metadata_cancel_button(
+    state: &OriginalsPanelState,
+    busy: bool,
+) -> impl View<OriginalsPanelState> {
+    let token = state.metadata_token.clone();
+    button(
+        "Cancel metadata",
+        move |_state: &mut OriginalsPanelState| {
+            let current = lock_cell(&token).clone();
+            if let Some(current) = current {
+                current.cancel();
+            }
+        },
+    )
+    .style(ButtonStyle::Secondary)
+    .disabled(!busy)
     .small()
 }
 
@@ -3432,7 +3473,20 @@ mod tests {
         );
         assert_eq!(
             counts.line(),
-            "Thumbnails: 2 from cache, 1 loaded, 1 cancelled, 1 failed"
+            "Thumbnails: 2 from cache (lower bound), 1 loaded, 1 cancelled, 1 failed"
+        );
+    }
+
+    #[test]
+    fn the_cache_counter_is_labelled_a_lower_bound() {
+        let counts = ThumbCounts {
+            cached: 3,
+            ..ThumbCounts::default()
+        };
+        assert!(
+            counts.line().contains("3 from cache (lower bound)"),
+            "{}",
+            counts.line()
         );
     }
 
@@ -3444,6 +3498,7 @@ mod tests {
         let line = metadata_text(Err(PhotoError::NetworkRequired));
         assert!(line.starts_with("metadata error: "), "{line}");
         assert!(line.contains("NetworkRequired"), "{line}");
+        assert_eq!(metadata_text(Err(PhotoError::Cancelled)), "Cancelled");
         assert!(run_metadata(None).is_none());
     }
 
