@@ -2,10 +2,13 @@
 # Installs apt packages on a hosted Linux runner: `apt-install.sh <package>...`.
 #
 # The runner image points apt at `azure.archive.ubuntu.com` through
-# `/etc/apt/apt-mirrors.txt`. When that name stops resolving, every download
-# waits out its DNS timeout and the step fails after about twenty minutes. This
-# script bounds the wait and falls back to `archive.ubuntu.com`: up front when
-# the Azure name does not resolve, and once more if the install fails anyway.
+# `/etc/apt/apt-mirrors.txt`. When name resolution on the runner turns flaky,
+# each download that misses waits out a DNS timeout, and the step fails after
+# about twenty minutes with `Temporary failure resolving`. This script resolves
+# the archive hosts once, with retries, and pins them in `/etc/hosts` so the
+# downloads no longer depend on DNS; it bounds each fetch; and it falls back to
+# `archive.ubuntu.com` when the Azure name cannot be resolved at all, or once
+# more if the install fails anyway.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
@@ -15,9 +18,9 @@ fi
 
 mirrors=/etc/apt/apt-mirrors.txt
 opts=(
-    -o Acquire::Retries=3
-    -o Acquire::http::Timeout=30
-    -o Acquire::https::Timeout=30
+    -o Acquire::Retries=2
+    -o Acquire::http::Timeout=20
+    -o Acquire::https::Timeout=20
 )
 
 use_main_archive() {
@@ -32,8 +35,34 @@ install() {
         sudo apt-get "${opts[@]}" install -y --no-install-recommends "$@"
 }
 
-if [ -f "$mirrors" ] && ! getent hosts azure.archive.ubuntu.com >/dev/null; then
-    echo "apt-install: azure.archive.ubuntu.com does not resolve"
+# Prints the first IPv4 address of a host, trying a few times.
+resolve() {
+    local host=$1 ip
+    for _ in 1 2 3 4 5 6 7 8; do
+        ip=$(getent ahostsv4 "$host" | awk 'NR == 1 { print $1 }') || true
+        if [ -n "${ip:-}" ]; then
+            echo "$ip"
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+pin() {
+    local host=$1 ip
+    if ip=$(resolve "$host"); then
+        echo "apt-install: pinning $host to $ip"
+        echo "$ip $host" | sudo tee -a /etc/hosts >/dev/null
+    else
+        echo "apt-install: $host does not resolve"
+        return 1
+    fi
+}
+
+pin archive.ubuntu.com || true
+pin security.ubuntu.com || true
+if [ -f "$mirrors" ] && ! pin azure.archive.ubuntu.com; then
     use_main_archive
 fi
 
