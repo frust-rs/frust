@@ -26,6 +26,10 @@
 //!   declarations, every blocking call refuses the UI thread, browsing never
 //!   takes the pick slot, paging and the access check keep their shape, and
 //!   the asked-flag keys and permission table match `frust-permissions`;
+//! - cursor paging: the `assetsAfter` call and its `AssetsAfterResult` match,
+//!   the keyset query takes no count, orders by the sort key then `_ID`,
+//!   selects the rows after the cursor's key and `_ID` and reads one row past
+//!   the page, never seeks, and the offset path keeps its count and seek;
 //! - thumbnail cancel: the load gets a real `CancellationSignal` held under its
 //!   request id, `cancelThumbnail` fires it, a failure after the cancel answers
 //!   `CANCELLED`, and the Rust hook calls the entry and types the code;
@@ -2349,4 +2353,180 @@ fn the_observer_wakes_from_every_overload_and_stops_outside_its_lock() {
     assert!(stop.contains("jni_str!(\"stopChangeObserver\")"));
     let start = function(&rust, "pub(crate) fn start_change_observer(");
     assert!(start.contains("Err(changes_error(code))"));
+}
+
+#[test]
+fn cursor_paging_jni_call_matches_the_kotlin_declaration() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_LIBRARY);
+    let decl = "@JvmStatic\n    fun assetsAfter(albumId: String?, filter: Int, first: Boolean, afterKey: Long, afterId: Long, limit: Int, details: Boolean): AssetsAfterResult =";
+    let sig = "(Ljava/lang/String;IZJJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsAfterResult;";
+    assert!(kotlin.contains(decl), "Kotlin host must declare `{decl}`");
+    assert!(
+        kotlin.contains(&format!("`{sig}`")),
+        "the contract table names the `assetsAfter` signature"
+    );
+    let at = kotlin.find(decl).unwrap();
+    assert!(
+        kotlin[at..(at + 400).min(kotlin.len())].contains(
+            "MediaStoreBrowser.assetsAfter(appContext, albumId, filter, first, afterKey, afterId, limit, details)"
+        ),
+        "the host forwards to the browser"
+    );
+    let at = rust
+        .find("jni_str!(\"assetsAfter\")")
+        .expect("src/android_library.rs calls `assetsAfter`");
+    assert!(
+        rust[at..(at + 300).min(rust.len())].contains(&format!("\"{sig}\"")),
+        "src/android_library.rs must call `assetsAfter` with `{sig}`"
+    );
+    let code = rust_code(&rust);
+    let arm = function(&code, "pub(crate) fn assets_after(");
+    let call = arm.find("call_static_method").unwrap();
+    let values = &arm[call..];
+    let order = [
+        "JValue::Object(&album)",
+        "JValue::Int(filter)",
+        "JValue::Bool(first)",
+        "JValue::Long(after_key)",
+        "JValue::Long(after_id)",
+        "JValue::Int(limit)",
+        "JValue::Bool(details)",
+    ];
+    let mut last = 0;
+    for value in order {
+        let at = values
+            .find(value)
+            .unwrap_or_else(|| panic!("`assets_after` passes `{value}`"));
+        assert!(at > last, "`{value}` is out of the declared order");
+        last = at;
+    }
+}
+
+#[test]
+fn cursor_page_fields_match_their_rust_reads() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_LIBRARY);
+    assert_eq!(
+        jvm_fields(&kotlin, "class AssetsAfterResult("),
+        [
+            ("code", "Int"),
+            ("page", "AssetsResult"),
+            ("lastKey", "Long"),
+            ("lastId", "Long"),
+            ("hasMore", "Boolean"),
+        ]
+        .map(|(name, ty)| (name.to_string(), ty.to_string()))
+        .to_vec(),
+        "`AssetsAfterResult` fields changed"
+    );
+    let arm = function(&rust, "pub(crate) fn assets_after(");
+    for read in [
+        "int_field(env, &result, jni_str!(\"code\"))",
+        ".get_field(&result, jni_str!(\"lastKey\"), jni_sig!(\"J\"))",
+        ".get_field(&result, jni_str!(\"lastId\"), jni_sig!(\"J\"))",
+        ".get_field(&result, jni_str!(\"hasMore\"), jni_sig!(\"Z\"))",
+        "jni_sig!(\"Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;\")",
+        "asset_columns(env, page)?",
+    ] {
+        assert!(arm.contains(read), "no `{read}` in `assets_after`");
+    }
+    assert!(
+        function(&rust, "pub(crate) fn assets(").contains("asset_columns(env, result)?"),
+        "both pages read their arrays through one reader"
+    );
+}
+
+/// The concatenated string literals of the Kotlin `const val` declared by
+/// `decl`, up to the blank line that ends it.
+fn kotlin_const_text(contents: &str, decl: &str) -> String {
+    let start = contents
+        .find(decl)
+        .unwrap_or_else(|| panic!("source has no `{decl}`"));
+    let body = &contents[start + decl.len()..];
+    let body = &body[..body.find("\n\n").unwrap_or(body.len())];
+    body.split('"').skip(1).step_by(2).collect()
+}
+
+#[test]
+fn the_keyset_query_counts_nothing_and_orders_by_the_key_then_the_id() {
+    let browser = read(KOTLIN_BROWSER);
+    let key = kotlin_const_text(&browser, "private const val SORT_KEY =");
+    let order = kotlin_const_text(&browser, "private const val SORT_ORDER =");
+    assert_eq!(
+        order,
+        format!("{key} DESC, ${{BaseColumns._ID}} DESC"),
+        "the keyset compares the key the page is ordered by, then `_ID`"
+    );
+    assert!(key.starts_with("CASE WHEN ") && key.ends_with(" END"));
+
+    let page = rust_code(&browser);
+    let page = function(&page, "fun assetsAfter(");
+    assert!(
+        !page.contains("countRows")
+            && !page.to_uppercase().contains("COUNT")
+            && !page.contains(".count"),
+        "the keyset page takes no row count"
+    );
+    assert!(page.contains(
+        "val selection = if (first) scoped else \"$scoped AND ${keysetSelection(afterKey, afterId)}\""
+    ));
+    assert!(
+        page.contains("val window = pageSize + 1")
+            && page.contains("readRows(c, 0, window, details)")
+            && page.contains("val more = rows.size > pageSize"),
+        "one row past the page says whether another follows, read from the first row"
+    );
+    assert!(page.contains("last?.date ?: 0, last?.rowId ?: 0, more"));
+
+    let keyset = function(&browser, "internal fun keysetSelection(");
+    assert!(
+        keyset.contains(
+            "\"(($SORT_KEY) < $afterKey OR (($SORT_KEY) = $afterKey AND ${BaseColumns._ID} < $afterId))\""
+        ),
+        "the rows after the cursor: an older key, or the same key and a smaller id"
+    );
+
+    let query = function(&browser, "private fun queryAfter(");
+    assert_eq!(
+        query.matches(", SORT_ORDER)").count(),
+        2,
+        "both API branches order by SORT_ORDER"
+    );
+    assert!(query.contains("if (Build.VERSION.SDK_INT < 30) {"));
+    assert!(query.contains("putInt(ContentResolver.QUERY_ARG_LIMIT, window)"));
+    assert!(
+        !query.contains("QUERY_ARG_OFFSET") && !query.contains("moveToPosition"),
+        "the keyset page never offsets or seeks"
+    );
+    let rows = function(&browser, "private fun readRows(");
+    assert!(rows.contains("val rowId = cursor.getLong(0)"));
+    assert!(rows.contains("rowId = rowId,"));
+
+    // The offset path keeps its count and its seek.
+    let offset = function(&browser, "fun assets(ctx: Context?,");
+    assert!(offset.contains("countRows(resolver, selection, args)"));
+    assert!(
+        offset.contains("queryPage(resolver, selection, args, offset.toInt(), limit, details)")
+    );
+    assert!(!offset.contains("keysetSelection"));
+}
+
+#[test]
+fn cursor_paging_refuses_the_ui_thread_and_checks_the_cursor_first() {
+    let rust = rust_code(&read(RUST_ANDROID_LIBRARY));
+    let arm = function(&rust, "pub(crate) fn assets_after(");
+    let cursor = arm
+        .find("cursor.keyset_for(query)")
+        .expect("the cursor is checked against the query");
+    let host = arm.find("with_host(").unwrap();
+    let ui = arm.find("ensure_off_ui_thread(env)?;").unwrap();
+    let call = arm.find("call_static_method").unwrap();
+    assert!(cursor < host && host < ui && ui < call);
+    assert!(!arm.contains("PickGuard"), "cursor paging is read-only");
+    assert!(arm.contains("keyset_page(query, page.items, more, last_key, last_id)"));
+    assert!(
+        !function(&rust, "pub(crate) fn assets(").contains("assetsAfter"),
+        "the offset path makes only its own call"
+    );
 }

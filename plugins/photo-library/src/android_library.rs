@@ -2,9 +2,10 @@
 //! contract in [`super`]. Declared from `android.rs` so the crate root stays
 //! platform-agnostic.
 //!
-//! `albums`, `assets` and `thumbnail` call `FrustPhotoLibraryHost`'s statics
-//! on the caller's thread, inside one scoped JNI attachment, and read a result
-//! object (`FrustPhotoLibraryHost$AlbumsResult` and siblings) field by field.
+//! `albums`, `assets`, `assets_after` and `thumbnail` call
+//! `FrustPhotoLibraryHost`'s statics on the caller's thread, inside one scoped
+//! JNI attachment, and read a result object
+//! (`FrustPhotoLibraryHost$AlbumsResult` and siblings) field by field.
 //! The result's `code` decides the outcome; parallel primitive arrays carry
 //! the data. They never take the pick guard: browsing is read-only and runs
 //! while a pick is up.
@@ -38,8 +39,9 @@ use super::{
 };
 use crate::cancel::CancelToken;
 use crate::library::{
-    Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, Thumbnail, ThumbnailMode,
-    ThumbnailRequest, favorite_from_code, modified_ms_from_seconds,
+    Album, AlbumId, AlbumKind, Asset, AssetCursor, AssetCursorPage, AssetPage, AssetQuery,
+    Thumbnail, ThumbnailMode, ThumbnailRequest, favorite_from_code, keyset_page,
+    modified_ms_from_seconds,
 };
 use crate::pick_cache;
 use crate::pixels;
@@ -156,19 +158,97 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
             let total = env
                 .get_field(&result, jni_str!("total"), jni_sig!("J"))?
                 .j()?;
-            let columns = AssetColumns {
-                ids: string_array_field(env, &result, jni_str!("ids"))?,
-                kinds: int_array_field(env, &result, jni_str!("kinds"))?,
-                widths: int_array_field(env, &result, jni_str!("widths"))?,
-                heights: int_array_field(env, &result, jni_str!("heights"))?,
-                dates: long_array_field(env, &result, jni_str!("dates"))?,
-                durations: long_array_field(env, &result, jni_str!("durations"))?,
-                modified: long_array_field(env, &result, jni_str!("modified"))?,
-                favorites: int_array_field(env, &result, jni_str!("favorites"))?,
-                names: string_array_field(env, &result, jni_str!("names"))?,
-                types: string_array_field(env, &result, jni_str!("types"))?,
-            };
+            let columns = asset_columns(env, result)?;
             Ok(assets_from(columns, total, details))
+        })?
+    })
+}
+
+/// The parallel arrays of one `AssetsResult`, read field by field.
+fn asset_columns(
+    env: &mut Env<'_>,
+    result: JObject<'_>,
+) -> Result<AssetColumns, jni::errors::Error> {
+    Ok(AssetColumns {
+        ids: string_array_field(env, &result, jni_str!("ids"))?,
+        kinds: int_array_field(env, &result, jni_str!("kinds"))?,
+        widths: int_array_field(env, &result, jni_str!("widths"))?,
+        heights: int_array_field(env, &result, jni_str!("heights"))?,
+        dates: long_array_field(env, &result, jni_str!("dates"))?,
+        durations: long_array_field(env, &result, jni_str!("durations"))?,
+        modified: long_array_field(env, &result, jni_str!("modified"))?,
+        favorites: int_array_field(env, &result, jni_str!("favorites"))?,
+        names: string_array_field(env, &result, jni_str!("names"))?,
+        types: string_array_field(env, &result, jni_str!("types"))?,
+    })
+}
+
+/// The crate root's `assets_after` arm: keyset paging through the host's
+/// `assetsAfter`. The host orders by the same key and `_ID` as `assets`,
+/// selects only the rows after the cursor's `(key, id)`, takes no row count,
+/// and reads one row past the page so the last page carries no cursor.
+pub(crate) fn assets_after(
+    query: &AssetQuery,
+    cursor: Option<&AssetCursor>,
+) -> Result<AssetCursorPage, PhotoError> {
+    // A cursor of another query or platform is refused before any host work.
+    let after = cursor.map(|cursor| cursor.keyset_for(query)).transpose()?;
+    let (first, after_key, after_id) = match after {
+        Some((key, id)) => (false, key, id),
+        None => (true, 0, 0),
+    };
+    let limit = jint::try_from(query.effective_limit()).unwrap_or(jint::MAX);
+    let filter = filter_code(query.filter);
+    let details = query.details;
+    with_host(|env, class| {
+        ensure_off_ui_thread(env)?;
+        run_jni(env, "FrustPhotoLibraryHost.assetsAfter", |env| {
+            let album = match &query.album {
+                Some(album) => JObject::from(env.new_string(album.as_str())?),
+                None => JObject::null(),
+            };
+            let result = env
+                .call_static_method(
+                    class,
+                    jni_str!("assetsAfter"),
+                    jni_sig!(
+                        "(Ljava/lang/String;IZJJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsAfterResult;"
+                    ),
+                    &[
+                        JValue::Object(&album),
+                        JValue::Int(filter),
+                        JValue::Bool(first),
+                        JValue::Long(after_key),
+                        JValue::Long(after_id),
+                        JValue::Int(limit),
+                        JValue::Bool(details),
+                    ],
+                )?
+                .l()?;
+            let code = int_field(env, &result, jni_str!("code"))?;
+            if code != OK {
+                return Ok(Err(browse_error(code)));
+            }
+            let last_key = env
+                .get_field(&result, jni_str!("lastKey"), jni_sig!("J"))?
+                .j()?;
+            let last_id = env
+                .get_field(&result, jni_str!("lastId"), jni_sig!("J"))?
+                .j()?;
+            let more = env
+                .get_field(&result, jni_str!("hasMore"), jni_sig!("Z"))?
+                .z()?;
+            let page = env
+                .get_field(
+                    &result,
+                    jni_str!("page"),
+                    jni_sig!("Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;"),
+                )?
+                .l()?;
+            let columns = asset_columns(env, page)?;
+            // The keyset page has no total; `assets_from` only carries it.
+            Ok(assets_from(columns, 0, details)
+                .map(|page| keyset_page(query, page.items, more, last_key, last_id)))
         })?
     })
 }

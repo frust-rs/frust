@@ -58,6 +58,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Kotlin → Rust | `nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)` | copy progress, never an answer |
  * | Rust → Kotlin | `albums(): AlbumsResult` | an [AlbumsResult]; `code` is [OK], [NOT_INITIALIZED], [PERMISSION_DENIED] or [QUERY_FAILED] |
  * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult` | an [AssetsResult], same codes as `albums` |
+ * | Rust → Kotlin | `assetsAfter(albumId: String?, filter: Int, first: Boolean, afterKey: Long, afterId: Long, limit: Int, details: Boolean): AssetsAfterResult` — `(Ljava/lang/String;IZJJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsAfterResult;` | an [AssetsAfterResult], same codes as `albums` |
  * | Rust → Kotlin | `thumbnail(requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] and [CANCELLED] |
  * | Rust → Kotlin | `cancelThumbnail(requestId: Long)` — `(J)V` | nothing; an unknown or finished id is ignored |
  * | Rust → Kotlin | `manageLimitedSelection(requestId: Long): Int` — `(J)I` | [PENDING] after posting the prompt, [NOT_LIMITED], [NO_ACTIVITY], [BUSY] or [NOT_INITIALIZED]; answered through [nativeOnPickResult] (three empty arrays) or [nativeOnPickError] |
@@ -120,9 +121,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * ## Browsing
  *
- * [albums], [assets] and [thumbnail] run in [MediaStoreBrowser] on the calling
- * thread, return their result object synchronously, and never touch the
- * in-flight slot. A [thumbnail] load runs with a `CancellationSignal` held
+ * [albums], [assets], [assetsAfter] and [thumbnail] run in [MediaStoreBrowser]
+ * on the calling thread, return their result object synchronously, and never
+ * touch the in-flight slot. [assets] pages by offset and counts the query;
+ * [assetsAfter] pages by keyset after the last row of the previous page, in
+ * the same order, and counts nothing. A [thumbnail] load runs with a `CancellationSignal` held
  * under its request id until it returns; [cancelThumbnail] fires it, and the
  * load then answers [CANCELLED]. [manageLimitedSelection] presents the Android 14 selection
  * UI: `RequestMultiplePermissions` for the SDK media set, through the same
@@ -300,6 +303,20 @@ object FrustPhotoLibraryHost {
         @JvmField val favorites: IntArray,
         @JvmField val names: Array<String?>,
         @JvmField val types: Array<String?>,
+    )
+
+    /**
+     * [assetsAfter]: one keyset page in [page] (its `total` is always 0), the
+     * sort key and `_ID` of the page's last row ([lastKey], [lastId], 0 for an
+     * empty page), and whether a row follows the page ([hasMore]). A failed
+     * call has only [code].
+     */
+    class AssetsAfterResult(
+        @JvmField val code: Int,
+        @JvmField val page: AssetsResult,
+        @JvmField val lastKey: Long,
+        @JvmField val lastId: Long,
+        @JvmField val hasMore: Boolean,
     )
 
     /** [thumbnail]: premultiplied RGBA8 with [rowBytes] per row. */
@@ -497,6 +514,15 @@ object FrustPhotoLibraryHost {
     @JvmStatic
     fun assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult =
         MediaStoreBrowser.assets(appContext, albumId, filter, offset, limit, details)
+
+    /**
+     * One keyset page of assets, newest first: from the newest when [first] is
+     * set, otherwise after the row whose sort key and `_ID` are [afterKey] and
+     * [afterId]. Any thread but the main one (the query blocks).
+     */
+    @JvmStatic
+    fun assetsAfter(albumId: String?, filter: Int, first: Boolean, afterKey: Long, afterId: Long, limit: Int, details: Boolean): AssetsAfterResult =
+        MediaStoreBrowser.assetsAfter(appContext, albumId, filter, first, afterKey, afterId, limit, details)
 
     /**
      * One thumbnail, loaded under [requestId] so [cancelThumbnail] can stop it.

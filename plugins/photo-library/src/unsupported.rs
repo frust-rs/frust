@@ -18,6 +18,14 @@ pub(crate) fn assets(_query: &crate::AssetQuery) -> Result<crate::AssetPage, Pho
 }
 
 #[cfg(feature = "library")]
+pub(crate) fn assets_after(
+    _query: &crate::AssetQuery,
+    _cursor: Option<&crate::AssetCursor>,
+) -> Result<crate::AssetCursorPage, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
 pub(crate) fn thumbnail(
     _id: &crate::AssetId,
     _request: &crate::ThumbnailRequest,

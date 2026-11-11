@@ -94,7 +94,7 @@ pub(crate) use apple_changes::{
     stop_change_observer,
 };
 #[cfg(feature = "library")]
-pub(crate) use apple_library::{albums, assets, manage_limited_selection, thumbnail};
+pub(crate) use apple_library::{albums, assets, assets_after, manage_limited_selection, thumbnail};
 #[cfg(feature = "library")]
 pub(crate) use apple_metadata::asset_metadata;
 #[cfg(feature = "library")]
