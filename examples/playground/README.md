@@ -438,6 +438,12 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Folders panel Cancel during Pick folder and during a large Scan | iPhone | OWED |
 | Photos: Folders panel Cancel during Pick folder and during a large Scan | Android device | OWED |
 | Photos: Folders panel Cancel during Pick folder and during a large Scan | Desktop (macOS, Windows, Linux) | OWED |
+| Accessibility: `uiautomator dump`, then tab navigation, 5 relaunches; dump, then rotation, 5 relaunches; control with no dump | OnePlus 9 (LE2115), Android 15 (API 35), 2026-11-11 | PASS (feature/accesskit-bump 6cca0f4d, profile build: 5 of 5 and 5 of 5 alive, every dump returned the page's nodes, crash buffer empty. Baseline on the same phone, main 546d1ec1 profile build: 0 of 5 and 0 of 5, each a SIGABRT with `called Result::unwrap() on an Err value: JavaException`; its no-dump control stayed alive) |
+| Accessibility: the same dump-then-navigate and dump-then-rotate legs | Pixel 4a (sunfish), Android 16 (API 36), 2026-11-11 | PASS (feature/accesskit-bump 6cca0f4d, profile build: 5 of 5 and 5 of 5 alive, every dump returned the page's nodes, crash buffer empty. No baseline run on this phone) |
+| Accessibility: dump, open the camera permission prompt, dismiss it, navigate | OnePlus 9 (LE2115), Android 15 (API 35), 2026-11-11 | PASS (feature/accesskit-bump 6cca0f4d: one process throughout, crash buffer empty) |
+| Accessibility: TalkBack on, swipe gestures, tab activation by double-tap, soft keyboard raised, TalkBack off, navigate, rotate; two on/off cycles | OnePlus 9 (LE2115), Android 15 (API 35), 2026-11-11 | PASS for no abort only (feature/accesskit-bump 6cca0f4d, driven over adb: one process throughout, crash buffer empty, tabs changed under touch exploration). Spoken labels, focus order and typing into a text field under TalkBack are NOT RUN |
+| Accessibility: TalkBack by hand (swipe through a page, hear the labels, type into a field) | Android device | OWED |
+| Accessibility: VoiceOver on, flick through 10+ elements, double-tap More > URL, back and forward, type two characters into a field, VoiceOver off, change tab | iPhone SE (iPhone12,8), iOS 26.7.1, 2026-11-11 | PASS (feature/accesskit-bump 6cca0f4d, debug build, human-run: no crash, labels read; an automated pass on the same build kept one process throughout and its accessibility dumps carried the page's labels. Not compared against main) |
 
 ### Drag gate notes
 

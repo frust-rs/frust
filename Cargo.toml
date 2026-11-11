@@ -123,11 +123,11 @@ objc2-core-foundation = "0.3"
 # residual: do not try to fix it here (docs/DEVELOPMENT.md § Version-Pin Policy).
 objc2-app-kit = "0.3"
 android_system_properties = "0.1"
-accesskit = "0.24"
-accesskit_winit = "0.33"
-accesskit_android = "0.7"
+accesskit = "0.25"
+accesskit_winit = "0.34"
+accesskit_android = "0.9"
 # Exact pin: the 0.1.x line is younger/less proven than the other adapters (Version-Pin Policy).
-accesskit_ios = "=0.1.2"
+accesskit_ios = "=0.2.2"
 # frust-engine's sparse-strip core, exact-pinned (pre-1.0): the only `vello_common`/`glifo` identities,
 # guarded by crates/frust-testing/tests/dup_identities.rs.
 vello_common = { version = "=0.2.0", default-features = false, features = ["std"] }

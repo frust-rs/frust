@@ -4132,7 +4132,7 @@ mod tests {
     use crate::config::Decorations;
     use frust_core::SemanticsUpdate;
     use frust_core::accesskit::{
-        Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role, Tree, TreeId,
+        Affine as AccessKitAffine, Node, NodeId, Rect as AccessKitRect, Role, TreeId, TreeInfo,
     };
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -5503,7 +5503,7 @@ mod tests {
 
         let tree_update = build_tree_update(&update, 1.0);
         assert_eq!(tree_update.nodes.len(), 2);
-        assert_eq!(tree_update.tree, Some(Tree::new(root_id)));
+        assert_eq!(tree_update.tree, Some(TreeInfo::new(root_id)));
         assert_eq!(tree_update.tree_id, TreeId::ROOT);
         assert_eq!(tree_update.focus, child_id);
     }

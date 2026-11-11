@@ -8,6 +8,14 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Breaking
 
+- `accesskit::Tree` (re-exported through frust) is now `TreeInfo`; the old name is a deprecated alias.
+- Android, behaviour: with the new accesskit Android adapter a static text node reports its label as
+  the accessibility node's content description and leaves the node's text empty; before, the label
+  was the node's text. Screen readers read it the same. A UI test that selects by text (uiautomator
+  `text=`, `By.text`, a `text` selector in a test runner) must select by content description
+  instead. On a `uiautomator dump` of the playground the node set and bounds were identical (23
+  nodes) and every label moved from `text` to `content-desc`.
+
 - `frust-i18n` typed keys (`locales!`'s `keys` module): a message with two or more `$variable`s now
   takes one generated `<PascalKey>Args` struct with a named field per variable, instead of
   positional arguments, so two values of the same type cannot be swapped at a call site. A message
@@ -100,8 +108,17 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ### Changed
 
+- accesskit 0.25, `accesskit_winit` 0.34, `accesskit_android` 0.9, `accesskit_ios` 0.2.2.
 - The plugin registry's `photo-library` `library` option now also links `ImageIO` on iOS, which
   `asset_metadata` reads through; a project that also enables `decode` links it once.
+
+### Fixed
+
+- An Android app no longer aborts when an accessibility client detaches or the host view is
+  detached and the UI then changes (for example `uiautomator dump`, then a navigation or a
+  rotation). On a OnePlus 9 (Android 15) the build before the bump aborted 10 of 10 and this one
+  0 of 10; a Pixel 4a (Android 16) also ran 10 of 10 clean. TalkBack speech, focus order and typing
+  under TalkBack were not verified by hand.
 
 ## 0.6.6 — 2026-11-11
 
@@ -613,8 +630,7 @@ fonts (PingFang) now draw from the glyph atlas.
 - An Android app aborts when an accessibility client is active (TalkBack, or a tool that queries the
   accessibility tree such as `uiautomator dump`) and the window then changes. This predates 0.6.6.
   The fix is an upstream change to `accesskit_android` plus a pin bump, and there is no workaround in
-  app code. See `android-accessibility-service-abort` in
-  [docs/LIMITATIONS.md](docs/LIMITATIONS.md).
+  app code. Fixed after 0.6.6: see Unreleased.
 
 ## 0.6.5 — 2026-11-02
 

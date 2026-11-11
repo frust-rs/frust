@@ -268,7 +268,7 @@ const NO_VALVE_CRATES: &[&str] = &["frust_core", "frust_scene", "frust_text"];
 /// that tail. What stays forbidden is the **bare** spelling, which means a
 /// consumer re-declared a direct dependency on a crate whose version is
 /// pinned in one place (`docs/DEVELOPMENT.md` § Version-Pin Policy,
-/// `accesskit 0.24`) — the version-forgeability hole this seam exists to close.
+/// `accesskit 0.25`) — the version-forgeability hole this seam exists to close.
 const VALVED_CRATES: &[&str] = &["accesskit", "kurbo", "peniko"];
 
 /// Every byte offset in `line` where `<crate_name>::` starts a genuine

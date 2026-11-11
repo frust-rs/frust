@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 
 use accesskit::{Node, NodeId, TreeUpdate};
 #[cfg(test)]
-use accesskit::{Tree, TreeId};
+use accesskit::{TreeId, TreeInfo};
 use frust_render::SurfacePhase;
 
 /// Assemble an `accesskit::TreeUpdate` from the flat pieces of a
@@ -1311,7 +1311,7 @@ mod tests {
         ];
         let update = build_tree_update(nodes, root, button, 1.0);
         // A full-tree update MUST carry `tree` metadata rooted at `root`.
-        assert_eq!(update.tree, Some(Tree::new(root)));
+        assert_eq!(update.tree, Some(TreeInfo::new(root)));
         // Single root tree — no subtrees.
         assert_eq!(update.tree_id, TreeId::ROOT);
         // The resolved focus id is threaded straight through.
@@ -1376,7 +1376,7 @@ mod tests {
         let root = NodeId(1);
         let update = build_tree_update(Vec::new(), root, root, 2.0);
         assert!(update.nodes.is_empty());
-        assert_eq!(update.tree, Some(Tree::new(root)));
+        assert_eq!(update.tree, Some(TreeInfo::new(root)));
     }
 
     #[test]
