@@ -37,6 +37,12 @@ use frust_core::Widget;
 /// them at its next rebuild (see the [module docs](self)).
 pub struct NavigatorController<State: 'static> {
     pub(super) ops: Rc<RefCell<Vec<NavOp<State>>>>,
+    /// Whether the last op in [`ops`](Self::ops) is a
+    /// [`pop_with_result`](Self::pop_with_result) no other op has followed.
+    /// Cleared by every enqueue and every drain, so it can only be `true` while
+    /// that pop is still the queue's tail: a further `pop_with_result` then
+    /// targets the same top page and is a repeat.
+    result_pop_is_tail: Rc<Cell<bool>>,
     /// The current page-stack **depth**, published by the attached
     /// [`NavigatorWidget`] on every `build`/`rebuild`/`apply_ops`. The widget
     /// owns the authoritative stack; this shared cell is
@@ -134,6 +140,7 @@ impl<State: 'static> Clone for NavigatorController<State> {
     fn clone(&self) -> Self {
         Self {
             ops: Rc::clone(&self.ops),
+            result_pop_is_tail: Rc::clone(&self.result_pop_is_tail),
             depth: Rc::clone(&self.depth),
             back_interest: Rc::clone(&self.back_interest),
             transition: Rc::clone(&self.transition),
@@ -155,6 +162,7 @@ impl<State: 'static> NavigatorController<State> {
     pub fn new() -> Self {
         Self {
             ops: Rc::new(RefCell::new(Vec::new())),
+            result_pop_is_tail: Rc::new(Cell::new(false)),
             depth: Rc::new(Cell::new(0)),
             back_interest: Rc::new(Cell::new(false)),
             transition: Rc::new(Cell::new(TransitionState::default())),
@@ -491,8 +499,32 @@ impl<State: 'static> NavigatorController<State> {
 
     /// Pop the top page, handing `result` to its pusher-registered
     /// [`push_for_result`](Self::push_for_result) callback.
+    ///
+    /// **Single-shot per page.** The call targets the page that is on top when
+    /// it is made. A second `pop_with_result` requested before the first has
+    /// been applied (a double click on a dialog button, say) targets that same
+    /// page, so it is dropped and its `result` is discarded: the callback
+    /// receives the first result exactly once and no second page is popped.
+    ///
+    /// Only an immediate repeat is recognised. Once any other op is queued
+    /// between the two calls (a [`push`](Self::push), a [`pop`](Self::pop), a
+    /// `replace`) the second call may target a different page and is queued as
+    /// usual, and a pop requested after the first was applied pops the next
+    /// page. [`pop`](Self::pop) itself is unchanged: calling it twice leaves two
+    /// pages, so `pop_with_result` followed by `pop` (or the reverse) pops two
+    /// pages, as it cannot be told apart from two intended pops.
     pub fn pop_with_result(&self, result: PopResult) {
+        if self.result_pop_is_tail.get() {
+            // Debug aid: a repeat for the same page; the payload is discarded.
+            #[cfg(debug_assertions)]
+            eprintln!(
+                "frust: pop_with_result repeated for the same page before it was applied; ignored"
+            );
+            drop(result);
+            return;
+        }
         self.enqueue(NavOp::Pop { result });
+        self.result_pop_is_tail.set(true);
     }
 
     /// Route a back press through the top page's [`BackPolicy`] (the
@@ -643,6 +675,7 @@ impl<State: 'static> NavigatorController<State> {
     /// small, known price next to the bug it replaces: a page mounted with zero
     /// frames painted for 15+ seconds.
     fn enqueue(&self, op: NavOp<State>) {
+        self.result_pop_is_tail.set(false);
         self.ops.borrow_mut().push(op);
         frust_core::mark_pending_result_flush();
     }
@@ -650,6 +683,7 @@ impl<State: 'static> NavigatorController<State> {
     /// Take the queued ops (leaving the queue empty). Called by
     /// [`NavigatorView::rebuild`]/`build`.
     pub(super) fn drain(&self) -> Vec<NavOp<State>> {
+        self.result_pop_is_tail.set(false);
         std::mem::take(&mut *self.ops.borrow_mut())
     }
 }
