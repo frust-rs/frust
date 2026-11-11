@@ -536,6 +536,18 @@ fn feed_at_the_end_then_halved(keyed: bool) -> Harness {
     feed
 }
 
+/// Every row id in `count..100` (the whole pre-shrink range, so the whole
+/// pre-shrink window) is absent from the last frame's paint log: a pod left
+/// over from before the shrink would record itself there.
+fn assert_no_row_at_or_past(feed: &Harness, count: u64) {
+    for id in count..100 {
+        assert!(
+            feed.log.row(id).is_none(),
+            "row {id} is past the new count of {count} but painted"
+        );
+    }
+}
+
 #[test]
 fn a_shrink_past_the_window_with_a_queued_jump_lands_on_valid_rows() {
     let mut feed = feed_at_the_end_then_halved(false);
@@ -547,10 +559,7 @@ fn a_shrink_past_the_window_with_a_queued_jump_lands_on_valid_rows() {
     assert_eq!(feed.content_extent(), feed.prefix()[50]);
     let (y, height) = feed.log.row(0).expect("row 0 painted");
     assert_eq!((y, height), (0.0, mixed_extent(0)));
-    assert!(
-        feed.log.row(60).is_none(),
-        "no row past the new count paints"
-    );
+    assert_no_row_at_or_past(&feed, 50);
 }
 
 #[test]
@@ -563,6 +572,96 @@ fn a_shrink_past_the_window_with_a_queued_scroll_to_item_lands_on_the_row() {
     assert_eq!(feed.controller.offset(), prefix[10]);
     let (y, height) = feed.log.row(10).expect("row 10 painted");
     assert_eq!((y, height), (0.0, mixed_extent(10)));
+    assert_no_row_at_or_past(&feed, 50);
+}
+
+/// The ids painted in the last frame, ascending.
+fn painted_ids(feed: &Harness) -> Vec<u64> {
+    let mut ids: Vec<u64> = feed.log.rows.borrow().keys().copied().collect();
+    ids.sort_unstable();
+    ids
+}
+
+#[test]
+fn removing_the_viewport_top_row_anchors_on_a_surviving_neighbour() {
+    let mut feed = Harness::new(FeedData::mixed(2_000), true, Extents::Exact);
+    let top = feed.prefix()[500] + 7.5;
+    feed.controller.jump_to(top);
+    feed.settle();
+    let (y, _) = feed.log.row(500).expect("row 500 holds the top edge");
+    assert_eq!(y, -7.5);
+
+    // The row the top edge sits in is itself removed in one frame.
+    {
+        let mut data = feed.data.borrow_mut();
+        data.ids_mut().remove(500);
+        data.extents_mut().remove(500);
+    }
+    feed.settle();
+
+    let offset = feed.controller.offset();
+    assert!((0.0..=feed.controller.max_offset()).contains(&offset));
+    assert!(feed.log.row(500).is_none(), "the removed row is gone");
+    // The anchor fell back to a surviving row above the viewport, so the
+    // offset is not corrected and the first visible row is the removed row's
+    // successor, now under the top edge.
+    assert_eq!(offset, top, "no surviving anchor moved, so no correction");
+    let first_visible = painted_ids(&feed)
+        .into_iter()
+        .find(|&id| {
+            let (y, height) = feed.log.row(id).expect("painted");
+            y + height > 0.0
+        })
+        .expect("a row is visible");
+    assert!(
+        (498..=502).contains(&first_visible),
+        "the first visible row {first_visible} is a neighbour of the removed row"
+    );
+    assert_eq!(first_visible, 501);
+    assert_eq!(feed.log.row(501).map(|(y, _)| y), Some(-7.5));
+}
+
+/// A documented limit (recorded in the `list_view.rs` module docs, *Known
+/// limits*): a row inserted or removed between the window's first row and the
+/// viewport top is not corrected, so the content under the viewport moves by
+/// that row's extent.
+#[test]
+fn a_single_row_edit_inside_the_leading_buffer_is_not_corrected() {
+    // With the top edge in row 504 the window starts at row 502, so row 503
+    // lies between the window's first row and the viewport top.
+    let mut feed = Harness::new(FeedData::mixed(2_000), true, Extents::Exact);
+    let top = feed.prefix()[504] + 7.5;
+    feed.controller.jump_to(top);
+    feed.settle();
+    let (before_y, _) = feed.log.row(504).expect("row 504 holds the top edge");
+    assert_eq!(before_y, -7.5);
+
+    let removed = mixed_extent(503);
+    {
+        let mut data = feed.data.borrow_mut();
+        data.ids_mut().remove(503);
+        data.extents_mut().remove(503);
+    }
+    feed.settle();
+    assert_eq!(feed.controller.offset(), top, "the offset is left alone");
+    let (y, _) = feed.log.row(504).expect("row 504 painted");
+    assert_eq!(
+        y,
+        before_y - removed,
+        "content moves up by the row's extent"
+    );
+
+    // Insert a row at the same place: content moves down by its extent.
+    let inserted = 56.25;
+    {
+        let mut data = feed.data.borrow_mut();
+        data.ids_mut().insert(503, 2_000_000);
+        data.extents_mut().insert(503, inserted);
+    }
+    feed.settle();
+    assert_eq!(feed.controller.offset(), top);
+    let (y, _) = feed.log.row(504).expect("row 504 painted");
+    assert_eq!(y, before_y - removed + inserted);
 }
 
 #[test]
