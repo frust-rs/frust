@@ -3,7 +3,8 @@
 // the LICENSE-APACHE file) or the MIT license (found in
 // the LICENSE-MIT file), at your option.
 //
-// Vendored verbatim from accesskit_android 0.9.1's `java/` directory. The
+// Vendored from accesskit_android 0.9.1's `java/` directory with one frust
+// patch, `labelAsText` below (marked "frust patch"); the rest is verbatim. The
 // `frust-shell-android` crate's `InjectingAdapter` locates this
 // class at runtime via `env.find_class("dev/accesskit/android/Delegate")` and
 // registers its native methods dynamically, so the package and class name
@@ -54,17 +55,39 @@ public final class Delegate extends View.AccessibilityDelegate implements View.O
         };
     }
 
+    // frust patch (not upstream). A static text node is `Role::Label` with its
+    // text in `value`. Since accesskit_android 0.9 the adapter reports that as the
+    // node's content description and leaves its text null; up to 0.7 it was the
+    // node's text. Screen readers read either, but UI tests select by text, so
+    // put it back: only `android.widget.TextView` (the adapter's class for
+    // `Role::Label` alone), only when the text is null.
+    private static AccessibilityNodeInfo labelAsText(AccessibilityNodeInfo info) {
+        if (info == null || info.getText() != null) {
+            return info;
+        }
+        CharSequence label = info.getContentDescription();
+        CharSequence className = info.getClassName();
+        if (label != null
+                && className != null
+                && "android.widget.TextView".contentEquals(className)) {
+            info.setText(label);
+            info.setContentDescription(null);
+        }
+        return info;
+    }
+
     @Override
     public AccessibilityNodeProvider getAccessibilityNodeProvider(final View host) {
         return new AccessibilityNodeProvider() {
             @Override
             public AccessibilityNodeInfo createAccessibilityNodeInfo(int virtualViewId) {
-                return Delegate.createAccessibilityNodeInfo(adapterHandle, host, virtualViewId);
+                return labelAsText(
+                        Delegate.createAccessibilityNodeInfo(adapterHandle, host, virtualViewId));
             }
 
             @Override
             public AccessibilityNodeInfo findFocus(int focusType) {
-                return Delegate.findFocus(adapterHandle, host, focusType);
+                return labelAsText(Delegate.findFocus(adapterHandle, host, focusType));
             }
 
             @Override

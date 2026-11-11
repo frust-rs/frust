@@ -9,13 +9,6 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 ### Breaking
 
 - `accesskit::Tree` (re-exported through frust) is now `TreeInfo`; the old name is a deprecated alias.
-- Android, behaviour: with the new accesskit Android adapter a static text node reports its label as
-  the accessibility node's content description and leaves the node's text empty; before, the label
-  was the node's text. Screen readers read it the same. A UI test that selects by text (uiautomator
-  `text=`, `By.text`, a `text` selector in a test runner) must select by content description
-  instead. On a `uiautomator dump` of the playground the node set and bounds were identical (23
-  nodes) and every label moved from `text` to `content-desc`.
-
 - `frust-i18n` typed keys (`locales!`'s `keys` module): a message with two or more `$variable`s now
   takes one generated `<PascalKey>Args` struct with a named field per variable, instead of
   positional arguments, so two values of the same type cannot be swapped at a call site. A message
