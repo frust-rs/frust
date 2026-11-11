@@ -23,12 +23,18 @@ on:
     paths-ignore:
       - '**.md'
       - 'docs/**'
+  # Weekly run for the advisories job only: every other job is skipped on this
+  # event (`if: github.event_name != 'schedule'`).
+  schedule:
+    - cron: '17 5 * * 1'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # The event name is part of the group so the weekly scheduled run on main
+  # cannot cancel a push run on main that is still in progress.
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -43,6 +49,7 @@ env:
 
 jobs:
   fmt:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -52,6 +59,7 @@ jobs:
       - run: cargo fmt --check
 
   clippy:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -89,6 +97,7 @@ jobs:
         run: cargo clippy -p frust-beui --features gpu-effects --all-targets --locked -- -D warnings
 
   test:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     # A runner that runs out of disk stops responding instead of failing; the
     # default limit is six hours.
@@ -140,6 +149,7 @@ jobs:
           du -sh target 2>/dev/null || true
 
   standalone:
+    if: github.event_name != 'schedule'
     name: standalone (${{ matrix.dir }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -205,6 +215,7 @@ jobs:
         run: ${{ matrix.gate }}
 
   web-smoke:
+    if: github.event_name != 'schedule'
     # The browser tier (frust-rs/frust#127): the wasm32 clock tripwire, then a
     # headless-Chrome boot of the web gallery in strict mode (the render surface
     # must come online). No system packages: the wasm32 graph links nothing native.
@@ -262,6 +273,7 @@ jobs:
           retention-days: 7
 
   hotpatch-feature-gate:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -285,6 +297,7 @@ jobs:
       - run: bash scripts/ci/hotpatch-feature-gate.sh
 
   hotpatch-canary:
+    if: github.event_name != 'schedule'
     # The desktop patch builder end to end on the pinned toolchain: capture, fat
     # build, edit, thin build, L3, in-process apply, and a D2 edit that must be
     # refused (scripts/ci/hotpatch-canary.sh). One leg per builder platform. The
@@ -310,6 +323,7 @@ jobs:
         run: bash scripts/ci/hotpatch-canary.sh
 
   hotpatch-windows:
+    if: github.event_name != 'schedule'
     # The Windows (MSVC) hot-patch builder mechanics, whose PDB fixtures need a
     # Windows host: PE/PDB symbol cache, jump table, stub and PDB layout gate
     # (`hotpatch::pe`, `hotpatch::pdb_layout`), the fixed-base fat and thin links
@@ -359,6 +373,7 @@ jobs:
           fi
 
   text-oracle-macos:
+    if: github.event_name != 'schedule'
     # The Apple (CoreText) text-oracle backend and the engine's hvgl provider
     # tests, which no other job runs. GPU-dependent tests are #[ignore] and stay
     # ignored. Outside `ci-ok`'s needs: it is advisory, and it only builds when the
@@ -405,6 +420,7 @@ jobs:
           echo "SKIPPED (scope: $REASON)" >> "$GITHUB_STEP_SUMMARY"
 
   clippy-ios:
+    if: github.event_name != 'schedule'
     # Clippy for frust-shell-ios on the iOS simulator target, which no other job
     # builds: the clippy job lints the host target only. Outside `ci-ok`'s needs:
     # it is advisory, and it only runs when the change touches the paths it covers
@@ -455,6 +471,7 @@ jobs:
           echo "SKIPPED (scope: $REASON)" >> "$GITHUB_STEP_SUMMARY"
 
   text-oracle-windows:
+    if: github.event_name != 'schedule'
     # The DirectWrite text-oracle backend (`oracle/dwrite.rs`), which no other job
     # runs. Outside `ci-ok`'s needs, and path-scoped like the macOS leg.
     runs-on: windows-latest
@@ -498,6 +515,7 @@ jobs:
           echo "SKIPPED (scope: $REASON)" >> "$GITHUB_STEP_SUMMARY"
 
   android-relr-guard:
+    if: github.event_name != 'schedule'
     # No other job links an Android shared object, so this one builds the
     # benchmark app's arm64 cdylib with the repo's Android link flags (the root
     # .cargo/config.toml) and checks its dynamic section: packed relocations must
@@ -552,6 +570,7 @@ jobs:
           "$GITHUB_WORKSPACE/scripts/ci/page-size-check.sh" "$so"
 
   hygiene:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -572,9 +591,49 @@ jobs:
       - name: Erasure tripwire
         run: scripts/ci/erasure-check.sh
 
+  advisories:
+    # RustSec advisories for the root workspace's Cargo.lock, checked against
+    # deny.toml (advisories only: licences, bans and sources are not enforced).
+    # Runs on pull requests and on the weekly schedule. It covers the root
+    # workspace only: the standalone workspaces excluded in the root Cargo.toml
+    # have their own lockfiles. Deliberately outside `ci-ok`'s needs, like the
+    # advisory legs above: a new upstream advisory must not block an unrelated
+    # merge. Each accepted advisory is recorded with its reason in deny.toml.
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        # cargo-deny reads the workspace through cargo, which rustup resolves to
+        # the pinned toolchain in rust-toolchain.toml.
+        run: rustup toolchain install
+      - name: Install cargo-deny 0.20.2
+        # Installed from the release tarball and verified by sha256; never
+        # `cargo install` a floating version. The digest is the release's
+        # cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz.sha256 asset,
+        # fetched from https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/
+        # and checked against the downloaded tarball.
+        env:
+          CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/cargo-deny"
+          mkdir -p "$dir/bin"
+          curl -fsSL -o "$dir/cargo-deny.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz"
+          echo "$CARGO_DENY_SHA256  $dir/cargo-deny.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/cargo-deny.tar.gz" -C "$dir"
+          install -m 0755 "$dir/cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny" "$dir/bin/cargo-deny"
+          ver="$("$dir/bin/cargo-deny" --version | awk '{print $2}')"
+          [ "$ver" = "0.20.2" ] || { echo "::error::cargo-deny is $ver, expected 0.20.2"; exit 1; }
+          echo "$dir/bin" >> "$GITHUB_PATH"
+      - name: Check advisories
+        run: cargo deny check advisories
+
   ci-ok:
     # The one required status check (.github/rulesets/main.json).
-    if: always()
+    if: always() && github.event_name != 'schedule'
     needs: [fmt, clippy, test, standalone, web-smoke, hotpatch-feature-gate, hotpatch-canary, hotpatch-windows, hygiene]
     runs-on: ubuntu-latest
     timeout-minutes: 5

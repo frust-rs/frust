@@ -1,0 +1,41 @@
+# cargo-deny configuration for the root workspace (crates/*, examples/*, and the
+# plugins listed in the root Cargo.toml `members`). Only the advisories section
+# is configured here: licences, bans and sources keep their cargo-deny defaults
+# and are not enforced by CI. Run from the repository root:
+#
+#   cargo deny check advisories
+#
+# The standalone workspaces excluded in the root Cargo.toml have their own
+# lockfiles and are NOT covered by this file.
+#
+# Every `ignore` entry is an advisory this repository cannot retire inside the
+# current version pins (docs/DEVELOPMENT.md, Version-Pin Policy). Each reason
+# names the advisory kind, the frust crate that pulls the dependency in, and what
+# must move for the entry to be removed. Removing an entry makes the check fail
+# with that id, so an entry is deleted the moment its upgrade lands.
+
+[advisories]
+ignore = [
+  # --- Unmaintained crates (no upgrade exists) ---
+  { id = "RUSTSEC-2024-0370", reason = "Unmaintained: proc-macro-error 1.0.4. Pulled by glib-macros 0.18.5 -> glib 0.18.5 -> gtk 0.18.2 -> muda 0.19.3 -> frust-shell-macos. muda's gtk dependency is target-gated to Linux and the BSDs in muda's manifest. Must move: muda moves off gtk 0.18 (and its glib with it)." },
+  { id = "RUSTSEC-2024-0436", reason = "Unmaintained: paste 1.0.15 (proc-macro). Pulled by reactive_graph 0.2.14 -> frust-core, with frust-shell-common, frust-shell-desktop and frust-native-widgets on the same edge. Must move: reactive_graph drops paste (or a successor crate) in a release that frust adopts." },
+  { id = "RUSTSEC-2026-0192", reason = "Unmaintained: ttf-parser 0.25.1. Pulled by sctk-adwaita 0.10.1 -> winit 0.30.13 -> accesskit_winit 0.34.2 -> frust-shell-desktop -> frust-shell-linux (also owned_ttf_parser / ab_glyph under frust-beui). Must move: winit 0.31 or a sctk-adwaita release without ttf-parser." },
+  { id = "RUSTSEC-2026-0370", reason = "Unmaintained: zvariant 5.15.1. Pulled by accesskit_unix 0.24.1, accesskit_atspi_common 0.21.1, atspi-common and zbus 5.19.0 under frust-shell-desktop and frust-shell-linux, and under zbus-secret-service-keyring-store 1.0.1 in frust-secure-storage. Must move: the accesskit/atspi/zbus stack moves to a zvariant successor." },
+  { id = "RUSTSEC-2026-0371", reason = "Unmaintained: zbus_names 4.3.4. Pulled by atspi-common 0.13.0, accesskit_atspi_common, zbus_macros and zbus_xml under frust-shell-desktop, frust-shell-linux and frust-secure-storage. Must move: the atspi/zbus stack moves to a zbus_names successor." },
+  { id = "RUSTSEC-2026-0372", reason = "Unmaintained: zvariant_derive 5.15.1 (proc-macro). Pulled by zvariant 5.15.1 under the same accesskit/atspi/zbus edges as RUSTSEC-2026-0370. Must move: the same stack move as RUSTSEC-2026-0370." },
+
+  # --- Unsound (no fixed release inside the current pin of the owning crate) ---
+  { id = "RUSTSEC-2026-0386", reason = "Unsound: tokio 1.53.1 AsyncFd constructors (I/O safety). Pulled by axum 0.8.9 and tokio directly in frust-mcp, frust-dap, frust-tui and frust-cli, plus frust-devtools and frust-reactive. frust itself contains no AsyncFd use (checked: none in the workspace sources). Must move: tokio 1.53.3 or later (a lockfile patch update, not a source change)." },
+
+  # --- Vulnerabilities (patched release exists; the pinned line cannot take it here) ---
+  { id = "RUSTSEC-2026-0459", reason = "Vulnerability: libsqlite3-sys 0.38.2 bundles SQLite before 3.54.0 (uninitialised page-cache read via crafted -wal file, local, needs the victim to open the pair). Pulled by rusqlite 0.40.1 -> frust-database (plugins/database), bundled feature. Must move: rusqlite 0.41 (libsqlite3-sys 0.39.1 or later), a Version-Pin Policy change." },
+  { id = "RUSTSEC-2026-0457", reason = "Vulnerability: rmcp 2.2.0 OAuth client SSRF filter checks host strings, not resolved addresses. Pulled by frust-mcp, frust-dap, frust-tui and frust-cli. Must move: rmcp 3.7.0 or later, a major-version move of the MCP surface." },
+  { id = "RUSTSEC-2026-0462", reason = "Vulnerability: rmcp 2.2.0 Streamable HTTP clients buffer unbounded response bodies. Pulled by frust-mcp, frust-dap, frust-tui and frust-cli. Must move: rmcp 3.9.0 or later, a major-version move of the MCP surface (same move as RUSTSEC-2026-0457)." },
+  { id = "RUSTSEC-2026-0346", reason = "Vulnerability: rustls 0.23.45 Debug impls for client session values expose TLS secrets. Pulled by reqwest 0.13.5 (hyper-rustls, tokio-rustls, rustls-platform-verifier) under frust-network-image (plugins/network-image). Must move: rustls 0.23.46 or later (a lockfile patch update)." },
+  { id = "RUSTSEC-2026-0347", reason = "Vulnerability: rustls 0.23.45 sends buffered application data to the outer server after ECH rejection. Pulled by reqwest 0.13.5 under frust-network-image. Must move: rustls 0.23.46 or later (a lockfile patch update)." },
+  { id = "RUSTSEC-2026-0348", reason = "Vulnerability: rustls 0.23.45 Brotli certificate decompression can allocate up to 1 GiB before authentication. Pulled by reqwest 0.13.5 under frust-network-image. Must move: rustls 0.23.46 or later (a lockfile patch update)." },
+  { id = "RUSTSEC-2026-0349", reason = "Vulnerability: rustls 0.23.45 unauthenticated ServerHello can downgrade later connections to classical key exchange. Pulled by reqwest 0.13.5 under frust-network-image. Must move: rustls 0.23.46 or later (a lockfile patch update)." },
+  { id = "RUSTSEC-2026-0382", reason = "Vulnerability: rustls-webpki 0.103.15 certificate verification may accept distrusted intermediates. Pulled by rustls 0.23.45 under reqwest 0.13.5 in frust-network-image. Must move: rustls-webpki 0.103.16 or later (a lockfile patch update, with the rustls move above)." },
+  { id = "RUSTSEC-2026-0381", reason = "Vulnerability: webpki-roots 1.0.9 bundled root certificates allow trust in distrusted emSign intermediates. Pulled directly by frust-network-image (plugins/network-image). Must move: webpki-roots 1.0.10 or later (a lockfile patch update)." },
+  { id = "RUSTSEC-2026-0383", reason = "Vulnerability: webpki-root-certs 1.0.9 bundled root certificates allow trust in distrusted emSign intermediates. Pulled by rustls-platform-verifier 0.7.1 under reqwest 0.13.5 in frust-network-image. Must move: webpki-root-certs 1.0.10 or later (a lockfile patch update)." },
+]
