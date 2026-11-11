@@ -364,7 +364,7 @@ mod tests {
             .missing("wasm-opt --version");
         let env = MapEnv(&[
             ("ANDROID_HOME", "/sdk"),
-            ("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125"),
+            ("ANDROID_NDK_HOME", "/sdk/ndk/28.2.13676358"),
         ]);
         let ctx = DoctorCtx {
             runner: &runner,
@@ -419,7 +419,7 @@ mod tests {
             .missing("wasm-opt --version");
         let env = MapEnv(&[
             ("ANDROID_HOME", "/sdk"),
-            ("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125"),
+            ("ANDROID_NDK_HOME", "/sdk/ndk/28.2.13676358"),
         ]);
         let ctx = DoctorCtx {
             runner: &runner,

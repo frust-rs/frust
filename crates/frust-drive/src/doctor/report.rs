@@ -430,7 +430,7 @@ fn android_sdk_component(ctx: &DoctorCtx) -> Component {
     let fix_commands = match status {
         ComponentStatus::Ok => Vec::new(),
         _ => vec![FixCommand::guidance(
-            "Install Android Studio (SDK + NDK) and set ANDROID_HOME/ANDROID_NDK_HOME",
+            "Install Android Studio (SDK), then `sdkmanager --install \"ndk;28.2.13676358\"`, and set ANDROID_HOME/ANDROID_NDK_HOME",
             Some("https://developer.android.com/studio"),
         )],
     };
@@ -568,7 +568,7 @@ mod tests {
         FakeEnv::new()
             .set("JAVA_HOME", "/opt/jdk17")
             .set("ANDROID_HOME", "/sdk")
-            .set("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125")
+            .set("ANDROID_NDK_HOME", "/sdk/ndk/28.2.13676358")
     }
 
     #[test]
@@ -1020,7 +1020,7 @@ mod tests {
         );
         let env = FakeEnv::new()
             .set("ANDROID_HOME", "/sdk")
-            .set("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125"); // no JAVA_HOME
+            .set("ANDROID_NDK_HOME", "/sdk/ndk/28.2.13676358"); // no JAVA_HOME
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,

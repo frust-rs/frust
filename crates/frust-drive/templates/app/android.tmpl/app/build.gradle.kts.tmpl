@@ -110,9 +110,19 @@ val cargoFeaturesB64 = prop("frust.cargoFeatures", "")
 // platform `cargoNdkBuild` passes to `cargo ndk --platform`, so the two cannot drift.
 val minSdkValue = 29
 
+// The NDK this module builds with. Gradle (`ndkVersion` below) and the Rust build
+// (`cargoNdkBuild` exports ANDROID_NDK_HOME at the same directory) both use it, so
+// they cannot pick different NDKs. NDK r28 and later align shared libraries to
+// 16 KB pages by default. Set FRUST_ANDROID_NDK_VERSION in the environment to use
+// a newer NDK you have installed instead (for example `29.0.13113456`).
+val ndkVersionValue: String =
+    System.getenv("FRUST_ANDROID_NDK_VERSION")?.trim()?.takeIf { it.isNotEmpty() }
+        ?: "28.2.13676358"
+
 android {
     namespace = "{{ android_identifier }}"
     compileSdk = 36
+    ndkVersion = ndkVersionValue
 
     defaultConfig {
         applicationId = "{{ android_identifier }}"
@@ -331,8 +341,27 @@ val cargoFeatureArgs: List<String> =
         listOf("--features", String(Base64.getDecoder().decode(cargoFeaturesB64)))
     }
 
+// The directory of the NDK `ndkVersionValue` names inside the Android SDK.
+val resolvedNdkDir: File? = (
+    localProperties.getProperty("sdk.dir")?.trim()?.takeIf { it.isNotEmpty() }
+        ?: System.getenv("ANDROID_HOME")?.trim()?.takeIf { it.isNotEmpty() }
+        ?: System.getenv("ANDROID_SDK_ROOT")?.trim()?.takeIf { it.isNotEmpty() }
+    )?.let { File(it, "ndk/$ndkVersionValue") }
+
 val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
     workingDir = file("../..")
+    doFirst {
+        val ndkDir = resolvedNdkDir
+        if (ndkDir == null || !ndkDir.isDirectory) {
+            throw GradleException(
+                "Android NDK $ndkVersionValue was not found" +
+                    (if (ndkDir != null) " at $ndkDir" else " (no Android SDK location is set)") +
+                    ". Install it with: sdkmanager --install \"ndk;$ndkVersionValue\"",
+            )
+        }
+    }
+    // Hand cargo-ndk the same NDK Gradle resolved, so the two never disagree.
+    resolvedNdkDir?.let { environment("ANDROID_NDK_HOME", it.absolutePath) }
     commandLine(
         buildList {
             add("cargo")
