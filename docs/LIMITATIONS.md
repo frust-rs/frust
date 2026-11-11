@@ -8392,16 +8392,16 @@ shows the guard works, not that it was needed. Notification display was not obse
 
 ---
 
-### `list-view-leading-buffer-edit-not-anchored` — a keyed `ListView` does not correct a single row edit just above the viewport
+### `list-view-leading-buffer-edit-not-anchored` — a keyed `ListView` does not correct rows edited just above the viewport
 
-**Observed**: a keyed exact-extent `ListView` keeps its anchor row in place when rows change above the viewport, but a single row inserted or removed between the window's first buffered row (the leading buffer is 2 rows) and the viewport top is not corrected. The scroll offset stays put and the content under the viewport moves by that row's extent: up on removal, down on insert. An edit at the window's first row or anywhere above it is corrected. The same probe serves the estimated keyed mode, so it is expected there too, but it was not observed there.
+**Observed**: a keyed exact-extent `ListView` keeps its anchor row in place when rows change above the viewport, but rows inserted into the gap between the window's first buffered row (the leading buffer is 2 rows) and the viewport-top row, or the one row in that gap removed, go uncorrected. The scroll offset stays put and the content moves by their summed extent: up on removal, down on insert, however many rows were inserted. Removing the row that holds the top edge itself is likewise uncorrected: the next row takes its on-screen place. An edit at the window's first row or anywhere above it is corrected. The same probe serves the estimated keyed mode, so it is expected there too, but it was not observed there.
 
 **Applies to**: keyed `ListView`s (`builder_keyed`); for example a message deleted just off-screen.
 
-**Workaround**: none in the framework. An app can compensate with `ScrollController::jump_to` by the row's extent.
+**Workaround**: none in the framework. An app can compensate with `ScrollController::jump_to` by the summed extent of the rows edited.
 
-**Why accepted**: it predates the exact-extent mode and is bounded to one row's extent per edit; the anchor cannot see a row it never materialized.
+**Why accepted**: it predates the exact-extent mode, the anchor probe only confirms rows by the first surviving window row (it cannot see a row it never materialized), and changing the probe affects all three extent modes. A removal is bounded to one row's extent, but a batch insert just above the screen moves the content by the whole batch.
 
-**Evidence**: established from code and a headless test, not from a device observation: `crates/frust-widgets/src/list_view.rs` (`apply_exact_anchor_shift`, `anchor_shift_items`) and `crates/frust-widgets/tests/list_item_extent.rs` (`a_single_row_edit_inside_the_leading_buffer_is_not_corrected`).
+**Evidence**: originates from a phase review finding of the exact-extent `ListView` work (2026-11-11); established from the code path and headless tests, not from a device observation: `crates/frust-widgets/src/list_view.rs` (`apply_exact_anchor_shift`, `anchor_shift_items`) and `crates/frust-widgets/tests/list_item_extent.rs` (`a_single_row_edit_inside_the_leading_buffer_is_not_corrected`, `two_rows_inserted_in_the_leading_gap_move_the_content_by_their_sum`, `removing_the_row_holding_the_top_edge_falls_back_to_a_row_above`, `editing_the_windows_first_row_is_corrected`).
 
 ---

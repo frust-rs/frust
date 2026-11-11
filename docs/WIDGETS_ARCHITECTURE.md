@@ -490,50 +490,50 @@ one-Housekeeping-pass lag. Bounds in `card-switcher-blocking-bounded`, `card-swi
 and `card-switcher-android-strip-ends-clamp`.
 
 ### Virtualized ListView (baseline)
-`ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`); the
-facade re-exports them unconditionally. `frust_material::list_view` is a `#[deprecated]` alias.
-Each `rebuild` reads the retained widget's scroll offset and cached viewport to materialize only the
-visible window plus a buffer; with `sliver_fixed_extent_list` it is among the few `View`s that
-read retained element state during `rebuild`. Layout measures only existing pods and paint builds nothing,
-so the row builder never runs outside `rebuild`. Refresh, overscroll, claim/veto and physics
-come from the shared core; the clamped-windowing/paint-only-overscroll split (`list_view.rs`) survives them.
+`ListView`/`ListViewWidget`/`list_view()` live in `frust-widgets` proper (`list_view.rs`); the facade re-exports
+them unconditionally. `frust_material::list_view` is a `#[deprecated]` alias. Each `rebuild` reads the retained
+widget's scroll offset and cached viewport to materialize only the visible window plus a buffer; with
+`sliver_fixed_extent_list` it is among the few `View`s that read retained element state during `rebuild`. Layout
+measures only existing pods and paint builds nothing, so the row builder runs only in `rebuild`. Refresh,
+overscroll, claim/veto and physics come from the shared core; the clamped-windowing/paint-only-overscroll split
+survives.
 
-**Two row-identity models.** `ListView::builder` reconciles by raw index (right for append-only,
-truncate-only or full-replace data; a mid-list mutation reattaches state to whatever now sits at the
-index). `builder_keyed` adds a `ChildKey` per row (as `keyed()` does for `Flex`, see WIDGETS_CODE_STANDARDS.md) so state follows the row, and re-anchors its offset in `rebuild`, before
-windowing, so a single-sided prepend/removal above the viewport does not visibly jump the content,
-except one edit between the window's first buffered row and the viewport top, which is not corrected
-(`list-view-leading-buffer-edit-not-anchored` in [LIMITATIONS.md](LIMITATIONS.md)). A
-same-frame mutation on both sides of the anchor can also miss it (registered). A
-duplicate key `debug_assert!`s with no positional fallback in release: the first slot wins.
+**Two row-identity models.** `ListView::builder` reconciles by raw index (right for append-only, truncate-only
+or full-replace data; a mid-list mutation reattaches state to whatever now sits at the index). `builder_keyed`
+adds a `ChildKey` per row (as `keyed()` does for `Flex`, see WIDGETS_CODE_STANDARDS.md) so state follows the
+row, and re-anchors its offset in `rebuild`, before windowing, so a single-sided prepend/removal above the
+viewport does not visibly jump the content, except rows inserted into, or the row removed from, the gap between
+the window's first buffered row and the viewport-top row, which are not corrected
+(`list-view-leading-buffer-edit-not-anchored` in [LIMITATIONS.md](LIMITATIONS.md)). A same-frame mutation on
+both sides of the anchor can also miss it (registered). A duplicate key `debug_assert!`s with no positional
+fallback in release: the first slot wins.
 
-**Variable extents are keyed-only.** `.estimated_item_extent(px)` switches a keyed list from the
-closed-form uniform path to a measured-by-key cache (estimate for unvisited rows, laid-out height
-once visited); on a positional list it `debug_assert!`s and is inert. A measurement revising a row
-above the viewport's top is committed on the following rebuild so the anchor row never moves; during
-a fling it accumulates and commits at settle.
+**Variable extents are keyed-only.** `.estimated_item_extent(px)` switches a keyed list from the closed-form
+uniform path to a measured-by-key cache (estimate for unvisited rows, laid-out height once visited); on a
+positional list it `debug_assert!`s and is inert. A measurement revising a row above the viewport's top is
+committed on the next rebuild so the anchor row never moves; during a fling it accumulates and commits at settle.
 
 **Exact extents.** `.item_extent_of(|index| px)` (positional or keyed) declares every row's extent up front, so
-the content extent, row positions and a `jump_to` landing are exact from frame one; rows lay out tight at
-their declared extent. A cached prefix sum gives an O(1) total and an O(log N) offset-to-row lookup, rebuilt
-(O(N) callback calls) only when `item_count` or `.extent_generation(u64)` changes; closures are not
-comparable, so the app bumps the generation when extents change under an unchanged count. It is exclusive
-with `estimated_item_extent` (`debug_assert!`; release keeps the exact extents), and the builders' required
+the content extent, row positions and a `jump_to` landing are exact from frame one; rows lay out tight at their
+declared extent. A cached prefix sum gives an O(1) total and an O(log N) offset-to-row lookup, rebuilt (O(N)
+callback calls) only when `item_count` or `.extent_generation(u64)` changes; closures are not comparable, so the
+app bumps the generation when extents change under an unchanged count. It is exclusive with
+`estimated_item_extent` (`debug_assert!`; release keeps the exact extents), and the builders' required
 `item_extent` is overridden. A keyed exact list keeps its anchor row in place across a count or generation
-re-flow above the viewport; a positional one never anchors, and the first exact frame shifts nothing. Pick by knowledge: **uniform** when every row is the same height, **estimated
-keyed** when heights are only known by laying rows out, **exact** when the app can state every height.
+re-flow above the viewport; a positional one never anchors, and the first exact frame shifts nothing. Pick by
+knowledge: **uniform** when every row is the same height, **estimated keyed** when heights are only known by
+laying rows out, **exact** when the app can state every height.
 
-**Visible range.** `.on_visible_range(|state, first, last|)` reports the inclusive indexes of rows
-intersecting the viewport (cache buffer excluded; a row only touching an edge is not visible) in all three
-modes, beside `on_near_start`/`on_near_end`: computed at layout, delivered one event late through the same
-flush, and only when the range changes.
+**Visible range.** `.on_visible_range(|state, first, last|)` reports the inclusive indexes of rows intersecting
+the viewport (cache buffer excluded; a row only touching an edge is not visible) in all three modes, beside
+`on_near_start`/`on_near_end`: computed at layout, delivered one event late through the same flush, and only on change.
 
-**Scroll-to-item.** `scroll_to_item(key, ItemAlignment, animated)` (`Start`/`Center`/`End`/`Nearest`)
-resolves `key` from measured extents plus the estimate for unlaid rows; a key outside the window
-costs one O(item count) `key_of` scan, not per frame. The jump lands on the estimate first when
-rows ahead were never measured, then settle-and-correct re-resolves each following layout, bounded
-to 4 layouts or within 0.5px, so an animated request over unmeasured rows can end with a small
-correction snap. An unknown key, or any key on a positional list, is a no-op (debug log).
+**Scroll-to-item.** `scroll_to_item(key, ItemAlignment, animated)` (`Start`/`Center`/`End`/`Nearest`) resolves
+`key` from measured extents plus the estimate for unlaid rows; a key outside the window costs one O(item count)
+`key_of` scan, not per frame. The jump lands on the estimate first when rows ahead were never measured, then
+settle-and-correct re-resolves each following layout, bounded to 4 layouts or within 0.5px, so an animated
+request over unmeasured rows can end with a small correction snap. An unknown key, or any key on a positional
+list, is a no-op (debug log).
 
 ### Slivers and the viewport
 `custom_scroll_view((slivers...))` (`viewport.rs`, `CustomScrollView`/`ViewportWidget`, the third
