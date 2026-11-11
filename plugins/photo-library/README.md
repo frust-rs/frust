@@ -103,10 +103,14 @@ fn sync(saved: Option<Vec<u8>>) -> Result<Vec<u8>, PhotoError> {
 ```
 
 - `PhotoLibrary::on_library_changed(|| ..)` returns a `ChangeSubscription`; dropping it unregisters the
-  callback. The callback only wakes the app: it carries no data, may run on any thread and may be
-  coalesced or spurious. Keep it short, and answer it by calling `changes_since` off the UI thread
-  (for example by setting a signal that starts a `spawn_blocking`).
-- A `Delta` evicts the updated and deleted ids from the thumbnail cache, and a `FullRescan` clears it.
+  callback. The callback only wakes the app: it carries no data and may be coalesced or spurious. It
+  runs inline on a platform notification thread (the Photos change queue on iOS, a binder thread on
+  Android), so it must only signal (set a flag, send on a channel, wake a task) and return; calling
+  `changes_since` or anything blocking from inside it delays other subscribers and the platform's
+  delivery. Answer the signal by calling `changes_since` off the UI thread.
+- Call `changes_since` once right after subscribing: a change that lands while subscribing may not
+  produce a wake.
+- A `Delta` evicts every id it names (inserted, updated and deleted) from the thumbnail cache, and a `FullRescan` clears it.
   An id in a delta may already be gone by the time you use it (`PhotoError::NotFound`).
 - iOS keeps a change history from iOS 16; iOS 15 always answers `FullRescan`. Android needs API 30; on
   API 29 every call is a `FullRescan`. A token from another device or platform, an expired token (iOS),
@@ -114,6 +118,8 @@ fn sync(saved: Option<Vec<u8>>) -> Result<Vec<u8>, PhotoError> {
   never an error. On Android a visible row missing from the token's id set counts as `inserted`. The
   Android token is about 100 KB per 100,000 assets (about 200 KB when ids are very sparse), so store it
   in a file or database (`photo-library-change-feed-full-rescan`, `photo-library-android-change-token-size`).
+  On Android the token also holds the list of the user's visible media ids plus the volume version, so
+  keep it in app-private storage and preferably exclude it from cloud backup.
 - `PhotoLibrary::assets_after(&AssetQuery, Option<&AssetCursor>)` returns an `AssetCursorPage` (`items`
   and `next`, `None` on the last page), newest first and stable while the library changes between pages.
   Start with `None`; the `AssetQuery` offset is ignored and no total is computed. `limit` and `details`
