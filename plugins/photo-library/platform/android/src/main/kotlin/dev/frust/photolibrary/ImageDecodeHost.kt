@@ -63,7 +63,8 @@ import kotlin.math.roundToInt
  * size, so nothing here rotates again. The target colour space is sRGB when
  * the caller asked for it or the source is not wide gamut, Display P3
  * otherwise; the reported space is the decoded bitmap's own. EXIF is read with
- * `android.media.ExifInterface` from the same path or content URI.
+ * `android.media.ExifInterface` from the same path or content URI; the capture
+ * time is `DateTimeOriginal` only, never the last-modified `DateTime`.
  *
  * ## Cancel
  *
@@ -364,7 +365,8 @@ internal object ImageDecodeHost {
         return DecodeResult(
             FrustPhotoLibraryHost.OK,
             colorSpace,
-            exif?.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL) ?: exif?.getAttribute(ExifInterface.TAG_DATETIME),
+            // The original capture only: `TAG_DATETIME` is when the file was last changed.
+            exif?.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL),
             exif?.getAttribute(ExifInterface.TAG_MAKE),
             exif?.getAttribute(ExifInterface.TAG_MODEL),
             exif?.getAttribute(TAG_LENS_MODEL),

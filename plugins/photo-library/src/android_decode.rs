@@ -12,8 +12,10 @@
 //! # One buffer, never a Java array
 //!
 //! A 48 MP RGBA8 image is about 192 MB, too large to cross JNI as a `byte[]`. `decodeHeader`
-//! reads only the header and reports the capped size; this module allocates exactly
-//! `width * height * 4` bytes, wraps them in a direct `ByteBuffer` (`NewDirectByteBuffer`, the
+//! reads only the header and reports the capped size; this module checks that size against the
+//! byte ceiling shared with the Apple arm ([`decode::MAX_BUFFER_BYTES`], also a `ByteBuffer`'s
+//! `int` capacity), allocates exactly `width * height * 4` bytes fallibly
+//! ([`decode::allocate_rgba`]), wraps them in a direct `ByteBuffer` (`NewDirectByteBuffer`, the
 //! module's one `unsafe` block) and passes it to `decodeInto`, where `ImageDecoder` decodes with
 //! the software allocator at that size and `copyPixelsToBuffer` writes premultiplied
 //! `ARGB_8888` (bytes R, G, B, A). The buffer is used only inside that call. The straight-alpha
@@ -23,8 +25,11 @@
 //!
 //! A format with no installed decoder (`ImageDecoder.isMimeTypeSupported`, and an HEVC decoder
 //! for HEIF) is [`PhotoError::Unsupported`]; a `DecodeException` or other read failure is
-//! [`PhotoError::Platform`] naming the decode; a missing file is [`PhotoError::Io`], checked
-//! here before any JNI call. `android.rs`'s `decode_file` arm refuses the UI thread with
+//! [`PhotoError::Platform`] naming the decode. A missing file is [`PhotoError::NotFound`], as on
+//! every arm: a plain path is checked here before any JNI call ([`decode::require_file`]), and a
+//! missing content URI answers the host's `NOT_FOUND`. A capped image over the byte ceiling is
+//! [`PhotoError::InvalidRequest`]. The crate root's shared precheck (a cancelled token, a zero
+//! cap) runs first; `android.rs`'s `decode_file` arm then refuses the UI thread with
 //! [`PhotoError::UiThread`] before calling in.
 //!
 //! # Cancel
@@ -35,7 +40,6 @@
 //! header always tells the host, which otherwise drops it when `decodeInto` returns.
 //! `ImageDecoder` applies the EXIF orientation itself, so nothing here rotates.
 
-use std::fs;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -45,8 +49,7 @@ use jni::sys::{jint, jlong};
 use jni::{Env, jni_sig, jni_str};
 
 use super::{CANCELLED, NEXT_REQUEST_ID, NOT_INITIALIZED, error_for, run_jni, with_host};
-use crate::cancel::CancelToken;
-use crate::decode::{DecodeOptions, DecodedImage, ImageColorSpace};
+use crate::decode::{self, DecodeOptions, DecodedImage, ImageColorSpace};
 use crate::pixels;
 use crate::types::{ExifData, PhotoError};
 
@@ -68,9 +71,6 @@ const COLOR_DISPLAY_P3: jint = 1;
 /// `DecodeResult.colorSpace`: any other space.
 const COLOR_OTHER: jint = 2;
 
-/// The largest pixel buffer a `java.nio.ByteBuffer` can address: its capacity is an `int`.
-const MAX_BUFFER_BYTES: usize = i32::MAX as usize;
-
 /// `DecodeHeader` as the host reported it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Header {
@@ -91,7 +91,8 @@ struct Size {
     bytes: usize,
 }
 
-/// `DecodeResult` as the host reported it; absent EXIF values are `None`, 0 or NaN.
+/// `DecodeResult` as the host reported it; absent EXIF values are `None`, 0 or NaN. The host
+/// reads `captureTime` from EXIF `DateTimeOriginal` only.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Filled {
     code: jint,
@@ -108,14 +109,14 @@ struct Filled {
     gps_longitude: f64,
 }
 
-/// `android.rs`'s `decode_file` arm after its UI-thread check. Blocks for the whole decode; see
-/// the module doc.
+/// `android.rs`'s `decode_file` arm after the shared precheck and its UI-thread check. Blocks for
+/// the whole decode; see the module doc.
 pub(super) fn decode(path: &Path, options: &DecodeOptions) -> Result<DecodedImage, PhotoError> {
     let path = path
         .to_str()
         .ok_or_else(|| PhotoError::Platform("the file path is not valid UTF-8".to_string()))?;
     if !is_content_uri(path) {
-        fs::metadata(path)?;
+        decode::require_file(Path::new(path))?;
     }
     let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
     if let Some(token) = &options.cancel {
@@ -134,7 +135,7 @@ fn run_decode(
     options: &DecodeOptions,
     request_id: u64,
 ) -> Result<DecodedImage, PhotoError> {
-    if is_cancelled(options) {
+    if options.is_cancelled() {
         return Err(PhotoError::Cancelled);
     }
     let max_dimension = jint::try_from(options.max_dimension).unwrap_or(jint::MAX);
@@ -146,8 +147,8 @@ fn run_decode(
 
     // The host now holds `request_id` until `decodeInto` returns or `cancelDecode` runs.
     let prepared = checked_size(&header, options.max_dimension).and_then(|size| {
-        let rgba = allocate(size.bytes)?;
-        if is_cancelled(options) {
+        let rgba = decode::allocate_rgba(size.bytes)?;
+        if options.is_cancelled() {
             return Err(PhotoError::Cancelled);
         }
         Ok((size, rgba))
@@ -164,17 +165,10 @@ fn run_decode(
         decode_into(env, class, request_id, path, &size, options.srgb, &mut rgba)
     })?;
     // A cancel that raced the host's answer still wins.
-    if is_cancelled(options) {
+    if options.is_cancelled() {
         return Err(PhotoError::Cancelled);
     }
     finish(size, rgba, filled)
-}
-
-fn is_cancelled(options: &DecodeOptions) -> bool {
-    options
-        .cancel
-        .as_ref()
-        .is_some_and(CancelToken::is_cancelled)
 }
 
 fn is_content_uri(path: &str) -> bool {
@@ -182,7 +176,7 @@ fn is_content_uri(path: &str) -> bool {
 }
 
 /// Validates the host's header against the cap: both sides positive, within `max_dimension`
-/// and the source, and a buffer a `ByteBuffer` can address.
+/// and the source, and a buffer within the shared byte ceiling.
 fn checked_size(header: &Header, max_dimension: u32) -> Result<Size, PhotoError> {
     let invalid = || PhotoError::Platform("the image decode host returned a bad size".to_string());
     let positive = |v: jint| u32::try_from(v).ok().filter(|v| *v > 0).ok_or_else(invalid);
@@ -193,13 +187,7 @@ fn checked_size(header: &Header, max_dimension: u32) -> Result<Size, PhotoError>
     if width.max(height) > max_dimension || width > source_width || height > source_height {
         return Err(invalid());
     }
-    let bytes = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|n| n.checked_mul(4))
-        .filter(|n| *n <= MAX_BUFFER_BYTES)
-        .ok_or(PhotoError::InvalidRequest {
-            reason: "the capped image is too large for one pixel buffer; lower max_dimension",
-        })?;
+    let bytes = decode::rgba_len(width, height)?;
     Ok(Size {
         width,
         height,
@@ -207,15 +195,6 @@ fn checked_size(header: &Header, max_dimension: u32) -> Result<Size, PhotoError>
         source_height,
         bytes,
     })
-}
-
-/// A zeroed buffer of `len` bytes, or an error rather than an abort when memory is short.
-fn allocate(len: usize) -> Result<Vec<u8>, PhotoError> {
-    let mut rgba = Vec::new();
-    rgba.try_reserve_exact(len)
-        .map_err(|_| PhotoError::Platform("not enough memory for the decoded image".to_string()))?;
-    rgba.resize(len, 0);
-    Ok(rgba)
 }
 
 /// The decoded image from the host's answer: straight alpha, the reported colour space, EXIF.
@@ -262,15 +241,16 @@ fn color_space(code: jint) -> ImageColorSpace {
 fn exif_from(filled: Filled) -> Option<ExifData> {
     let text = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
     let number = |v: f64| Some(v).filter(|v| v.is_finite());
+    // Zero, negative and non-finite measurements are absent, as on the Apple arm.
     let exif = ExifData {
         capture_time: text(filled.capture_time),
         camera_make: text(filled.camera_make),
         camera_model: text(filled.camera_model),
         lens: text(filled.lens),
         iso: u32::try_from(filled.iso).ok().filter(|iso| *iso > 0),
-        exposure_seconds: number(filled.exposure_seconds).filter(|v| *v > 0.0),
-        aperture: number(filled.aperture).filter(|v| *v > 0.0),
-        focal_length_mm: number(filled.focal_length_mm).filter(|v| *v > 0.0),
+        exposure_seconds: decode::positive_measure(filled.exposure_seconds),
+        aperture: decode::positive_measure(filled.aperture),
+        focal_length_mm: decode::positive_measure(filled.focal_length_mm),
         gps_latitude: number(filled.gps_latitude),
         gps_longitude: number(filled.gps_longitude),
     };
@@ -553,6 +533,35 @@ mod tests {
         assert_eq!(exif.gps_latitude, Some(-33.5));
         assert_eq!(exif.gps_longitude, None);
         assert_eq!(exif.exposure_seconds, None);
+
+        // Zero, negative and non-finite measurements are absent.
+        for bad in [0.0, -1.0, f64::INFINITY] {
+            let exif = exif_from(Filled {
+                camera_make: Some("Make".to_string()),
+                iso: -5,
+                exposure_seconds: bad,
+                aperture: bad,
+                focal_length_mm: bad,
+                ..filled(OK)
+            })
+            .unwrap();
+            assert_eq!(exif.iso, None);
+            assert_eq!(exif.exposure_seconds, None);
+            assert_eq!(exif.aperture, None);
+            assert_eq!(exif.focal_length_mm, None);
+        }
+    }
+
+    #[test]
+    fn a_missing_plain_path_is_not_found() {
+        assert_eq!(
+            decode(
+                Path::new("/nonexistent/frust-photo-library/a.jpg"),
+                &DecodeOptions::new(8)
+            )
+            .map(|_| ()),
+            Err(PhotoError::NotFound)
+        );
     }
 
     #[test]

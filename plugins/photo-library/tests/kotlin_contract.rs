@@ -1605,6 +1605,13 @@ fn decode_fills_one_direct_buffer_with_the_software_allocator() {
         !decoder.contains("Matrix") && !decoder.contains("TAG_ORIENTATION"),
         "ImageDecoder applies the orientation itself; nothing rotates again"
     );
+    // The capture time is the original capture tag only, never the last-modified one.
+    let exif = function(&decoder, "private fun withExif(");
+    assert!(exif.contains("exif?.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL),"));
+    assert!(
+        !exif.contains("ExifInterface.TAG_DATETIME)"),
+        "capture_time must not fall back to the TIFF DateTime tag"
+    );
     let codes = function(&decoder, "private fun codeFor(");
     assert!(codes.contains("is ImageDecoder.DecodeException ->"));
     assert!(codes.contains("FrustPhotoLibraryHost.DECODE_FAILED"));
@@ -1671,7 +1678,7 @@ fn decode_refuses_the_ui_thread_and_types_its_errors() {
     assert!(decode.contains("token.clear_hook();"));
     let run = function(&rust, "fn run_decode(");
     assert!(
-        run.matches("if is_cancelled(options) {").count() >= 2,
+        run.matches("if options.is_cancelled() {").count() >= 2,
         "the token is checked before the header and after the copy"
     );
     assert!(

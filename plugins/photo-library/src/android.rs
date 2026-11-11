@@ -121,10 +121,12 @@
 //!
 //! # Decoding
 //!
-//! With the `decode` feature, `decode_file` refuses the UI thread and hands
-//! over to `android_decode`, which adds the `decodeHeader`, `decodeInto` and
-//! `cancelDecode` host calls and holds this crate's one Android `unsafe`
-//! block (wrapping the pixel buffer for `decodeInto`); see that module.
+//! With the `decode` feature, the crate root's shared precheck (a cancelled
+//! token, a zero cap) runs first; `decode_file` then refuses the UI thread
+//! and hands over to `android_decode`, which adds the `decodeHeader`,
+//! `decodeInto` and `cancelDecode` host calls and holds this crate's one
+//! Android `unsafe` block (wrapping the pixel buffer for `decodeInto`); see
+//! that module.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -814,8 +816,9 @@ pub(crate) use android_originals::save;
 #[path = "android_decode.rs"]
 mod android_decode;
 
-/// The crate root's `decode_file` arm: refuses the UI thread before any other work, then
-/// decodes in `android_decode`.
+/// The crate root's `decode_file` arm. The shared precheck (a cancelled token, a zero cap) has
+/// already run; this refuses the UI thread before any platform work, then decodes in
+/// `android_decode`.
 #[cfg(feature = "decode")]
 pub(crate) fn decode_file(
     path: &Path,

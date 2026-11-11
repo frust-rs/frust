@@ -315,25 +315,33 @@ impl PhotoLibrary {
 
     /// Decodes an image file at its full resolution, downscaled so neither side exceeds
     /// [`DecodeOptions::max_dimension`], into straight-alpha RGBA8. Blocks; needs the `decode`
-    /// feature. [`PhotoError::UiThread`] on a mobile UI thread, [`PhotoError::Unsupported`]
-    /// where the platform has no decoder, and [`PhotoError::InvalidRequest`] for a zero
-    /// `max_dimension`. A token cancelled before the call returns [`PhotoError::Cancelled`].
+    /// feature.
+    ///
+    /// # Order of checks and errors
+    ///
+    /// A shared precheck runs first on every platform: a token cancelled before the call returns
+    /// [`PhotoError::Cancelled`] and a zero `max_dimension` returns
+    /// [`PhotoError::InvalidRequest`]. The UI-thread refusal follows: iOS and Android return
+    /// [`PhotoError::UiThread`] on their UI thread, while macOS decodes on the calling thread
+    /// and does not refuse the main one. A missing file is [`PhotoError::NotFound`] on every
+    /// platform that decodes (a plain path or a content URI on Android, a path on iOS and
+    /// macOS). A platform with no decoder returns [`PhotoError::Unsupported`]. A capped image
+    /// over the byte ceiling (see [`DecodeOptions`]) returns [`PhotoError::InvalidRequest`]
+    /// before its buffer is allocated.
     ///
     /// iOS and macOS decode through ImageIO (HEIC, JPEG, PNG and every other format it reads),
     /// apply the EXIF orientation, and return Display P3 pixels for a wide-gamut image unless
-    /// [`DecodeOptions::srgb`] is set. A missing file is [`PhotoError::NotFound`]; a file with
-    /// no decodable image, or one cut short inside its headers, is [`PhotoError::Platform`]. A
-    /// file whose pixel data stops early decodes with the missing part blank (ImageIO's own
-    /// leniency). The token is checked between stages, but the platform decode itself is not
-    /// interruptible.
+    /// [`DecodeOptions::srgb`] is set. A file with no decodable image, or one cut short inside
+    /// its headers, is [`PhotoError::Platform`]. A file whose pixel data stops early decodes
+    /// with the missing part blank (ImageIO's own leniency). The token is checked between
+    /// stages, but the platform decode itself is not interruptible.
     pub fn decode_file(
         path: &std::path::Path,
         options: &DecodeOptions,
     ) -> Result<DecodedImage, PhotoError> {
         #[cfg(feature = "decode")]
         {
-            decode::precheck(options)?;
-            platform::decode_file(path, options)
+            decode::decode_file_with(path, options, platform::decode_file)
         }
         #[cfg(not(feature = "decode"))]
         {
@@ -344,7 +352,8 @@ impl PhotoLibrary {
 
     /// Exports an asset's file (see [`export_original`](Self::export_original)), decodes it as
     /// [`decode_file`](Self::decode_file) does, and removes the exported file afterwards on
-    /// success, failure and cancel. Blocks; needs the `decode` and `library` features.
+    /// success, failure, cancel and a panic in the decode. Blocks; needs the `decode` and
+    /// `library` features. The same shared precheck runs first, before the export.
     pub fn decode_asset(
         id: &AssetId,
         options: &DecodeOptions,
