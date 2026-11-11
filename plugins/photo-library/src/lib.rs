@@ -408,7 +408,8 @@ impl PhotoLibrary {
     /// - **Android:** the asset's content URI is opened as
     ///   [`export_original`](Self::export_original) opens it, unredacted only when the app holds
     ///   `ACCESS_MEDIA_LOCATION`, and read with `android.media.ExifInterface`. Without that
-    ///   permission the GPS fields are `None`. `allow_network` has no effect: `MediaStore` makes
+    ///   permission the GPS fields are `None`, including when the platform returns a redacted 0, 0
+    ///   location. `allow_network` has no effect: `MediaStore` makes
     ///   no network distinction. The token is checked before the read and after it.
     pub fn asset_metadata(id: &AssetId, options: &MetadataOptions) -> Result<ExifData, PhotoError> {
         #[cfg(feature = "library")]

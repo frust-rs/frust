@@ -80,6 +80,10 @@ pub(super) fn exif_from(filled: Filled) -> Option<ExifData> {
     let text = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
     let number = |v: f64| Some(v).filter(|v| v.is_finite());
     // Zero, negative and non-finite measurements are absent, as on the Apple arm.
+    // A redacted or placeholder 0, 0 location, one lone coordinate, or an out-of-range pair is
+    // absent, so decode and metadata agree.
+    let (gps_latitude, gps_longitude) =
+        decode::usable_position(number(filled.gps_latitude), number(filled.gps_longitude));
     let exif = ExifData {
         capture_time: text(filled.capture_time),
         camera_make: text(filled.camera_make),
@@ -89,8 +93,8 @@ pub(super) fn exif_from(filled: Filled) -> Option<ExifData> {
         exposure_seconds: decode::positive_measure(filled.exposure_seconds),
         aperture: decode::positive_measure(filled.aperture),
         focal_length_mm: decode::positive_measure(filled.focal_length_mm),
-        gps_latitude: number(filled.gps_latitude),
-        gps_longitude: number(filled.gps_longitude),
+        gps_latitude,
+        gps_longitude,
     };
     (exif != ExifData::default()).then_some(exif)
 }
@@ -225,6 +229,48 @@ mod tests {
     }
 
     #[test]
+    fn redacted_zero_position_is_absent_and_real_ones_are_kept() {
+        let with = |lat, lon| {
+            exif_from(Filled {
+                camera_make: Some("Make".to_string()),
+                gps_latitude: lat,
+                gps_longitude: lon,
+                ..filled(7)
+            })
+            .unwrap()
+        };
+        let redacted = with(0.0, 0.0);
+        assert_eq!(
+            (redacted.gps_latitude, redacted.gps_longitude),
+            (None, None)
+        );
+        let real = with(-33.5, 151.25);
+        assert_eq!(
+            (real.gps_latitude, real.gps_longitude),
+            (Some(-33.5), Some(151.25))
+        );
+        let equator = with(0.0, 151.25);
+        assert_eq!(
+            (equator.gps_latitude, equator.gps_longitude),
+            (Some(0.0), Some(151.25))
+        );
+        let out_of_range = with(95.0, 10.0);
+        assert_eq!(
+            (out_of_range.gps_latitude, out_of_range.gps_longitude),
+            (None, None)
+        );
+        // A position alone is still EXIF data only when it is usable.
+        assert_eq!(
+            exif_from(Filled {
+                gps_latitude: 0.0,
+                gps_longitude: 0.0,
+                ..filled(7)
+            }),
+            None
+        );
+    }
+
+    #[test]
     fn exif_is_none_when_empty_and_drops_placeholders() {
         assert_eq!(exif_from(filled(7)), None);
         let exif = exif_from(Filled {
@@ -240,7 +286,8 @@ mod tests {
         assert_eq!(exif.lens, None);
         assert_eq!(exif.iso, Some(200));
         assert_eq!(exif.aperture, Some(1.8));
-        assert_eq!(exif.gps_latitude, Some(-33.5));
+        // A latitude without a longitude is no position.
+        assert_eq!(exif.gps_latitude, None);
         assert_eq!(exif.gps_longitude, None);
         assert_eq!(exif.exposure_seconds, None);
 

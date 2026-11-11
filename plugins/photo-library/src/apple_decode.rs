@@ -29,7 +29,9 @@
 //!
 //! `capture_time` comes only from EXIF `DateTimeOriginal`, never the TIFF `DateTime` (the
 //! last-modified time). An ISO, exposure time, aperture or focal length that is zero, negative
-//! or non-finite is absent, as on Android ([`decode::positive_measure`]).
+//! or non-finite is absent, as on Android ([`decode::positive_measure`]). A GPS position that is
+//! redacted to 0, 0, out of range or missing one coordinate is absent
+//! ([`decode::usable_position`]).
 //!
 //! # Cancel
 //!
@@ -524,6 +526,19 @@ fn read_exif(properties: &Properties) -> Option<ExifData> {
         Some(if negate { -value.abs() } else { value })
     };
 
+    let (gps_latitude, gps_longitude) = decode::usable_position(
+        coordinate(
+            unsafe { kCGImagePropertyGPSLatitude },
+            unsafe { kCGImagePropertyGPSLatitudeRef },
+            "S",
+        ),
+        coordinate(
+            unsafe { kCGImagePropertyGPSLongitude },
+            unsafe { kCGImagePropertyGPSLongitudeRef },
+            "W",
+        ),
+    );
+
     let data = ExifData {
         // The original capture only; TIFF `DateTime` is the last-modified time.
         capture_time: exif_string(unsafe { kCGImagePropertyExifDateTimeOriginal }),
@@ -538,16 +553,8 @@ fn read_exif(properties: &Properties) -> Option<ExifData> {
         exposure_seconds: measure(unsafe { kCGImagePropertyExifExposureTime }),
         aperture: measure(unsafe { kCGImagePropertyExifFNumber }),
         focal_length_mm: measure(unsafe { kCGImagePropertyExifFocalLength }),
-        gps_latitude: coordinate(
-            unsafe { kCGImagePropertyGPSLatitude },
-            unsafe { kCGImagePropertyGPSLatitudeRef },
-            "S",
-        ),
-        gps_longitude: coordinate(
-            unsafe { kCGImagePropertyGPSLongitude },
-            unsafe { kCGImagePropertyGPSLongitudeRef },
-            "W",
-        ),
+        gps_latitude,
+        gps_longitude,
     };
     (data != ExifData::default()).then_some(data)
 }
