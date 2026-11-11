@@ -259,10 +259,21 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
         };
         // SAFETY: `count` reads the immutable fetch result.
         let total = unsafe { assets.count() };
-        let items = page_bounds(query.offset, query.effective_limit(), total)
+        let started = Instant::now();
+        let items: Vec<Asset> = page_bounds(query.offset, query.effective_limit(), total)
             // SAFETY: the page is clamped below `total`, the result's count.
-            .map(|index| asset_of(&*unsafe { assets.objectAtIndex(index) }))
+            .map(|index| asset_of(&*unsafe { assets.objectAtIndex(index) }, query.details))
             .collect();
+        log::debug!(
+            "photo-library page: {} rows in {:?}, details {}",
+            items.len(),
+            started.elapsed(),
+            if query.details {
+                "requested"
+            } else {
+                "not requested"
+            },
+        );
         Ok(AssetPage {
             items,
             total: total as u64,
@@ -282,7 +293,22 @@ fn millis(seconds: f64) -> f64 {
     (seconds * 1000.0).round()
 }
 
-fn asset_of(asset: &PHAsset) -> Asset {
+/// Builds one row. The modified time, favourite flag and burst identifier are plain
+/// property reads. With `details`, the file name and type identifier cost one
+/// `assetResourcesForAsset:` lookup per asset; without it no resource is touched.
+fn asset_of(asset: &PHAsset, details: bool) -> Asset {
+    let names = if details {
+        super::apple_originals::primary_names(asset)
+    } else {
+        None
+    };
+    let (file_name, content_type) = match names {
+        Some((name, uti)) => (
+            (!name.is_empty()).then_some(name),
+            (!uti.is_empty()).then_some(uti),
+        ),
+        None => (None, None),
+    };
     // SAFETY: read-only property getters of a live `PHAsset`; the bindings mark
     // the class `Send + Sync`.
     unsafe {
@@ -300,12 +326,16 @@ fn asset_of(asset: &PHAsset) -> Asset {
                 .creationDate()
                 .map(|date| millis(date.timeIntervalSince1970()) as i64),
             duration_ms: video.then(|| millis(asset.duration()) as u64),
-            // The following change fills these from PhotoKit.
-            modified_unix_ms: None,
-            is_favorite: None,
-            burst_id: None,
-            file_name: None,
-            content_type: None,
+            modified_unix_ms: asset
+                .modificationDate()
+                .map(|date| millis(date.timeIntervalSince1970()) as i64),
+            is_favorite: Some(asset.isFavorite()),
+            burst_id: asset
+                .burstIdentifier()
+                .map(|id| id.to_string())
+                .filter(|id| !id.is_empty()),
+            file_name,
+            content_type,
         }
     }
 }
@@ -807,6 +837,14 @@ mod tests {
     use super::*;
 
     const GRACE: Duration = PRESENT_GRACE;
+
+    #[test]
+    fn seconds_convert_to_whole_milliseconds() {
+        assert_eq!(millis(1.5) as i64, 1500);
+        assert_eq!(millis(1_700_000_000.000_4) as i64, 1_700_000_000_000);
+        assert_eq!(millis(-1.2345) as i64, -1235);
+        assert_eq!(millis(0.0) as i64, 0);
+    }
 
     #[test]
     fn a_page_is_clamped_to_the_total() {
