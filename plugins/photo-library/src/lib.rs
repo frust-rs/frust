@@ -51,7 +51,10 @@
 //! }
 //! ```
 
+#[cfg(all(feature = "decode", any(target_os = "ios", target_os = "macos")))]
+mod apple_decode;
 mod cancel;
+mod decode;
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
@@ -81,6 +84,7 @@ mod pixels;
 mod thumb_cache;
 
 pub use cancel::CancelToken;
+pub use decode::{DecodeOptions, DecodedImage, ImageColorSpace};
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
@@ -101,7 +105,7 @@ pub use originals::{
     AssetVersion, ExportOptions, ExportedOriginal, ProgressFn, SaveRequest, SavedAsset,
 };
 pub use types::{
-    AssetId, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
+    AssetId, ExifData, MediaFilter, MediaKind, PhotoError, PickOptions, PickProgress, PickedItem,
 };
 
 /// The folder types [`PhotoLibrary::scan_folder`] takes and returns, from `frust-file-dialogs`,
@@ -306,6 +310,78 @@ impl PhotoLibrary {
         {
             let _ = (id, options);
             Err(library_disabled())
+        }
+    }
+
+    /// Decodes an image file at its full resolution, downscaled so neither side exceeds
+    /// [`DecodeOptions::max_dimension`], into straight-alpha RGBA8. Blocks; needs the `decode`
+    /// feature.
+    ///
+    /// # Order of checks and errors
+    ///
+    /// A shared precheck runs first on every platform: a token cancelled before the call returns
+    /// [`PhotoError::Cancelled`] and a zero `max_dimension` returns
+    /// [`PhotoError::InvalidRequest`]. The UI-thread refusal follows: iOS and Android return
+    /// [`PhotoError::UiThread`] on their UI thread, while macOS decodes on the calling thread
+    /// and does not refuse the main one. A missing file is [`PhotoError::NotFound`] on every
+    /// platform that decodes (a plain path or a content URI on Android, a path on iOS and
+    /// macOS). A platform with no decoder returns [`PhotoError::Unsupported`]. A capped image
+    /// over the byte ceiling (see [`DecodeOptions`]) returns [`PhotoError::InvalidRequest`]
+    /// before its buffer is allocated.
+    ///
+    /// iOS and macOS decode through ImageIO (HEIC, JPEG, PNG and every other format it reads),
+    /// apply the EXIF orientation, and return Display P3 pixels for a wide-gamut image unless
+    /// [`DecodeOptions::srgb`] is set. A file with no decodable image, or one cut short inside
+    /// its headers, is [`PhotoError::Platform`]. A file whose pixel data stops early decodes
+    /// with the missing part blank (ImageIO's own leniency). The token is checked between
+    /// stages, but the platform decode itself is not interruptible.
+    pub fn decode_file(
+        path: &std::path::Path,
+        options: &DecodeOptions,
+    ) -> Result<DecodedImage, PhotoError> {
+        #[cfg(feature = "decode")]
+        {
+            decode::decode_file_with(path, options, platform::decode_file)
+        }
+        #[cfg(not(feature = "decode"))]
+        {
+            let _ = (path, options);
+            Err(decode::decode_disabled())
+        }
+    }
+
+    /// Exports an asset's file (see [`export_original`](Self::export_original)), decodes it as
+    /// [`decode_file`](Self::decode_file) does, and removes the exported file afterwards on
+    /// success, failure, cancel and a panic in the decode. Blocks; needs the `decode` and
+    /// `library` features. The same shared precheck runs first, before the export.
+    pub fn decode_asset(
+        id: &AssetId,
+        options: &DecodeOptions,
+        export: &ExportOptions,
+    ) -> Result<DecodedImage, PhotoError> {
+        #[cfg(all(feature = "decode", feature = "library"))]
+        {
+            decode::decode_asset_with(
+                id,
+                options,
+                export,
+                |id, export| {
+                    if originals::is_cancelled(export) {
+                        return Err(PhotoError::Cancelled);
+                    }
+                    platform::export_original(id, export)
+                },
+                platform::decode_file,
+            )
+        }
+        #[cfg(not(all(feature = "decode", feature = "library")))]
+        {
+            let _ = (id, options, export);
+            Err(if cfg!(feature = "decode") {
+                library_disabled()
+            } else {
+                decode::decode_disabled()
+            })
         }
     }
 

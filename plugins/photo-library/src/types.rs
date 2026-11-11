@@ -145,6 +145,39 @@ pub struct PickedItem {
     pub is_copy: bool,
 }
 
+/// Capture metadata read from an image's EXIF block, returned by
+/// [`PhotoLibrary::decode_file`](crate::PhotoLibrary::decode_file) and
+/// [`PhotoLibrary::decode_asset`](crate::PhotoLibrary::decode_asset) in
+/// [`DecodedImage::exif`](crate::DecodedImage::exif). Every field is optional: a file carries
+/// only what its camera or editor wrote. An ISO, exposure time, aperture or focal length the
+/// file records as zero, negative or non-finite is `None`.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
+pub struct ExifData {
+    /// When the photo was taken: the EXIF `DateTimeOriginal` tag as the file records it
+    /// (`YYYY:MM:DD HH:MM:SS`, local time). Never the TIFF `DateTime` tag, which records when
+    /// the file was last changed, so a file with only that tag leaves this `None`.
+    pub capture_time: Option<String>,
+    /// Camera manufacturer.
+    pub camera_make: Option<String>,
+    /// Camera model.
+    pub camera_model: Option<String>,
+    /// Lens description.
+    pub lens: Option<String>,
+    /// ISO sensitivity.
+    pub iso: Option<u32>,
+    /// Exposure time in seconds.
+    pub exposure_seconds: Option<f64>,
+    /// Aperture as an f-number.
+    pub aperture: Option<f64>,
+    /// Focal length in millimetres.
+    pub focal_length_mm: Option<f64>,
+    /// GPS latitude in degrees, south negative.
+    pub gps_latitude: Option<f64>,
+    /// GPS longitude in degrees, west negative.
+    pub gps_longitude: Option<f64>,
+}
+
 /// Why a photo-library call failed. Display never echoes paths or identifiers.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]

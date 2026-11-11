@@ -20,6 +20,9 @@ library = []
 # with it off `PhotoLibrary::save` returns `PhotoError::FeatureDisabled`. `export_original`
 # needs `library` instead.
 save = []
+# Full-resolution native decode (`PhotoLibrary::decode_file`, and `decode_asset` together with
+# `library`). A code gate only: with it off both calls return `PhotoError::FeatureDisabled`.
+decode = []
 
 [dependencies]
 thiserror = { workspace = true }
@@ -41,7 +44,6 @@ frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.6" }
 # iOS arm: PHPicker, item-provider file copies and the main-queue bounce. Literals narrow the
 # feature lists of the root rows (only a non-workspace row may set `default-features = false`).
 [target.'cfg(target_os = "ios")'.dependencies]
-objc2 = { workspace = true }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSString",
@@ -92,7 +94,13 @@ objc2-photos = { version = "0.3", default-features = false, features = [
     "PHAssetChangeRequest",
     "PHAssetCollectionChangeRequest",
 ] }
-# Thumbnail rendering: a bitmap context draws the CGImage into straight-alpha RGBA8.
+block2 = { version = "0.6", default-features = false, features = ["std"] }
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }
+
+# Shared by the iOS arm and the ImageIO decoder (iOS and macOS): a bitmap context draws a CGImage
+# into straight-alpha RGBA8, and Core Foundation carries the ImageIO options and properties.
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+objc2 = { workspace = true }
 objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "std",
     "CGContext",
@@ -100,5 +108,12 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGColorSpace",
     "CGImage",
 ] }
-block2 = { version = "0.6", default-features = false, features = ["std"] }
-dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFCGTypes",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "CFURL",
+] }

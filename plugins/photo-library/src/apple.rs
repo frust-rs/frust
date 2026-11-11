@@ -473,6 +473,20 @@ fn anchor_window(mtm: MainThreadMarker) -> Option<Retained<UIWindow>> {
     fallback
 }
 
+// Decode: the shared ImageIO decoder. The crate root's shared precheck (a cancelled token, a
+// zero cap) has already run; the main-thread refusal follows, as for browsing (a
+// full-resolution decode can take long enough to stall the UI).
+#[cfg(feature = "decode")]
+pub(crate) fn decode_file(
+    path: &std::path::Path,
+    options: &crate::DecodeOptions,
+) -> Result<crate::DecodedImage, PhotoError> {
+    if MainThreadMarker::new().is_some() {
+        return Err(PhotoError::UiThread);
+    }
+    crate::apple_decode::decode_file(path, options)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

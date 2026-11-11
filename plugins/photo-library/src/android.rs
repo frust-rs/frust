@@ -118,6 +118,15 @@
 //! `android_originals` implements `export_original` (`library`) and `save`
 //! (`save`) with its own request map, so neither takes the pick guard or the
 //! host's single pick slot; see that module.
+//!
+//! # Decoding
+//!
+//! With the `decode` feature, the crate root's shared precheck (a cancelled
+//! token, a zero cap) runs first; `decode_file` then refuses the UI thread
+//! and hands over to `android_decode`, which adds the `decodeHeader`,
+//! `decodeInto` and `cancelDecode` host calls and holds this crate's one
+//! Android `unsafe` block (wrapping the pixel buffer for `decodeInto`); see
+//! that module.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -801,3 +810,20 @@ mod android_originals;
 pub(crate) use android_originals::export_original;
 #[cfg(feature = "save")]
 pub(crate) use android_originals::save;
+
+// Decode: `decode_file` through `ImageDecoder` into a direct `ByteBuffer`.
+#[cfg(feature = "decode")]
+#[path = "android_decode.rs"]
+mod android_decode;
+
+/// The crate root's `decode_file` arm. The shared precheck (a cancelled token, a zero cap) has
+/// already run; this refuses the UI thread before any platform work, then decodes in
+/// `android_decode`.
+#[cfg(feature = "decode")]
+pub(crate) fn decode_file(
+    path: &Path,
+    options: &crate::DecodeOptions,
+) -> Result<crate::DecodedImage, PhotoError> {
+    with_host(|env, _class| ensure_off_ui_thread(env))?;
+    android_decode::decode(path, options)
+}
