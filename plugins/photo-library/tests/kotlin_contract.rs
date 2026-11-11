@@ -26,6 +26,9 @@
 //!   declarations, every blocking call refuses the UI thread, browsing never
 //!   takes the pick slot, paging and the access check keep their shape, and
 //!   the asked-flag keys and permission table match `frust-permissions`;
+//! - thumbnail cancel: the load gets a real `CancellationSignal` held under its
+//!   request id, `cancelThumbnail` fires it, a failure after the cancel answers
+//!   `CANCELLED`, and the Rust hook calls the entry and types the code;
 //! - originals and saves: the host calls, exports and codes match, neither
 //!   touches pick state or a pick's executor, the export copies in cancellable
 //!   chunks and deletes its partial file, the location-preserving open falls
@@ -693,9 +696,14 @@ fn browse_jni_calls_match_the_kotlin_declarations() {
             "(Ljava/lang/String;IJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;",
         ),
         (
-            "@JvmStatic\n    fun thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult",
+            "@JvmStatic\n    fun thumbnail(requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult",
             "thumbnail",
-            "(Ljava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;",
+            "(JLjava/lang/String;IIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ThumbnailResult;",
+        ),
+        (
+            "@JvmStatic\n    fun cancelThumbnail(requestId: Long) {",
+            "cancelThumbnail",
+            "(J)V",
         ),
         (
             "@JvmStatic\n    fun manageLimitedSelection(requestId: Long): Int",
@@ -903,8 +911,8 @@ fn browsing_checks_access_and_pages_by_sdk() {
         browser.contains("MediaStore.Video.Media.EXTERNAL_CONTENT_URI"),
         "asset ids are typed collection URIs, which loadThumbnail resolves on every API level"
     );
-    let thumb = function(&browser, "fun thumbnail(");
-    assert!(thumb.contains("loadThumbnail(uri, Size(width, height), null)"));
+    let thumb = function(&browser, "private fun loadThumbnail(");
+    assert!(thumb.contains("loadThumbnail(uri, Size(width, height), signal)"));
     assert!(thumb.contains("catch (e: FileNotFoundException)"));
     assert!(thumb.contains("Bitmap.Config.ARGB_8888"));
     assert!(thumb.contains("copyPixelsToBuffer"));
@@ -918,6 +926,74 @@ fn browsing_checks_access_and_pages_by_sdk() {
     let error = function(&rust, "fn browse_error(");
     assert!(error.contains("PERMISSION_DENIED => PhotoError::PermissionDenied,"));
     assert!(error.contains("NOT_FOUND => PhotoError::NotFound,"));
+}
+
+#[test]
+fn a_thumbnail_load_is_cancellable_on_both_sides() {
+    let browser = read(KOTLIN_BROWSER);
+    let code = rust_code(&browser);
+    assert!(
+        !code.contains("loadThumbnail(uri, Size(width, height), null)"),
+        "loadThumbnail never runs without a CancellationSignal"
+    );
+    assert!(browser.contains("import android.os.CancellationSignal"));
+    let entry = function(&browser, "fun thumbnail(ctx: Context?, requestId: Long,");
+    assert!(entry.contains("val signal = CancellationSignal()"));
+    assert!(entry.contains("thumbnailSignals[requestId] = signal"));
+    assert!(
+        entry.contains("} finally {") && entry.contains("thumbnailSignals.remove(requestId)"),
+        "a finished load drops its signal, so a late cancel finds nothing"
+    );
+    let load = function(&browser, "private fun loadThumbnail(");
+    assert!(load.contains("loadThumbnail(uri, Size(width, height), signal)"));
+    assert!(
+        load.contains("catch (e: OperationCanceledException) {")
+            && load.contains("thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)"),
+        "the cancel exception answers CANCELLED"
+    );
+    assert!(
+        load.contains("thumbnailFailed(cancelledOr(signal, FrustPhotoLibraryHost.NOT_FOUND))"),
+        "a missing-file failure after a cancel is a cancel"
+    );
+    assert!(load.contains(
+        "if (signal.isCanceled) return@browse thumbnailFailed(FrustPhotoLibraryHost.CANCELLED)"
+    ));
+    let cancel = function(&browser, "fun cancelThumbnail(requestId: Long) {");
+    assert!(cancel.contains("thumbnailSignals[requestId]?.cancel()"));
+
+    let kotlin = rust_code(&read(KOTLIN_HOST));
+    let at = kotlin
+        .find("fun cancelThumbnail(requestId: Long) {")
+        .unwrap();
+    assert!(
+        kotlin[at..(at + 200).min(kotlin.len())]
+            .contains("MediaStoreBrowser.cancelThumbnail(requestId)"),
+        "the host's cancel entry forwards to the browser"
+    );
+    let at = kotlin.find("fun thumbnail(requestId: Long,").unwrap();
+    assert!(
+        kotlin[at..(at + 300).min(kotlin.len())].contains(
+            "MediaStoreBrowser.thumbnail(appContext, requestId, id, width, height, fill)"
+        )
+    );
+    let host = read(KOTLIN_HOST);
+    assert!(host.contains("`cancelThumbnail(requestId: Long)` — `(J)V`"));
+
+    let rust = rust_code(&read(RUST_ANDROID_LIBRARY));
+    let arm = function(&rust, "pub(crate) fn thumbnail(");
+    let hook = arm
+        .find("token.set_hook(move || cancel_thumbnail(request_id));")
+        .expect("the token's hook cancels this request");
+    let call = arm.find("jni_str!(\"thumbnail\")").unwrap();
+    let clear = arm
+        .find("token.clear_hook();")
+        .expect("the hook is cleared");
+    assert!(hook < call && call < clear);
+    assert!(arm.contains("JValue::Long(request_id as jlong),"));
+    let hook = function(&rust, "fn cancel_thumbnail(");
+    assert!(hook.contains("jni_str!(\"cancelThumbnail\")"));
+    let error = function(&rust, "fn browse_error(");
+    assert!(error.contains("CANCELLED => PhotoError::Cancelled,"));
 }
 
 #[test]

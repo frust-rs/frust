@@ -58,7 +58,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Kotlin → Rust | `nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)` | copy progress, never an answer |
  * | Rust → Kotlin | `albums(): AlbumsResult` | an [AlbumsResult]; `code` is [OK], [NOT_INITIALIZED], [PERMISSION_DENIED] or [QUERY_FAILED] |
  * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult` | an [AssetsResult], same codes as `albums` |
- * | Rust → Kotlin | `thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] |
+ * | Rust → Kotlin | `thumbnail(requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] and [CANCELLED] |
+ * | Rust → Kotlin | `cancelThumbnail(requestId: Long)` — `(J)V` | nothing; an unknown or finished id is ignored |
  * | Rust → Kotlin | `manageLimitedSelection(requestId: Long): Int` — `(J)I` | [PENDING] after posting the prompt, [NOT_LIMITED], [NO_ACTIVITY], [BUSY] or [NOT_INITIALIZED]; answered through [nativeOnPickResult] (three empty arrays) or [nativeOnPickError] |
  * | Rust → Kotlin | `exportOriginal(requestId: Long, uri: String, destPath: String): Int` — `(JLjava/lang/String;Ljava/lang/String;)I` | [PENDING] after queuing the copy, [NOT_INITIALIZED], or [NOT_FOUND] for an id that is not a `MediaStore` image or video item on an external volume |
  * | Rust → Kotlin | `cancelExport(requestId: Long)` — `(J)V` | nothing; an unknown or already-answered id is ignored |
@@ -109,7 +110,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * [albums], [assets] and [thumbnail] run in [MediaStoreBrowser] on the calling
  * thread, return their result object synchronously, and never touch the
- * in-flight slot. [manageLimitedSelection] presents the Android 14 selection
+ * in-flight slot. A [thumbnail] load runs with a `CancellationSignal` held
+ * under its request id until it returns; [cancelThumbnail] fires it, and the
+ * load then answers [CANCELLED]. [manageLimitedSelection] presents the Android 14 selection
  * UI: `RequestMultiplePermissions` for the SDK media set, through the same
  * slot and launcher key as a pick.
  *
@@ -187,7 +190,7 @@ object FrustPhotoLibraryHost {
     const val LAUNCH_FAILED = 4
     /** A chosen item could not be copied. */
     const val COPY_FAILED = 5
-    /** The pick was cancelled through [cancel]. */
+    /** The pick, export, decode or thumbnail was cancelled. */
     const val CANCELLED = 6
     /** A browse call succeeded; the result object carries its data. */
     const val OK = 7
@@ -458,10 +461,19 @@ object FrustPhotoLibraryHost {
     fun assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult =
         MediaStoreBrowser.assets(appContext, albumId, filter, offset, limit, details)
 
-    /** One thumbnail. Any thread but the main one (the decode blocks). */
+    /**
+     * One thumbnail, loaded under [requestId] so [cancelThumbnail] can stop it.
+     * Any thread but the main one (the decode blocks).
+     */
     @JvmStatic
-    fun thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
-        MediaStoreBrowser.thumbnail(appContext, id, width, height, fill)
+    fun thumbnail(requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult =
+        MediaStoreBrowser.thumbnail(appContext, requestId, id, width, height, fill)
+
+    /** Cancel thumbnail [requestId]. Any thread; an unknown or finished id is ignored. */
+    @JvmStatic
+    fun cancelThumbnail(requestId: Long) {
+        MediaStoreBrowser.cancelThumbnail(requestId)
+    }
 
     /**
      * Re-show the Android 14 photo selection UI by requesting the SDK media

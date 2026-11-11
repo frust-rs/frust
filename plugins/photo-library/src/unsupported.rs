@@ -21,6 +21,7 @@ pub(crate) fn assets(_query: &crate::AssetQuery) -> Result<crate::AssetPage, Pho
 pub(crate) fn thumbnail(
     _id: &crate::AssetId,
     _request: &crate::ThumbnailRequest,
+    _token: &crate::CancelToken,
 ) -> Result<crate::Thumbnail, PhotoError> {
     Err(PhotoError::Unsupported)
 }
