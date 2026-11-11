@@ -45,8 +45,10 @@ import dev.frust.photolibrary.FrustPhotoLibraryHost.ChangesResult
  * collections with `notifyForDescendants`. It runs `onChange` on the binder
  * thread that delivers the notification (no `Handler`), and every overload
  * calls [FrustPhotoLibraryHost.notifyLibraryChanged] with no data and no lock
- * held, so a subscriber may stop the observer from inside the wake.
- * [stopObserver] unregisters it; a wake already in flight from an
+ * held, so a subscriber may stop the observer from inside the wake. The
+ * observer is published before it is registered (and unpublished if
+ * registering fails), so every change delivered to the registered observer
+ * wakes. [stopObserver] unregisters it; a wake already in flight from an
  * unregistered observer is dropped.
  */
 internal object MediaStoreChanges {
@@ -72,7 +74,7 @@ internal object MediaStoreChanges {
         MediaStore.MediaColumns.GENERATION_MODIFIED,
     )
 
-    /** The registered observer, or null. Written under [observerLock]; read by [WakeObserver]. */
+    /** The registered (or registering) observer, or null. Written under [observerLock]; read by [WakeObserver]. */
     @Volatile
     private var observer: WakeObserver? = null
 
@@ -152,6 +154,9 @@ internal object MediaStoreChanges {
             if (observer != null) return FrustPhotoLibraryHost.OK
             val created = WakeObserver()
             val resolver = ctx.contentResolver
+            // Published before registering: a change delivered while the second collection is
+            // still registering reaches the wake instead of being dropped as a stale observer's.
+            observer = created
             val code = try {
                 resolver.registerContentObserver(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, true, created)
                 resolver.registerContentObserver(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, true, created)
@@ -163,10 +168,10 @@ internal object MediaStoreChanges {
                 FrustPhotoLibraryHost.QUERY_FAILED
             }
             if (code != FrustPhotoLibraryHost.OK) {
+                observer = null
                 unregister(ctx, created)
                 return code
             }
-            observer = created
             return FrustPhotoLibraryHost.OK
         }
     }

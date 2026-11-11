@@ -214,7 +214,8 @@ pub(crate) const CURSOR_EXPIRED: &str =
     "the cursor's library snapshot is no longer held; restart paging from None";
 
 /// Where an [`AssetCursor`] resumes. Each platform makes and accepts only its own variant.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// `Debug` prints the position; [`AssetCursor`]'s own `Debug` never does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(
     not(all(feature = "library", any(target_os = "android", target_os = "ios"))),
     allow(dead_code)
@@ -613,7 +614,7 @@ mod tests {
         let query = AssetQuery::new().album(AlbumId::from_raw("a"));
         let keyset = CursorPosition::Keyset { key: -5, id: 42 };
         let cursor = AssetCursor::new(&query, keyset);
-        assert!(cursor.position_for(&query) == Ok(keyset));
+        assert_eq!(cursor.position_for(&query), Ok(keyset));
         assert_eq!(cursor.keyset_for(&query), Ok((-5, 42)));
         let snapshot = CursorPosition::Snapshot {
             session: 3,
