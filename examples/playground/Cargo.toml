@@ -43,10 +43,9 @@ frust-device-info = { path = "../../plugins/device-info" }
 # The Photos page: runtime permission status, request and settings for photos, camera, microphone and media location.
 frust-permissions = { path = "../../plugins/permissions", features = ["photos", "camera", "microphone", "media-location"] }
 
-# The Photos page's Picker panel (the system photo picker; desktop: native file dialog) and Browse
-# panel (`library`: albums, paged assets, thumbnails), and Originals panel (`save`: export_original
-# with progress and cancel, then save back into the library), and its `decode` feature (native
-# full-resolution decode: the Originals panel's Decode actions and the Picker preview's HEIC fallback).
+# The Photos page: the Picker panel (system photo picker; desktop: native file dialog), the Browse
+# panel (`library`: albums, paged assets, thumbnails), the Originals panel (`save`: export, then save
+# back) and native decode (`decode`: the Decode actions and the Picker preview's HEIC fallback).
 frust-photo-library = { path = "../../plugins/photo-library", features = ["library", "save", "decode"] }
 
 # Default features required: the `frust-api` hooks and the ICU4X `formatting` that `locales/*/main.ftl` uses.
