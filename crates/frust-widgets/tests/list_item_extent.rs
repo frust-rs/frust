@@ -17,6 +17,7 @@ use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, Component, ComponentView, FrameTime, LayoutCtx,
     PaintCtx, PaintScene, RenderRoot, View, Widget, component,
 };
+use frust_widgets::scroll_controller::ItemAlignment;
 use frust_widgets::{ChildKey, ListView, ScrollController};
 use kurbo::{Point, Size};
 
@@ -163,6 +164,8 @@ impl FeedData {
 /// How the feed declares its extents. Only the misuse cases combine modes.
 #[derive(Clone, Copy)]
 enum Extents {
+    /// No `item_extent_of`: every row is the constructor's uniform extent.
+    Uniform,
     Exact,
     ExactThenEstimate,
     EstimateThenExact,
@@ -186,6 +189,7 @@ impl Component for Feed {
         let list = Self::rows(Rc::clone(&data.ids), &self.log, self.keyed);
         let extent_of = Self::extent_of(Rc::clone(&data.extents));
         let list = match self.extents {
+            Extents::Uniform => list,
             Extents::Exact => list.item_extent_of(extent_of),
             Extents::ExactThenEstimate => {
                 list.item_extent_of(extent_of).estimated_item_extent(48.0)
@@ -448,6 +452,117 @@ fn a_prepend_keeps_the_anchor_row_in_place() {
         .row(anchor_id)
         .expect("the anchor row still painted");
     assert_eq!(y, anchor_y);
+}
+
+/// Grow row `id`'s declared extent by `by` px under an unchanged item count,
+/// bumping the generation as the contract asks.
+fn reflow(feed: &Harness, id: usize, by: f64) {
+    let mut data = feed.data.borrow_mut();
+    data.extents_mut()[id] += by;
+    data.generation += 1;
+}
+
+#[test]
+fn a_reflow_above_the_viewport_keeps_the_anchor_row_in_place() {
+    let mut feed = Harness::new(FeedData::mixed(2_000), true, Extents::Exact);
+    let anchor_id = 500_u64;
+    let top = feed.prefix()[anchor_id as usize] + 7.5;
+    feed.controller.jump_to(top);
+    feed.settle();
+    let (anchor_y, _) = feed.log.row(anchor_id).expect("the anchor row painted");
+    assert_eq!(anchor_y, -7.5);
+
+    // A row far above the materialized window grows: same count, new
+    // generation. The offset absorbs the growth.
+    reflow(&feed, 100, 200.0);
+    feed.settle();
+    assert_eq!(feed.controller.offset(), top + 200.0);
+    let (y, _) = feed.log.row(anchor_id).expect("the anchor row painted");
+    assert_eq!(y, anchor_y, "a re-flow far above leaves the anchor row put");
+
+    // The row just above the viewport, inside the window's leading buffer,
+    // grows: the row the top edge sits in still holds its place.
+    reflow(&feed, 499, 33.25);
+    feed.settle();
+    assert_eq!(feed.controller.offset(), top + 200.0 + 33.25);
+    let (y, _) = feed.log.row(anchor_id).expect("the anchor row painted");
+    assert_eq!(y, anchor_y, "a re-flow in the leading buffer leaves it put");
+
+    // A re-flow below the viewport changes nothing on screen.
+    let offset = feed.controller.offset();
+    reflow(&feed, 1_500, 120.0);
+    feed.settle();
+    assert_eq!(feed.controller.offset(), offset);
+    let (y, _) = feed.log.row(anchor_id).expect("the anchor row painted");
+    assert_eq!(y, anchor_y);
+}
+
+#[test]
+fn entering_exact_mode_on_a_prepend_frame_skips_the_anchor_shift() {
+    let mut feed = Harness::new(FeedData::mixed(100), true, Extents::Uniform);
+    let top = 5.0 * IGNORED_ITEM_EXTENT;
+    feed.controller.jump_to(top);
+    feed.settle();
+    assert_eq!(feed.controller.offset(), top);
+
+    // One frame prepends three rows and switches the list to exact extents:
+    // there is no previous prefix to read the anchor row's old top off, so
+    // the offset is left where it was rather than shifted by a guess.
+    {
+        let mut data = feed.data.borrow_mut();
+        for n in 0..3 {
+            data.ids_mut().insert(0, 1_000_000 + n);
+            data.extents_mut().insert(0, 24.0);
+        }
+    }
+    feed.extents = Extents::Exact;
+    feed.settle();
+    let max_offset = feed.prefix()[103] - WINDOW.height;
+    assert_eq!(feed.controller.offset(), top.min(max_offset));
+    assert_eq!(feed.content_extent(), feed.prefix()[103]);
+}
+
+/// Scroll a 100-row feed to its end, then cut it to its first 50 rows: the
+/// materialized window (rows 9x) now lies wholly past the new item count.
+fn feed_at_the_end_then_halved(keyed: bool) -> Harness {
+    let mut feed = Harness::new(FeedData::mixed(100), keyed, Extents::Exact);
+    feed.controller.jump_to(1.0e12);
+    feed.settle();
+    assert!(feed.log.row(99).is_some(), "the last row is on screen");
+    let mut data = feed.data.borrow_mut();
+    data.ids_mut().truncate(50);
+    data.extents_mut().truncate(50);
+    drop(data);
+    feed
+}
+
+#[test]
+fn a_shrink_past_the_window_with_a_queued_jump_lands_on_valid_rows() {
+    let mut feed = feed_at_the_end_then_halved(false);
+    // The jump drains in the same rebuild that sees the shrink, before the
+    // window is reconciled to the new count.
+    feed.controller.jump_to(0.0);
+    feed.settle();
+    assert_eq!(feed.controller.offset(), 0.0);
+    assert_eq!(feed.content_extent(), feed.prefix()[50]);
+    let (y, height) = feed.log.row(0).expect("row 0 painted");
+    assert_eq!((y, height), (0.0, mixed_extent(0)));
+    assert!(
+        feed.log.row(60).is_none(),
+        "no row past the new count paints"
+    );
+}
+
+#[test]
+fn a_shrink_past_the_window_with_a_queued_scroll_to_item_lands_on_the_row() {
+    let mut feed = feed_at_the_end_then_halved(true);
+    feed.controller
+        .scroll_to_item(ChildKey::new(10_u64), ItemAlignment::Start, false);
+    feed.settle();
+    let prefix = feed.prefix();
+    assert_eq!(feed.controller.offset(), prefix[10]);
+    let (y, height) = feed.log.row(10).expect("row 10 painted");
+    assert_eq!((y, height), (0.0, mixed_extent(10)));
 }
 
 #[test]

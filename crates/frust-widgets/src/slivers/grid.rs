@@ -189,6 +189,10 @@ impl SliverGridDelegate {
     /// The main-axis offset of item `index`'s row from the grid's leading edge,
     /// in the grid's own sliver coordinates, for a grid `cross_extent` px across.
     ///
+    /// **`0.0` is also the answer for an invalid or not-yet-measured cross
+    /// extent** (zero, negative or non-finite), indistinguishable from row 0's
+    /// offset: pass the grid's real laid-out width, never a placeholder.
+    ///
     /// It is computed from the same layout the grid places its cells with, so
     /// it cannot drift from where the cell lands. To scroll a
     /// [`CustomScrollView`](crate::CustomScrollView) to a cell, add the extent
@@ -210,9 +214,8 @@ impl SliverGridDelegate {
     /// controller.jump_to(preceding_extent + delegate.offset_of_index(42, cross_extent));
     /// ```
     ///
-    /// Returns `0.0` for a zero, negative or non-finite cross extent, and
-    /// whenever the row stride is not a positive finite length, rather than
-    /// panicking.
+    /// Likewise `0.0` whenever the row stride is not a positive finite
+    /// length, rather than panicking.
     pub fn offset_of_index(&self, index: usize, cross_extent: f64) -> f64 {
         if !(cross_extent > 0.0 && cross_extent.is_finite()) {
             return 0.0;
