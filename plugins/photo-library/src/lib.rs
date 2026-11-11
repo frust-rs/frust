@@ -394,12 +394,14 @@ impl PhotoLibrary {
     ///   all.
     ///   - *Deadline:* with or without a token, a read that receives neither data nor its
     ///     completion for 30 seconds is stopped and returns a [`PhotoError::Platform`] timeout.
-    ///     Each piece of data restarts that clock, so a slow download that keeps arriving is not
-    ///     cut off. A cancel during the read stops the transfer sooner and returns
-    ///     [`PhotoError::Cancelled`].
+    ///     Each piece of data restarts that clock. Only delivered data counts: if Photos
+    ///     downloads an iCloud original for longer than that before it delivers the first piece,
+    ///     the read times out (not yet checked on a device). A cancel during the read stops the
+    ///     transfer sooner and returns [`PhotoError::Cancelled`].
     ///   - *Size and memory:* an original over 256 MiB is refused with
-    ///     [`PhotoError::InvalidRequest`] once that much has arrived. The peak memory is one
-    ///     buffer of the original, with up to the same again in spare capacity while it grows.
+    ///     [`PhotoError::InvalidRequest`] once that much has arrived. The buffer holds the
+    ///     original once, with up to the same again in spare capacity; while it grows, the old
+    ///     and the new block are briefly both live, about three times the bytes received.
     ///     An allocation the system refuses returns [`PhotoError::Platform`] rather than
     ///     aborting, but iOS can still end the app under memory pressure while the buffer is
     ///     large, so read originals one at a time.

@@ -40,7 +40,9 @@
 //! completion arrives for [`INACTIVITY_TIMEOUT`] (30 s, as for a thumbnail request), the request
 //! is cancelled and the read answers a [`PhotoError::Platform`] timeout. Each chunk restarts the
 //! deadline, so a slow download that keeps delivering data is never cut off; a download that
-//! stalls is. No header promises the completion block runs after a cancel, so the wait never
+//! stalls is. Only delivered chunks count: no progress handler is installed, so an iCloud download
+//! that Photos completes before it delivers the first chunk has 30 s to do so. Whether Photos
+//! delivers chunks during such a download has not been checked on a device. No header promises the completion block runs after a cancel, so the wait never
 //! depends on it.
 //!
 //! The crate root has already refused a token cancelled before the call. Once the request has an
