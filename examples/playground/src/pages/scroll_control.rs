@@ -42,11 +42,24 @@
 //! listener that runs with no `&mut State` (see that field's own doc
 //! comment) — so it live-updates through every drag, fling, and
 //! programmatic move, not just on a button press.
+//!
+//! # Exact extents
+//!
+//! A second list of [`EXACT_ROW_COUNT`] rows declares every row's height up
+//! front through [`frust::ListView::item_extent_of`] ([`exact_row_height`]
+//! cycles through [`EXACT_HEIGHTS`]), so nothing is estimated or measured.
+//! Its "Row N" buttons `jump_to` [`exact_row_offset`] — the closed-form sum
+//! of the heights before row N — and land with that row exactly at the top
+//! (the last row stops at the bottom edge, since a jump clamps to
+//! `max_offset`). The "visible rows" line under it is fed by
+//! [`frust::ListView::on_visible_range`] into
+//! [`crate::PlaygroundState::exact_visible_range`]; that delivery is one
+//! event late, so the line catches up on the next event after a scroll.
 
 use frust::{
     AnimateTo, ButtonStyle, ChildKey, Color, Curve, EdgeInsets, Get, ItemAlignment, ListView,
-    Padding, ScrollbarShow, ScrollbarStyle, SizedBox, Theme, View, button, column, row,
-    scroll_view, text, use_context,
+    Padding, ScrollbarShow, ScrollbarStyle, Set, SizedBox, Theme, View, button, column, row,
+    scroll_view, text, use_context, wrap,
 };
 
 use crate::PlaygroundState;
@@ -80,6 +93,33 @@ fn row_height(index: usize) -> f64 {
     } else {
         ROW_EXTENT
     }
+}
+
+/// How many rows the exact-extent list holds — enough that measuring rows
+/// on the way to a far jump target would be hopeless.
+const EXACT_ROW_COUNT: usize = 100_000;
+
+/// The heights the exact-extent list cycles through by index, so the offset
+/// of any row has a closed form.
+const EXACT_HEIGHTS: [f64; 3] = [40.0, 64.0, 96.0];
+
+/// The rows the exact-extent list's jump buttons target.
+const EXACT_JUMP_ROWS: [usize; 4] = [0, 12_345, 50_000, 99_999];
+
+/// This exact-extent row's declared height.
+fn exact_row_height(index: usize) -> f64 {
+    EXACT_HEIGHTS[index % EXACT_HEIGHTS.len()]
+}
+
+/// The sum of the heights of every row before `index`: whole cycles of
+/// [`EXACT_HEIGHTS`] plus the partial cycle, so a press costs O(1) rather
+/// than a walk over up to 100k rows. All heights are small integers, so the
+/// sum is exact in `f64` and matches the widget's own prefix sum.
+fn exact_row_offset(index: usize) -> f64 {
+    let period = EXACT_HEIGHTS.len();
+    let cycle: f64 = EXACT_HEIGHTS.iter().sum();
+    let partial: f64 = EXACT_HEIGHTS[..index % period].iter().sum();
+    (index / period) as f64 * cycle + partial
 }
 
 /// One row's content: its index, a tall row highlighted in the theme's
@@ -180,6 +220,46 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
         .small()
     };
 
+    let exact_list = ListView::builder(EXACT_ROW_COUNT, EXACT_HEIGHTS[0], move |index: usize| {
+        let height = exact_row_height(index);
+        SizedBox::<PlaygroundState>(None, Some(height)).child(Padding(
+            EdgeInsets::symmetric(12.0, 8.0),
+            text(format!("Row {index} · {height:.0} px"))
+                .size(12.0)
+                .color(muted),
+        ))
+    })
+    .item_extent_of(exact_row_height)
+    .on_visible_range(|state: &mut PlaygroundState, first, last| {
+        state.exact_visible_range.set(Some((first, last)));
+    })
+    .controller(state.exact_scroll_controller.clone())
+    .scrollbar(ScrollbarStyle::default());
+    let exact_viewport = SizedBox::<PlaygroundState>(None, Some(VIEWPORT_H)).child(exact_list);
+
+    let visible_label = match state.exact_visible_range.get() {
+        Some((first, last)) => format!("visible rows {first}–{last}"),
+        None => "visible rows —".to_string(),
+    };
+
+    // A wrap, not a row: four buttons do not fit one line on a phone width.
+    let mut exact_jumps = wrap().spacing(8.0).run_spacing(8.0);
+    for target in EXACT_JUMP_ROWS {
+        let controller = state.exact_scroll_controller.clone();
+        let label = if target >= 1_000 {
+            format!("Row {},{:03}", target / 1_000, target % 1_000)
+        } else {
+            format!("Row {target}")
+        };
+        exact_jumps = exact_jumps.child(
+            button(label, move |_state: &mut PlaygroundState| {
+                controller.jump_to(exact_row_offset(target));
+            })
+            .style(ButtonStyle::Secondary)
+            .small(),
+        );
+    }
+
     // Scrollbar showcase: a plain `ScrollView` with the default
     // (`WhileScrolling`) bar and one with the `Always` variant. The list above
     // carries the default bar too.
@@ -236,6 +316,24 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
                     .child(item_280_animated),
             )
             .child(SizedBox(None, Some(16.0)))
+            .child(text("Exact extents").size(13.0).color(accent))
+            .child(
+                text(
+                    "A 100,000-row ListView that declares every row's height up front \
+                     (40, 64 or 96 px by index), so a jump lands exactly on the named row \
+                     even this far down a very long list — nothing is estimated or \
+                     measured. The label below shows the rows currently on screen.",
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(exact_viewport)
+            .child(SizedBox(None, Some(8.0)))
+            .child(text(visible_label).size(12.0))
+            .child(SizedBox(None, Some(8.0)))
+            .child(exact_jumps)
+            .child(SizedBox(None, Some(16.0)))
             .child(text("Scrollbars").size(13.0).color(accent))
             .child(
                 text(
@@ -265,5 +363,20 @@ mod tests {
         assert_eq!(row_height(1), ROW_EXTENT);
         assert_eq!(row_height(6), ROW_EXTENT);
         assert_eq!(row_height(8), ROW_EXTENT);
+    }
+
+    #[test]
+    fn exact_heights_have_three_distinct_values() {
+        let mut seen: Vec<f64> = (0..EXACT_HEIGHTS.len()).map(exact_row_height).collect();
+        seen.dedup();
+        assert_eq!(seen.len(), 3);
+    }
+
+    #[test]
+    fn exact_row_offset_matches_a_brute_force_sum() {
+        let brute = |index: usize| (0..index).map(exact_row_height).sum::<f64>();
+        for index in [0, 1, 2, 3, 4, 12_345, 50_000, EXACT_ROW_COUNT - 1] {
+            assert_eq!(exact_row_offset(index), brute(index), "row {index}");
+        }
     }
 }
