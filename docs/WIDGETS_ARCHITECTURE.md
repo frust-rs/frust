@@ -6,10 +6,9 @@ WIDGETS covers `frust-widgets`, the baseline widget set (layout, controls, text,
 navigation, platform-view slots), built over `frust-core`/`frust-scene`/`frust-text`/`frust-theme`
 through a shared authoring toolkit; and its sibling `frust-theme`, a design-token crate bundling
 color/type/shape/elevation/motion/glass values into a `Theme` that widgets recover from context and
-app code reads reactively. The built-in design systems are not part of this unit: they are sibling
-plugin crates in PLUGINS (`frust-glyph`/`frust-material`/`frust-cupertino` and the two
-external-origin ports, see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)), built on the same
-public authoring toolkit this doc describes.
+app code reads reactively. The built-in design systems are sibling plugin crates in PLUGINS
+(`frust-glyph`/`frust-material`/`frust-cupertino` and the two external-origin ports, see
+[PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)) on the same public authoring toolkit.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other units.
 
@@ -25,7 +24,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::pinch` | `PinchRecognizer` (a pure two-contact state machine) and `pinch_detector`, the wrapper feeding it from a gesture's contacts |
 | `frust-widgets::pan_zoom` | `PanZoomView`/`PanZoomWidget` — one child under a pan/pinch-or-wheel-zoom transform, with inertia and a `PanZoomController` handle |
 | `frust-widgets::motion` | Implicit-animation and transition vocabulary, `card_switcher` (see *Card Switcher*), `detent` (pure `Detents` snap-point math + headless `DetentController`) and `presence(open, child)` (`.timing`, `.on_exited`): kept-mounted and owner-controlled — always built and laid out, painted only while visible, input only while open, semantics only while visible; `on_exited` rides the next Housekeeping flush and fires only once an exit is painted (a cleanup cue); core retains no absent view. `MotionExtras` (`extended` 800, `reduced_fade` 120 ms; 0 snaps) sets every reduce-motion collapse |
-| `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six `nav/*.rs` files (see below); single public path via `navigator.rs`'s re-exports. A page's transition resolves `Router::push_with` options, then `Route::transition`, then the navigator default (all collapse under reduce motion). `PushOptions::barrier`/`barrier_dismissible` give a page a route-owned scrim painted under it: never moved by the page's transition, alpha following the route's eased progress (instant under `TransitionSpec::NONE`); an unhandled press and release that lands on no content (layout wrappers are transparent) dismisses through the page's `BackPolicy`, and taps are ignored while a transition is in flight |
+| `frust-widgets::nav` | Imperative page-stack navigator, declarative router, and shared-element hero transitions — internally split across six private `nav/*.rs` files (stack core, ambient-context idioms, options/callbacks, controller, view constructors, edge-swipe driver); single public path via `navigator.rs`'s re-exports. A page's transition resolves `Router::push_with` options, then `Route::transition`, then the navigator default (all collapse under reduce motion). `PushOptions::barrier`/`barrier_dismissible` give a page a route-owned scrim painted under it: never moved by the page's transition, alpha following the route's eased progress (instant under `TransitionSpec::NONE`); an unhandled press and release that lands on no content (layout wrappers are transparent) dismisses through the page's `BackPolicy`, and taps are ignored while a transition is in flight |
 | `frust-widgets::physics` | Pluggable scroll-motion strategy (`ScrollPhysics`, `OverscrollEffect`, `Simulation` ports, platform-adaptive defaults) the scroll surfaces consult — see *Scroll Physics* |
 | `frust-widgets::page_view` | `page_view` + `PageController` (Flutter `PageView` parity: `viewport_fraction`, `pad_ends`, `on_page_changed`, `animate_to_page`/`jump_to_page`, live fractional `page()`, both axes) over `custom_scroll_view` with a crate-private page sliver; `on_page_changed` fires once the page has settled, not mid-drag; eager children only (`page-view-eager-children`) |
 | `frust-widgets::viewport` / `slivers` | `CustomScrollView`/`ViewportWidget` (the sliver viewport) and the sliver family (`slivers::adapter` holds `sliver_box`); `scroll_core` holds the shared `ScrollSurfaceCore` — see *Slivers and the viewport* |
@@ -37,9 +36,6 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how WIDGETS relates to the other unit
 | `frust-widgets::window_drag_region` | `window_drag_region(child)` (`.resize(edge)`, `.double_click_toggles_maximize(bool)`) — offers a primary press to the child first and pushes `BeginMove`/`BeginResize` only for one the child ignores; never captures the pointer |
 | `frust-theme` | `Theme` aggregate and its token tables (color, type, shape, elevation, motion, glass); carries no design-language token module of its own — only the neutral/language-free floor (`Theme::neutral()` and friends) |
 
-`nav/`'s files are private, re-exported through `navigator.rs` (stack core, ambient-context idioms,
-options/callbacks, controller, view constructors, edge-swipe driver).
-
 ## Layer Dependencies
 
 `frust-widgets` depends on `frust-core` (`View`/`Widget` traits, layout, paint/event context,
@@ -49,13 +45,12 @@ engine backing `frust-theme`'s typography tokens), `frust-theme` (design tokens 
 path). `frust-theme` is `frust-widgets`' primary consumer. The one reverse edge, `frust-theme` →
 `frust-core`, is context-accessor sugar only and creates no cycle into `frust-widgets`.
 
-Every container and interactive widget in `frust-widgets` is built through the crate's own public
-authoring toolkit rather than touching `frust-core` primitives directly. The crate graph enforces
-this structurally: the three built-in design systems (`frust-glyph`/`frust-material`/
-`frust-cupertino`, PLUGINS unit) depend only on the `frust` facade (`default-features = false`)
-plus `kurbo`/`peniko`, so they cannot reach a `frust-core` primitive `frust` doesn't re-export —
-the same seam any third-party design system builds against (see *External Design-System
-Contract*). `frust::authoring` is the toolkit both the baseline set and every plugin build from.
+Every container and interactive widget is built through the crate's own public authoring toolkit, not
+`frust-core` primitives directly. The crate graph enforces this: the three built-in design systems
+(`frust-glyph`/`frust-material`/`frust-cupertino`, PLUGINS unit) depend only on the `frust` facade
+(`default-features = false`) plus `kurbo`/`peniko`, so they cannot reach a `frust-core` primitive
+`frust` doesn't re-export: the seam any third-party design system builds against (see *External
+Design-System Contract*).
 
 ## Data Flow
 
@@ -70,30 +65,28 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   display/headline max 1.5). Default-sized `Text`/`TextInput` scale at layout through
   `frust_theme::scale_style` (body-role clamp); explicit sizes never scale, and catalogs pass explicit
   sizes from the already-scaled `TypeScale`. A theme read from context may go back to `set_app_theme`
-  without compounding (`Theme::authored_type_scale`); edit the type scale on the app's own authored theme.
-- Introspection flow: a container implements `Widget::visit_children` (CORE unit) via the
-  authoring toolkit's `VisitPods` trait and `visit_children!` macro (one line naming its
-  `ChildPod` fields) so `RenderRoot::inspect()` can enumerate its children; a hand-rolled child
-  list implements `VisitPods` by hand on the same seam. The baseline set and all five plugins use
-  it; see WIDGETS_CODE_STANDARDS.md for the convention this obliges.
+  without compounding (`Theme::authored_type_scale`); edit the app's own authored type scale.
+- Introspection flow: a container implements `Widget::visit_children` (CORE unit) via the authoring
+  toolkit's `VisitPods` trait and `visit_children!` macro (one line naming its `ChildPod` fields) so
+  `RenderRoot::inspect()` can enumerate its children; a hand-rolled child list implements `VisitPods`
+  by hand. The baseline set and all five plugins use it; see WIDGETS_CODE_STANDARDS.md.
 - Design-system layering: the five design-system plugins (PLUGINS unit) assemble their own `Theme` via
   `ThemeBuilder`'s editors over `frust-theme`'s neutral floor; `frust-cupertino` owns its "Liquid Glass"
   `GlassScale` recipe, degrading to the neutral `GlassScale::opaque_material()` where unsupported.
 - Motion flow: implicit-animation and transition widgets resolve default timing from `Theme.motion`,
-  collapsing to a short crossfade under `reduce_motion`; decorative loops request paced frames. `reduce_motion` is a floor, not an assignment: every
-  baseline defaults it `false`, and a mobile shell OR's the OS accessibility preference over whatever
-  the active theme authored (`effective = authored || os`, see SHELLS_ARCHITECTURE.md for the
-  sensors) — an authored `true` is never un-reduced by an OS report of `false`.
+  collapsing to a short crossfade under `reduce_motion`; decorative loops request paced frames.
+  `reduce_motion` is a floor, not an assignment: every baseline defaults it `false`, and a mobile shell
+  OR's the OS accessibility preference over the theme's (`effective = authored || os`, sensors in
+  SHELLS_ARCHITECTURE.md) — an authored `true` is never un-reduced by an OS report of `false`.
 - Navigation flow: `Navigator`/`Router` manage a page stack and declarative routes over the same
   container plumbing; `hero()` morphs a tagged child between pages during transitions.
   - **Alpha-zero paint redirect:** the split-crossfade presets (`M3SharedAxisX`, `M3FadeThrough`,
     `Glyph`) are hard, non-overlapping splits — before the split only the leaving page ramps 1→0,
     after it only the entering page ramps 0→1, so at most one page is visible at any instant and
     both resolve to alpha 0 at the split itself. Never assume a dual-visible crossfade window:
-    `IosPush` keeps both visible (parallax + dim, never reaching 0) and `ReducedCrossfade` is a
-    genuine crossfade, but the presets above are not. A page resolving to alpha 0 still runs its
-    paint pass (hero-rect capture, paint-time state) redirected into `frust_core::DiscardScene`, so no
-    scene command is emitted for an otherwise wasted full-layer rasterization.
+    `IosPush` (parallax + dim, never reaching 0) and `ReducedCrossfade` keep both visible; the presets
+    above do not. A page resolving to alpha 0 still runs its paint pass (hero-rect capture,
+    paint-time state) redirected into `frust_core::DiscardScene`, so no scene command is emitted.
   - **Retained pages:** each page carries a `RetainedBoundary` (`PageEntry.boundary`; the switcher's
     `child_boundary`/`exiting_boundary`). A page **at rest paints plain**; only a programmatic
     transition's progress-0 seed frame records the leaving page and the transition frames draw it
@@ -108,19 +101,19 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     (Current/Visible/Covered) observe page visibility; the opt-in `cull_covered_builds` (default false)
     skips rebuilds for covered pages, but `on_cleanup` does **not** fire under a covering push.
   - **Pop-result delivery:** `push_for_result`'s `on_result` needs `&mut State`, which the state-free
-    view diff doesn't carry, so a pop queues it and raises CORE's pending-result-flush flag, drained by
-    the same rebuild's `Housekeeping` broadcast (see CORE_ARCHITECTURE.md): an eager pop delivers within
-    that rebuild, an edge-swipe pop on its settle frame.
-  - **RouteNavigator:** A thread-safe (`Arc<Mutex<Vec<NavRequest>>>`) navigation handle carrying no closures
-    or reactive types, making it `Send + Sync` and usable via `provide_context` from any thread; off-thread
-    requests wake the shell and apply in the next rebuild before the navigator reconciles.
-  - **Route params:** Query parameters merge **under** path captures (a path capture wins a name clash);
+    view diff lacks, so a pop queues it and raises CORE's pending-result-flush flag, drained by the
+    rebuild's `Housekeeping` broadcast (see CORE_ARCHITECTURE.md): an eager pop delivers in that
+    rebuild, an edge-swipe pop on its settle frame.
+  - **RouteNavigator:** A thread-safe (`Arc<Mutex<Vec<NavRequest>>>`) navigation handle with no closures
+    or reactive types (`Send + Sync`, usable via `provide_context` from any thread); off-thread requests
+    wake the shell and apply in the next rebuild before the navigator reconciles.
+  - **Route params:** Query parameters merge **under** path captures (a capture wins a name clash);
     named-route `path_for_name` round-trips unused params as query.
   - **Route-state observable (R-B1):** `NavigatorController::route_stack()`/`route_generation()` publish a
     `RouteStack` (route identities bottom→top, depth, generation) and a diffed `NavChange`
-    (Initial/Push/Pop/Replace/Reset) from every committed mutation in `publish_state()`. An uncommitted
-    in-flight edge-swipe pop reports the pre-swipe stack until its settle-frame publish; frame-accurate
-    drag chrome wants `NavigatorController::transition()`.
+    (Initial/Push/Pop/Replace/Reset) from every committed mutation in `publish_state()`. An in-flight
+    edge-swipe pop reports the pre-swipe stack until its settle-frame publish; frame-accurate drag
+    chrome wants `NavigatorController::transition()`.
   - **shell_route (nested navigators):** `shell_route(inner, builder, children)` is a pathless route binding
     a subtree to a second app-owned `NavigatorController` — the shell page stays retained on the enclosing
     stack while its children resolve onto `inner` (go_router's `ShellRoute`). A chain crossing the boundary
@@ -143,7 +136,7 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     navigator, and among navigator peers the order is **innermost-first** (most-recently-wired wins,
     LIFO), mirroring Android's `OnBackPressedDispatcher` and UIKit/SwiftUI pop-from-top. A host with no
     overlays reports no interest and defers to the inner navigator. Registrants are released by mount
-    liveness (`NavigatorController::is_mounted()`), not by a wire-count heuristic.
+    liveness (`NavigatorController::is_mounted()`), not a wire-count heuristic.
   - **Fallback rank:** a `BackFallback` (an app rule, e.g. back at a tab root returns home) ranks after every
     navigator by role and claims only when none does; it is live while a `frust::back_fallback(&handle, child)`
     wrapper is mounted (plus a first-wire grace) — one in a hidden branch still counts, so gate its interest.
@@ -155,9 +148,8 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
     (a navigator in a non-selected child claims no back); a top-level navigator is unconditionally reachable.
   - **Controller binding is structural:** a `NavigatorView`'s published cells (depth, back interest,
     transition, mount count) bind to the `NavigatorController` it was last built or rebuilt against;
-    a controller swap is detected by identity (not just view type) and re-bound in the same rebuild
-    pass, so ops and published state can never target different controllers and a swapped-away-from
-    controller reliably reports unmounted.
+    a swap is detected by identity (not just view type) and re-bound in the same rebuild pass, so ops
+    and published state never target different controllers and the old one reports unmounted.
   - **NavigatorWidget semantics (R23):** Now implements `Widget::semantics`, forwarding via
     `ChildPod::semantics_child` to exactly the pages input routing can reach (covered pages and pages
     under modals omitted outright), honoring the input-parity invariant documented in CODE_STANDARDS.md.
@@ -171,10 +163,9 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   child through `LayoutCtx::with_window_insets`/`PaintCtx::with_window_insets` — so a self-insetting
   descendant, or a nested `safe_area`, does not inset the same edge twice. `.minimum` is extra
   padding, never consumed, and `view_insets` (the IME) always flows through unchanged. A pod floated
-  through the overlay portal carries its owner's consumed `WindowInsets` along in its
-  `OverlayEntry`, so a paint-time read inside floated content still agrees with the layout-time one
-  it saw under its owner's `LayoutCtx`; hit testing and event routing are unaffected.
-  `WindowInsets` also carries `corner_insets: CornerInsets` — four physical corners (`top_left`,
+  through the overlay portal carries its owner's consumed `WindowInsets` in its `OverlayEntry`, so
+  paint-time reads inside floated content agree with layout-time ones; hit testing and event routing are
+  unaffected. `WindowInsets` also carries `corner_insets: CornerInsets` — four physical corners (`top_left`,
   `top_right`, `bottom_left`, `bottom_right`), each the window control's protrusion beyond the safe
   area in logical px; `safe_area` neither pads by nor removes them (`consuming` copies them) and `padding()` ignores them.
 - Scaffold flow: `scaffold(body)` assembles the four fixed chrome slots (`app_bar`/`body`/`bottom_bar`/`fab`)
@@ -188,9 +179,9 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   otherwise. **Bar contract:** the Glyph app bar and the Material top and sliver app bars (listed in
   [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)) shift their leading slot right by `top_left.width` and
   their trailing edge left by `top_right.width` whenever that corner's height > 0; the Scaffold is unchanged.
-  The shift assumes the bar spans the window's top edge: layout cannot see a bar's window-space position and
-  corners are never consumed, so there is no automatic detection — a bar hosted in a pane, sheet or dialog opts
-  out with `corner_shift(false)`. Other catalogs' top bars (Cupertino's navigation bar, the shadcn/beUI headers)
+  The shift assumes the bar spans the window's top edge; layout cannot see a bar's window-space position
+  and corners are never consumed, so a bar hosted in a pane, sheet or dialog opts out with
+  `corner_shift(false)`. Other catalogs' top bars (Cupertino's navigation bar, the shadcn/beUI headers)
   do not yet apply the rule; see `corner-insets-ios-26-only` in [LIMITATIONS.md](LIMITATIONS.md).
 - Overlay flow: anchored placement is framework-owned — `place(anchor, content, area, placement)` and
   `OverlaySlot`, which resolve a side, a cross-axis alignment, an offset, a collision flip and a
@@ -204,30 +195,31 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   (`Floating`/`Interactive`) ride the slot directly; the catalogs' own `overlay::anchored` hosts still carry
   plugin-local copies. See CORE_ARCHITECTURE.md's Overlay Portal for the mechanism itself.
 - Drag-and-drop flow: an ambient, Rc-shared `DragCoordinator` (one per scope, cloneable like `ScrollController`)
-  is the single source of truth for a session — idle/armed/dragging/dropping/ cancelled — and its typed `Box<dyn
-  Any>` payload, so several targets type-gate against one handle. `draggable()` arms on a primary press and
+  is the single source of truth for a session — idle/armed/dragging/dropping/cancelled — and its typed
+  `Box<dyn Any>` payload, so several targets type-gate against one handle. `draggable()` arms on a primary press and
   begins once a `DragPolicy` is crossed (a mouse travels past a distance threshold, a touch press holds through
   a long-press — `Auto` picks per press from the pointer source), floating a ghost through the overlay portal
   anchored at `OverlayAnchor::Window` (see CORE_ARCHITECTURE.md's Overlay Portal) and cancelling on Escape or a
   release with nothing hovered. A begun drag vetoes the takeover of every enclosing scroll surface, not only the
   nearest, for as long as the session runs. `drag_target()` resolves against bounds the coordinator's registry
   collects at paint — never a hit test — so later registration wins an overlap and a drop can land across
-  containers (two kanban columns, a list and a trash bin). Keyboard lift/cycle/drop
-  (`move_to_next_target`/`move_to_previous_target`, Enter/Space/arrows, Escape to cancel) is the
-  assistive-technology path, driving the same coordinator from the source's own focus; semantics advertise a
-  `Role::Button` source and a `Role::Group` target, each supporting `Action::Click`: the target's `Click` drops
-  a live, accepting KEYBOARD session onto it (a pointer session's `Up` belongs to its source), while the
-  source's `Click` drops (or cancels) its own live keyboard session and is a plain tap otherwise (see
-  `drag-ghost-pod-no-semantics` in [LIMITATIONS.md](LIMITATIONS.md)). `auto_scroll_zone()` drives an attached
-  `ScrollController` toward whichever edge the dragged pointer sits inside
-  (`AutoScroll::edge_px`/`max_px_per_s`). `reorderable_list()` composes both primitives over keyed rows with `N
-  + 1` gap targets, firing `on_reorder(state, from, to)` on an actual move. A desktop `InputEvent::FileDrop`
-  opens an `ExternalFiles` session so a `drag_target::<Vec<PathBuf>>` accepts an OS file drop the same way a
-  widget-originated session would (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)).
+  containers (two kanban columns, a list and a trash bin). Keyboard lift/cycle/drop (`move_to_next_target`/
+  `move_to_previous_target`, Enter/Space/arrows, Escape to cancel) is the assistive-technology path, driving
+  the same coordinator from the source's own focus; semantics advertise a `Role::Button` source and a
+  `Role::Group` target, each supporting `Action::Click`: the target's `Click` drops a live, accepting
+  KEYBOARD session onto it (a pointer session's `Up` belongs to its source), while the source's `Click`
+  drops (or cancels) its own live keyboard session and is a plain tap otherwise (see
+  `drag-ghost-pod-no-semantics` in [LIMITATIONS.md](LIMITATIONS.md)). `auto_scroll_zone()` drives an
+  attached `ScrollController` toward whichever edge the dragged pointer sits inside
+  (`AutoScroll::edge_px`/`max_px_per_s`). `reorderable_list()` composes both primitives over keyed rows
+  with `N + 1` gap targets, firing `on_reorder(state, from, to)` on an actual move. A desktop
+  `InputEvent::FileDrop` opens an `ExternalFiles` session so a `drag_target::<Vec<PathBuf>>` accepts an
+  OS file drop the same way a widget-originated session would (see
+  [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)).
 - Platform-view flow: `platform_view()`/`shield()` publish native-compositing slots and input-shield
   rects each frame for the shell layer to reconcile against native views.
-- Canvas flow: `canvas(paint)` takes `Fn(&mut dyn PaintScene, Size, &PaintCtx)`; the widget translates to its
-  own origin and clips to its bounds before invoking the closure, so painting happens entirely in local space.
+- Canvas flow: `canvas(paint)` takes `Fn(&mut dyn PaintScene, Size, &PaintCtx)`; the widget translates to
+  its own origin and clips to its bounds first, so painting happens entirely in local space.
   `.size(Size)`/`.expand()` (default) pick the sizing policy; `.on_hit(Fn(Point, Size) -> bool)` narrows
   hit-testing and gates `.on_tap`/`.on_pointer`; `.repaint_key(impl Hash)` requests a repaint when an external
   fingerprint changes, since the paint closure itself is not comparable across a rebuild.
@@ -246,15 +238,14 @@ Contract*). `frust::authoring` is the toolkit both the baseline set and every pl
   inverse-maps the child's hit-testing and events. A primary `Down` is offered to the child first; an ignored
   press pans on the claimant's moves. An `InputEvent::Scale` (desktop ctrl/⌘+wheel, trackpad pinch) is likewise
   offered to the child first and applied here when ignored; a touch pinch is recognised in-widget by a
-  `PinchRecognizer` fed from every primary `Down`'s contacts, so a second finger routes here even when the child
-  owns the first. On a `Down` the child ignores, the view publishes the nested-scroll claim (the same ambient
-  cell `ScrollView`/`ListView` use, both drag directions registered unconditionally) so an enclosing scrollable
-  defers to it; when the child owns the press instead, the view captures the ambient multi-contact veto cell and
-  holds it raised while a second contact is tracked, so a pinch beginning over that child-owned press is not
-  taken over by the enclosing scroll surface once the claimant crosses slop — the veto clears, and the surface's
-  ordinary takeover resumes, once back down to one contact. A `Scroll` arriving between `Scale` events clears
-  the stale `last_focal` left by an open bracket (a macOS trackpad pinch whose modifier released mid-gesture
-  finishes as wheel events) so a later unrelated wheel notch does not anchor on it. `.min_scale`/`.max_scale`
+  `PinchRecognizer` fed from every primary `Down`'s contacts, so a second finger routes here even when the
+  child owns the first. On a `Down` the child ignores, the view publishes the nested-scroll claim (the same
+  ambient cell `ScrollView`/`ListView` use, both drag directions registered unconditionally) so an enclosing
+  scrollable defers to it; when the child owns the press, the view captures the multi-contact veto as
+  `pinch_detector` does, so a pinch beginning over that press is not taken over by the enclosing scroll
+  surface; the veto clears, and ordinary takeover resumes, back down to one contact. A `Scroll` arriving between `Scale` events clears the stale
+  `last_focal` left by an open bracket (a macOS trackpad pinch whose modifier released mid-gesture finishes
+  as wheel events) so a later unrelated wheel notch does not anchor on it. `.min_scale`/`.max_scale`
   (default `0.25`/`8.0`) clamp zoom; `.inertia(bool)` (off by default) glides a released pan on a per-axis
   `FrictionSimulation`; `.on_transform(Fn(&mut State, PanZoomTransform))` notifies after every change;
   `.controller(PanZoomController)` attaches a cloneable handle
@@ -304,19 +295,17 @@ re-exported as `frust::authoring`), `Theme`'s token bus (`ThemeBuilder`'s per-gr
 payloads a baseline doesn't carry (e.g. `NativeTypefaces`, see Key Types) — plus `IconData::resolve`/
 `same`, promoted `pub` so an out-of-tree catalog can paint its own icon glyphs the same way a
 built-in one does. `examples/design-system-sample` is the reference proof for a genuinely external
-crate (outside this repo's own workspace, unlike the three built-ins above) — a themed catalog plus
-installer built on `frust`'s public API alone (see ARCHITECTURE.md's Examples table); its one
-finding, that `Widget::semantics` cannot be exercised from out of tree, is registered in
-LIMITATIONS.md. `plugins/shadcn` (55 components) and `plugins/beui` (81 motion-first parts) are
-production-scale external-origin ports on the same seam — see PLUGINS_ARCHITECTURE.md's
-Design-System Plugins.
+crate (outside this workspace) — a themed catalog plus installer built on `frust`'s public API alone
+(see ARCHITECTURE.md's Examples table); its one finding, that `Widget::semantics` cannot be exercised
+from out of tree, is registered in LIMITATIONS.md. `plugins/shadcn` (55 components) and `plugins/beui`
+(81 motion-first parts) are production-scale external-origin ports on the same seam — see
+PLUGINS_ARCHITECTURE.md's Design-System Plugins.
 
 Three more seams are part of the same public authoring surface: opt-in hover claiming
 (`EventCtx::claim_hover`/`PaintCtx::is_hovered`) for state-layer-style interaction chrome, cursor
 requests (`EventCtx::set_cursor`/`CursorIcon`, also flat-re-exported as `frust::CursorIcon`) for a
-design system's own hover/drag affordances, and the overlay portal — `place`/`OverlaySlot`/
-`overlay_portal`, re-exported through `frust::authoring` — for a popover, menu, tooltip or context
-menu (see *Overlay flow* above).
+design system's own hover/drag affordances, and the overlay portal (`place`/`OverlaySlot`/
+`overlay_portal`, via `frust::authoring`; see *Overlay flow*) for a popover, menu, tooltip or context menu.
 
 ### Erasure at the API Boundary
 Authoring code rarely names `AnyView`: `AnyView::new`/`any()` is idempotent (an argument already
@@ -334,8 +323,8 @@ only `rebuild_children`'s `view_of` (mixed/keyed lists) and `OverlaySlot` stay `
   optional slot is `Option<V>` (`app_bar_opt`, `bottom_bar_opt`, `overlay`); a plugin list is
   `impl IntoIterator<Item = impl View<State>>`; a builder closure is `impl Fn(..) -> V`
   (navigator/`overlay_host`, `NavigatorController` push/replace, `Route::new`/`shell_route`/
-  `Router::error_builder`, `ListView` item builders, `DraggableView::ghost`; `reorderable_list`
-  takes `impl IntoIterator<Item = (K, V)>`).
+  `Router::error_builder`, `ListView` item builders, `DraggableView::ghost`; `reorderable_list` takes
+  `impl IntoIterator<Item = (K, V)>`).
 - **Caller consequences:** a bare `None` on an optional slot becomes `None::<AnyView<S>>`; an
   explicit turbofish gains a `_` for the view type; `.collect()` into an iterator parameter needs `::<Vec<_>>()`.
 
@@ -373,44 +362,42 @@ spellings (`Copy`/`Cut`/`Paste` named keys, `Ctrl+Insert`, `Shift+Insert`, `Shif
 never a chord modifier, and any other chorded character is consumed rather than typed. Refusals are
 the field's own call and still count as *handled*: an obscured field copies and cuts nothing
 (neither the buffer nor its bullet mirror), a collapsed selection makes copy and cut no-ops, a paste
-sanitised down to nothing inserts nothing, and a disabled field never sees a verb at all because it
-never holds focus — a read-only field does (see *Read-only Text Fields* below). Nothing here touches
-a host clipboard — see CORE_ARCHITECTURE.md for the write/request slots the shell drains.
+sanitised down to nothing inserts nothing, and a disabled field never holds focus, so never sees a
+verb — a read-only field does (see *Read-only Text Fields*). Nothing here touches a host clipboard —
+see CORE_ARCHITECTURE.md for the write/request slots the shell drains.
 
 The bar itself is somebody else's widget: the field hosts an `OverlaySlot` and fills it from the
 process-wide selection-toolbar builder, so `frust-widgets` never names the view that floats and no
 builder installed means no bar at all. The pod is mounted and dropped in `rebuild` (the only pass
-carrying a `BuildCtx`) and only when the enabled verb set changes, then placed in `paint` against
-the selection's bounding box, or the caret rect when the selection is collapsed. Under the `Native`
-policy the field floats nothing and only publishes its request. `selection_toolbar()` is the
-baseline that builder yields by default — a pill of text buttons for the enabled verbs, following
-every other baseline widget's fire-on-up-inside contract, with cut/copy/select-all riding
-`EventCtx::dispatch_edit_command` and paste riding `EventCtx::request_paste` because only a shell
-may read the host clipboard. Its labels are English-only on purpose: an app or design system
-replaces the whole view through `set_selection_toolbar_builder` (or the cooperative set-if-unset
-install), which is where localisation belongs.
+carrying a `BuildCtx`) and only when the enabled verb set changes, then placed in `paint` against the
+selection's bounding box, or the caret rect when collapsed. Under the `Native` policy the field floats
+nothing and only publishes its request. `selection_toolbar()` is the baseline that builder yields by
+default — a pill of text buttons for the enabled verbs, following every other baseline widget's
+fire-on-up-inside contract, with cut/copy/select-all riding `EventCtx::dispatch_edit_command` and
+paste riding `EventCtx::request_paste` because only a shell may read the host clipboard. Its labels
+are English-only on purpose: an app or design system replaces the whole view through
+`set_selection_toolbar_builder` (or the cooperative set-if-unset install), where localisation belongs.
 
 The same verbs are published on the field's **own** semantics node as accesskit custom actions,
 under the predicates the bar is built from rather than on whether the bar is up — the floated pod
 contributes no semantics, so a screen-reader user can reach nothing on the bar itself. **Those
 actions are advertised but not invocable today:** the shell-to-core accessibility seam carries
 `(node_id, action)` and drops the `ActionRequest::data` a custom-action id rides in, so nothing
-delivers them; the field's own half is complete the moment one arrives as an `EditCommand`. The
-selection range is not published either — accesskit models one as a pair of positions into
-`Role::TextRun` nodes, and this field contributes a single leaf carrying its text as a plain value.
+delivers them; the field's half is complete once one arrives as an `EditCommand`. The selection range
+is not published either — accesskit models one as positions into `Role::TextRun` nodes, and this
+field contributes a single leaf carrying its text as a plain value.
 
 ### Read-only Text Fields
 `TextInput::read_only(true)` makes a field uneditable without dimming it (`content_type` is the
 separate IME hint, [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) `ImeContentType`) — dimming stays keyed to
 `enabled` alone, never to read-only, so a live-styled static mock does not pop to full alpha when it
 goes live. Focus and mutation answer separate questions: a read-only field is still **focusable and
-copyable** — Material 3's and Apple's HIG's convention, and the plain reading that visible text is
-text a user can select. It takes focus on a press, drag-selects, long-presses to a toolbar offering
-copy and select-all, and answers those verbs in full, while it refuses typed characters, IME
-composition and commits, and the editing/caret-motion keys; cut and paste are answered with no effect
-and no `on_change`. A paste chord never asks the shell to read the host clipboard at all, so an
-answer that could only be discarded never reaches the host (and never raises iOS's system paste
-prompt). Escape still ends the session — a field that can hold focus needs a keyboard way out — and
+copyable** (Material 3's and Apple's HIG's convention; visible text is text a user can select). It
+takes focus on a press, drag-selects, long-presses to a toolbar offering copy and select-all, and
+answers those verbs in full, while it refuses typed characters, IME composition and commits, and the
+editing/caret-motion keys; cut and paste are answered with no effect and no `on_change`. A paste chord
+never asks the shell to read the host clipboard, so an answer that could only be discarded never
+reaches the host (nor raises iOS's system paste prompt). Escape still ends the session — a field that can hold focus needs a keyboard way out — and
 its caret is drawn but does not blink, since a blink advertises an insertion point this field does
 not have. A focused read-only field publishes `ImeState { active: true, suppress_soft_keyboard:
 true, .. }` (see CORE_ARCHITECTURE.md's Key Types for the shell obligation this carries).
@@ -453,10 +440,11 @@ simulation that ends fully pinned outward stops early, handing the residual pull
 (`InnerScrollState`, nearest-inner pairing), and the outer reads that at the touch-slop takeover,
 deferring when the inner can consume the direction. A claim registers only with real scroll capacity
 (a deliberate deviation from Flutter's `BouncingScrollPhysics`). The report is a `Down`-time
-snapshot and the defer decision is sticky for the gesture. All surfaces also run a live **multi-contact veto**, a per-gesture cell replaced on
-every primary `Down` and consulted on every `Move` takeover check, so a nested
-`pinch_detector`/`pan_zoom` reporting a second contact still suppresses the takeover. Claims are
-axis-aware: a viewport registers only into a same-axis host and drops other-axis surfaces' claims.
+snapshot and the defer decision is sticky for the gesture. All surfaces also run a live
+**multi-contact veto**, a per-gesture cell replaced on every primary `Down` and consulted on every
+`Move` takeover check, so a nested `pinch_detector`/`pan_zoom` reporting a second contact still
+suppresses the takeover. Claims are axis-aware: a viewport registers only into a same-axis host and
+drops other-axis claims.
 
 **Programmatic scroll (`scroll_controller.rs`).** `ScrollController` is a cloneable, reactive-free
 handle that `ScrollView`/`ListView`/`CustomScrollView::controller` attaches. One surface holds a
@@ -469,8 +457,8 @@ lands against fresh extents. The queue is bounded by superseding within a segmen
 commands since the last item command): a jump supersedes every earlier offset command in its segment,
 an animate supersedes an earlier animate but keeps a preceding jump; superseding never crosses a
 queued `scroll_to_item`. Item commands keep an ordered channel capped at 8 (the oldest drops, with a
-debug log). Recording raises CORE's pending-result-flush flag
-(`frust_core::mark_pending_result_flush`) so a frame-gated mobile shell runs the applying frame.
+debug log). Recording raises CORE's pending-result-flush flag (`frust_core::mark_pending_result_flush`)
+so a frame-gated mobile shell runs the applying frame.
 `jump_to` clamps to `[0, max_offset]`, stops any fling or settle, and (like `animate_to` and
 `scroll_to_item`) ends an established live drag, whose remaining `Move`s and `Up` fall through to the
 child; a hold still inside slop stays armed. `animate_to` runs a `TweenSimulation` on the release
@@ -483,16 +471,16 @@ visible row) still ends a running controller tween where it stands and clears an
 settle loop, but leaves a user fling, settle or drag alone.
 `is_animating` is true only while the attached surface has a live tween; `on_change` fires only when
 the published `ScrollInfo` changes. `scroll_to_item` is list-only (`CustomScrollView` and `ScrollView`
-ignore it with a debug log). A desktop shell ignores the pending-result-flush flag, so a command from
-a handler that requests no redraw waits for the next frame another input wakes (as `PanZoomController`).
+ignore it with a debug log). A desktop shell ignores the pending-result-flush flag, so a command from a
+handler that requests no redraw waits for the next frame another input wakes (as `PanZoomController`).
 
 ### Card Switcher
 `motion/card_switcher.rs` (`card_switcher`, `CardSwitcherView`): an app-switcher stage over one live
 child. The child shrinks through `ChildPod::set_transform` about the centre under a parent-space
 rounded clip, with the shadow and scrim painted at the pattern's own scope; input to the shrunken
-child is blocked (a tap closes) but only within the pattern's bounds (`blocked_pointer`). It owns its ramp (a
-`make_driver` + `Tween`; `reduce_motion` snaps geometry and cross-fades alphas over `MotionExtras::reduced_fade` whatever
-`open_timing`/`close_timing` say). Peers sit in a horizontal `ScrollSurfaceCore` strip on
+child is blocked (a tap closes) but only within the pattern's bounds (`blocked_pointer`). It owns its
+ramp (a `make_driver` + `Tween`; `reduce_motion` snaps geometry and cross-fades alphas over
+`MotionExtras::reduced_fade` whatever `open_timing`/`close_timing` say). Peers sit in a horizontal `ScrollSurfaceCore` strip on
 `PageSnap::extent(stride)` over `default_physics()`/`default_overscroll_effect()` (Android clamps the
 ends) with tap-only selection: a fling never selects, taps during a centring tween are ignored, the
 strip's `forward_wheel` does not scroll it, and it registers no nested claim. `CardSwitcherView::expanding(i)`
@@ -544,8 +532,7 @@ the sliver protocol (`frust_core::sliver`, see CORE_ARCHITECTURE.md). The layout
 
 Paint runs last to first, hit-testing first to last, within `hit_test_extent`; the semantics node is
 `Role::ScrollView` with `scroll_x`/`scroll_y` per axis. An unbounded main axis shrink-wraps; a
-horizontal viewport builds its core on its own axis (only the stretch overscroll transform is still
-transposed).
+horizontal viewport builds its core on its own axis (only the stretch overscroll transform is transposed).
 
 | Sliver | Behavior |
 |--------|----------|
@@ -566,11 +553,10 @@ from the last layout's constraints; paint requests one more frame until the rows
 `probe_key`/`locate_key` lookup in `slivers/reconcile.rs`. Near-edge callbacks are checked at layout,
 only once the list has moved, and delivered through the Housekeeping broadcast.
 
-**Correction-based anchoring.** `sliver_list` places rows from an anchor row. Keyed prepends and
-removals above the anchor (and a leading edge disagreeing with the list's start) are reported as
-`scroll_offset_correction` and applied by the retry loop, not a private nudge. It applies only while
-the list's start is at or above the viewport's leading edge; `locate_key` scans up to 64 items
-around the anchor.
+**Correction-based anchoring.** `sliver_list` anchors on a row. Keyed prepends and removals
+above the anchor (and a leading edge disagreeing with the list's start) are reported as
+`scroll_offset_correction` and applied by the retry loop, not a private nudge. It applies only while the
+list's start is at or above the viewport's leading edge; `locate_key` scans up to 64 items around the anchor.
 
 **Persistent header.** The child is laid out tight at `max(min, max - shrink)`,
 `shrink = min(scroll_offset, max)`. Pinned: `paint_origin = overlap` (pinned headers stack), the
@@ -579,17 +565,16 @@ under it (`overlaps_content = overlap > 0`). Floating: it keeps its own effectiv
 only under a Forward `user_scroll_direction`, which the viewport sets only during a drag or fling;
 floating+pinned never paints below `min_extent`. Layout records shrink and `overlaps_content`; paint
 requests a frame when stale; the next `View::rebuild` calls `build` (against the previous view's, as
-`ListView` does), so `build` must be pure and the content lags geometry by one frame. A change under
-a 0.5 px tolerance (`SHRINK_REBUILD_TOLERANCE`, crate-internal) skips the rebuild unless it lands on 0 or `max_extent`. An
-outside sliver can hold `SliverPersistentHeaderWidget` (frust-widgets-only; not yet in the facade)
-as a geometry core, as Material's `sliver_app_bar` does.
+`ListView` does), so `build` must be pure and the content lags geometry by one frame. A change under a
+0.5 px tolerance (`SHRINK_REBUILD_TOLERANCE`, crate-internal) skips the rebuild unless it lands on 0 or
+`max_extent`. An outside sliver can hold `SliverPersistentHeaderWidget` (frust-widgets-only; not yet in
+the facade) as a geometry core, as Material's `sliver_app_bar` does.
 
 **Forwarding wrappers** forward `Widget::as_sliver`: `Either`/`EitherOf3..8`, `hero`, `shield`,
 `auto_scroll_zone`, `GestureDetector`, plus `AnyView`/component boundaries (CORE). Others are boxes.
 
-**Reference surface and limits.** The playground Slivers page
-(`examples/playground/src/pages/slivers.rs`) composes a pinned Material `sliver_app_bar`, a floating
-`sliver_persistent_header`, a variable-extent `sliver_list`, a 4-column `sliver_grid` and
-`sliver_fill_remaining` under a `ScrollController`; its smoke test covers bar heights, wheel, jumps
-and zero layout-audit mismatches. v1 scope limits are registered as
+**Reference surface and limits.** The playground Slivers page (`examples/playground/src/pages/slivers.rs`)
+composes a pinned Material `sliver_app_bar`, a floating `sliver_persistent_header`, a variable-extent
+`sliver_list`, a 4-column `sliver_grid` and `sliver_fill_remaining` under a `ScrollController`; its
+smoke test covers bar heights, wheel, jumps and zero layout-audit mismatches. v1 scope limits:
 `sliver-v1-scope`; `ScrollView`/`ListView` are not yet viewport-based.
