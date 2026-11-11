@@ -112,6 +112,15 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - The plugin registry's `photo-library` `library` option now also links `ImageIO` on iOS, which
   `asset_metadata` reads through; a project that also enables `decode` links it once.
 
+### Fixed
+
+- An Android app no longer aborts when an accessibility client detaches or the host view is
+  detached and the UI then changes (for example `uiautomator dump`, then a navigation or a
+  rotation). On a OnePlus 9 (Android 15) the build before the bump aborted 10 of 10 and this one 0 of
+  10; a Pixel 4a
+  (Android 16) also ran 10 of 10 clean. TalkBack speech, focus order and typing under TalkBack were
+  not verified by hand.
+
 ## 0.6.6 — 2026-11-11
 
 A patch release (the 0.6.x line continues) with three breaks, listed under Breaking: `Router::go`
@@ -616,11 +625,13 @@ fonts (PingFang) now draw from the glyph atlas.
   taking the host UI font's line height.
 - `frust-i18n`: the language-id cache is bounded (256 entries) and the currency formatter cache is
   bounded (64 entries), both approximate LRU.
-- An Android app no longer aborts when an accessibility client detaches or the host view is
-  detached and the UI then changes. Measured on a OnePlus 9 (Android 15) and a Pixel 4a
-  (Android 16) with nothing in the crash buffer; main aborted 10 of 10 on the OnePlus 9. A TalkBack
-  on/off session driven over adb kept the app alive; spoken labels, focus order and typing under
-  TalkBack were not verified by hand. The iPhone VoiceOver smoke passed on an iPhone SE.
+
+### Known issues
+
+- An Android app aborts when an accessibility client is active (TalkBack, or a tool that queries the
+  accessibility tree such as `uiautomator dump`) and the window then changes. This predates 0.6.6.
+  The fix is an upstream change to `accesskit_android` plus a pin bump, and there is no workaround in
+  app code. Fixed after 0.6.6: see Unreleased.
 
 ## 0.6.5 — 2026-11-02
 
