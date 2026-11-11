@@ -541,6 +541,15 @@ jobs:
             echo "::error::$so has no DT_ANDROID_RELR; check --pack-dyn-relocs=relr and --use-android-relr-tags"
             exit 1
           fi
+      - name: 16 KB page-size guard
+        # Covers only the debug arm64 library built above, not a packaged app. A packaged app
+        # is checked by running scripts/ci/page-size-check.sh over the .so files of an unpacked APK.
+        working-directory: benchmarks/frust_bench
+        run: |
+          set -euo pipefail
+          so="$(find . -path '*aarch64-linux-android/debug/libfrustbench.so' | head -n 1)"
+          [ -n "$so" ] || { echo "::error::libfrustbench.so was not built"; exit 1; }
+          "$GITHUB_WORKSPACE/scripts/ci/page-size-check.sh" "$so"
 
   hygiene:
     runs-on: ubuntu-latest
