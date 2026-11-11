@@ -4,6 +4,13 @@ All notable changes to Frust are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) shape. GitHub release notes are copied
 from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
+**Versioning.** Frust is pre-1.0 and in alpha. A 0.x.y patch may contain source-breaking and
+behaviour-changing entries. Every such entry is listed under Breaking in that release's section,
+with its migration, and named in the release summary. To avoid surprises, pin an exact version
+(`version = "=0.6.6"`, the version you tested) on the facade and on every frust plugin crate, which
+share one version. Or commit `Cargo.lock` and read the Breaking block before running
+`cargo update`. The full rule is in [docs/RELEASING.md](docs/RELEASING.md) § Versioning.
+
 ## Unreleased
 
 ### Breaking

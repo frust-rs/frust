@@ -10,7 +10,7 @@ Frust is a Rust-native, mobile-first declarative UI framework: write one `View` 
 ship it to Android, iOS, macOS, Windows, Linux, and the web, rendered everywhere by the
 frust-owned `frust-engine` GPU pipeline.
 
-> Status: pre-1.0; APIs may change between minor versions.
+> Status: pre-1.0 alpha; a patch release (0.x.y) may break APIs, not only a minor one.
 
 ## Documentation
 
@@ -122,6 +122,11 @@ clean-signals` scaffolds an opt-in clean-architecture variant wired to `clean-si
 ## Status
 
 Pre-1.0. APIs are unstable and may change without notice between commits.
+
+A patch release (0.x.y) may contain source-breaking and behaviour-changing entries. Each is listed
+under Breaking in the [CHANGELOG](CHANGELOG.md) with its migration. To avoid surprises, pin the
+exact version you tested, for example `frust-ui = "=0.6.6"`, on the facade and on every frust plugin
+crate, or commit `Cargo.lock` and read the Breaking block before `cargo update`.
 
 > [!WARNING]
 > Frust can currently be considered in an alpha state. In particular, we're
