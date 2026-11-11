@@ -110,11 +110,12 @@ val cargoFeaturesB64 = prop("frust.cargoFeatures", "")
 // platform `cargoNdkBuild` passes to `cargo ndk --platform`, so the two cannot drift.
 val minSdkValue = 29
 
-// The NDK this module builds with. Gradle (`ndkVersion` below) and the Rust build
-// (`cargoNdkBuild` exports ANDROID_NDK_HOME at the same directory) both use it, so
-// they cannot pick different NDKs. NDK r28 and later align shared libraries to
+// The NDK this module builds with: `<sdk>/ndk/<version>` inside the Android SDK.
+// Gradle (`ndkVersion` below) and the Rust build (`cargoNdkBuild` exports that
+// directory as ANDROID_NDK_HOME, replacing any value the caller set) both use it,
+// so they cannot pick different NDKs. NDK r28 and later align shared libraries to
 // 16 KB pages by default. Set FRUST_ANDROID_NDK_VERSION in the environment to use
-// a newer NDK you have installed instead (for example `29.0.13113456`).
+// another NDK installed under the SDK instead (for example `29.0.13113456`).
 val ndkVersionValue: String =
     System.getenv("FRUST_ANDROID_NDK_VERSION")?.trim()?.takeIf { it.isNotEmpty() }
         ?: "28.2.13676358"
@@ -356,7 +357,8 @@ val cargoNdkBuild = tasks.register<Exec>("cargoNdkBuild") {
             throw GradleException(
                 "Android NDK $ndkVersionValue was not found" +
                     (if (ndkDir != null) " at $ndkDir" else " (no Android SDK location is set)") +
-                    ". Install it with: sdkmanager --install \"ndk;$ndkVersionValue\"",
+                    ". Install it with: sdkmanager --install \"ndk;$ndkVersionValue\"" +
+                    ", or set FRUST_ANDROID_NDK_VERSION to another NDK version installed under the SDK",
             )
         }
     }

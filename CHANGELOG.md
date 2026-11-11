@@ -39,6 +39,12 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   second is queued as usual. `pop()` is unchanged, and `pop_with_result` followed by `pop()` still pops
   two pages. Migration: remove app-side latches that guarded against a double pop. An app that meant
   to pop two pages with results calls it once per page across frames, or uses `pop()`.
+- A generated Android app now needs the pinned NDK installed under the Android SDK
+  (`<sdk>/ndk/28.2.13676358`): `cargoNdkBuild` resolves that directory and exports it as
+  `ANDROID_NDK_HOME`, so `frust run` / `frust build` no longer consult the caller's
+  `ANDROID_NDK_HOME` for Android, and the build fails when the directory is missing. Migration:
+  `sdkmanager --install "ndk;28.2.13676358"`, or set `FRUST_ANDROID_NDK_VERSION` to an installed r28+
+  version.
 
 ### Added
 
@@ -141,15 +147,21 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   rebuild that moves the caret, a relayout that reflows it onto another line, and focus granted
   programmatically (the first report then comes with the next handled event). `TextEditor::caret_line()`
   in `frust-text` gives the visual line of the caret.
-- `frust doctor` reads the Android NDK's version: ok at r28 or later, a warning below it (its
-  libraries are not 16 KB aligned), and "version not verified" when the revision cannot be read. The
-  missing-NDK text recommends `ndk;28.2.13676358`.
+- `frust doctor` checks the NDK the generated build uses: `<sdk>/ndk/<version>` under
+  `ANDROID_HOME` (else `ANDROID_SDK_ROOT`), where the version is `FRUST_ANDROID_NDK_VERSION` or
+  28.2.13676358. It is ok when that directory holds r28 or later, a warning when it is missing (with
+  the `sdkmanager --install "ndk;<version>"` fix), below r28 (its libraries are not 16 KB aligned),
+  or has no readable revision ("version not verified"). It cannot read a project's
+  `android/local.properties` `sdk.dir`. When `ANDROID_NDK_HOME` is set to another directory, an
+  informational line says `frust run` / `frust build` use the SDK copy and only the hot-patch path
+  uses `ANDROID_NDK_HOME`.
 - The app template's `app/build.gradle.kts` pins `ndkVersion` to 28.2.13676358; set
-  `FRUST_ANDROID_NDK_VERSION` in the environment to build with another. `cargoNdkBuild` exports
-  `ANDROID_NDK_HOME` for that NDK and fails with an `sdkmanager --install "ndk;<version>"` hint when
-  it is not installed.
+  `FRUST_ANDROID_NDK_VERSION` in the environment to build with another NDK installed under the SDK.
+  `cargoNdkBuild` exports that directory as `ANDROID_NDK_HOME` (replacing the caller's value) and
+  fails with an `sdkmanager --install "ndk;<version>"` hint when it is not installed.
 - `scripts/ci/page-size-check.sh`: fails when any `PT_LOAD` segment of an Android `.so` is aligned
-  below 0x4000. The `android-relr-guard` CI job runs it on the one debug arm64 library that job builds.
+  below 0x4000, rejects a non-numeric alignment field, and skips 32-bit objects. The `android-relr-guard` CI job runs it on the one debug arm64
+  library that job builds.
 - `deny.toml` (advisories only, each ignore with its reason) and an `advisories` CI job that runs a
   pinned `cargo-deny` on pull requests and weekly. It is not a merge gate.
 
