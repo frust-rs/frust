@@ -422,7 +422,10 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
 
 - **Event pass under root owner:** every shell routes input through `AppTree::event` inside a reactive
   `Owner.with` wrap, so handlers see root-level contexts (`Theme`, `WindowMetrics`, root-component
-  `init`-installed values). `frust-reactive` is a leaf crate and cannot wrap itself. The pass is
+  `init`-installed values); inside a component, `ComponentWidget::event` enters that component's owner,
+  so a handler there also sees its context and registers owner-scoped work on it (see
+  [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). `frust-reactive` is a leaf crate and cannot wrap
+  itself. The pass is
   deliberately **not tracked** — entering a tracked scope resets dependencies and clears the dirty flag,
   which would unsubscribe the frame loop from pending wakes. Desktop forwards the secondary mouse button
   as `PointerButton::Secondary` through a delivery-latched gate — an Up dispatches iff its Down did —
