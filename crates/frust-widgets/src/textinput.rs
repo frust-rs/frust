@@ -2885,7 +2885,8 @@ impl Widget for TextInputWidget {
 }
 
 impl TextInputWidget {
-    /// The caret as `on_caret_change` reports it, or `None` with no listener.
+    /// The caret as `on_caret_change` reports it. Always builds the value;
+    /// `report_caret` is what skips the report when no listener is set.
     fn caret_info(&self, size: Size) -> CaretInfo {
         let offset = Vec2::new(self.pad_x, self.content_origin_y(size.height));
         let rect = self

@@ -62,14 +62,20 @@ impl<State: 'static> SemanticsView<State> {
     }
 
     /// Set the role of the container node (default [`Role::GenericContainer`]).
+    /// A role other than [`Role::Heading`] drops any level set earlier by
+    /// [`heading`](Self::heading), so the last call wins.
     pub fn role(mut self, role: Role) -> Self {
+        if role != Role::Heading {
+            self.level = None;
+        }
         self.role = role;
         self
     }
 
     /// Mark the container as a heading of `level` (1 is the top level, as in
     /// HTML). Sets the role to [`Role::Heading`]; the platform level is
-    /// zero-based, so `level - 1` is stored.
+    /// zero-based, so `level - 1` is stored. A `level` of 0 is clamped to 1,
+    /// the same node as `heading(1)`.
     pub fn heading(mut self, level: usize) -> Self {
         self.role = Role::Heading;
         self.level = Some(level.saturating_sub(1));
@@ -113,19 +119,26 @@ impl<State: 'static> View<State> for SemanticsView<State> {
         element: &mut SemanticsWidget,
         ctx: &mut BuildCtx<'_>,
     ) -> ChangeFlags {
-        // Semantics are recomputed each pass from the widget, so adopting new
-        // values needs no layout or paint dirtiness of its own.
-        if prev.label != self.label
+        // The published node is read from this widget when the tree is
+        // published, and the semantics generation advances only on a non-empty
+        // rebuild. A change to any published value therefore raises PAINT, as
+        // `IconButtonWidget::rebuild` does for its label.
+        let published_changed = prev.label != self.label
             || prev.role != self.role
             || prev.level != self.level
-            || prev.hidden != self.hidden
-        {
+            || prev.hidden != self.hidden;
+        if published_changed {
             element.label = self.label.clone();
             element.role = self.role;
             element.level = self.level;
             element.hidden = self.hidden;
         }
-        crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx)
+        let mut flags =
+            crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        if published_changed {
+            flags |= ChangeFlags::PAINT;
+        }
+        flags
     }
 
     fn teardown(&self, element: &mut SemanticsWidget, ctx: &mut BuildCtx<'_>) {
@@ -210,6 +223,9 @@ impl<State: 'static> View<State> for SemanticsLabelView {
     ) -> ChangeFlags {
         if prev.text != self.text {
             element.text = self.text.clone();
+            // The announced text is published from this widget, so a change
+            // raises PAINT to advance the semantics generation.
+            return ChangeFlags::PAINT;
         }
         ChangeFlags::NONE
     }
@@ -276,8 +292,12 @@ mod tests {
             .iter()
             .find(|(_, n)| n.role() == Role::Button)
             .expect("child's node is kept");
-        assert!(group.children().contains(bid));
-        let _ = gid;
+        let (parent_id, _) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.children().contains(bid))
+            .expect("child's node has a parent");
+        assert_eq!(parent_id, gid, "the container is the child's parent");
     }
 
     #[test]
@@ -350,5 +370,158 @@ mod tests {
         assert_eq!(bare_scene.rects, wrapped_scene.rects);
         assert_eq!(bare_scene.layers, wrapped_scene.layers);
         assert_eq!(bare_scene.transforms, wrapped_scene.transforms);
+    }
+
+    #[test]
+    fn role_after_heading_drops_the_level() {
+        let update = semantics_of(|_| semantics(leaf(10.0, 10.0)).heading(2).role(Role::Group));
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Group)
+            .expect("container keeps the later role");
+        assert_eq!(node.level(), None);
+    }
+
+    #[test]
+    fn heading_zero_is_clamped_to_level_one() {
+        let update = semantics_of(|_| semantics(leaf(10.0, 10.0)).heading(0));
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Heading)
+            .expect("heading node");
+        assert_eq!(node.level(), Some(0));
+    }
+
+    /// The values a generation-gated test turns one at a time.
+    #[derive(Clone)]
+    struct Knobs {
+        label: &'static str,
+        role: Role,
+        heading: Option<usize>,
+        hidden: bool,
+        text: &'static str,
+    }
+
+    fn base() -> Knobs {
+        Knobs {
+            label: "group",
+            role: Role::Group,
+            heading: None,
+            hidden: false,
+            text: "3 unread",
+        }
+    }
+
+    fn wrapper(k: &Knobs) -> SemanticsView<Knobs> {
+        let view = semantics(crate::button("go", |_: &mut Knobs| {}))
+            .label(k.label)
+            .role(k.role)
+            .hidden(k.hidden);
+        match k.heading {
+            Some(level) => view.heading(level),
+            None => view,
+        }
+    }
+
+    fn announce(k: &Knobs) -> SemanticsLabelView {
+        semantics_label(k.text)
+    }
+
+    /// Build `first`, lay out, then rebuild the same root with `second` and
+    /// lay out again. Returns the update a shell would pull, or `None` when
+    /// the generation gate says the tree is unchanged.
+    fn gated_update<V: View<Knobs>>(
+        view: fn(&Knobs) -> V,
+        first: &Knobs,
+        second: &Knobs,
+    ) -> Option<frust_core::SemanticsUpdate> {
+        let mut root: RenderRoot<Knobs, V> = RenderRoot::new();
+        let mut tcx = frust_text::TextContext::new();
+        let mut state = first.clone();
+        root.rebuild(&mut |k: &mut Knobs| view(k), &mut state);
+        root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+        let seen = root.semantics_generation();
+        state = second.clone();
+        root.rebuild(&mut |k: &mut Knobs| view(k), &mut state);
+        root.layout_with_text(Size::new(200.0, 200.0), &mut tcx as &mut dyn Any);
+        root.semantics_if_changed(seen)
+    }
+
+    #[test]
+    fn label_only_change_reaches_the_gated_tree() {
+        let second = Knobs {
+            label: "renamed",
+            ..base()
+        };
+        let update = gated_update(wrapper, &base(), &second).expect("label change is published");
+        let (_, group) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Group)
+            .expect("container");
+        assert_eq!(group.label(), Some("renamed"));
+    }
+
+    #[test]
+    fn role_only_change_reaches_the_gated_tree() {
+        let second = Knobs {
+            role: Role::Navigation,
+            ..base()
+        };
+        let update = gated_update(wrapper, &base(), &second).expect("role change is published");
+        assert_eq!(count(&update, Role::Navigation), 1);
+        assert_eq!(count(&update, Role::Group), 0);
+    }
+
+    #[test]
+    fn heading_level_only_change_reaches_the_gated_tree() {
+        let first = Knobs {
+            heading: Some(1),
+            ..base()
+        };
+        let second = Knobs {
+            heading: Some(2),
+            ..base()
+        };
+        let update = gated_update(wrapper, &first, &second).expect("level change is published");
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Heading)
+            .expect("heading node");
+        assert_eq!(node.level(), Some(1));
+    }
+
+    #[test]
+    fn hidden_only_change_reaches_the_gated_tree() {
+        let second = Knobs {
+            hidden: true,
+            ..base()
+        };
+        let update = gated_update(wrapper, &base(), &second).expect("hidden change is published");
+        assert_eq!(count(&update, Role::Group), 0);
+    }
+
+    #[test]
+    fn label_text_only_change_reaches_the_gated_tree() {
+        let second = Knobs {
+            text: "4 unread",
+            ..base()
+        };
+        let update = gated_update(announce, &base(), &second).expect("text change is published");
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Label)
+            .expect("label node");
+        assert_eq!(node.value(), Some("4 unread"));
+    }
+
+    #[test]
+    fn unchanged_rebuild_does_not_advance_the_gate() {
+        assert!(gated_update(wrapper, &base(), &base()).is_none());
+        assert!(gated_update(announce, &base(), &base()).is_none());
     }
 }
