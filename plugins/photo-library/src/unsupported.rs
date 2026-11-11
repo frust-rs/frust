@@ -31,6 +31,27 @@ pub(crate) fn manage_limited_selection() -> Result<(), PhotoError> {
     Err(PhotoError::Unsupported)
 }
 
+// Change feed: these targets have no photo library to watch.
+#[cfg(feature = "library")]
+pub(crate) fn current_change_token() -> Result<crate::ChangeToken, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
+pub(crate) fn changes_since(
+    _token: &crate::ChangeToken,
+) -> Result<crate::LibraryChanges, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
+pub(crate) fn start_change_observer() -> Result<(), PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
+pub(crate) fn stop_change_observer() {}
+
 // Originals and saving: replaced by the platform implementations.
 #[cfg(feature = "library")]
 pub(crate) fn export_original(

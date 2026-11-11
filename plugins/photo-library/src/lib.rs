@@ -58,6 +58,8 @@
 ))]
 mod apple_decode;
 mod cancel;
+#[cfg_attr(not(feature = "library"), allow(dead_code))]
+mod changes;
 mod decode;
 #[cfg(any(
     target_os = "android",
@@ -89,6 +91,7 @@ mod pixels;
 mod thumb_cache;
 
 pub use cancel::CancelToken;
+pub use changes::{ChangeSubscription, ChangeToken, LibraryChanges};
 pub use decode::{DecodeOptions, DecodedImage, ImageColorSpace};
 #[cfg(any(
     target_os = "android",
@@ -247,13 +250,73 @@ impl PhotoLibrary {
         }
     }
 
+    /// The library's current [`ChangeToken`], to pass to [`changes_since`](Self::changes_since)
+    /// later. Blocks; see [`albums`](Self::albums) for the rules. Desktop and web have no photo
+    /// library and return [`PhotoError::Unsupported`].
+    pub fn current_change_token() -> Result<ChangeToken, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            platform::current_change_token()
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            Err(library_disabled())
+        }
+    }
+
+    /// What changed in the library since `token`. Blocks; see [`albums`](Self::albums) for the
+    /// rules. A token from another device, platform or library, or one the platform no longer
+    /// tracks, answers [`LibraryChanges::FullRescan`], not an error.
+    ///
+    /// Before it returns, a [`LibraryChanges::Delta`] evicts every size of each updated and
+    /// deleted asset from the thumbnail cache, and a [`LibraryChanges::FullRescan`] empties it.
+    /// A thumbnail still loading when either happens is returned to its caller but not cached.
+    pub fn changes_since(token: &ChangeToken) -> Result<LibraryChanges, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            changes::changes_since_with(token, platform::changes_since)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = token;
+            Err(library_disabled())
+        }
+    }
+
+    /// Calls `callback` when the library may have changed, until the returned
+    /// [`ChangeSubscription`] is dropped. Needs the `library` feature and photo access; desktop
+    /// and web return [`PhotoError::Unsupported`].
+    ///
+    /// The callback only wakes the app: it carries no data, may run on any thread, and may be
+    /// coalesced or spurious. Answer it by calling [`changes_since`](Self::changes_since) off
+    /// the UI thread, and keep the callback itself short. The platform observer starts with
+    /// the first subscription and stops when the last one drops.
+    pub fn on_library_changed(
+        callback: impl Fn() + Send + Sync + 'static,
+    ) -> Result<ChangeSubscription, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            changes::FEED.subscribe(
+                std::sync::Arc::new(callback),
+                platform::start_change_observer,
+                platform::stop_change_observer,
+            )
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = callback;
+            Err(library_disabled())
+        }
+    }
+
     /// A thumbnail as straight-alpha RGBA8, from the in-memory cache when present. Blocks on a
     /// miss; [`PhotoError::NotFound`] for a stale `id`. The request is clamped to `1..=2048`.
     ///
     /// # The cache
     ///
     /// A hit returns before any platform call, so it skips the access check, and an edited or
-    /// deleted asset can be served until [`clear_thumbnail_cache`](Self::clear_thumbnail_cache).
+    /// deleted asset can be served until [`clear_thumbnail_cache`](Self::clear_thumbnail_cache)
+    /// or until [`changes_since`](Self::changes_since) reports it.
     /// The cache empties itself when [`manage_limited_selection`](Self::manage_limited_selection)
     /// succeeds and when a miss answers [`PhotoError::PermissionDenied`];
     /// [`set_thumbnail_cache_budget(0)`](Self::set_thumbnail_cache_budget) also empties it. A
@@ -830,6 +893,42 @@ mod tests {
             Err(PhotoError::Cancelled)
         );
         assert_eq!(backend.calls(), 1);
+    }
+
+    #[cfg(not(feature = "library"))]
+    #[test]
+    fn the_change_feed_is_feature_gated() {
+        let disabled = PhotoError::FeatureDisabled { feature: "library" };
+        assert_eq!(PhotoLibrary::current_change_token(), Err(disabled.clone()));
+        assert_eq!(
+            PhotoLibrary::changes_since(&ChangeToken::from_bytes(*b"t")),
+            Err(disabled.clone())
+        );
+        assert_eq!(
+            PhotoLibrary::on_library_changed(|| {}).map(|_| ()),
+            Err(disabled)
+        );
+    }
+
+    // Desktop and web have no library, so their arms refuse the whole feed.
+    #[cfg(all(
+        feature = "library",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    #[test]
+    fn the_change_feed_is_unsupported_without_a_library() {
+        assert_eq!(
+            PhotoLibrary::current_change_token(),
+            Err(PhotoError::Unsupported)
+        );
+        assert_eq!(
+            PhotoLibrary::changes_since(&ChangeToken::from_bytes(*b"t")),
+            Err(PhotoError::Unsupported)
+        );
+        assert_eq!(
+            PhotoLibrary::on_library_changed(|| {}).map(|_| ()),
+            Err(PhotoError::Unsupported)
+        );
     }
 
     #[cfg(not(feature = "library"))]

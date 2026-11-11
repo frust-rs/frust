@@ -88,6 +88,25 @@ pub(crate) use apple_originals::export_original;
 #[cfg(feature = "save")]
 pub(crate) use apple_originals::save;
 
+// Change feed placeholder (full rescan, no observer) until `apple_changes.rs` lands.
+#[cfg(feature = "library")]
+pub(crate) fn current_change_token() -> Result<crate::ChangeToken, PhotoError> {
+    Ok(crate::ChangeToken::from_bytes(Vec::new()))
+}
+#[cfg(feature = "library")]
+pub(crate) fn changes_since(
+    _token: &crate::ChangeToken,
+) -> Result<crate::LibraryChanges, PhotoError> {
+    let next = current_change_token()?;
+    Ok(crate::LibraryChanges::FullRescan { next })
+}
+#[cfg(feature = "library")]
+pub(crate) fn start_change_observer() -> Result<(), PhotoError> {
+    Ok(())
+}
+#[cfg(feature = "library")]
+pub(crate) fn stop_change_observer() {}
+
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
