@@ -300,6 +300,12 @@ fn asset_of(asset: &PHAsset) -> Asset {
                 .creationDate()
                 .map(|date| millis(date.timeIntervalSince1970()) as i64),
             duration_ms: video.then(|| millis(asset.duration()) as u64),
+            // The following change fills these from PhotoKit.
+            modified_unix_ms: None,
+            is_favorite: None,
+            burst_id: None,
+            file_name: None,
+            content_type: None,
         }
     }
 }

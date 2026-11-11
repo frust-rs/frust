@@ -676,9 +676,9 @@ fn browse_jni_calls_match_the_kotlin_declarations() {
             "()Ldev/frust/photolibrary/FrustPhotoLibraryHost$AlbumsResult;",
         ),
         (
-            "@JvmStatic\n    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult",
+            "@JvmStatic\n    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult",
             "assets",
-            "(Ljava/lang/String;IJI)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;",
+            "(Ljava/lang/String;IJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;",
         ),
         (
             "@JvmStatic\n    fun thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult",
@@ -751,6 +751,10 @@ fn browse_result_fields_match_their_rust_reads() {
                 ("heights", "IntArray", "int_array_field"),
                 ("dates", "LongArray", "long_array_field"),
                 ("durations", "LongArray", "long_array_field"),
+                ("modified", "LongArray", "long_array_field"),
+                ("favorites", "IntArray", "int_array_field"),
+                ("names", "Array<String?>", "string_array_field"),
+                ("types", "Array<String?>", "string_array_field"),
             ],
         ),
         (
@@ -902,6 +906,52 @@ fn browsing_checks_access_and_pages_by_sdk() {
     let error = function(&rust, "fn browse_error(");
     assert!(error.contains("PERMISSION_DENIED => PhotoError::PermissionDenied,"));
     assert!(error.contains("NOT_FOUND => PhotoError::NotFound,"));
+}
+
+#[test]
+fn asset_detail_columns_are_projected_by_api_level_and_details() {
+    let browser = read(KOTLIN_BROWSER);
+    let base = browser
+        .split("private val ASSET_PROJECTION")
+        .nth(1)
+        .and_then(|rest| rest.split("private val DETAIL_COLUMNS").next())
+        .expect("ASSET_PROJECTION");
+    assert!(base.contains("MediaStore.MediaColumns.DATE_MODIFIED,"));
+    assert!(
+        !base.contains("IS_FAVORITE")
+            && !base.contains("DISPLAY_NAME")
+            && !base.contains("MIME_TYPE"),
+        "the always-projected columns hold only what API 29 has and no detail column"
+    );
+    let detail = browser
+        .split("private val DETAIL_COLUMNS")
+        .nth(1)
+        .and_then(|rest| rest.split("private fun projection").next())
+        .expect("DETAIL_COLUMNS");
+    assert!(detail.contains("MediaStore.MediaColumns.DISPLAY_NAME,"));
+    assert!(detail.contains("MediaStore.MediaColumns.MIME_TYPE,"));
+    let projection = function(&browser, "private fun projection(");
+    assert!(
+        projection.contains(
+            "if (Build.VERSION.SDK_INT >= 30) columns += MediaStore.MediaColumns.IS_FAVORITE"
+        ),
+        "IS_FAVORITE is an API 30 column"
+    );
+    assert!(
+        projection.contains("if (details) columns += DETAIL_COLUMNS"),
+        "name and type are projected only with details"
+    );
+    let page = function(&browser, "private fun queryPage(");
+    assert!(page.contains("val projection = projection(details)"));
+    assert!(!page.contains("ASSET_PROJECTION"));
+    let rows = function(&browser, "private fun readRows(");
+    assert!(rows.contains("cursor.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)"));
+    assert!(rows.contains("if (favoriteAt < 0) FAVORITE_UNKNOWN"));
+    assert!(rows.contains("val nameAt = if (details)"));
+    assert!(rows.contains("val typeAt = if (details)"));
+    let rust = rust_code(&read(RUST_ANDROID_LIBRARY));
+    assert!(function(&rust, "pub(crate) fn assets(").contains("JValue::Bool(details)"));
+    assert!(function(&rust, "fn assets_from(").contains("burst_id: None,"));
 }
 
 #[test]
