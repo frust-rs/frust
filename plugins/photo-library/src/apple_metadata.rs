@@ -14,8 +14,19 @@
 //!
 //! The chunks arrive "on an arbitrary serial queue", and the complete data is "the concatenation
 //! of the `data` parameters from all calls to your `handler` block" (`PHAssetResourceManager.h`),
-//! so each chunk is appended as it arrives, before its handler returns. The buffer grows
-//! fallibly: a chunk the allocator refuses fails the read rather than aborting.
+//! so each chunk is appended as it arrives, before its handler returns.
+//!
+//! # Byte ceiling and memory
+//!
+//! The buffer refuses to grow past [`MAX_ORIGINAL_BYTES`] (256 MiB): the chunk that would pass it
+//! cancels the request (`cancelDataRequest:`), frees what was buffered and answers
+//! [`PhotoError::InvalidRequest`]. Its room grows by doubling, capped at the ceiling, so the
+//! buffer's capacity is at most twice the bytes received; while it grows the allocator can
+//! briefly hold the old block and the new one. ImageIO then reads the buffer in place
+//! ([`crate::apple_decode::exif_from_data`] makes no second copy), so the peak is that one
+//! buffer. Room is reserved fallibly: an allocation the allocator refuses fails the read with
+//! [`PhotoError::Platform`]. That does not stop iOS from ending the app under memory pressure
+//! while the buffer is large, so a caller reading many originals should read them one at a time.
 //!
 //! # Network
 //!
@@ -23,13 +34,19 @@
 //! an original that is only in iCloud completes with `PHPhotosErrorNetworkAccessRequired` (3164),
 //! which answers [`PhotoError::NetworkRequired`].
 //!
-//! # Cancel
+//! # Inactivity deadline and cancel
+//!
+//! Every read has an inactivity deadline, with or without a token: when neither a chunk nor the
+//! completion arrives for [`INACTIVITY_TIMEOUT`] (30 s, as for a thumbnail request), the request
+//! is cancelled and the read answers a [`PhotoError::Platform`] timeout. Each chunk restarts the
+//! deadline, so a slow download that keeps delivering data is never cut off; a download that
+//! stalls is. No header promises the completion block runs after a cancel, so the wait never
+//! depends on it.
 //!
 //! The crate root has already refused a token cancelled before the call. Once the request has an
-//! id, the token's hook calls `cancelDataRequest:`. The wait has no timeout, because a download can
-//! take minutes and the token is the way out; it wakes every [`POLL`] to notice a cancel, and the
-//! token is checked once more after the wait, so a cancel that races the last chunk still wins.
-//! No header promises the completion block runs after a cancel, so the wait does not depend on it.
+//! id, the token's hook calls `cancelDataRequest:`. The wait wakes every [`POLL`], and after every
+//! chunk, to notice a cancel, and the token is checked once more after the wait, so a cancel that
+//! races the last chunk still wins.
 //!
 //! # Access
 //!
@@ -39,7 +56,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -55,10 +72,20 @@ use objc2_photos::{
 };
 
 use super::lock;
+use crate::metadata::transfer::{Event, Received, Timing, wait_for_completion};
 use crate::{AssetId, ExifData, MetadataOptions, PhotoError};
 
 /// How often a blocked read looks for a cancel.
 const POLL: Duration = Duration::from_millis(100);
+
+/// How long a read may go without a chunk or its completion before it is cancelled: the
+/// thumbnail request's backstop. A download that keeps delivering chunks never reaches it.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The most bytes a read buffers: 256 MiB. That admits every ordinary original, a 48 MP ProRAW
+/// DNG (typically 75 MB or more) and large imported camera RAW files included, while refusing
+/// an original that has no business being held in memory whole for its EXIF.
+const MAX_ORIGINAL_BYTES: usize = 256 * 1024 * 1024;
 
 /// `PHPhotosErrorDomain`. The bindings' `PHError` feature is off, so the codes below are spelled
 /// here from `PHError.h`.
@@ -67,28 +94,6 @@ const PHOTOS_ERROR_DOMAIN: &str = "PHPhotosErrorDomain";
 const NETWORK_ACCESS_REQUIRED: isize = 3164;
 /// `PHPhotosErrorUserCancelled` (`PHError.h`).
 const USER_CANCELLED: isize = 3072;
-
-/// The bytes received so far, or the reason the read stopped growing them.
-#[derive(Default)]
-struct Received {
-    bytes: Vec<u8>,
-    out_of_memory: bool,
-}
-
-impl Received {
-    /// Appends one chunk; after an allocation failure, chunks are dropped.
-    fn append(&mut self, chunk: &[u8]) {
-        if self.out_of_memory {
-            return;
-        }
-        if self.bytes.try_reserve(chunk.len()).is_err() {
-            self.out_of_memory = true;
-            self.bytes = Vec::new();
-            return;
-        }
-        self.bytes.extend_from_slice(chunk);
-    }
-}
 
 pub(crate) fn asset_metadata(
     id: &AssetId,
@@ -124,7 +129,7 @@ pub(crate) fn asset_metadata(
         }
         let resource = photo_resource(&asset)?;
         let bytes = read_resource(&resource, options)?;
-        crate::apple_decode::exif_from_data(&bytes)
+        crate::apple_decode::exif_from_data(bytes)
     })
 }
 
@@ -169,7 +174,8 @@ fn read_resource(
     resource: &PHAssetResource,
     options: &MetadataOptions,
 ) -> Result<Vec<u8>, PhotoError> {
-    let received = Arc::new(Mutex::new(Received::default()));
+    let received = Arc::new(Mutex::new(Received::with_limit(MAX_ORIGINAL_BYTES)));
+    let (tx, rx) = mpsc::channel();
 
     // SAFETY: `new` and the setter are plain messages to the fresh options object.
     let request_options = unsafe {
@@ -180,23 +186,31 @@ fn read_resource(
 
     let on_chunk = {
         let received = Arc::clone(&received);
+        let tx = tx.clone();
         RcBlock::new(move |data: NonNull<NSData>| {
             // Runs on a Photos queue: never unwind into its frame.
-            if catch_unwind(AssertUnwindSafe(|| {
+            let event = catch_unwind(AssertUnwindSafe(|| {
                 // SAFETY: Photos passes a non-null `NSData` valid for this call and does not
                 // mutate it while the handler runs; the slice is copied before the handler
                 // returns.
                 let chunk = unsafe { data.as_ref().as_bytes_unchecked() };
-                lock(&received).append(chunk);
+                match lock(&received).append(chunk) {
+                    Ok(()) => Event::Chunk,
+                    // Over the ceiling or out of memory: the waiter stops the request.
+                    Err(error) => Event::Done(Err(error)),
+                }
             }))
-            .is_err()
-            {
+            .unwrap_or_else(|_| {
                 log::error!("photo metadata: panic while receiving a chunk");
-            }
+                Event::Done(Err(PhotoError::Platform(
+                    "panic while receiving the asset's data".to_owned(),
+                )))
+            });
+            // The waiter may have gone already; then the chunk is simply dropped.
+            let _ = tx.send(event);
         })
     };
 
-    let (tx, rx) = mpsc::channel();
     let on_done = RcBlock::new(move |error: *mut NSError| {
         // Runs on a Photos queue: never unwind into its frame.
         let outcome = catch_unwind(AssertUnwindSafe(|| {
@@ -212,7 +226,7 @@ fn read_resource(
                 "panic while finishing the read".to_owned(),
             ))
         });
-        let _ = tx.send(outcome);
+        let _ = tx.send(Event::Done(outcome));
     });
 
     // SAFETY: `defaultManager` is a plain class-method getter, and the request takes a live
@@ -242,7 +256,11 @@ fn read_resource(
         // finished ignores the cancel. The manager is `Send + Sync` in the bindings.
         token.set_hook(move || unsafe { manager.cancelDataRequest(request) });
     }
-    let outcome = wait_for_completion(&rx, &|| options.is_cancelled());
+    let timing = Timing {
+        poll: POLL,
+        inactivity: INACTIVITY_TIMEOUT,
+    };
+    let outcome = wait_for_completion(&rx, timing, &|| options.is_cancelled());
     if let Some(token) = &options.cancel {
         token.clear_hook();
     }
@@ -253,43 +271,14 @@ fn read_resource(
         outcome
     };
     if outcome.is_err() {
+        // A timeout, the ceiling, a cancel or a failed transfer: stop Photos, and drop any chunk
+        // it still delivers.
         // SAFETY: as for the hook above.
         unsafe { manager.cancelDataRequest(request) };
+        lock(&received).discard();
     }
     outcome?;
-    finish(std::mem::take(&mut *lock(&received)))
-}
-
-/// The bytes of a transfer that completed without an error.
-fn finish(received: Received) -> Result<Vec<u8>, PhotoError> {
-    if received.out_of_memory {
-        return Err(PhotoError::Platform(
-            "not enough memory for the asset's data".to_owned(),
-        ));
-    }
-    Ok(received.bytes)
-}
-
-/// Waits for the completion handler, waking every [`POLL`] for a cancel.
-fn wait_for_completion(
-    rx: &Receiver<Result<(), PhotoError>>,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<(), PhotoError> {
-    loop {
-        match rx.recv_timeout(POLL) {
-            Ok(outcome) => return outcome,
-            Err(RecvTimeoutError::Timeout) => {
-                if cancelled() {
-                    return Err(PhotoError::Cancelled);
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(PhotoError::Platform(
-                    "Photos dropped the read without answering".to_owned(),
-                ));
-            }
-        }
-    }
+    lock(&received).finish()
 }
 
 #[cfg(test)]
@@ -328,39 +317,10 @@ mod tests {
     }
 
     #[test]
-    fn chunks_append_in_order_and_a_refused_allocation_fails_the_read() {
-        let mut received = Received::default();
-        received.append(b"ab");
-        received.append(b"cd");
-        assert_eq!(finish(received), Ok(b"abcd".to_vec()));
-
-        let mut received = Received {
-            out_of_memory: true,
-            ..Received::default()
-        };
-        received.append(b"ef");
-        assert!(received.bytes.is_empty());
-        assert!(matches!(finish(received), Err(PhotoError::Platform(_))));
-    }
-
-    #[test]
-    fn the_wait_returns_the_answer_or_stops_on_a_cancel() {
-        let (tx, rx) = mpsc::channel();
-        tx.send(Err(PhotoError::NetworkRequired)).unwrap();
-        assert_eq!(
-            wait_for_completion(&rx, &|| false),
-            Err(PhotoError::NetworkRequired)
-        );
-        let (_tx, rx) = mpsc::channel();
-        assert_eq!(
-            wait_for_completion(&rx, &|| true),
-            Err(PhotoError::Cancelled)
-        );
-        let (tx, rx) = mpsc::channel::<Result<(), PhotoError>>();
-        drop(tx);
-        assert!(matches!(
-            wait_for_completion(&rx, &|| false),
-            Err(PhotoError::Platform(_))
-        ));
+    fn the_deadline_and_the_ceiling_are_as_documented() {
+        assert_eq!(INACTIVITY_TIMEOUT, Duration::from_secs(30));
+        assert!(POLL < INACTIVITY_TIMEOUT);
+        assert_eq!(MAX_ORIGINAL_BYTES, 256 << 20);
+        assert!(isize::try_from(MAX_ORIGINAL_BYTES).is_ok());
     }
 }

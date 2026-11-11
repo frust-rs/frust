@@ -303,10 +303,14 @@ impl PhotoLibrary {
     ///
     /// # Showing it
     ///
+    /// The cache itself never copies pixels: a hit shares the cached allocation. Building an
+    /// `ImageSource` from the pixels copies them once, though, so compared with
+    /// [`thumbnail`](Self::thumbnail) an app saves the cache-side copy only, not that one.
+    ///
     /// Keep one image per asset: build an `ImageSource` from the pixels once and hold it with
     /// the cell's state, rather than making a new one in every build. Each `ImageSource` made
-    /// from pixels is a new engine image, so one per build uploads the same pixels again and
-    /// again even though the cache shares them.
+    /// from pixels is a new engine image, so one per build copies and uploads the same pixels
+    /// again and again even though the cache shares them.
     pub fn thumbnail_shared(
         id: &AssetId,
         request: &ThumbnailRequest,
@@ -384,10 +388,21 @@ impl PhotoLibrary {
     /// - **iOS:** Photos offers no way to read an asset's metadata from its header alone, so the
     ///   original's bytes must be on the device: the call reads the whole original resource into
     ///   memory (never to a file) and hands it to the same ImageIO property reader
-    ///   [`decode_file`](Self::decode_file) uses. An original that is only in iCloud is
-    ///   downloaded when [`MetadataOptions::allow_network`] is set, and returns
-    ///   [`PhotoError::NetworkRequired`] otherwise (the default). A cancel during the read stops
-    ///   the transfer and returns [`PhotoError::Cancelled`]. A video is not read at all.
+    ///   [`decode_file`](Self::decode_file) uses, which reads that buffer in place. An original
+    ///   that is only in iCloud is downloaded when [`MetadataOptions::allow_network`] is set, and
+    ///   returns [`PhotoError::NetworkRequired`] otherwise (the default). A video is not read at
+    ///   all.
+    ///   - *Deadline:* with or without a token, a read that receives neither data nor its
+    ///     completion for 30 seconds is stopped and returns a [`PhotoError::Platform`] timeout.
+    ///     Each piece of data restarts that clock, so a slow download that keeps arriving is not
+    ///     cut off. A cancel during the read stops the transfer sooner and returns
+    ///     [`PhotoError::Cancelled`].
+    ///   - *Size and memory:* an original over 256 MiB is refused with
+    ///     [`PhotoError::InvalidRequest`] once that much has arrived. The peak memory is one
+    ///     buffer of the original, with up to the same again in spare capacity while it grows.
+    ///     An allocation the system refuses returns [`PhotoError::Platform`] rather than
+    ///     aborting, but iOS can still end the app under memory pressure while the buffer is
+    ///     large, so read originals one at a time.
     /// - **Android:** the asset's content URI is opened as
     ///   [`export_original`](Self::export_original) opens it, unredacted only when the app holds
     ///   `ACCESS_MEDIA_LOCATION`, and read with `android.media.ExifInterface`. Without that

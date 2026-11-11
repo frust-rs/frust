@@ -78,15 +78,22 @@ type Properties = CFDictionary<CFString, CFType>;
 /// `CGImageSourceStatus.kCGImageStatusComplete`.
 const STATUS_COMPLETE: i32 = 0;
 
-// Hand-declared: the crate enables no `CFData` binding, and `CFDataCreate` is the one call the
-// in-memory reader needs. A `CFDataRef` is a CF object; it is handled as a plain `CFType`.
+// Hand-declared: the crate enables no `CFData` binding, and the in-memory reader needs only a
+// data object over bytes it does not copy and the retain count that proves nothing kept it. A
+// `CFDataRef` is a CF object; it is handled as a plain `CFType`, and a `CFAllocatorRef` as an
+// opaque pointer.
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
-    fn CFDataCreate(
+    fn CFDataCreateWithBytesNoCopy(
         allocator: *const c_void,
         bytes: *const u8,
         length: isize,
+        bytes_deallocator: *const c_void,
     ) -> Option<NonNull<CFType>>;
+    fn CFGetRetainCount(cf: &CFType) -> isize;
+
+    /// The allocator that does nothing: as a bytes deallocator, CF never frees the bytes.
+    static kCFAllocatorNull: *const c_void;
 }
 
 // Hand-declared: the workspace has no ImageIO bindings, and the reader and decoder need only
@@ -154,33 +161,65 @@ unsafe extern "C" {
 /// EXIF read as the decoder; no pixel is decoded. An image without EXIF is an empty
 /// [`ExifData`]; bytes ImageIO cannot read, or that hold no image, are the decoder's
 /// [`PhotoError::Platform`] error. Only the header matters: ImageIO reports the properties of a
-/// header it can parse even when the rest of the data is missing. ImageIO reads from a copy of
-/// `bytes` that is released before this returns.
+/// header it can parse even when the rest of the data is missing.
+///
+/// ImageIO reads `bytes` in place: no second copy of the data is made, so the peak memory is
+/// `bytes` itself. Every object made from them is released before this returns; should one
+/// still be alive then (a retain this crate cannot see), `bytes` is leaked rather than freed
+/// under it.
 #[cfg_attr(not(all(target_os = "ios", feature = "library")), allow(dead_code))]
-pub(crate) fn exif_from_data(bytes: &[u8]) -> Result<ExifData, PhotoError> {
-    autoreleasepool(|_| {
-        let length = isize::try_from(bytes.len())
-            .map_err(|_| PhotoError::Platform("the image data is too large to read".to_owned()))?;
-        // SAFETY: `bytes` is valid for reads of `length` bytes for the duration of the call, and
-        // `CFDataCreate` copies them; a null allocator is the default one. The Create-rule result
-        // is owned (+1) and released by `CFRetained` on every path.
-        let data = unsafe { CFDataCreate(std::ptr::null(), bytes.as_ptr(), length) }
-            // SAFETY: a non-null Create-rule result is owned by the caller.
-            .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-            .ok_or_else(|| {
-                PhotoError::Platform("not enough memory for the image data".to_owned())
-            })?;
-        let no_cache = no_cache_options();
-        let no_cache_off = no_cache.as_opaque();
-        // SAFETY: `data` and the options dictionary are live CF objects for the call. The result
-        // follows the Create rule, so it is owned (+1) and `CFRetained` releases it on every path.
-        let source = unsafe { CGImageSourceCreateWithData(&data, Some(no_cache_off)) }
-            // SAFETY: a non-null Create-rule result is owned by the caller.
-            .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-            .ok_or_else(undecodable)?;
-        let properties = first_image_properties(&source, no_cache_off)?;
-        Ok(read_exif(&properties).unwrap_or_default())
-    })
+pub(crate) fn exif_from_data(bytes: Vec<u8>) -> Result<ExifData, PhotoError> {
+    // SAFETY: `data` is dropped below, before `bytes` (or `bytes` is leaked); see `borrowed_data`.
+    let data = unsafe { borrowed_data(&bytes) }?;
+    let exif = autoreleasepool(|_| exif_of(&data));
+    // The pool has drained, so every image source and dictionary made from `data` is released;
+    // only this reference should remain.
+    // SAFETY: `data` is a live CF object.
+    if unsafe { CFGetRetainCount(&data) } != 1 {
+        log::warn!(
+            "photo metadata: ImageIO kept the asset's data; leaking it instead of freeing it"
+        );
+        std::mem::forget(bytes);
+    }
+    drop(data);
+    exif
+}
+
+/// A `CFData` over `bytes` that neither copies nor frees them.
+///
+/// # Safety
+///
+/// `bytes` must stay alive and unmodified while the result, or any object made from it, is
+/// alive: drop the result first and confirm its retain count was one, or leak `bytes`.
+unsafe fn borrowed_data(bytes: &[u8]) -> Result<CFRetained<CFType>, PhotoError> {
+    let length = isize::try_from(bytes.len())
+        .map_err(|_| PhotoError::Platform("the image data is too large to read".to_owned()))?;
+    // SAFETY: `bytes` is valid for reads of `length` bytes, and the caller keeps it alive and
+    // unmodified for as long as the data object and everything made from it lives. A null
+    // allocator is the default one, for the object itself; `kCFAllocatorNull` as the bytes
+    // deallocator means CF never frees `bytes`. The Create-rule result is owned (+1) and
+    // released by `CFRetained`.
+    unsafe {
+        CFDataCreateWithBytesNoCopy(std::ptr::null(), bytes.as_ptr(), length, kCFAllocatorNull)
+    }
+    // SAFETY: a non-null Create-rule result is owned by the caller.
+    .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+    .ok_or_else(|| PhotoError::Platform("not enough memory for the image data".to_owned()))
+}
+
+/// The EXIF of the image in `data`. Call it inside an autorelease pool, so nothing made from
+/// `data` outlives the pool.
+fn exif_of(data: &CFType) -> Result<ExifData, PhotoError> {
+    let no_cache = no_cache_options();
+    let no_cache_off = no_cache.as_opaque();
+    // SAFETY: `data` and the options dictionary are live CF objects for the call. The result
+    // follows the Create rule, so it is owned (+1) and `CFRetained` releases it on every path.
+    let source = unsafe { CGImageSourceCreateWithData(data, Some(no_cache_off)) }
+        // SAFETY: a non-null Create-rule result is owned by the caller.
+        .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+        .ok_or_else(undecodable)?;
+    let properties = first_image_properties(&source, no_cache_off)?;
+    Ok(read_exif(&properties).unwrap_or_default())
 }
 
 /// The property dictionary of `source`'s first image: the reader both [`exif_from_data`] and the
@@ -964,7 +1003,18 @@ mod tests {
         ));
         let bytes = std::fs::read(&file.0).unwrap();
 
-        let exif = exif_from_data(&bytes).expect("exif");
+        // ImageIO lets go of the borrowed bytes once the read returns: the leak guard never
+        // fires for an ordinary image.
+        {
+            // SAFETY: `data` is dropped at the end of this block, before `bytes`.
+            let data = unsafe { borrowed_data(&bytes) }.expect("data");
+            let read = autoreleasepool(|_| exif_of(&data));
+            assert!(read.is_ok(), "{read:?}");
+            // SAFETY: `data` is a live CF object.
+            assert_eq!(unsafe { CFGetRetainCount(&data) }, 1);
+        }
+
+        let exif = exif_from_data(bytes).expect("exif");
         assert_eq!(exif.capture_time.as_deref(), Some("2024:05:06 07:08:09"));
         assert_eq!(exif.camera_make.as_deref(), Some("Frust"));
         assert_eq!(exif.camera_model.as_deref(), Some("Fixture"));
@@ -989,13 +1039,17 @@ mod tests {
         let src = image(16, 8, srgb_name(), |_, _| [0, 0, 255, 255]);
         assert!(write(&file.0, "public.png", &src, None));
         let bytes = std::fs::read(&file.0).unwrap();
-        assert_eq!(exif_from_data(&bytes), Ok(ExifData::default()));
+        assert_eq!(exif_from_data(bytes.clone()), Ok(ExifData::default()));
 
         // Two bytes of the signature, not an image at all, and empty: the decoder's error. A cut
         // later in the header is not tried: ImageIO reports the properties of an in-memory PNG
         // whose header it can parse, even when the rest of the file is missing.
         for foreign in [&bytes[..2], b"not an image at all", b""] {
-            assert_eq!(exif_from_data(foreign), Err(undecodable()), "{foreign:?}");
+            assert_eq!(
+                exif_from_data(foreign.to_vec()),
+                Err(undecodable()),
+                "{foreign:?}"
+            );
         }
     }
 

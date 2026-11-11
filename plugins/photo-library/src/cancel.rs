@@ -1,4 +1,5 @@
-//! Cooperative cancellation and throttled progress for a pick or an export.
+//! Cooperative cancellation for the long-running calls, and throttled progress for a pick or an
+//! export.
 
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,13 +15,26 @@ struct Inner {
     hook: Mutex<Option<Hook>>,
 }
 
-/// A handle that cancels an in-flight [`PhotoLibrary::pick`](crate::PhotoLibrary::pick) or
-/// [`PhotoLibrary::export_original`](crate::PhotoLibrary::export_original).
+/// A handle that cancels an in-flight call:
 ///
-/// Clones share one state. Hand a clone to [`PickOptions::cancel`](crate::PickOptions::cancel)
-/// or [`ExportOptions::cancel`](crate::ExportOptions::cancel) and call
-/// [`cancel`](Self::cancel) from any thread. A token that is already cancelled makes the call
-/// return [`PhotoError::Cancelled`](crate::PhotoError::Cancelled) at once.
+/// - [`PhotoLibrary::pick`](crate::PhotoLibrary::pick), through
+///   [`PickOptions::cancel`](crate::PickOptions::cancel);
+/// - [`PhotoLibrary::export_original`](crate::PhotoLibrary::export_original), through
+///   [`ExportOptions::cancel`](crate::ExportOptions::cancel);
+/// - [`PhotoLibrary::thumbnail_shared`](crate::PhotoLibrary::thumbnail_shared), which takes the
+///   token itself;
+/// - [`PhotoLibrary::asset_metadata`](crate::PhotoLibrary::asset_metadata), through
+///   [`MetadataOptions::cancel`](crate::MetadataOptions::cancel);
+/// - [`PhotoLibrary::decode_file`](crate::PhotoLibrary::decode_file), through
+///   [`DecodeOptions::cancel`](crate::DecodeOptions::cancel);
+/// - [`PhotoLibrary::decode_asset`](crate::PhotoLibrary::decode_asset), through
+///   [`DecodeOptions::cancel`](crate::DecodeOptions::cancel) (checked before the export, after
+///   it and during the decode) and [`ExportOptions::cancel`](crate::ExportOptions::cancel)
+///   (which stops the export itself).
+///
+/// Clones share one state. Hand a clone to the call and call [`cancel`](Self::cancel) from any
+/// thread. A token that is already cancelled makes the call return
+/// [`PhotoError::Cancelled`](crate::PhotoError::Cancelled) at once.
 #[derive(Clone)]
 pub struct CancelToken(Arc<Inner>);
 
