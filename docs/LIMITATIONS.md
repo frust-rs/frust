@@ -8009,7 +8009,7 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 **Trigger for removal**: none for the access case; the asset case is handled for apps that call `changes_since`.
 
-**Evidence**: (2026-11-09, revised 2026-11-11) `plugins/photo-library/src/lib.rs` (`thumbnail`, `cached_thumbnail`, `changes_since`); `plugins/photo-library/src/changes.rs` (`changes_since_with` and its tests); `plugins/photo-library/src/thumb_cache.rs`. The eviction is established from code and headless tests, not a device run.
+**Evidence**: (2026-11-09, revised 2026-11-11) `plugins/photo-library/src/lib.rs` (`thumbnail`, `cached_thumbnail`, `changes_since`); `plugins/photo-library/src/changes.rs` (`changes_since_with` and its tests); `plugins/photo-library/src/thumb_cache.rs`. The eviction is established from code and headless tests. On a Pixel 5 (Android 14) an edited photo's thumbnail showed the new picture after the delta reported it; the iOS refresh has not been run on a device (`photo-library-change-feed-not-device-tested`).
 
 ---
 
@@ -8025,7 +8025,7 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 **Trigger for removal**: none; a floor raised to iOS 16 and API 30 would remove two of the cases.
 
-**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_changes.rs`, `plugins/photo-library/src/android_changes.rs` and `plugins/photo-library/src/changes.rs`. Established from code and headless tests, not a device run.
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_changes.rs`, `plugins/photo-library/src/android_changes.rs` and `plugins/photo-library/src/changes.rs`. Code and headless tests. Device (2026-11-11): on a Pixel 5 (Android 14) a forged token answered a full rescan and a fresh token was stored. The iOS expired or forged token, iOS 15 and API 29 have not run on a device (`photo-library-change-feed-not-device-tested`).
 
 ---
 
@@ -8035,13 +8035,13 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 **Applies to**: Android; libraries with tens of thousands of items or more, and an app that persists the token or calls `changes_since` often.
 
-**Workaround**: call `changes_since` off the UI thread in answer to `on_library_changed` rather than on a timer, and store the token in a file or database rather than a preference. The plugin does not coalesce wakes, so the app should coalesce a burst of them into one `changes_since` call; the cost of a call has not been measured on a device.
+**Workaround**: call `changes_since` off the UI thread in answer to `on_library_changed` rather than on a timer, and store the token in a file or database rather than a preference. The plugin does not coalesce wakes, so the app should coalesce a burst of them into one `changes_since` call; the cost of a call on a large library has not been measured on a device.
 
 **Why accepted**: the id set is how rows that became visible without being added (a published pending item, a restored item, a widened selection) are reported as inserted, and how deletions are found without `MediaStore.DeletedFiles`.
 
 **Trigger for removal**: a device measurement on a large library, and a cheaper snapshot if it is slow.
 
-**Evidence**: (2026-11-11) `plugins/photo-library/src/android_changes.rs` (*The token*; the size is from its host test and arithmetic); `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreChanges.kt`. Code and headless tests, not a device run.
+**Evidence**: (2026-11-11) `plugins/photo-library/src/android_changes.rs` (*The token*; the size is from its host test and arithmetic); `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreChanges.kt`. Code and headless tests. Device (2026-11-11), Pixel 5 (Android 14): the saved token was 73 bytes at 13 assets and 217 bytes at 156 assets. A large library has not been measured, for size or for the per-call snapshot cost.
 
 ---
 
@@ -8057,24 +8057,27 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 **Trigger for removal**: PhotoKit offering a stable secondary sort or keyset fetch.
 
-**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_library.rs` (*Cursor paging*, `Snapshot`); `plugins/photo-library/src/library.rs` (`SnapshotStore`, `SNAPSHOT_SESSIONS`). Code and headless tests (the store), not a device run.
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_library.rs` (*Cursor paging*, `Snapshot`); `plugins/photo-library/src/library.rs` (`SnapshotStore`, `SNAPSHOT_SESSIONS`). Code and headless tests (the store). Device (2026-11-11): an iPhone 13 mini (iOS 27.2) paged 6,155 assets in pages of 60, equal to the library's Recents count, with Load more disabled at the end. A session with an item added part-way has not run on iOS (`photo-library-change-feed-not-device-tested`).
 
 ---
 
-### `photo-library-change-feed-not-device-tested` — the change feed and cursor paging have not run on a device
+### `photo-library-change-feed-not-device-tested` — parts of the change feed and cursor paging have not run on a device
 
-**Observed**: `current_change_token`, `changes_since`, `on_library_changed`, `assets_after` and `cloud_identifiers` are covered by host tests and the Kotlin contract test only. No iPhone or Android device has run them, so the PhotoKit persistent-change fetch, the change observers, the `MediaStore` generation reads, keyset paging against a real library and the cloud-identifier mapping are unconfirmed on hardware.
+**Observed**: device gates ran on 2026-11-11 on a Pixel 5 (Android 14) and an iPhone 13 mini (iOS 27.2) and passed for the core paths: token save, empty, inserted, updated and deleted deltas on Android, an inserted delta and the wake counter on iOS, a token surviving a relaunch, and cursor paging on both. Still unverified on a device:
 
-**Applies to**: iOS and Android apps that use any of those calls.
+- iOS: updated and deleted deltas; a forged or expired token answering `FullRescan`; `cloud_identifiers`; anything on iOS 15 (the no-history path).
+- Android: API 29 (always `FullRescan`); the observer's Stop; token size and per-call snapshot cost on a large library (only 156 assets were measured).
+- Both: an iOS cursor session with an item added part-way; thumbnail refresh after a delta on iOS.
 
-**Workaround**: none; verify on the target device before depending on them.
+**Applies to**: iOS apps that use `cloud_identifiers`, read updated or deleted deltas or run on iOS 15; Android apps on API 29, with a large library, or that rely on the observer's Stop.
 
-**Why accepted**: the device gate is a separate step from the code.
+**Workaround**: none; verify the listed paths on the target device before depending on them.
 
-**Trigger for removal**: the device gate records a run of the change feed and cursor paging on iOS and Android (including iOS 15 and API 29 for the `FullRescan` answer).
+**Why accepted**: the remaining gates need hardware or a library not yet on hand; the verified paths have run.
 
-**Evidence**: (2026-11-11) established from the code and headless tests, not from a device observation: `plugins/photo-library/src/changes.rs`, `apple_changes.rs`, `android_changes.rs`, `apple_library.rs`, `android_library.rs`.
+**Trigger for removal**: the device gate records a run of each unverified item above.
 
+**Evidence**: (2026-11-11) the device table in `examples/playground/README.md`; code and headless tests in `plugins/photo-library/src/changes.rs`, `apple_changes.rs`, `android_changes.rs`, `apple_library.rs`, `android_library.rs`.
 ---
 
 ### `photo-library-live-photo-still-only` — exporting a Live Photo returns its still, not the paired video
