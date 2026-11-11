@@ -394,6 +394,16 @@ pub struct PlaygroundState {
     /// lets every clone of the state share the one subscription without
     /// requiring it to be.
     pub scroll_subscription: Rc<ScrollSubscription>,
+    /// The "Scroll" section's second `ScrollController`, attached to its
+    /// exact-extent `ListView` — the clone-shares-one-handle shape
+    /// [`PlaygroundState::scroll_controller`] uses, so its row-jump buttons
+    /// drive the one attached surface.
+    pub exact_scroll_controller: ScrollController,
+    /// The first and last rows the exact-extent list reports on screen, `None`
+    /// until its first `on_visible_range` delivery. A signal rather than a
+    /// plain field so the handler's write wakes the shell like every other
+    /// field here.
+    pub exact_visible_range: RwSignal<Option<(usize, usize)>>,
     /// The "Drag" section's shared [`DragCoordinator`], ambient over all
     /// three of that section's demos (kanban board, reorderable list,
     /// desktop file drop) — type-gating on each target's own payload keeps
@@ -460,6 +470,8 @@ impl PlaygroundState {
             scroll_controller,
             scroll_readout,
             scroll_subscription,
+            exact_scroll_controller: ScrollController::new(),
+            exact_visible_range: RwSignal::new(None),
             drag_coordinator: DragCoordinator::new(),
             kanban_columns: RwSignal::new(pages::drag_drop::initial_kanban_columns()),
             kanban_scroll_controllers: vec![
