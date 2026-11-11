@@ -71,6 +71,32 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   building an `ImageSource` from them copies them once; a miss can be cancelled on iOS and Android
   with `PhotoError::Cancelled`, caching nothing. `thumbnail` keeps its signature and shares the same
   cache.
+- `frust-photo-library` (`library` feature) change feed: `PhotoLibrary::current_change_token()` returns
+  an opaque `ChangeToken` (persist it with `as_bytes`, restore it with `from_bytes`), and
+  `PhotoLibrary::changes_since(&ChangeToken)` answers a `LibraryChanges`: a `Delta` of `inserted`,
+  `updated` and `deleted` ids plus the `next` token to store, or a `FullRescan` with a fresh `next`
+  when the platform cannot say what changed. `PhotoLibrary::on_library_changed(callback)` returns a
+  `ChangeSubscription` whose drop unregisters it; the callback only wakes the app (no data, any thread,
+  possibly coalesced or spurious), so answer it by calling `changes_since` off the UI thread. iOS reads
+  Photos' persistent change history (iOS 16+) and merges its batches into one delta; Android compares the
+  `MediaStore` generations (API 30+) and the token's id set. A `FullRescan` answers iOS 15, Android API 29,
+  a token from another device or platform, an expired token (iOS), a changed `MediaStore` volume version
+  (Android) and bytes that do not decode. On Android an id that is visible but absent from the token's id
+  set counts as inserted. A `Delta` evicts every id it names (inserted, updated and deleted) from the thumbnail cache, and a
+  `FullRescan` clears it, before `changes_since` returns. Desktop and web return `Unsupported`.
+- `frust-photo-library` cursor paging: `PhotoLibrary::assets_after(&AssetQuery, Option<&AssetCursor>)`
+  returns an `AssetCursorPage` (`items`, and `next` until the last page) that stays stable while the
+  library changes between pages. `AssetQuery`, `AssetPage` and `assets` are unchanged. Android pages by
+  keyset on the `assets` order, with no row count and no seek; iOS pins one `PHFetchResult` snapshot per
+  cursor session, so changes are invisible until a new session starts from `None`, and four sessions are
+  kept (an evicted session's cursor answers `InvalidRequest`). A cursor lives in memory only and is bound
+  to the album and filter that made it.
+- `PhotoLibrary::cloud_identifiers(&[AssetId])` (iOS 15+): the iCloud identifier of each asset, one
+  entry per id in order, `None` where there is none. Unlike an `AssetId` it names the asset on every
+  device of the same iCloud Photos library. Every other platform returns `Unsupported`.
+- `AssetId` documents its stability: best-effort the same across launches on one device, so an app may
+  store it; not portable to another device or platform, and a restore or reinstall may change it.
+- The playground's Photos page gains a Changes panel and a cursor-paging toggle.
 
 ### Changed
 

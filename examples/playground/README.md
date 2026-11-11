@@ -245,9 +245,19 @@ The sections, in order:
     read on **Refresh**), a **Manage selection** banner while access is Limited, an
     album selector, and a keyed lazy list of rows of four thumbnails (each
     requested off the UI thread at 3x the cell size) loaded in pages of 60 by an
-    explicit **Load more** button, with the loaded and total counts shown. When a
+    explicit **Load more** button, with the loaded and total counts shown. A
+    **Cursor paging** toggle pages with `PhotoLibrary::assets_after` instead: no
+    total, Load more follows the returned cursor and is disabled on the last page,
+    and switching the toggle or the album reloads the first page. When a
     picked item carries a library asset id (iOS) the Picker preview uses the same
-    native thumbnail path, so a HEIC pick previews. A **Folders** panel below
+    native thumbnail path, so a HEIC pick previews. A **Changes** panel below
+    Browse drives the change feed: **Save token** stores the library's current
+    change token in shared preferences (key `playground.change_token`, as hex) and
+    the next launch reads it back (the panel shows only its byte length);
+    **Check** shows `Delta: +inserted ~updated -deleted` or `Full rescan` since the
+    stored token and stores the token it answers with; **Watch** counts the
+    library's change wake-ups until **Stop**, and the watch survives a switch to
+    another section. A **Folders** panel below
     Originals keeps a user-chosen folder: **Pick folder** stores the grant token in
     shared preferences (key `playground.folder_token`) and the next launch restores
     it, or says "Folder access was lost. Pick folder again." when the system no
@@ -389,6 +399,16 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Browse panel Manage selection (limited access) | iPhone | OWED |
 | Photos: Browse panel Manage selection (limited access) | Android device | OWED |
 | Photos: Picker preview of a HEIC pick through the native thumbnail | iPhone | OWED |
+| Photos: Changes panel Save token, relaunch shows the stored token, then Check reports a delta after an insert, an edit and a delete | iPhone 13 mini (iOS 27.2), 2026-11-11 | PASS for the token and an insert (a 608-byte token; `+0 ~0 -0` with no change; the token is still stored after a relaunch; `+1` after Save copy back). An edit and a delete were not run: nothing in a personal library was edited or removed |
+| Photos: Changes panel Save token, relaunch shows the stored token, then Check reports a delta after an insert, an edit and a delete | Pixel 5 (Android 14), 2026-11-11 | PASS (empty delta `+0 ~0 -0` with no change; `+1` after an insert; `~1` after an in-place file edit; `-1` after a delete; after a force-stop and relaunch the token is still stored and Check reports `+1` for a photo added while the app was stopped. A file replaced through the filesystem reports as inserted, not updated: MediaStore gives it a new added-generation) |
+| Photos: Changes panel Watch, the wake counter moves when the library changes; Stop holds it | iPhone 13 mini (iOS 27.2), 2026-11-11 | PASS (0 → 2 on the saved copy; Stop reads `Not watching (2 wake-up(s) counted)`). No change was made after Stop, so the hold itself was not observed. Changing the app's Photos access in Settings terminates the app, so a stop never runs after a revoke |
+| Photos: Changes panel Watch, the wake counter moves when the library changes; Stop holds it | Pixel 5 (Android 14), 2026-11-11 | PASS for Watch (the counter went 0 → 2 → 7 → 8 → 9 across an insert, a second insert plus a replace, a delete and an edit); Stop was not exercised |
+| Photos: Browse panel Cursor paging loads every page, and stays stable when an item is added mid-way | iPhone 13 mini (iOS 27.2), 2026-11-11 | PASS for paging (6,155 assets in pages of 60, equal to the Recents count, Load more disabled at the end). No item was added mid-way |
+| Photos: Browse panel Cursor paging loads every page, and stays stable when an item is added mid-way | Pixel 5 (Android 14), 2026-11-11 | PASS (155 assets: pages of 60, 60 and 35; a photo added after the first page did not appear and nothing repeated; a further Load more stayed at 155) |
+| Photos: Changes panel Check with a forged token answers Full rescan and stores a fresh token | Pixel 5 (Android 14), 2026-11-11 | PASS (a 4-byte forged token gave `Full rescan` and a 75-byte token was stored) |
+| Photos: Changes panel Check with a forged token answers Full rescan and stores a fresh token | iPhone | OWED (a forged value written into the app's preferences file was not picked up: the system's preferences cache kept the stored token) |
+| Photos: an edited photo's thumbnail refreshes after Check reports it | Pixel 5 (Android 14), 2026-11-11 | PASS (a photo overwritten in place reported `~1`, and its Browse cell showed the new picture once the cell was rebuilt) |
+| Photos: Android change token size on a real library | Pixel 5 (Android 14), 2026-11-11 | 73 bytes at 13 assets, 217 bytes at 156 assets; no large library measured |
 | Desktop page: Open file / Open files copy the picked file into the app and list its name | iPhone | OWED |
 | Desktop page: Open file / Open files copy the picked file into the app and list its name | Android device | OWED |
 | Desktop page: Export file writes the generated text file through Files / the system save dialog | iPhone | OWED |
