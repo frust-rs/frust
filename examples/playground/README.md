@@ -400,11 +400,14 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Browse panel Manage selection (limited access) | Android device | OWED |
 | Photos: Picker preview of a HEIC pick through the native thumbnail | iPhone | OWED |
 | Photos: Changes panel Save token, relaunch shows the stored token, then Check reports a delta after an insert, an edit and a delete | iPhone | OWED |
-| Photos: Changes panel Save token, relaunch shows the stored token, then Check reports a delta after an insert, an edit and a delete | Android device | OWED |
+| Photos: Changes panel Save token, relaunch shows the stored token, then Check reports a delta after an insert, an edit and a delete | Pixel 5 (Android 14), 2026-11-11 | PASS (empty delta `+0 ~0 -0` with no change; `+1` after an insert; `~1` after an in-place file edit; `-1` after a delete; after a force-stop and relaunch the token is still stored and Check reports `+1` for a photo added while the app was stopped. A file replaced through the filesystem reports as inserted, not updated: MediaStore gives it a new added-generation) |
 | Photos: Changes panel Watch, the wake counter moves when the library changes; Stop holds it | iPhone | OWED |
-| Photos: Changes panel Watch, the wake counter moves when the library changes; Stop holds it | Android device | OWED |
+| Photos: Changes panel Watch, the wake counter moves when the library changes; Stop holds it | Pixel 5 (Android 14), 2026-11-11 | PASS for Watch (the counter went 0 → 2 → 7 → 8 → 9 across an insert, a second insert plus a replace, a delete and an edit); Stop was not exercised |
 | Photos: Browse panel Cursor paging loads every page, and stays stable when an item is added mid-way | iPhone | OWED |
-| Photos: Browse panel Cursor paging loads every page, and stays stable when an item is added mid-way | Android device | OWED |
+| Photos: Browse panel Cursor paging loads every page, and stays stable when an item is added mid-way | Pixel 5 (Android 14), 2026-11-11 | PASS (155 assets: pages of 60, 60 and 35; a photo added after the first page did not appear and nothing repeated; a further Load more stayed at 155) |
+| Photos: Changes panel Check with a forged token answers Full rescan and stores a fresh token | Pixel 5 (Android 14), 2026-11-11 | PASS (a 4-byte forged token gave `Full rescan` and a 75-byte token was stored) |
+| Photos: an edited photo's thumbnail refreshes after Check reports it | Pixel 5 (Android 14), 2026-11-11 | PASS (a photo overwritten in place reported `~1`, and its Browse cell showed the new picture once the cell was rebuilt) |
+| Photos: Android change token size on a real library | Pixel 5 (Android 14), 2026-11-11 | 73 bytes at 13 assets, 217 bytes at 156 assets; no large library measured |
 | Desktop page: Open file / Open files copy the picked file into the app and list its name | iPhone | OWED |
 | Desktop page: Open file / Open files copy the picked file into the app and list its name | Android device | OWED |
 | Desktop page: Export file writes the generated text file through Files / the system save dialog | iPhone | OWED |
