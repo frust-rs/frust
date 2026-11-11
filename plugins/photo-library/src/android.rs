@@ -818,6 +818,25 @@ pub(crate) use android_originals::export_original;
 #[cfg(feature = "save")]
 pub(crate) use android_originals::save;
 
+// Change feed placeholder (full rescan, no observer) until `android_changes.rs` lands.
+#[cfg(feature = "library")]
+pub(crate) fn current_change_token() -> Result<crate::ChangeToken, PhotoError> {
+    Ok(crate::ChangeToken::from_bytes(Vec::new()))
+}
+#[cfg(feature = "library")]
+pub(crate) fn changes_since(
+    _token: &crate::ChangeToken,
+) -> Result<crate::LibraryChanges, PhotoError> {
+    let next = current_change_token()?;
+    Ok(crate::LibraryChanges::FullRescan { next })
+}
+#[cfg(feature = "library")]
+pub(crate) fn start_change_observer() -> Result<(), PhotoError> {
+    Ok(())
+}
+#[cfg(feature = "library")]
+pub(crate) fn stop_change_observer() {}
+
 // EXIF: the `DecodeResult` read both calls share, and `asset_metadata`'s host call.
 #[cfg(any(feature = "decode", feature = "library"))]
 #[path = "android_metadata.rs"]

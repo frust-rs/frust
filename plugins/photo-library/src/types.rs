@@ -102,6 +102,12 @@ impl fmt::Debug for PickOptions {
 }
 
 /// An opaque platform asset identifier. `Debug` never prints the value.
+///
+/// On one device it stays the same across launches on a best-effort basis, so an app may
+/// store it. It is not portable: an id means nothing on another device or platform, and a
+/// restore from backup or a reinstall may change it. An id from a change feed
+/// ([`LibraryChanges`](crate::LibraryChanges)) or an earlier listing may already be gone by
+/// the time it is used, which answers [`PhotoError::NotFound`].
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct AssetId(String);
 
