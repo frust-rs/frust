@@ -8199,6 +8199,82 @@ Media location has no user-facing switch on Android 14: it is granted along with
 
 ---
 
+### `photo-library-no-local-availability` — an asset row does not say whether its original is on the device
+
+**Observed**: `Asset` has no cloud or locally-available field, on either platform. An iCloud-only original on iOS looks like any other row; it surfaces as `PhotoError::NetworkRequired` only when `asset_metadata`, `export_original` or `decode_asset` is asked to read it with `allow_network` off.
+
+**Applies to**: iOS; apps that want to badge or skip cloud-only photos before the user opens them.
+
+**Workaround**: treat `NetworkRequired` as the answer and show the asset as not downloaded.
+
+**Why accepted**: PhotoKit offers no per-asset flag for this without a resource lookup per row, the cost `AssetQuery::with_details` documents for iOS pages.
+
+**Trigger for removal**: a cheap per-row availability signal from Photos.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/library.rs` (`Asset`); `plugins/photo-library/src/apple_metadata.rs` (*Network*); `plugins/photo-library/src/apple_library.rs` (`asset_of`). Not run on a device.
+
+---
+
+### `photo-library-ios-metadata-reads-original` — on iOS `asset_metadata` reads the whole local original
+
+**Observed**: Photos has no call that returns an asset's EXIF from its header alone, so `asset_metadata` reads the original photo resource in full into memory (never to a file) and hands the bytes to ImageIO. Cost grows with the original's size, and an iCloud-only original is downloaded when `MetadataOptions::allow_network` is set. A cancel stops the transfer.
+
+**Applies to**: iOS; apps that read metadata for many assets, or for very large originals, in a row.
+
+**Workaround**: read metadata for the asset the user opened rather than for a whole page, keep `allow_network` off unless the user asked, and cancel through `MetadataOptions::cancel` when the view goes away.
+
+**Why accepted**: no header-only path exists in Photos or ImageIO for a library asset; Android reads through an opened stream with `ExifInterface`.
+
+**Trigger for removal**: a Photos API that returns EXIF without the full resource.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_metadata.rs` (*No header-only path*, *Network*); `plugins/photo-library/src/lib.rs` (`asset_metadata` rustdoc). Memory and time not measured on a device.
+
+---
+
+### `photo-library-android-asset-fields` — `is_favorite` is unknown below API 30 and `burst_id` is never set on Android
+
+**Observed**: `Asset::is_favorite` is `None` below Android API 30, where `MediaStore` has no favourite column, and `Asset::burst_id` is always `None` on Android, which has no burst identifier. iOS fills both.
+
+**Applies to**: Android; apps that group bursts or show a favourites filter.
+
+**Workaround**: treat `None` as unknown, never as false; group bursts on iOS only.
+
+**Why accepted**: the platform does not report either value.
+
+**Trigger for removal**: a `MediaStore` burst identifier, or dropping API 29 support.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/android_library.rs` (`assets_from`); `plugins/photo-library/src/library.rs` (`favorite_from_code`); `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreBrowser.kt` (`FAVORITE_UNKNOWN`). Not run on a device.
+
+---
+
+### `photo-library-content-type-platform-shaped` — `Asset::content_type` is a MIME type on Android and a type identifier on iOS
+
+**Observed**: with `AssetQuery::with_details`, `content_type` is a MIME type such as `image/jpeg` on Android and a uniform type identifier such as `public.heic` on iOS. The two are not interchangeable, and the plugin does not convert between them. `file_name` is the platform's original name and is untrusted.
+
+**Applies to**: apps that branch on the type of an asset on both platforms.
+
+**Workaround**: normalise per platform in app code, or classify by `Asset::kind` and the file extension.
+
+**Why accepted**: each platform's own identifier is lossless; a mapping table would drop types it did not list.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/library.rs` (`Asset::content_type`); `plugins/photo-library/src/apple_originals.rs` (`primary_names`); `plugins/photo-library/src/android_library.rs` (`assets_from`). Not run on a device.
+
+---
+
+### `photo-library-android-thumbnail-early-cancel` — an Android thumbnail cancel that lands before the host starts the load does not stop it
+
+**Observed**: `thumbnail_shared` cancels an Android load through a `CancellationSignal` the Kotlin host registers under the request id. A cancel that arrives before the host has registered the signal finds nothing to fire, so that one load runs to its end and its pixels are dropped. The call still returns `PhotoError::Cancelled` (the token is checked on both sides of the host call), and nothing is cached. A cancel during the load stops it only where `MediaStore` honours the signal.
+
+**Applies to**: Android; apps that cancel thumbnail loads as cells leave the screen, in a fast fling.
+
+**Workaround**: none needed for correctness; the wasted work is bounded by one thumbnail per such cancel.
+
+**Why accepted**: the signal exists only once the host call is under way, and the result is correct either way.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/android_library.rs` (module docs, `thumbnail`, `cancel_thumbnail`); `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreBrowser.kt` (`cancelThumbnail`). Not run on a device.
+
+---
+
 ### `time-no-firing-while-backgrounded` — a `frust::time::Timer` gets no regular ticks while the app is backgrounded (Android, iOS)
 
 **Observed**: Android removes its frame callback at `onPause` and pumps nothing at `onPause`/`onStop`; iOS
