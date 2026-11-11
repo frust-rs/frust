@@ -7983,11 +7983,11 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 ### `photo-library-android-paging-cost` — each Android asset page counts and sorts the whole match
 
-**Observed**: every `assets` page runs a `MediaStore` query that counts all matching rows and sorts them by a computed key (`DATE_TAKEN` when positive, else `DATE_ADDED`), and `albums` scans every row. API 29 pages by moving a cursor rather than by a query offset. The cost grows with library size and has not been measured on very large libraries.
+**Observed**: every `assets` (offset) page runs a `MediaStore` query that counts all matching rows and sorts them by a computed key (`DATE_TAKEN` when positive, else `DATE_ADDED`), and `albums` scans every row. API 29 pages by moving a cursor rather than by a query offset. `assets_after` (cursor paging) takes no count and no seek: each page is a keyset query that reads one row past its page, though it still sorts on the same key; offset paging still pays both. The cost grows with library size and has not been measured on very large libraries.
 
 **Applies to**: Android; libraries with tens of thousands of items.
 
-**Workaround**: request larger pages less often, and load albums once.
+**Workaround**: page with `PhotoLibrary::assets_after` instead of `assets`, or request larger pages less often; load albums once.
 
 **Why accepted**: acceptable for a first release on the devices tried; the sort key keeps the order identical to the reported timestamp.
 
@@ -7999,17 +7999,81 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 ### `photo-library-thumbnail-cache-staleness` — cached thumbnails can outlive access or the asset
 
-**Observed**: `PhotoLibrary::thumbnail` serves a cache hit (48 MiB by default) before any platform call, so it skips the access check. The cache empties itself on `manage_limited_selection` success and on a miss answering `PermissionDenied`. A selection changed any other way (a `frust-permissions` request on Android while access is Limited), or an edited or deleted asset, is not noticed until `clear_thumbnail_cache` or eviction.
+**Observed**: `PhotoLibrary::thumbnail` serves a cache hit (48 MiB by default) before any platform call, so it skips the access check. The cache empties itself on `manage_limited_selection` success and on a miss answering `PermissionDenied`. A `Delta` from `PhotoLibrary::changes_since` evicts every size of its updated and deleted ids and a `FullRescan` clears the cache. An app that never calls `changes_since` still keeps a stale entry for an edited or deleted asset until `clear_thumbnail_cache` or eviction, and a selection changed any other way (a `frust-permissions` request on Android while access is Limited) is not noticed either.
 
-**Applies to**: apps showing thumbnails after the user changed photo access or edited photos outside the app.
+**Applies to**: apps showing thumbnails after the user changed photo access or edited photos outside the app, and that do not apply the change feed.
 
-**Workaround**: call `PhotoLibrary::clear_thumbnail_cache()` after your own permission request or on app resume, or set the budget to 0.
+**Workaround**: call `changes_since` (wake it from `on_library_changed`) and keep its `next` token; or call `PhotoLibrary::clear_thumbnail_cache()` after your own permission request or on app resume, or set the budget to 0.
 
-**Why accepted**: a hit costs no platform call, which keeps a scrolling grid cheap; there is no change notification wired.
+**Why accepted**: a hit costs no platform call, which keeps a scrolling grid cheap; the cache is evicted by the change feed only when the app asks for it, because the wake carries no data.
 
-**Trigger for removal**: a library change observer that clears the cache.
+**Trigger for removal**: none for the access case; the asset case is handled for apps that call `changes_since`.
 
-**Evidence**: (2026-11-09) `plugins/photo-library/src/lib.rs` (`thumbnail`, `cached_thumbnail`); `plugins/photo-library/src/thumb_cache.rs`.
+**Evidence**: (2026-11-09, revised 2026-11-11) `plugins/photo-library/src/lib.rs` (`thumbnail`, `cached_thumbnail`, `changes_since`); `plugins/photo-library/src/changes.rs` (`changes_since_with` and its tests); `plugins/photo-library/src/thumb_cache.rs`. The eviction is established from code and headless tests, not a device run.
+
+---
+
+### `photo-library-change-feed-full-rescan` — the change feed answers a full rescan where Photos or MediaStore keeps no history
+
+**Observed**: `PhotoLibrary::changes_since` answers `LibraryChanges::FullRescan` (with a fresh `next` token) instead of a `Delta` on iOS 15 (Photos keeps a persistent change history from iOS 16; the token is a fixed placeholder), on Android API 29 (`MediaStore` keeps no generations), when the token expired (iOS) or the change details are unavailable, when the `MediaStore` volume version differs from the token's or the generation is below it (Android), and when the token bytes do not decode (another platform's, an older or newer format, empty or truncated). It is not an error; the app re-reads the library.
+
+**Applies to**: iOS 15 and Android API 29 always; any app that stores a token across long gaps, a database rebuild or a device change.
+
+**Workaround**: treat `FullRescan` as "re-list with `assets` or `assets_after`", store its `next`, and keep the rescan path as cheap as the first launch.
+
+**Why accepted**: the platforms keep no older history to answer from; a full rescan is correct, only slower.
+
+**Trigger for removal**: none; a floor raised to iOS 16 and API 30 would remove two of the cases.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_changes.rs`, `plugins/photo-library/src/android_changes.rs` and `plugins/photo-library/src/changes.rs`. Established from code and headless tests, not a device run.
+
+---
+
+### `photo-library-android-change-token-size` — the Android change token grows with the library and each call moves a full snapshot
+
+**Observed**: an Android `ChangeToken` encodes the sorted id sets of the visible images and videos (delta-encoded varints), so it takes about 100 KB per 100,000 assets, and about 200 KB when the ids are very sparse (gaps up to 16,384). Each `changes_since` call also reads every visible row's id, kind and two generations through JNI, about 2.8 MB for a 100,000-asset library, once per call and never kept. Cost and token size grow with library size.
+
+**Applies to**: Android; libraries with tens of thousands of items or more, and an app that persists the token or calls `changes_since` often.
+
+**Workaround**: call `changes_since` from a coalesced wake (`on_library_changed`) off the UI thread rather than on a timer, and store the token in a file or database rather than a preference.
+
+**Why accepted**: the id set is how rows that became visible without being added (a published pending item, a restored item, a widened selection) are reported as inserted, and how deletions are found without `MediaStore.DeletedFiles`.
+
+**Trigger for removal**: a device measurement on a large library, and a cheaper snapshot if it is slow.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/android_changes.rs` (*The token*; the size is from its host test and arithmetic); `plugins/photo-library/platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreChanges.kt`. Code and headless tests, not a device run.
+
+---
+
+### `photo-library-ios-cursor-pins-snapshot` — an iOS paging cursor session sees one frozen snapshot
+
+**Observed**: PhotoKit has no keyset fetch, so `PhotoLibrary::assets_after` on iOS pins one `PHFetchResult` snapshot for a cursor session, fetched by the first page (`cursor: None`). Inserts and deletes after that first page do not appear until a new session starts from `None`, and an asset deleted since can answer `NotFound` from `thumbnail`. Only the four most recently used sessions keep their snapshot; the cursor of an evicted session answers `PhotoError::InvalidRequest`. Assets that share a creation date keep PhotoKit's order within the snapshot.
+
+**Applies to**: iOS apps that page with `assets_after`, especially several paging sessions at once (for example one per album) or a long-lived list.
+
+**Workaround**: on `InvalidRequest` restart from `None`; combine paging with `changes_since` to pick up later changes; start a new session on `FullRescan`.
+
+**Why accepted**: a position inside a snapshot is the only stable paging PhotoKit allows, and the bound on sessions keeps the held fetch results from growing.
+
+**Trigger for removal**: PhotoKit offering a stable secondary sort or keyset fetch.
+
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_library.rs` (*Cursor paging*, `Snapshot`); `plugins/photo-library/src/library.rs` (`SnapshotStore`, `SNAPSHOT_SESSIONS`). Code and headless tests (the store), not a device run.
+
+---
+
+### `photo-library-change-feed-not-device-tested` — the change feed and cursor paging have not run on a device
+
+**Observed**: `current_change_token`, `changes_since`, `on_library_changed`, `assets_after` and `cloud_identifiers` are covered by host tests and the Kotlin contract test only. No iPhone or Android device has run them, so the PhotoKit persistent-change fetch, the change observers, the `MediaStore` generation reads, keyset paging against a real library and the cloud-identifier mapping are unconfirmed on hardware.
+
+**Applies to**: iOS and Android apps that use any of those calls.
+
+**Workaround**: none; verify on the target device before depending on them.
+
+**Why accepted**: the device gate is a separate step from the code.
+
+**Trigger for removal**: the device gate records a run of the change feed and cursor paging on iOS and Android (including iOS 15 and API 29 for the `FullRescan` answer).
+
+**Evidence**: (2026-11-11) established from the code and headless tests, not from a device observation: `plugins/photo-library/src/changes.rs`, `apple_changes.rs`, `android_changes.rs`, `apple_library.rs`, `android_library.rs`.
 
 ---
 
