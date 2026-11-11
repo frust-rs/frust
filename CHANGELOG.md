@@ -32,6 +32,13 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   `provide_context` called from a handler inside a component now lands on that component's owner
   (visible to that component's subtree only, gone when it is disposed), where before it landed on the
   app's root owner; to provide app-wide from a handler, enter a longer-lived owner first.
+- `NavigatorController::pop_with_result` is now single-shot per page: a second call for the same top
+  page before the first is applied (a double click on a dialog button, say) is dropped and its result
+  discarded, so the `push_for_result` callback receives the first result once and no second page is
+  popped. Only an immediate repeat is recognised: once another op is queued between the two calls the
+  second is queued as usual. `pop()` is unchanged, and `pop_with_result` followed by `pop()` still pops
+  two pages. Migration: remove app-side latches that guarded against a double pop. An app that meant
+  to pop two pages with results calls it once per page across frames, or uses `pop()`.
 
 ### Added
 
@@ -123,9 +130,33 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 - `AssetId` documents its stability: best-effort the same across launches on one device, so an app may
   store it; not portable to another device or platform, and a restore or reinstall may change it.
 - The playground's Photos page gains a Changes panel and a cursor-paging toggle.
+- `semantics(child)`: a view that wraps a child with its own accessibility node, with builders
+  `label`, `role`, `heading(level)` and `hidden(bool)` (omits the subtree from the semantics tree).
+  `semantics_label(text)` is a zero-size leaf that only announces its text. Both are re-exported from
+  `frust`.
+- `TextInputView::on_caret_change(|state, CaretInfo| ..)` and `CaretInfo { rect, line, offset,
+  selection }` (non-exhaustive): where the caret is, fired when the field gains focus through an event
+  it handles and whenever the rect, line, offset or selection then differs from the last report.
+  When an event also changes the text, `on_change` runs first. Not reported: a controlled-value
+  rebuild that moves the caret, a relayout that reflows it onto another line, and focus granted
+  programmatically (the first report then comes with the next handled event). `TextEditor::caret_line()`
+  in `frust-text` gives the visual line of the caret.
+- `frust doctor` reads the Android NDK's version: ok at r28 or later, a warning below it (its
+  libraries are not 16 KB aligned), and "version not verified" when the revision cannot be read. The
+  missing-NDK text recommends `ndk;28.2.13676358`.
+- The app template's `app/build.gradle.kts` pins `ndkVersion` to 28.2.13676358; set
+  `FRUST_ANDROID_NDK_VERSION` in the environment to build with another. `cargoNdkBuild` exports
+  `ANDROID_NDK_HOME` for that NDK and fails with an `sdkmanager --install "ndk;<version>"` hint when
+  it is not installed.
+- `scripts/ci/page-size-check.sh`: fails when any `PT_LOAD` segment of an Android `.so` is aligned
+  below 0x4000. The `android-relr-guard` CI job runs it on the one debug arm64 library that job builds.
+- `deny.toml` (advisories only, each ignore with its reason) and an `advisories` CI job that runs a
+  pinned `cargo-deny` on pull requests and weekly. It is not a merge gate.
 
 ### Changed
 
+- New apps build with NDK 28.2.13676358, and `frust doctor` recommends r28 (earlier NDKs produce
+  libraries that are not 16 KB aligned).
 - accesskit 0.25, `accesskit_winit` 0.34, `accesskit_android` 0.9, `accesskit_ios` 0.2.2.
 - The plugin registry's `photo-library` `library` option now also links `ImageIO` on iOS, which
   `asset_metadata` reads through; a project that also enables `decode` links it once.

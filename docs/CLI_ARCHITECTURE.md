@@ -180,7 +180,8 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
 - `doctor`/`devices`: `dispatch` runs `frust-drive`'s independent, non-fatal `Validator`/
   `DeviceDiscovery` sets through the injected runner; the CLI renders the resulting report.
   `doctor` also prints a "Platform packages" section: the directory the project resolves for
-  android, ios, and web through one `PackageLocator`, or the resolution error.
+  android, ios, and web through one `PackageLocator`, or the resolution error. The Android area reads
+  the NDK's `Pkg.Revision`: ok at r28 or later, a warning below it (not 16 KB aligned).
 - `run`/`build`: CLI args become a `BuildInfo`, which drives `frust-drive`'s Android/iOS pipelines
   (compile → install → launch/stream) through the same `ProcessRunner`; desktop falls back to a
   `cargo run` passthrough (via `desktop_run`) with an optional `--watch` loop (below). `-d android|ios`
