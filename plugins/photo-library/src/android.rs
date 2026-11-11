@@ -113,6 +113,14 @@
 //! `thumbnail` and `manageLimitedSelection` host calls and refuses the UI
 //! thread on each; see that module and the Kotlin host's contract table.
 //!
+//! # Change feed
+//!
+//! With the `library` feature, `android_changes` adds the `changeSnapshot`,
+//! `startChangeObserver` and `stopChangeObserver` host calls and the
+//! `nativeOnLibraryChanged` export: tokens from `MediaStore` versions,
+//! generations and id sets, and a `ContentObserver` wake. Its token and diff
+//! logic is platform-free and checked on the host; see that module.
+//!
 //! # Originals and saves
 //!
 //! `android_originals` implements `export_original` (`library`) and `save`
@@ -818,24 +826,14 @@ pub(crate) use android_originals::export_original;
 #[cfg(feature = "save")]
 pub(crate) use android_originals::save;
 
-// Change feed placeholder (full rescan, no observer) until `android_changes.rs` lands.
+// Change feed: `current_change_token`, `changes_since` and the `ContentObserver` wake.
 #[cfg(feature = "library")]
-pub(crate) fn current_change_token() -> Result<crate::ChangeToken, PhotoError> {
-    Ok(crate::ChangeToken::from_bytes(Vec::new()))
-}
+#[path = "android_changes.rs"]
+mod android_changes;
 #[cfg(feature = "library")]
-pub(crate) fn changes_since(
-    _token: &crate::ChangeToken,
-) -> Result<crate::LibraryChanges, PhotoError> {
-    let next = current_change_token()?;
-    Ok(crate::LibraryChanges::FullRescan { next })
-}
-#[cfg(feature = "library")]
-pub(crate) fn start_change_observer() -> Result<(), PhotoError> {
-    Ok(())
-}
-#[cfg(feature = "library")]
-pub(crate) fn stop_change_observer() {}
+pub(crate) use android_changes::{
+    changes_since, current_change_token, start_change_observer, stop_change_observer,
+};
 
 // EXIF: the `DecodeResult` read both calls share, and `asset_metadata`'s host call.
 #[cfg(any(feature = "decode", feature = "library"))]

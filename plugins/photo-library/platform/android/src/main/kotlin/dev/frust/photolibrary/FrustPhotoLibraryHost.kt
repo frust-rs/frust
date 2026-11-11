@@ -44,8 +44,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * and its `@JvmStatic` entry points are looked up by string from Rust through
  * the application classloader, and the mangled JNI symbols of
  * [nativeOnPickResult], [nativeOnPickError], [nativeOnPickProgress],
- * [nativeOnExportProgress], [nativeOnExportDone] and [nativeOnSaveDone] are
- * exported by that same module. **The class may never move and no signature may change without a
+ * [nativeOnExportProgress], [nativeOnExportDone], [nativeOnSaveDone] and
+ * [nativeOnLibraryChanged] are exported by that same crate. **The class may never move and no signature may change without a
  * coordinated change on both sides.** The integer codes below are pinned
  * against their Rust twins by `plugins/photo-library/tests/kotlin_contract.rs`.
  *
@@ -71,6 +71,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Rust → Kotlin | `decodeInto(requestId: Long, path: String, width: Int, height: Int, srgb: Boolean, pixels: ByteBuffer): DecodeResult` | a [DecodeResult]; the same codes plus [CANCELLED] |
  * | Rust → Kotlin | `cancelDecode(requestId: Long)` — `(J)V` | nothing; an unknown or finished id is ignored |
  * | Rust → Kotlin | `assetMetadata(id: String): DecodeResult` | a [DecodeResult] carrying the asset's EXIF, `colorSpace` always [COLOR_OTHER]; `code` is [OK], [NOT_FOUND], [NOT_INITIALIZED], [PERMISSION_DENIED] or [DECODE_FAILED] |
+ * | Rust → Kotlin | `changeSnapshot(withGenerations: Boolean): ChangesResult` — `(Z)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ChangesResult;` | a [ChangesResult]; `code` is [OK], [NOT_INITIALIZED], [PERMISSION_DENIED] or [QUERY_FAILED] |
+ * | Rust → Kotlin | `startChangeObserver(): Int` — `()I` | [OK] once the observer is registered (also when it already was), [NOT_INITIALIZED], [PERMISSION_DENIED] or [QUERY_FAILED] |
+ * | Rust → Kotlin | `stopChangeObserver()` — `()V` | nothing; a stopped observer is ignored |
+ * | Kotlin → Rust | `nativeOnLibraryChanged()` | the library may have changed; carries no data |
  *
  * Every request that returned [PENDING] gets exactly one answer: a pick gets
  * [nativeOnPickResult] or [nativeOnPickError], an export [nativeOnExportDone],
@@ -105,6 +109,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * only with `ACCESS_MEDIA_LOCATION`), reads it with `ExifInterface`, and
  * answers through [ImageDecodeHost]'s shared EXIF read. It never touches the
  * pick slot or an executor.
+ *
+ * ## Change feed
+ *
+ * [changeSnapshot], [startChangeObserver] and [stopChangeObserver] run in
+ * [MediaStoreChanges] on the calling thread and never touch the pick slot or
+ * an executor. The observer's every `onChange` calls [notifyLibraryChanged]
+ * with no lock held, so Rust may call [stopChangeObserver] from inside the
+ * wake.
  *
  * ## Browsing
  *
@@ -327,6 +339,27 @@ object FrustPhotoLibraryHost {
         @JvmField val gpsLongitude: Double,
     )
 
+    /**
+     * [changeSnapshot]: the volume version, the generation
+     * ([MediaStoreChanges.NO_GENERATION] below API 30) and the visible rows as
+     * parallel arrays: `_ID`, kind ([KIND_IMAGE] or [KIND_VIDEO]), and, when
+     * the call asked for generations, `GENERATION_ADDED` and
+     * `GENERATION_MODIFIED` ([added] and [modified] are empty otherwise).
+     * [imageBase] and [videoBase] are the typed collection URIs the browser's
+     * ids are built under. A failed call has only [code].
+     */
+    class ChangesResult(
+        @JvmField val code: Int,
+        @JvmField val version: String?,
+        @JvmField val generation: Long,
+        @JvmField val ids: LongArray,
+        @JvmField val kinds: IntArray,
+        @JvmField val added: LongArray,
+        @JvmField val modified: LongArray,
+        @JvmField val imageBase: String?,
+        @JvmField val videoBase: String?,
+    )
+
     /** The application [Context], installed once by [FrustPhotoLibraryInitProvider]. */
     @Volatile
     private var appContext: Context? = null
@@ -375,6 +408,10 @@ object FrustPhotoLibraryHost {
     /** Set once [nativeOnExportProgress] is found missing, so it is not retried. */
     @Volatile
     private var exportProgressUnavailable: Boolean = false
+
+    /** Set once [nativeOnLibraryChanged] is found missing, so it is not retried. */
+    @Volatile
+    private var libraryChangedUnavailable: Boolean = false
 
     /** Guards a single [Application.registerActivityLifecycleCallbacks] call. */
     @Volatile
@@ -581,6 +618,24 @@ object FrustPhotoLibraryHost {
     @JvmStatic
     fun assetMetadata(id: String): DecodeResult = AssetMetadataHost.read(appContext, id)
 
+    /**
+     * The library's change position and visible ids (class doc, "Change
+     * feed"). Any thread but the main one (the query blocks).
+     */
+    @JvmStatic
+    fun changeSnapshot(withGenerations: Boolean): ChangesResult =
+        MediaStoreChanges.snapshot(appContext, withGenerations)
+
+    /** Register the change observer. Any thread; idempotent. */
+    @JvmStatic
+    fun startChangeObserver(): Int = MediaStoreChanges.startObserver(appContext)
+
+    /** Unregister the change observer. Any thread, including inside its wake. */
+    @JvmStatic
+    fun stopChangeObserver() {
+        MediaStoreChanges.stopObserver(appContext)
+    }
+
     // --- Kotlin -> Rust -----------------------------------------------------
 
     /**
@@ -618,6 +673,10 @@ object FrustPhotoLibraryHost {
     /** Answers the [saveToLibrary] that returned [PENDING] with the same [requestId]. */
     @JvmStatic
     external fun nativeOnSaveDone(requestId: Long, code: Int, uri: String?)
+
+    /** The library may have changed: wakes every Rust subscriber. Carries no data. */
+    @JvmStatic
+    external fun nativeOnLibraryChanged()
 
     // Every native call is guarded: a missing symbol (an app that depends on
     // this Gradle module without the `frust-photo-library` Rust crate) must
@@ -681,6 +740,17 @@ object FrustPhotoLibraryHost {
             nativeOnSaveDone(requestId, code, uri)
         } catch (e: Throwable) {
             Log.w(TAG, "frust-photo-library: nativeOnSaveDone unavailable", e)
+        }
+    }
+
+    /** [MediaStoreChanges]' wake; called with no lock held. */
+    internal fun notifyLibraryChanged() {
+        if (libraryChangedUnavailable) return
+        try {
+            nativeOnLibraryChanged()
+        } catch (e: Throwable) {
+            libraryChangedUnavailable = true
+            Log.w(TAG, "frust-photo-library: nativeOnLibraryChanged unavailable", e)
         }
     }
 

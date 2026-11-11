@@ -41,7 +41,18 @@
 //! - metadata: the `assetMetadata` call and its result match, the host opens
 //!   the asset with the export's own open and reuses the decoder's EXIF read
 //!   (no tag read of its own), closes its stream, reports no GPS from a
-//!   redacted read, and the Rust arm refuses the UI thread and types its codes.
+//!   redacted read, and the Rust arm refuses the UI thread and types its codes;
+//! - change feed: the snapshot and observer calls, the `ChangesResult` fields,
+//!   the `nativeOnLibraryChanged` export and `NO_GENERATION` match; the
+//!   snapshot refuses the UI thread, checks access, reads the position before
+//!   the rows and queries the browser's own collection and selection; the
+//!   observer covers both collections, wakes from every `onChange` overload
+//!   with no lock held, and unregisters outside its lock.
+//!
+//! The change feed's platform-free core (`src/android_changes.rs` outside its
+//! JNI arm: the token, the generation filter and the id-set diff) is included
+//! below as a module, so its own unit tests run here on the host (precedent:
+//! `crates/frust-shell-android/tests/adpf.rs`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -69,6 +80,15 @@ const RUST_ANDROID_DECODE: &str = "src/android_decode.rs";
 const KOTLIN_METADATA: &str =
     "platform/android/src/main/kotlin/dev/frust/photolibrary/AssetMetadataHost.kt";
 const RUST_ANDROID_METADATA: &str = "src/android_metadata.rs";
+const KOTLIN_CHANGES: &str =
+    "platform/android/src/main/kotlin/dev/frust/photolibrary/MediaStoreChanges.kt";
+const RUST_ANDROID_CHANGES: &str = "src/android_changes.rs";
+
+// The change feed's token and diff logic, run on the host; its JNI arm is Android-only.
+#[cfg(not(target_os = "android"))]
+#[allow(dead_code)]
+#[path = "../src/android_changes.rs"]
+mod android_changes;
 
 /// How many leading [`SHARED_CODES`] are result codes (the rest are filters and kinds).
 const RESULT_CODES: usize = 16;
@@ -198,11 +218,13 @@ fn kotlin_codes_equal_their_rust_twins() {
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_ORIGINALS)));
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_DECODE)));
     rust.extend(rust_jint_consts(&read(RUST_ANDROID_METADATA)));
-    // The originals, decode and metadata modules repeat some codes; `extend` would mask a drift.
+    // The originals, decode, metadata and change modules repeat some codes; `extend` would mask
+    // a drift.
     for file in [
         RUST_ANDROID_ORIGINALS,
         RUST_ANDROID_DECODE,
         RUST_ANDROID_METADATA,
+        RUST_ANDROID_CHANGES,
     ] {
         for (name, value) in rust_jint_consts(&read(file)) {
             assert_eq!(
@@ -1990,4 +2012,341 @@ fn metadata_refuses_the_ui_thread_and_types_its_codes() {
         !rust.contains("unsafe"),
         "src/android_metadata.rs holds no `unsafe`"
     );
+}
+
+#[test]
+fn change_feed_jni_calls_match_the_kotlin_declarations() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_CHANGES);
+    for (decl, name, sig) in [
+        (
+            "@JvmStatic\n    fun changeSnapshot(withGenerations: Boolean): ChangesResult",
+            "changeSnapshot",
+            "(Z)Ldev/frust/photolibrary/FrustPhotoLibraryHost$ChangesResult;",
+        ),
+        (
+            "@JvmStatic\n    fun startChangeObserver(): Int",
+            "startChangeObserver",
+            "()I",
+        ),
+        (
+            "@JvmStatic\n    fun stopChangeObserver() {",
+            "stopChangeObserver",
+            "()V",
+        ),
+    ] {
+        assert!(kotlin.contains(decl), "Kotlin host must declare `{decl}`");
+        let at = rust
+            .find(&format!("jni_str!(\"{name}\")"))
+            .unwrap_or_else(|| panic!("src/android_changes.rs never calls `{name}`"));
+        let window = &rust[at..(at + 200).min(rust.len())];
+        assert!(
+            window.contains(&format!("jni_sig!(\"{sig}\")")),
+            "src/android_changes.rs must call `{name}` with `{sig}`"
+        );
+        assert!(
+            rust.contains(&format!("`{name}` | `(")),
+            "src/android_changes.rs's contract table must list `{name}`"
+        );
+        assert!(
+            kotlin.contains(&format!("`{name}(")),
+            "the Kotlin host's contract table must list `{name}`"
+        );
+    }
+    let host = rust_code(&kotlin);
+    for (entry, forward) in [
+        (
+            "fun changeSnapshot(",
+            "MediaStoreChanges.snapshot(appContext, withGenerations)",
+        ),
+        (
+            "fun startChangeObserver(",
+            "MediaStoreChanges.startObserver(appContext)",
+        ),
+        (
+            "fun stopChangeObserver(",
+            "MediaStoreChanges.stopObserver(appContext)",
+        ),
+    ] {
+        let at = host.find(entry).unwrap();
+        assert!(
+            host[at..(at + 200).min(host.len())].contains(forward),
+            "`{entry}` must forward to `{forward}`"
+        );
+    }
+
+    let android = read(RUST_ANDROID);
+    assert!(
+        android.contains(
+            "#[cfg(feature = \"library\")]\n#[path = \"android_changes.rs\"]\nmod android_changes;"
+        ),
+        "src/android.rs declares the change feed under `library`"
+    );
+    assert!(
+        android.contains(
+            "pub(crate) use android_changes::{\n    changes_since, current_change_token, start_change_observer, stop_change_observer,\n};"
+        ),
+        "src/android.rs re-exports the four change-feed arms"
+    );
+    let code = rust_code(&android);
+    assert!(
+        !android.contains("placeholder") && !code.contains("fn current_change_token("),
+        "the placeholder arms are gone from src/android.rs"
+    );
+}
+
+#[test]
+fn change_result_fields_match_their_rust_reads() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_CHANGES);
+    let fields = [
+        ("code", "Int", "int_field"),
+        ("version", "String?", "string_field"),
+        ("generation", "Long", "get_field"),
+        ("ids", "LongArray", "long_array_field"),
+        ("kinds", "IntArray", "int_array_field"),
+        ("added", "LongArray", "long_array_field"),
+        ("modified", "LongArray", "long_array_field"),
+        ("imageBase", "String?", "string_field"),
+        ("videoBase", "String?", "string_field"),
+    ];
+    let declared = jvm_fields(&kotlin, "class ChangesResult(");
+    let expected: Vec<_> = fields
+        .iter()
+        .map(|(name, ty, _)| (name.to_string(), ty.to_string()))
+        .collect();
+    assert_eq!(declared, expected, "`ChangesResult` fields changed");
+    for (name, _, reader) in fields {
+        let read = if reader == "get_field" {
+            format!(".get_field(&result, jni_str!(\"{name}\")")
+        } else {
+            format!("{reader}(env, &result, jni_str!(\"{name}\"))")
+        };
+        assert!(
+            rust.contains(&read),
+            "no `{read}` in src/android_changes.rs"
+        );
+    }
+    assert!(
+        rust.contains(".get_field(&result, jni_str!(\"generation\"), jni_sig!(\"J\"))"),
+        "`generation` is a Long"
+    );
+
+    // The generation the host reports below API 30.
+    let changes = read(KOTLIN_CHANGES);
+    assert!(changes.contains("\n    const val NO_GENERATION = -1L\n"));
+    assert!(rust.contains("\nconst NO_GENERATION: i64 = -1;\n"));
+    let failed = function(&changes, "private fun failed(");
+    assert!(failed.contains("ChangesResult(code, null, NO_GENERATION,"));
+    let read_rows = function(&changes, "private fun read(");
+    assert!(
+        read_rows.contains("FrustPhotoLibraryHost.OK, MediaStore.getVersion(ctx), NO_GENERATION,"),
+        "API 29 answers no generation"
+    );
+}
+
+#[test]
+fn the_library_changed_export_matches_its_kotlin_external() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_CHANGES);
+    assert!(
+        kotlin.contains("@JvmStatic\n    external fun nativeOnLibraryChanged()\n"),
+        "Kotlin `nativeOnLibraryChanged` signature changed"
+    );
+    let symbol = "Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnLibraryChanged";
+    let decl = format!("pub extern \"system\" fn {symbol}<");
+    assert!(
+        rust.contains(&decl),
+        "src/android_changes.rs must export `{symbol}`"
+    );
+    let export = function(&rust, &decl);
+    assert!(
+        export.contains("_class: JClass<'local>,\n    ) {"),
+        "`{symbol}` takes no argument besides the class"
+    );
+    assert!(export.contains("crate::changes::notify_all();"));
+    assert!(
+        export.contains(".resolve::<LogErrorAndDefault>()"),
+        "`{symbol}` must never unwind into the JVM"
+    );
+    assert!(
+        rust.contains("#[unsafe(no_mangle)]\n    pub extern \"system\" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnLibraryChanged<"),
+        "the export keeps its JNI symbol"
+    );
+    let notify = function(&kotlin, "internal fun notifyLibraryChanged(");
+    assert!(
+        notify.contains("nativeOnLibraryChanged()") && notify.contains("catch (e: Throwable)"),
+        "a missing symbol degrades to a log line"
+    );
+    assert!(
+        kotlin.contains("`nativeOnLibraryChanged()`"),
+        "the Kotlin host's contract table must list `nativeOnLibraryChanged`"
+    );
+}
+
+#[test]
+fn the_change_snapshot_refuses_the_ui_thread_and_checks_access() {
+    let rust = rust_code(&read(RUST_ANDROID_CHANGES));
+    let snapshot = function(&rust, "fn snapshot(with_generations: bool)");
+    let ui = snapshot
+        .find("ensure_off_ui_thread(env)?;")
+        .expect("the snapshot refuses the UI thread");
+    assert!(ui < snapshot.find("call_static_method").unwrap());
+    for arm in [
+        "pub(crate) fn current_change_token(",
+        "pub(crate) fn changes_since(",
+    ] {
+        let body = function(&rust, arm);
+        assert!(
+            body.contains("snapshot(") || body.contains("current_change_token()?"),
+            "`{arm}` reads through the UI-thread-checked snapshot"
+        );
+        assert!(!body.contains("call_static_method"));
+    }
+    let errors = function(&rust, "fn changes_error(");
+    for mapping in [
+        "NOT_INITIALIZED => PhotoError::PlatformNotInitialized,",
+        "PERMISSION_DENIED => PhotoError::PermissionDenied,",
+        "QUERY_FAILED => PhotoError::Platform(",
+        "other => error_for(other),",
+    ] {
+        assert!(
+            errors.contains(mapping),
+            "changes_error must map `{mapping}`"
+        );
+    }
+    assert!(
+        !rust.contains("PickGuard") && !rust.contains("WAITS"),
+        "the change feed never touches pick state"
+    );
+
+    let changes = read(KOTLIN_CHANGES);
+    assert!(changes.contains("package dev.frust.photolibrary\n"));
+    assert!(changes.contains("\ninternal object MediaStoreChanges {"));
+    let guard = function(&changes, "fun snapshot(");
+    assert!(
+        guard.contains("if (ctx == null) return failed(FrustPhotoLibraryHost.NOT_INITIALIZED)")
+    );
+    assert!(
+        guard.contains(
+            "if (!hasAccess(ctx)) return failed(FrustPhotoLibraryHost.PERMISSION_DENIED)"
+        )
+    );
+    assert!(guard.contains("catch (e: SecurityException)"));
+    assert!(guard.contains("failed(FrustPhotoLibraryHost.QUERY_FAILED)"));
+    let access = function(&changes, "private fun hasAccess(");
+    assert!(
+        access.contains("MediaStoreBrowser.mediaPermissions(Build.VERSION.SDK_INT)"),
+        "the change feed checks the browser's permission set"
+    );
+    let start = function(&changes, "fun startObserver(");
+    assert!(start.contains("if (!hasAccess(ctx)) return FrustPhotoLibraryHost.PERMISSION_DENIED"));
+    for pick_state in ["claimInFlight", "inFlight", "copyExecutor", ", e)"] {
+        assert!(
+            !changes.contains(pick_state),
+            "MediaStoreChanges.kt must not use `{pick_state}`"
+        );
+    }
+}
+
+#[test]
+fn the_change_snapshot_reads_the_position_first_from_the_browsers_query() {
+    let changes = read(KOTLIN_CHANGES);
+    let browser = read(KOTLIN_BROWSER);
+    let files = "private val FILES_URI: Uri = MediaStore.Files.getContentUri(\"external\")";
+    assert!(changes.contains(files) && browser.contains(files));
+    let selection = "IN ($MEDIA_TYPE_IMAGE, $MEDIA_TYPE_VIDEO)";
+    assert!(changes.contains(selection) && browser.contains(selection));
+    for base in [
+        "MediaStore.Images.Media.EXTERNAL_CONTENT_URI",
+        "MediaStore.Video.Media.EXTERNAL_CONTENT_URI",
+    ] {
+        assert!(
+            browser.contains(base),
+            "the browser builds ids under `{base}`"
+        );
+        assert!(
+            function(&changes, "private fun read(").contains(&format!("{base}.toString()")),
+            "the snapshot reports `{base}`"
+        );
+    }
+    let read_rows = function(&changes, "private fun read(");
+    let sdk = read_rows.find("if (Build.VERSION.SDK_INT < 30) {").unwrap();
+    let version = read_rows
+        .find("MediaStore.getVersion(ctx, MediaStore.VOLUME_EXTERNAL_PRIMARY)")
+        .unwrap();
+    let generation = read_rows
+        .find("MediaStore.getGeneration(ctx, MediaStore.VOLUME_EXTERNAL_PRIMARY)")
+        .unwrap();
+    let query = read_rows
+        .find("ctx.contentResolver.query(FILES_URI, projection, SELECTION, null,")
+        .unwrap();
+    assert!(
+        sdk < version && version < query && generation < query,
+        "below API 30 there is no generation, and the position is read before the rows"
+    );
+    assert!(changes.contains("MediaStore.MediaColumns.GENERATION_ADDED"));
+    assert!(changes.contains("MediaStore.MediaColumns.GENERATION_MODIFIED"));
+    assert!(
+        !changes.contains("DeletedFiles"),
+        "deletions come from the id set"
+    );
+}
+
+#[test]
+fn the_observer_wakes_from_every_overload_and_stops_outside_its_lock() {
+    let changes = read(KOTLIN_CHANGES);
+    let start = function(&changes, "fun startObserver(");
+    for collection in ["Images", "Video"] {
+        assert!(
+            start.contains(&format!(
+                "resolver.registerContentObserver(MediaStore.{collection}.Media.EXTERNAL_CONTENT_URI, true, created)"
+            )),
+            "the observer covers the {collection} collection with descendants"
+        );
+    }
+    assert!(start.contains("if (observer != null) return FrustPhotoLibraryHost.OK"));
+    assert!(start.contains("unregister(ctx, created)"));
+
+    let observer = function(
+        &changes,
+        "private class WakeObserver : ContentObserver(null) {",
+    );
+    let overloads: Vec<&str> = observer
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("override fun onChange("))
+        .collect();
+    assert_eq!(
+        overloads,
+        [
+            "override fun onChange(selfChange: Boolean) = wake()",
+            "override fun onChange(selfChange: Boolean, uri: Uri?) = wake()",
+            "override fun onChange(selfChange: Boolean, uri: Uri?, flags: Int) = wake()",
+            "override fun onChange(selfChange: Boolean, uris: Collection<Uri>, flags: Int) = wake()",
+        ],
+        "every onChange overload wakes, without calling super"
+    );
+    let wake = function(&changes, "private fun wake(");
+    assert!(wake.contains("if (observer !== this) return"));
+    assert!(wake.contains("FrustPhotoLibraryHost.notifyLibraryChanged()"));
+    assert!(
+        !wake.contains("synchronized"),
+        "the wake holds no lock, so a subscriber may stop the observer from inside it"
+    );
+
+    let stop = function(&changes, "fun stopObserver(");
+    let unlocked = stop
+        .find("} ?: return")
+        .expect("the lock is released first");
+    assert!(
+        stop[unlocked..].contains("unregister(ctx, current)"),
+        "the observer is unregistered outside the lock"
+    );
+
+    let rust = rust_code(&read(RUST_ANDROID_CHANGES));
+    let stop = function(&rust, "pub(crate) fn stop_change_observer(");
+    assert!(stop.contains("jni_str!(\"stopChangeObserver\")"));
+    let start = function(&rust, "pub(crate) fn start_change_observer(");
+    assert!(start.contains("Err(changes_error(code))"));
 }
