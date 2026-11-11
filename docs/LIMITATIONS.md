@@ -8443,22 +8443,6 @@ shows the guard works, not that it was needed. Notification display was not obse
 
 ---
 
-### `android-accessibility-service-abort` — an Android app aborts when a window change meets an active accessibility client
-
-**Observed**: an Android app aborts (SIGABRT on the UI thread) when an accessibility client is active — TalkBack, or any tool that queries the accessibility tree such as `uiautomator dump` — and the window then changes: a rotation or resize, a window-content change that publishes semantics, or a back-finish followed by a relaunch. The abort message is a `Result::unwrap()` on a Java exception. The AccessKit Android adapter (`accesskit_android 0.7.5`, a version-pinned dependency) raises an accessibility event from a runnable it posts to the UI thread and unwraps a JNI call that threw; the panic crosses the JNI boundary and aborts in every build mode. The Android shell installs no panic hook, so the message is lost outside a tombstone.
-
-**Applies to**: every frust Android app, only while an accessibility service or client is active. Without one, the path is not taken.
-
-**Workaround**: none in app code.
-
-**Why accepted**: the unwrap is inside the pinned dependency's own runnable, outside frust's call stack; the remedy is an upstream change plus a pin bump, which the version-pin policy ([DEVELOPMENT.md](DEVELOPMENT.md) § Version-Pin Policy) requires to be planned on its own.
-
-**Trigger for removal**: a pinned `accesskit_android` that no longer unwraps the failing call.
-
-**Evidence**: reproduced deterministically on a Pixel 5 in profile and debug builds: `adb shell uiautomator dump` followed by a rotation aborts within a second, 2 of 2; plain rotations with no accessibility client, 8 of 8 stayed alive. Symbolized frames: `accesskit_android` `event.rs` `send_completed_event` / `send_window_content_changed`, called from `dev.accesskit.android.Delegate`'s posted runnable. First seen 2026-09-30; seen again in device gates on 2026-11-01 and 2026-11-03.
-
----
-
 ### `list-view-leading-buffer-edit-not-anchored` — a keyed `ListView` does not correct rows edited just above the viewport
 
 **Observed**: a keyed exact-extent `ListView` keeps its anchor row in place when rows change above the viewport, but rows inserted into the gap between the window's first buffered row (the leading buffer is 2 rows) and the viewport-top row, or the one row in that gap removed, go uncorrected. The scroll offset stays put and the content moves by their summed extent: up on removal, down on insert, however many rows were inserted. Removing the row that holds the top edge itself is likewise uncorrected: the next row takes its on-screen place. An edit at the window's first row or anywhere above it is corrected. The same probe serves the estimated keyed mode, so it is expected there too, but it was not observed there.
