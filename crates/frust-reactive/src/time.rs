@@ -534,8 +534,9 @@ impl Timer {
     ///
     /// A timer armed in a component's event handler is bound to that component: the handler
     /// runs under the component's owner, so removing the component cancels the timer even
-    /// after [`detach`](Self::detach). A debounce keeps one child owner in its state, cleans
-    /// it up before re-arming, and arms the new timer under it:
+    /// after [`detach`](Self::detach). A debounce keeps one child owner in its state, created
+    /// on first use, cleaned up before each re-arm, and arms the new timer under it, so the
+    /// component's owner does not grow per event:
     ///
     /// ```no_run
     /// use std::time::Duration;
@@ -545,21 +546,20 @@ impl Timer {
     ///
     /// #[derive(Default)]
     /// struct Search {
-    ///     pending: Option<Owner>,
+    ///     scope: Option<Owner>,
     /// }
     ///
     /// impl Search {
     ///     fn on_input(&mut self, query: String) {
-    ///         if let Some(stale) = self.pending.take() {
-    ///             stale.cleanup();
-    ///         }
-    ///         let owner = Owner::current()
-    ///             .expect("a handler runs under its component's owner")
-    ///             .child();
+    ///         let owner = self.scope.get_or_insert_with(|| {
+    ///             Owner::current()
+    ///                 .expect("a handler runs under its component's owner")
+    ///                 .child()
+    ///         });
+    ///         owner.cleanup();
     ///         owner.with(|| {
     ///             Timer::new(Duration::from_millis(300), move || run_search(&query)).detach();
     ///         });
-    ///         self.pending = Some(owner);
     ///     }
     /// }
     ///

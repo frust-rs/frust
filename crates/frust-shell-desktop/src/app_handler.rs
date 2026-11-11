@@ -2857,8 +2857,9 @@ where
 /// including per pointer `Move` — which the "no per-event allocation" budget
 /// rules out, and a handler's `provide_context` would silently evaporate on
 /// dispose instead of being visible to the next rebuild. The cost of sharing is
-/// that a handler calling `provide_context` writes into the app-wide root owner;
-/// that matches what a root `Component::build` already does.
+/// that a handler outside any component calling `provide_context` writes into the
+/// app-wide root owner. Inside a component, `ComponentWidget::event` enters that
+/// component's owner first, so the value lands there and goes away with it.
 ///
 /// # No `TrackedScope`: deliberately untracked
 ///

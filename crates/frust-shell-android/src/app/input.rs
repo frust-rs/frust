@@ -35,7 +35,9 @@ use super::AndroidAppHandle;
 /// * **The root owner, not a fresh child scope.** A child owner would have to be
 ///   created and disposed per input event — including per resampled `Move` —
 ///   and a handler's `provide_context` would evaporate on dispose. Sharing costs
-///   one thread-local swap per pass and no allocation.
+///   one thread-local swap per pass and no allocation. A handler outside any
+///   component writes its `provide_context` into this root owner; inside a
+///   component, `ComponentWidget::event` enters that component's owner first.
 /// * **No `TrackedScope`.** `TrackedScope::track` clears the scope's recorded
 ///   sources and dirty flag on entry, so tracking an event pass would unsubscribe
 ///   the frame loop from every signal the last rebuild read *and* swallow a

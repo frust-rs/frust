@@ -4,7 +4,8 @@
 //! only the timers armed under it.
 //!
 //! Driven through the public facade: a `Component` with a `GestureDetector` is mounted in a
-//! `Tester`, tapped, then observed through counters its own callbacks bump.
+//! `Tester`, tapped, then observed through counters its own callbacks bump. `Tester::pump`
+//! advances a virtual clock, so the timers fire at their virtual deadlines.
 //!
 //! Needs the facade's `test-support` feature (`cargo test -p frust-ui --features test-support`);
 //! without it the file compiles to nothing.
@@ -51,7 +52,8 @@ struct Debounce {
 #[derive(Default)]
 struct DebounceState {
     taps: u32,
-    /// Owner of the most recent tap's child timer. Cleaning it up cancels that timer.
+    /// The one child owner the taps reuse. Each tap cleans it up, which cancels the previous
+    /// tap's child timer, before arming its own.
     child: Option<Owner>,
 }
 
@@ -67,9 +69,6 @@ impl Component for Debounce {
         let probes = self.probes.clone();
         let on_tap = move |s: &mut DebounceState| {
             s.taps += 1;
-            if let Some(stale) = s.child.take() {
-                stale.cleanup();
-            }
 
             // Detached: only the owner can cancel it, so the removal test proves the binding.
             let fired = probes.tap_timer.clone();
@@ -81,14 +80,16 @@ impl Component for Debounce {
                 done.set(done.get() + 1);
             });
 
-            let owner = Owner::current()
-                .expect("a handler runs under the component's owner")
-                .child();
+            let owner = s.child.get_or_insert_with(|| {
+                Owner::current()
+                    .expect("a handler runs under the component's owner")
+                    .child()
+            });
+            owner.cleanup();
             let fired = probes.child_timer.clone();
             owner.with(|| {
                 Timer::new(CHILD_DELAY, move || fired.set(fired.get() + 1)).detach();
             });
-            s.child = Some(owner);
         };
         GestureDetector::<DebounceState, _>(text("tap me")).on_tap(on_tap)
     }
