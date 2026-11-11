@@ -116,10 +116,9 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 - An Android app no longer aborts when an accessibility client detaches or the host view is
   detached and the UI then changes (for example `uiautomator dump`, then a navigation or a
-  rotation). On a OnePlus 9 (Android 15) the build before the bump aborted 10 of 10 and this one 0 of
-  10; a Pixel 4a
-  (Android 16) also ran 10 of 10 clean. TalkBack speech, focus order and typing under TalkBack were
-  not verified by hand.
+  rotation). On a OnePlus 9 (Android 15) the build before the bump aborted 10 of 10 and this one
+  0 of 10; a Pixel 4a (Android 16) also ran 10 of 10 clean. TalkBack speech, focus order and typing
+  under TalkBack were not verified by hand.
 
 ## 0.6.6 — 2026-11-11
 
