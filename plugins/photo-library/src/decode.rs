@@ -233,7 +233,7 @@ pub(crate) fn require_file(path: &std::path::Path) -> Result<(), PhotoError> {
 /// An EXIF measurement (ISO, exposure time, aperture, focal length) that means something: a
 /// zero, negative or non-finite value is absent on every arm.
 #[cfg(all(
-    feature = "decode",
+    any(feature = "decode", feature = "library"),
     any(target_os = "android", target_os = "ios", target_os = "macos")
 ))]
 pub(crate) fn positive_measure(value: f64) -> Option<f64> {

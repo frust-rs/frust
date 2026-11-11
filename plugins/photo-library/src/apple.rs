@@ -54,6 +54,12 @@
 //! second concurrent call, or one made while `clear_pick_cache` runs, fails
 //! with [`PhotoError::Busy`].
 //!
+//! # Metadata
+//!
+//! With the `library` feature, `apple_metadata` reads one asset's EXIF from its original's bytes,
+//! in memory, through the ImageIO property reader `apple_decode` shares with the decoder; see
+//! that module.
+//!
 //! # Results
 //!
 //! Items come back in selection order. A single item that cannot be copied is
@@ -64,6 +70,9 @@
 #[cfg(feature = "library")]
 #[path = "apple_library.rs"]
 mod apple_library;
+#[cfg(feature = "library")]
+#[path = "apple_metadata.rs"]
+mod apple_metadata;
 #[cfg(any(feature = "library", feature = "save"))]
 #[path = "apple_originals.rs"]
 mod apple_originals;
@@ -72,6 +81,8 @@ mod apple_picker;
 
 #[cfg(feature = "library")]
 pub(crate) use apple_library::{albums, assets, manage_limited_selection, thumbnail};
+#[cfg(feature = "library")]
+pub(crate) use apple_metadata::asset_metadata;
 #[cfg(feature = "library")]
 pub(crate) use apple_originals::export_original;
 #[cfg(feature = "save")]

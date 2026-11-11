@@ -969,14 +969,19 @@ const PERMISSIONS: PluginSpec = PluginSpec {
 };
 
 /// `photo-library`'s `library` feature contributions: the browsing half
-/// (albums, paged assets, thumbnails). The permission, usage-string and
+/// (albums, paged assets, thumbnails) and one asset's EXIF
+/// (`PhotoLibrary::asset_metadata`). The permission, usage-string and Photos
 /// framework values are the same ones [`PERMISSIONS_PHOTOS`] writes, so a
 /// project that adds both `permissions` with its `photos` feature and
 /// `photo-library` with `library` gets one copy of each line: the applier
 /// reports the repeats as an already-present item. The
 /// `photo_library_library_feature_repeats_only_the_permissions_photos_values`
 /// test pins that correspondence. The app still adds `permissions` with its
-/// `photos` feature to request access at run time.
+/// `photos` feature to request access at run time. The ImageIO link is the
+/// one line `permissions` does not write: `asset_metadata` reads an asset's
+/// properties through ImageIO on iOS without the `decode` feature. It is the
+/// same value [`PHOTO_LIBRARY_DECODE`] writes, so a project that enables both
+/// features links ImageIO once.
 const PHOTO_LIBRARY_LIBRARY: &[Contribution] = &[
     Contribution::CargoFeature {
         name: "frust-photo-library",
@@ -1002,6 +1007,7 @@ const PHOTO_LIBRARY_LIBRARY: &[Contribution] = &[
                   app's own Info.plist. Edit the text to match your app.",
     },
     Contribution::IosFramework { name: "Photos" },
+    Contribution::IosFramework { name: "ImageIO" },
 ];
 
 /// `photo-library`'s `save` feature contributions: the saving half (writing
@@ -1050,11 +1056,11 @@ const PHOTO_LIBRARY_DECODE: &[Contribution] = &[
 const PHOTO_LIBRARY_FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: "library",
-        summary: "Album and asset browsing with byte-budgeted thumbnails: \
-                  enables the Cargo feature and adds the Android media read \
-                  permissions, NSPhotoLibraryUsageDescription and the Photos \
-                  framework. Add `permissions` with its `photos` feature to \
-                  request access.",
+        summary: "Album and asset browsing with byte-budgeted thumbnails, and \
+                  one asset's EXIF: enables the Cargo feature and adds the \
+                  Android media read permissions, NSPhotoLibraryUsageDescription \
+                  and the Photos and ImageIO frameworks. Add `permissions` with \
+                  its `photos` feature to request access.",
         contributions: PHOTO_LIBRARY_LIBRARY,
     },
     FeatureSpec {
@@ -1848,8 +1854,9 @@ mod tests {
 
     /// The `library` feature's accounting: the Cargo feature on the
     /// `frust-photo-library` dependency, the four Android media read
-    /// permissions, the usage string and the Photos framework link, in that
-    /// order, and no Gradle module or Swift package of its own.
+    /// permissions, the usage string, the Photos framework link and the
+    /// ImageIO framework link, in that order, and no Gradle module or Swift
+    /// package of its own.
     #[test]
     fn photo_library_library_feature_contributions_match_the_final_accounting() {
         let spec = find_plugin("photo-library").unwrap();
@@ -1859,7 +1866,7 @@ mod tests {
             .find(|f| f.id == "library")
             .unwrap();
         let c = feature.contributions;
-        assert_eq!(c.len(), 7, "{c:?}");
+        assert_eq!(c.len(), 8, "{c:?}");
         assert!(matches!(
             c[0],
             Contribution::CargoFeature {
@@ -1902,11 +1909,17 @@ mod tests {
             c[6],
             Contribution::IosFramework { name: "Photos" }
         ));
+        assert!(matches!(
+            c[7],
+            Contribution::IosFramework { name: "ImageIO" }
+        ));
     }
 
-    /// Every `library` contribution except its Cargo feature is one that
-    /// `permissions`' `photos` feature also makes, byte for byte (compared by
-    /// `Debug` output), so applying both in one project repeats no line.
+    /// Every `library` contribution except its Cargo feature and its ImageIO
+    /// link is one that `permissions`' `photos` feature also makes, byte for
+    /// byte (compared by `Debug` output), so applying both in one project
+    /// repeats no line. The ImageIO link is instead the same value the
+    /// `decode` feature makes.
     #[test]
     fn photo_library_library_feature_repeats_only_the_permissions_photos_values() {
         let library = find_plugin("photo-library")
@@ -1923,13 +1936,30 @@ mod tests {
             .find(|f| f.id == "photos")
             .unwrap()
             .contributions;
+        let decode = find_plugin("photo-library")
+            .unwrap()
+            .optional_features
+            .iter()
+            .find(|f| f.id == "decode")
+            .unwrap()
+            .contributions;
+        let image_io = Contribution::IosFramework { name: "ImageIO" };
+        let image_io = format!("{image_io:?}");
         let mut repeats = 0;
         for c in library {
             if matches!(c, Contribution::CargoFeature { .. }) {
                 continue;
             }
-            repeats += 1;
             let shown = format!("{c:?}");
+            if shown == image_io {
+                assert!(
+                    decode.iter().any(|d| format!("{d:?}") == shown),
+                    "the library feature's ImageIO link must equal the decode feature's"
+                );
+                assert!(!photos.iter().any(|p| format!("{p:?}") == shown));
+                continue;
+            }
+            repeats += 1;
             assert!(
                 photos.iter().any(|p| format!("{p:?}") == shown),
                 "{shown} is not one of permissions' photos contributions"
@@ -1939,16 +1969,16 @@ mod tests {
     }
 
     /// `photo-library` with `library` and `permissions` with `photos` in one
-    /// project: the four Android permissions, the usage string and the Photos
-    /// link each land once, the six repeats report `AlreadyPresent`, and a
-    /// second apply leaves a byte-identical tree.
+    /// project: the four Android permissions, the usage string, the Photos
+    /// link and the ImageIO link each land once, the six repeats report
+    /// `AlreadyPresent`, and a second apply leaves a byte-identical tree.
     #[test]
     fn photo_library_library_and_permissions_photos_compose_without_duplicates() {
         let root = scaffold_project("photo-library-library-compose");
         add_plugin(&root, "permissions", &["photos"]).unwrap();
 
         let first = add_plugin(&root, "photo-library", &["library"]).unwrap();
-        assert_eq!(first.items.len(), 3 + 7, "{first:?}");
+        assert_eq!(first.items.len(), 3 + 8, "{first:?}");
         let repeats = first
             .items
             .iter()
@@ -1991,6 +2021,13 @@ mod tests {
         assert_eq!(
             pbxproj
                 .matches("\"-framework\",\n\t\t\t\t\tPhotos,\n")
+                .count(),
+            lists,
+            "{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj
+                .matches("\"-framework\",\n\t\t\t\t\tImageIO,\n")
                 .count(),
             lists,
             "{pbxproj}"
@@ -2159,6 +2196,56 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `photo-library` with both `library` and `decode`: each feature makes
+    /// the same ImageIO link, and the project ends with it listed once per
+    /// `OTHER_LDFLAGS` list, whichever feature lands first and when the two
+    /// are applied in one call or one after the other.
+    #[test]
+    fn photo_library_library_and_decode_link_imageio_once() {
+        let image_io = "\"-framework\",\n\t\t\t\t\tImageIO,\n";
+        let check = |root: &std::path::Path| {
+            let pbxproj =
+                fs::read_to_string(root.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+            let lists = pbxproj.matches("OTHER_LDFLAGS = (").count();
+            assert!(lists >= 1, "{pbxproj}");
+            assert_eq!(pbxproj.matches(image_io).count(), lists, "{pbxproj}");
+            assert_pbxproj_well_formed(&pbxproj);
+        };
+
+        let together = scaffold_project("photo-library-library-decode-together");
+        add_plugin(&together, "photo-library", &["library", "decode"]).unwrap();
+        check(&together);
+        let after_first = snapshot_tree(&together);
+        let again = add_plugin(&together, "photo-library", &["library", "decode"]).unwrap();
+        assert!(
+            again
+                .items
+                .iter()
+                .all(|i| i.outcome == AddOutcome::AlreadyPresent),
+            "{again:?}"
+        );
+        assert_eq!(after_first, snapshot_tree(&together));
+        let _ = fs::remove_dir_all(&together);
+
+        for (tag, order) in [
+            ("photo-library-library-then-decode", ["library", "decode"]),
+            ("photo-library-decode-then-library", ["decode", "library"]),
+        ] {
+            let root = scaffold_project(tag);
+            add_plugin(&root, "photo-library", &[order[0]]).unwrap();
+            let second = add_plugin(&root, "photo-library", &[order[1]]).unwrap();
+            check(&root);
+            let already = second
+                .items
+                .iter()
+                .filter(|i| i.outcome == AddOutcome::AlreadyPresent)
+                .count();
+            // The base's three lines and the ImageIO link were already there.
+            assert_eq!(already, 3 + 1, "{tag}: {second:?}");
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 
     /// `photo-library` with `save` and `permissions` with `photos-add` in one

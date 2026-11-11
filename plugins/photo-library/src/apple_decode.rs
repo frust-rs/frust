@@ -1,5 +1,11 @@
-//! iOS and macOS: full-resolution decode through ImageIO, for
+//! iOS and macOS: the ImageIO property reader, and full-resolution decode through ImageIO for
 //! [`PhotoLibrary::decode_file`](crate::PhotoLibrary::decode_file).
+//!
+//! The property reader ([`first_image_properties`] and the EXIF read) compiles with either the
+//! `decode` or the `library` feature; the pixel decode needs `decode`. Two callers share it: the
+//! decoder below, and [`exif_from_data`], which `asset_metadata` (`library`, iOS) uses on the
+//! in-memory bytes of a library asset's original. On macOS [`exif_from_data`] has no caller
+//! outside this module's tests, because desktop has no photo library.
 //!
 //! 1. The file URL becomes an image source with `kCGImageSourceShouldCache` off, so ImageIO keeps
 //!    no full-size copy of the pixels around.
@@ -42,20 +48,27 @@
 //! with the missing part left blank, and ImageIO reports the source as complete. Such a file is
 //! returned as an image, not an error; telling it apart would need a per-format container check.
 
+use std::ffi::c_void;
+#[cfg(feature = "decode")]
 use std::path::Path;
 use std::ptr::NonNull;
 
 use objc2::rc::autoreleasepool;
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CFURL, CGFloat,
-    CGPoint, CGRect, CGSize,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType,
 };
+#[cfg(feature = "decode")]
+use objc2_core_foundation::{CFURL, CGFloat, CGPoint, CGRect, CGSize};
+#[cfg(feature = "decode")]
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapInfo, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo,
     CGImageByteOrderInfo, kCGColorSpaceDisplayP3, kCGColorSpaceSRGB,
 };
 
-use crate::decode::{self, DecodeOptions, DecodedImage, ImageColorSpace};
+use crate::decode;
+#[cfg(feature = "decode")]
+use crate::decode::{DecodeOptions, DecodedImage, ImageColorSpace};
+#[cfg(feature = "decode")]
 use crate::pixels;
 use crate::types::{ExifData, PhotoError};
 
@@ -65,12 +78,29 @@ type Properties = CFDictionary<CFString, CFType>;
 /// `CGImageSourceStatus.kCGImageStatusComplete`.
 const STATUS_COMPLETE: i32 = 0;
 
-// Hand-declared: the workspace has no ImageIO bindings, and the decoder needs only these.
+// Hand-declared: the crate enables no `CFData` binding, and `CFDataCreate` is the one call the
+// in-memory reader needs. A `CFDataRef` is a CF object; it is handled as a plain `CFType`.
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFDataCreate(
+        allocator: *const c_void,
+        bytes: *const u8,
+        length: isize,
+    ) -> Option<NonNull<CFType>>;
+}
+
+// Hand-declared: the workspace has no ImageIO bindings, and the reader and decoder need only
+// these.
 #[link(name = "ImageIO", kind = "framework")]
 unsafe extern "C" {
     // A `CGImageSourceRef` is a CF object; it is handled as a plain `CFType`.
+    #[cfg(feature = "decode")]
     fn CGImageSourceCreateWithURL(
         url: &CFURL,
+        options: Option<&CFDictionary>,
+    ) -> Option<NonNull<CFType>>;
+    fn CGImageSourceCreateWithData(
+        data: &CFType,
         options: Option<&CFDictionary>,
     ) -> Option<NonNull<CFType>>;
     fn CGImageSourceGetCount(isrc: &CFType) -> usize;
@@ -80,6 +110,7 @@ unsafe extern "C" {
         index: usize,
         options: Option<&CFDictionary>,
     ) -> Option<NonNull<CFDictionary>>;
+    #[cfg(feature = "decode")]
     fn CGImageSourceCreateThumbnailAtIndex(
         isrc: &CFType,
         index: usize,
@@ -87,12 +118,19 @@ unsafe extern "C" {
     ) -> Option<NonNull<CGImage>>;
 
     static kCGImageSourceShouldCache: &'static CFString;
+    #[cfg(feature = "decode")]
     static kCGImageSourceCreateThumbnailFromImageAlways: &'static CFString;
+    #[cfg(feature = "decode")]
     static kCGImageSourceCreateThumbnailWithTransform: &'static CFString;
+    #[cfg(feature = "decode")]
     static kCGImageSourceThumbnailMaxPixelSize: &'static CFString;
 
+    #[cfg(feature = "decode")]
     static kCGImagePropertyPixelWidth: &'static CFString;
+    #[cfg(feature = "decode")]
     static kCGImagePropertyPixelHeight: &'static CFString;
+    // The tests write it into their fixtures.
+    #[cfg(any(feature = "decode", test))]
     static kCGImagePropertyOrientation: &'static CFString;
     static kCGImagePropertyExifDictionary: &'static CFString;
     static kCGImagePropertyTIFFDictionary: &'static CFString;
@@ -112,9 +150,76 @@ unsafe extern "C" {
     static kCGImagePropertyGPSLongitudeRef: &'static CFString;
 }
 
+/// The EXIF of the image held in `bytes`, read through the same [`first_image_properties`] and
+/// EXIF read as the decoder; no pixel is decoded. An image without EXIF is an empty
+/// [`ExifData`]; bytes ImageIO cannot read, or that hold no image, are the decoder's
+/// [`PhotoError::Platform`] error. Only the header matters: ImageIO reports the properties of a
+/// header it can parse even when the rest of the data is missing. ImageIO reads from a copy of
+/// `bytes` that is released before this returns.
+#[cfg_attr(not(all(target_os = "ios", feature = "library")), allow(dead_code))]
+pub(crate) fn exif_from_data(bytes: &[u8]) -> Result<ExifData, PhotoError> {
+    autoreleasepool(|_| {
+        let length = isize::try_from(bytes.len())
+            .map_err(|_| PhotoError::Platform("the image data is too large to read".to_owned()))?;
+        // SAFETY: `bytes` is valid for reads of `length` bytes for the duration of the call, and
+        // `CFDataCreate` copies them; a null allocator is the default one. The Create-rule result
+        // is owned (+1) and released by `CFRetained` on every path.
+        let data = unsafe { CFDataCreate(std::ptr::null(), bytes.as_ptr(), length) }
+            // SAFETY: a non-null Create-rule result is owned by the caller.
+            .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+            .ok_or_else(|| {
+                PhotoError::Platform("not enough memory for the image data".to_owned())
+            })?;
+        let no_cache = no_cache_options();
+        let no_cache_off = no_cache.as_opaque();
+        // SAFETY: `data` and the options dictionary are live CF objects for the call. The result
+        // follows the Create rule, so it is owned (+1) and `CFRetained` releases it on every path.
+        let source = unsafe { CGImageSourceCreateWithData(&data, Some(no_cache_off)) }
+            // SAFETY: a non-null Create-rule result is owned by the caller.
+            .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+            .ok_or_else(undecodable)?;
+        let properties = first_image_properties(&source, no_cache_off)?;
+        Ok(read_exif(&properties).unwrap_or_default())
+    })
+}
+
+/// The property dictionary of `source`'s first image: the reader both [`exif_from_data`] and the
+/// decoder go through. A source with no image, or one ImageIO could not parse completely, is
+/// [`undecodable`].
+fn first_image_properties(
+    source: &CFType,
+    options: &CFDictionary,
+) -> Result<CFRetained<Properties>, PhotoError> {
+    // SAFETY: `source` is a live image source.
+    if unsafe { CGImageSourceGetCount(source) } == 0 {
+        return Err(undecodable());
+    }
+    // SAFETY: as above; index 0 exists, checked just now. A source ImageIO could not parse
+    // reports a status other than complete.
+    if unsafe { CGImageSourceGetStatusAtIndex(source, 0) } != STATUS_COMPLETE {
+        return Err(undecodable());
+    }
+    // SAFETY: as above, and `options` is a live dictionary. The Copy-rule result is owned (+1)
+    // and released by `CFRetained`.
+    unsafe { CGImageSourceCopyPropertiesAtIndex(source, 0, Some(options)) }
+        // SAFETY: a non-null Copy-rule result is owned by the caller, and ImageIO documents it
+        // as a dictionary keyed by `CFString`; values stay untyped `CFType`.
+        .map(|ptr| unsafe { CFRetained::<Properties>::from_raw(ptr.cast()) })
+        .ok_or_else(undecodable)
+}
+
+/// `{ kCGImageSourceShouldCache: false }`, so ImageIO keeps no decoded copy of the image.
+fn no_cache_options() -> CFRetained<CFDictionary<CFString, CFBoolean>> {
+    flag_options(&[
+        // SAFETY: reading an ImageIO constant key, valid for the life of the process.
+        unsafe { kCGImageSourceShouldCache },
+    ])
+}
+
 /// Decodes `path` per `options`. The caller has run the shared [`decode::precheck`] (so
 /// `max_dimension` is non-zero) and then, on iOS only, refused the main thread; macOS decodes on
 /// the calling thread.
+#[cfg(feature = "decode")]
 pub(crate) fn decode_file(
     path: &Path,
     options: &DecodeOptions,
@@ -122,6 +227,7 @@ pub(crate) fn decode_file(
     autoreleasepool(|_| decode_in_pool(path, options))
 }
 
+#[cfg(feature = "decode")]
 fn decode_in_pool(path: &Path, options: &DecodeOptions) -> Result<DecodedImage, PhotoError> {
     if options.is_cancelled() {
         return Err(PhotoError::Cancelled);
@@ -129,10 +235,7 @@ fn decode_in_pool(path: &Path, options: &DecodeOptions) -> Result<DecodedImage, 
     decode::require_file(path)?;
     let url = CFURL::from_file_path(path)
         .ok_or_else(|| PhotoError::Platform("the path is not a valid file URL".to_owned()))?;
-    let no_cache = flag_options(&[
-        // SAFETY: reading an ImageIO constant key, valid for the life of the process.
-        unsafe { kCGImageSourceShouldCache },
-    ]);
+    let no_cache = no_cache_options();
     let no_cache_off = no_cache.as_opaque();
     // SAFETY: `url` and the options dictionary are live CF objects for the call. The result
     // follows the Create rule, so it is owned (+1) and `CFRetained` releases it on every path.
@@ -140,21 +243,7 @@ fn decode_in_pool(path: &Path, options: &DecodeOptions) -> Result<DecodedImage, 
         // SAFETY: a non-null Create-rule result is owned by the caller.
         .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
         .ok_or_else(undecodable)?;
-    // SAFETY: `source` is a live image source.
-    if unsafe { CGImageSourceGetCount(&source) } == 0 {
-        return Err(undecodable());
-    }
-    // SAFETY: as above; index 0 exists, checked just now. A source ImageIO could not parse
-    // reports a status other than complete.
-    if unsafe { CGImageSourceGetStatusAtIndex(&source, 0) } != STATUS_COMPLETE {
-        return Err(undecodable());
-    }
-    // SAFETY: as above. The Copy-rule result is owned (+1) and released by `CFRetained`.
-    let properties = unsafe { CGImageSourceCopyPropertiesAtIndex(&source, 0, Some(no_cache_off)) }
-        // SAFETY: a non-null Copy-rule result is owned by the caller, and ImageIO documents it
-        // as a dictionary keyed by `CFString`; values stay untyped `CFType`.
-        .map(|ptr| unsafe { CFRetained::<Properties>::from_raw(ptr.cast()) })
-        .ok_or_else(undecodable)?;
+    let properties = first_image_properties(&source, no_cache_off)?;
     let info = SourceInfo::read(&properties);
     info.check_capped_len(options.max_dimension)?;
 
@@ -190,6 +279,7 @@ fn flag_options(keys: &[&CFString]) -> CFRetained<CFDictionary<CFString, CFBoole
 }
 
 /// The full-data, upright, capped image.
+#[cfg(feature = "decode")]
 fn thumbnail(
     source: &CFType,
     info: &SourceInfo,
@@ -223,6 +313,7 @@ fn thumbnail(
         .ok_or_else(undecodable)
 }
 
+#[cfg(feature = "decode")]
 struct Drawn {
     width: u32,
     height: u32,
@@ -233,6 +324,7 @@ struct Drawn {
 /// The checked output size of a decoded `width x height` image: both sides non-zero, the long
 /// edge within `max_dimension`, and the buffer within the shared byte ceiling. Runs before any
 /// buffer is allocated.
+#[cfg(feature = "decode")]
 fn checked_output(
     width: usize,
     height: usize,
@@ -252,6 +344,7 @@ fn checked_output(
 }
 
 /// Draw `image` 1:1 into a fresh RGBA8 context and return straight-alpha pixels.
+#[cfg(feature = "decode")]
 fn draw(image: &CGImage, srgb: bool, max_dimension: u32) -> Result<Drawn, PhotoError> {
     let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
     let (out_width, out_height, len) = checked_output(width, height, max_dimension)?;
@@ -301,6 +394,7 @@ fn draw(image: &CGImage, srgb: bool, max_dimension: u32) -> Result<Drawn, PhotoE
 }
 
 /// What the image's properties say before any pixel is decoded.
+#[cfg(feature = "decode")]
 #[derive(Debug, Default)]
 struct SourceInfo {
     /// Stored (un-oriented) pixel size.
@@ -311,6 +405,7 @@ struct SourceInfo {
     exif: Option<ExifData>,
 }
 
+#[cfg(feature = "decode")]
 impl SourceInfo {
     fn read(properties: &Properties) -> Self {
         // SAFETY (all `unsafe` reads below): ImageIO constant keys, valid for the life of the
@@ -461,9 +556,16 @@ fn sub_dictionary(dict: &Properties, key: &CFString) -> Option<CFRetained<Proper
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "decode")]
     use crate::cancel::CancelToken;
-    use objc2_core_graphics::CGBitmapContextCreateImage;
-    use std::path::PathBuf;
+    use objc2_core_foundation::CFURL;
+    #[cfg(feature = "decode")]
+    use objc2_core_graphics::kCGColorSpaceDisplayP3;
+    use objc2_core_graphics::{
+        CGBitmapContextCreate, CGBitmapContextCreateImage, CGBitmapInfo, CGColorSpace, CGImage,
+        CGImageAlphaInfo, CGImageByteOrderInfo, kCGColorSpaceSRGB,
+    };
+    use std::path::{Path, PathBuf};
 
     // Encoding is test-only: the fixtures are written by ImageIO itself, so no binary file
     // lives in the repository.
@@ -586,11 +688,13 @@ mod tests {
         unsafe { kCGColorSpaceSRGB }
     }
 
+    #[cfg(feature = "decode")]
     fn pixel(img: &DecodedImage, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * img.width + x) * 4) as usize;
         img.rgba[i..i + 4].try_into().unwrap()
     }
 
+    #[cfg(feature = "decode")]
     fn near(a: [u8; 4], b: [u8; 4], tolerance: u8) -> bool {
         a.iter().zip(b).all(|(x, y)| x.abs_diff(y) <= tolerance)
     }
@@ -664,6 +768,7 @@ mod tests {
         CFDictionary::<CFString, CFType>::from_slices(&keys, &values)
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn jpeg_is_capped_oriented_and_carries_exif() {
         if rerun_without_dyld_library_path("jpeg_is_capped_oriented_and_carries_exif") {
@@ -702,6 +807,7 @@ mod tests {
         assert!(close(exif.gps_longitude, -45.25), "{exif:?}");
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn jpeg_without_orientation_keeps_its_shape_and_never_upscales() {
         if rerun_without_dyld_library_path(
@@ -723,6 +829,7 @@ mod tests {
         assert_eq!((img.width, img.height), (400, 200));
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn png_keeps_straight_alpha() {
         if rerun_without_dyld_library_path("png_keeps_straight_alpha") {
@@ -741,6 +848,7 @@ mod tests {
         assert!(near(px, [255, 128, 0, 128], 2), "{px:?}");
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn wide_gamut_png_stays_in_display_p3_unless_srgb_is_asked() {
         if rerun_without_dyld_library_path(
@@ -765,6 +873,7 @@ mod tests {
         assert!(px[1] > 200 && px[3] == 255, "{px:?}");
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn heic_decodes_when_the_system_can_encode_it() {
         if rerun_without_dyld_library_path("heic_decodes_when_the_system_can_encode_it") {
@@ -780,6 +889,7 @@ mod tests {
         assert!(near(pixel(&img, 20, 50), [255, 0, 0, 255], 32));
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn truncated_and_foreign_files_are_decode_errors() {
         if rerun_without_dyld_library_path("truncated_and_foreign_files_are_decode_errors") {
@@ -822,6 +932,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn missing_file_and_cancel() {
         let missing = TempFile::new("missing", "jpg");
@@ -835,6 +946,57 @@ mod tests {
             decode_file(&missing.0, &DecodeOptions::new(8).cancel(token)).map(|_| ()),
             Err(PhotoError::Cancelled)
         );
+    }
+
+    /// The in-memory entry point reads the same fields the decoder does, from the bytes alone.
+    #[test]
+    fn in_memory_bytes_carry_the_same_exif_as_the_file() {
+        if rerun_without_dyld_library_path("in_memory_bytes_carry_the_same_exif_as_the_file") {
+            return;
+        }
+        let file = TempFile::new("bytes-exif", "jpg");
+        let properties = jpeg_properties();
+        assert!(write(
+            &file.0,
+            "public.jpeg",
+            &halves(),
+            Some(properties.as_opaque())
+        ));
+        let bytes = std::fs::read(&file.0).unwrap();
+
+        let exif = exif_from_data(&bytes).expect("exif");
+        assert_eq!(exif.capture_time.as_deref(), Some("2024:05:06 07:08:09"));
+        assert_eq!(exif.camera_make.as_deref(), Some("Frust"));
+        assert_eq!(exif.camera_model.as_deref(), Some("Fixture"));
+        assert_eq!(exif.lens.as_deref(), Some("Fixture lens"));
+        assert_eq!(exif.iso, Some(400));
+        let close = |v: Option<f64>, want: f64| v.is_some_and(|v| (v - want).abs() < 1e-6);
+        assert!(close(exif.exposure_seconds, 0.01), "{exif:?}");
+        assert!(close(exif.aperture, 1.8), "{exif:?}");
+        assert!(close(exif.focal_length_mm, 4.2), "{exif:?}");
+        assert!(close(exif.gps_latitude, -12.5), "{exif:?}");
+        assert!(close(exif.gps_longitude, -45.25), "{exif:?}");
+    }
+
+    #[test]
+    fn in_memory_bytes_without_exif_are_empty_and_foreign_bytes_are_errors() {
+        if rerun_without_dyld_library_path(
+            "in_memory_bytes_without_exif_are_empty_and_foreign_bytes_are_errors",
+        ) {
+            return;
+        }
+        let file = TempFile::new("bytes-plain", "png");
+        let src = image(16, 8, srgb_name(), |_, _| [0, 0, 255, 255]);
+        assert!(write(&file.0, "public.png", &src, None));
+        let bytes = std::fs::read(&file.0).unwrap();
+        assert_eq!(exif_from_data(&bytes), Ok(ExifData::default()));
+
+        // Two bytes of the signature, not an image at all, and empty: the decoder's error. A cut
+        // later in the header is not tried: ImageIO reports the properties of an in-memory PNG
+        // whose header it can parse, even when the rest of the file is missing.
+        for foreign in [&bytes[..2], b"not an image at all", b""] {
+            assert_eq!(exif_from_data(foreign), Err(undecodable()), "{foreign:?}");
+        }
     }
 
     /// Properties holding an EXIF and a TIFF dictionary with the given entries.
@@ -943,6 +1105,7 @@ mod tests {
     // A real file cannot reach the ceiling in a host test: ImageIO itself refuses a JPEG header
     // of 16384 x 16384 or more as undecodable. This test and the next drive the arm's own checks
     // with the sizes a decoder would report.
+    #[cfg(feature = "decode")]
     #[test]
     fn an_output_over_the_cap_or_the_ceiling_is_refused_before_allocating() {
         assert_eq!(checked_output(400, 300, 400), Ok((400, 300, 400 * 300 * 4)));
@@ -962,6 +1125,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn an_oversized_request_is_refused_before_the_decode() {
         let info = |w, h| SourceInfo {
@@ -987,6 +1151,7 @@ mod tests {
         assert_eq!(unknown.check_capped_len(60_000), Ok(()));
     }
 
+    #[cfg(feature = "decode")]
     #[test]
     fn upright_size_turns_for_quarter_orientations() {
         let mut info = SourceInfo {
