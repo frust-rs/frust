@@ -185,6 +185,44 @@ impl SliverGridDelegate {
             main_spacing,
         }
     }
+
+    /// The main-axis offset of item `index`'s row from the grid's leading edge,
+    /// in the grid's own sliver coordinates, for a grid `cross_extent` px across.
+    ///
+    /// It is computed from the same layout the grid places its cells with, so
+    /// it cannot drift from where the cell lands. To scroll a
+    /// [`CustomScrollView`](crate::CustomScrollView) to a cell, add the extent
+    /// of the slivers above the grid and pass the result to
+    /// [`ScrollController::jump_to`](crate::ScrollController::jump_to) or
+    /// [`ScrollController::animate_to`](crate::ScrollController::animate_to):
+    ///
+    /// ```
+    /// use frust_widgets::{ScrollController, SliverGridDelegate};
+    /// let delegate = SliverGridDelegate::FixedCrossAxisCount {
+    ///     count: 4,
+    ///     main_spacing: 8.0,
+    ///     cross_spacing: 8.0,
+    ///     child_aspect_ratio: 1.0,
+    /// };
+    /// let controller = ScrollController::new();
+    /// let preceding_extent = 56.0; // the slivers above the grid
+    /// let cross_extent = 400.0;
+    /// controller.jump_to(preceding_extent + delegate.offset_of_index(42, cross_extent));
+    /// ```
+    ///
+    /// Returns `0.0` for a zero, negative or non-finite cross extent, and
+    /// whenever the row stride is not a positive finite length, rather than
+    /// panicking.
+    pub fn offset_of_index(&self, index: usize, cross_extent: f64) -> f64 {
+        if !(cross_extent > 0.0 && cross_extent.is_finite()) {
+            return 0.0;
+        }
+        let grid = self.layout(cross_extent);
+        if !(grid.main_stride > 0.0 && grid.main_stride.is_finite()) {
+            return 0.0;
+        }
+        (index / grid.count) as f64 * grid.main_stride
+    }
 }
 
 impl GridLayout {
@@ -563,6 +601,13 @@ impl SliverWidget for SliverGridWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::Any;
+
+    use frust_core::RenderRoot;
+
+    use crate::test_support::leaf;
+    use crate::viewport::ViewportWidget;
+    use crate::{CustomScrollView, custom_scroll_view};
 
     fn constraints(scroll_offset: f64, cross: f64) -> SliverConstraints {
         SliverConstraints {
@@ -643,5 +688,137 @@ mod tests {
                 child_aspect_ratio: 1.0,
             },
         );
+    }
+
+    /// Mount a `count`-item grid as the only sliver of a viewport `cross` px
+    /// wide and 2000 px tall, unscrolled, and lay it out.
+    fn mount(
+        item_count: usize,
+        delegate: SliverGridDelegate,
+        cross: f64,
+    ) -> RenderRoot<(), CustomScrollView<()>> {
+        // Leaves rather than text: a bare layout pass threads no text context.
+        let mut logic = move |_: &mut ()| {
+            custom_scroll_view(sliver_grid(item_count, |_| leaf(1.0, 1.0)).delegate(delegate))
+        };
+        let mut root = RenderRoot::new();
+        // The first rebuild materialises nothing (no layout has run yet); the
+        // second materialises the window the first layout asked for.
+        for _ in 0..2 {
+            root.rebuild(&mut logic, &mut ());
+            root.layout(Size::new(cross, 2000.0));
+        }
+        root
+    }
+
+    /// Each materialised cell's `(item index, main-axis origin)` from the last
+    /// layout, the origin relative to the grid's leading edge.
+    fn placed_rows(root: &RenderRoot<(), CustomScrollView<()>>) -> Vec<(usize, f64)> {
+        let id = root.root_id().expect("root built");
+        let viewport = (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<ViewportWidget>()
+            .expect("the root is the viewport");
+        let mut placed = Vec::new();
+        viewport.visit_children(&mut |sliver: &ChildPod| {
+            let boxed = (sliver.widget() as &dyn Any)
+                .downcast_ref::<Box<dyn Widget>>()
+                .expect("AnyView-erased sliver: double-boxed ChildPod element");
+            let grid = (boxed.as_ref() as &dyn Any)
+                .downcast_ref::<SliverGridWidget>()
+                .expect("the viewport's child is the grid");
+            for (index, pod) in grid.indices.iter().zip(grid.children.iter()) {
+                placed.push((*index, pod.origin().y));
+            }
+        });
+        placed
+    }
+
+    #[test]
+    fn offset_of_index_matches_the_placed_cell_origin() {
+        let delegates = [
+            SliverGridDelegate::FixedCrossAxisCount {
+                count: 4,
+                main_spacing: 10.0,
+                cross_spacing: 8.0,
+                child_aspect_ratio: 2.0,
+            },
+            SliverGridDelegate::FixedCrossAxisCount {
+                count: 3,
+                main_spacing: 0.0,
+                cross_spacing: 0.0,
+                child_aspect_ratio: 1.0,
+            },
+            SliverGridDelegate::MaxCrossAxisExtent {
+                max_cross_extent: 120.0,
+                main_spacing: 6.0,
+                cross_spacing: 4.0,
+                child_aspect_ratio: 1.5,
+            },
+        ];
+        for delegate in delegates {
+            for cross in [200.0, 424.0, 640.0] {
+                // Ten items: with four or three columns the last row is partial
+                // and index 5 sits mid-grid.
+                let root = mount(10, delegate, cross);
+                let placed = placed_rows(&root);
+                assert_eq!(
+                    placed.len(),
+                    10,
+                    "{delegate:?} at {cross}: every cell materialised"
+                );
+                for (index, origin) in placed {
+                    assert_eq!(
+                        origin,
+                        delegate.offset_of_index(index, cross),
+                        "{delegate:?} at {cross}: item {index}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn offset_of_index_places_first_mid_and_last_partial_rows() {
+        let delegate = SliverGridDelegate::FixedCrossAxisCount {
+            count: 4,
+            main_spacing: 10.0,
+            cross_spacing: 8.0,
+            child_aspect_ratio: 2.0,
+        };
+        // 424 px across: 4 cells of 100 px, 60 px row stride.
+        assert_eq!(delegate.offset_of_index(0, 424.0), 0.0);
+        assert_eq!(delegate.offset_of_index(3, 424.0), 0.0);
+        assert_eq!(delegate.offset_of_index(5, 424.0), 60.0);
+        assert_eq!(delegate.offset_of_index(9, 424.0), 120.0);
+    }
+
+    #[test]
+    fn offset_of_index_returns_zero_for_degenerate_inputs() {
+        let fixed = SliverGridDelegate::FixedCrossAxisCount {
+            count: 4,
+            main_spacing: 10.0,
+            cross_spacing: 8.0,
+            child_aspect_ratio: 2.0,
+        };
+        assert_eq!(fixed.offset_of_index(9, 0.0), 0.0);
+        assert_eq!(fixed.offset_of_index(9, -5.0), 0.0);
+        assert_eq!(fixed.offset_of_index(9, f64::NAN), 0.0);
+        assert_eq!(fixed.offset_of_index(9, f64::INFINITY), 0.0);
+        // An infinite aspect ratio collapses the cell to zero height; with no
+        // main spacing the stride is zero.
+        let flat = SliverGridDelegate::FixedCrossAxisCount {
+            count: 1,
+            main_spacing: 0.0,
+            cross_spacing: 0.0,
+            child_aspect_ratio: f64::INFINITY,
+        };
+        assert_eq!(flat.offset_of_index(3, 100.0), 0.0);
+        let max = SliverGridDelegate::MaxCrossAxisExtent {
+            max_cross_extent: 120.0,
+            main_spacing: 0.0,
+            cross_spacing: 0.0,
+            child_aspect_ratio: 1.0,
+        };
+        assert_eq!(max.offset_of_index(7, 0.0), 0.0);
     }
 }
