@@ -110,8 +110,9 @@
 //! # Library browsing
 //!
 //! With the `library` feature, `android_library` adds the `albums`, `assets`,
-//! `thumbnail` and `manageLimitedSelection` host calls and refuses the UI
-//! thread on each; see that module and the Kotlin host's contract table.
+//! `assetsAfter`, `thumbnail` and `manageLimitedSelection` host calls and
+//! refuses the UI thread on each; see that module and the Kotlin host's
+//! contract table.
 //!
 //! # Change feed
 //!
@@ -810,12 +811,14 @@ pub extern "system" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeO
     .resolve::<LogErrorAndDefault>();
 }
 
-// Library browsing: `albums`, `assets`, `thumbnail`, `manage_limited_selection`.
+// Library browsing: `albums`, `assets`, `assets_after`, `thumbnail`, `manage_limited_selection`.
 #[cfg(feature = "library")]
 #[path = "android_library.rs"]
 mod android_library;
 #[cfg(feature = "library")]
-pub(crate) use android_library::{albums, assets, manage_limited_selection, thumbnail};
+pub(crate) use android_library::{
+    albums, assets, assets_after, manage_limited_selection, thumbnail,
+};
 
 // Originals and saving: `export_original` and `save`.
 #[cfg(any(feature = "library", feature = "save"))]

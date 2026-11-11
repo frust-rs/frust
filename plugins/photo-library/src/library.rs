@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::types::{AssetId, MediaFilter, MediaKind};
+use crate::types::{AssetId, MediaFilter, MediaKind, PhotoError};
 
 /// Largest page [`AssetQuery::limit`] allows.
 pub const MAX_PAGE_LIMIT: u32 = 500;
@@ -197,6 +197,229 @@ pub struct AssetPage {
     pub total: u64,
 }
 
+/// How many iOS cursor sessions keep their library snapshot; the least recently used is evicted
+/// when another session starts.
+#[cfg_attr(not(all(feature = "library", target_os = "ios")), allow(dead_code))]
+pub(crate) const SNAPSHOT_SESSIONS: usize = 4;
+
+/// A cursor used with a query whose album or filter differs from the one that made it.
+const CURSOR_OTHER_QUERY: &str =
+    "the cursor belongs to a query with another album or filter; restart paging from None";
+/// A cursor made by another platform's paging scheme.
+const CURSOR_OTHER_PLATFORM: &str =
+    "the cursor was not made by this platform's library; restart paging from None";
+/// An iOS cursor whose snapshot was evicted from the session store.
+#[cfg_attr(not(all(feature = "library", target_os = "ios")), allow(dead_code))]
+pub(crate) const CURSOR_EXPIRED: &str =
+    "the cursor's library snapshot is no longer held; restart paging from None";
+
+/// Where an [`AssetCursor`] resumes. Each platform makes and accepts only its own variant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(feature = "library", any(target_os = "android", target_os = "ios"))),
+    allow(dead_code)
+)]
+pub(crate) enum CursorPosition {
+    /// Android: the sort key and `_ID` of the last row returned.
+    Keyset {
+        /// The row's timestamp key, in milliseconds.
+        key: i64,
+        /// The row's `MediaStore` `_ID`.
+        id: i64,
+    },
+    /// iOS: the index of the next asset in snapshot `session`.
+    Snapshot {
+        /// The snapshot's id in the session store.
+        session: u64,
+        /// The first index of the next page.
+        index: u64,
+    },
+}
+
+/// The part of a query a cursor is bound to: the parts that decide which assets match.
+#[derive(Clone, PartialEq, Eq)]
+struct CursorScope {
+    album: Option<AlbumId>,
+    filter: MediaFilter,
+}
+
+impl CursorScope {
+    fn of(query: &AssetQuery) -> Self {
+        Self {
+            album: query.album.clone(),
+            filter: query.filter,
+        }
+    }
+}
+
+/// Where [`PhotoLibrary::assets_after`](crate::PhotoLibrary::assets_after) resumes: the
+/// `next` of an [`AssetCursorPage`].
+///
+/// Opaque and in-memory only: it cannot be persisted, and is meaningful only to the query
+/// (album and filter) and the platform that made it. `Debug` prints no position.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AssetCursor {
+    scope: CursorScope,
+    position: CursorPosition,
+}
+
+#[cfg_attr(
+    not(all(feature = "library", any(target_os = "android", target_os = "ios"))),
+    allow(dead_code)
+)]
+impl AssetCursor {
+    /// A cursor resuming `query` at `position`.
+    pub(crate) fn new(query: &AssetQuery, position: CursorPosition) -> Self {
+        Self {
+            scope: CursorScope::of(query),
+            position,
+        }
+    }
+
+    /// The position to resume `query` at, or [`PhotoError::InvalidRequest`] when the cursor
+    /// was made for a query with another album or filter.
+    pub(crate) fn position_for(&self, query: &AssetQuery) -> Result<CursorPosition, PhotoError> {
+        if self.scope != CursorScope::of(query) {
+            return Err(PhotoError::InvalidRequest {
+                reason: CURSOR_OTHER_QUERY,
+            });
+        }
+        Ok(self.position)
+    }
+
+    /// The Android keyset `(key, id)` to resume `query` after.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn keyset_for(&self, query: &AssetQuery) -> Result<(i64, i64), PhotoError> {
+        match self.position_for(query)? {
+            CursorPosition::Keyset { key, id } => Ok((key, id)),
+            CursorPosition::Snapshot { .. } => Err(other_platform()),
+        }
+    }
+
+    /// The iOS `(session, index)` to resume `query` at.
+    #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+    pub(crate) fn snapshot_for(&self, query: &AssetQuery) -> Result<(u64, u64), PhotoError> {
+        match self.position_for(query)? {
+            CursorPosition::Snapshot { session, index } => Ok((session, index)),
+            CursorPosition::Keyset { .. } => Err(other_platform()),
+        }
+    }
+}
+
+fn other_platform() -> PhotoError {
+    PhotoError::InvalidRequest {
+        reason: CURSOR_OTHER_PLATFORM,
+    }
+}
+
+impl fmt::Debug for AssetCursor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("AssetCursor(..)")
+    }
+}
+
+/// One page of [`PhotoLibrary::assets_after`](crate::PhotoLibrary::assets_after).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AssetCursorPage {
+    /// The assets of this page, newest first.
+    pub items: Vec<Asset>,
+    /// Where the next page starts; `None` on the last page.
+    pub next: Option<AssetCursor>,
+}
+
+/// An Android keyset page: `more` says whether the host saw a row past this page, and
+/// `(last_key, last_id)` is the sort key and `_ID` of the page's last row.
+#[cfg_attr(not(all(feature = "library", target_os = "android")), allow(dead_code))]
+pub(crate) fn keyset_page(
+    query: &AssetQuery,
+    items: Vec<Asset>,
+    more: bool,
+    last_key: i64,
+    last_id: i64,
+) -> AssetCursorPage {
+    let next = (more && !items.is_empty()).then(|| {
+        AssetCursor::new(
+            query,
+            CursorPosition::Keyset {
+                key: last_key,
+                id: last_id,
+            },
+        )
+    });
+    AssetCursorPage { items, next }
+}
+
+/// The cursor after an iOS page that ended at index `end` of a `total`-asset snapshot, or
+/// `None` when that page was the last.
+#[cfg_attr(not(all(feature = "library", target_os = "ios")), allow(dead_code))]
+pub(crate) fn snapshot_next(
+    query: &AssetQuery,
+    session: u64,
+    end: usize,
+    total: usize,
+) -> Option<AssetCursor> {
+    (end < total).then(|| {
+        AssetCursor::new(
+            query,
+            CursorPosition::Snapshot {
+                session,
+                index: end as u64,
+            },
+        )
+    })
+}
+
+/// A bounded store of iOS cursor-session snapshots, keyed by a session id that is never
+/// reused. Inserting past the capacity evicts the least recently used session; a lookup marks
+/// its session most recently used.
+#[cfg_attr(not(all(feature = "library", target_os = "ios")), allow(dead_code))]
+pub(crate) struct SnapshotStore<T> {
+    capacity: usize,
+    next_session: u64,
+    /// Least recently used first.
+    entries: Vec<(u64, T)>,
+}
+
+#[cfg_attr(not(all(feature = "library", target_os = "ios")), allow(dead_code))]
+impl<T: Clone> SnapshotStore<T> {
+    /// An empty store holding at most `capacity` sessions (at least one).
+    pub(crate) const fn new(capacity: usize) -> Self {
+        Self {
+            capacity: if capacity == 0 { 1 } else { capacity },
+            next_session: 1,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Stores `snapshot` under a fresh session id, evicting the least recently used session
+    /// when the store is full.
+    pub(crate) fn insert(&mut self, snapshot: T) -> u64 {
+        let session = self.next_session;
+        self.next_session = self.next_session.wrapping_add(1);
+        while self.entries.len() >= self.capacity {
+            self.entries.remove(0);
+        }
+        self.entries.push((session, snapshot));
+        session
+    }
+
+    /// The snapshot of `session`, marked most recently used, or `None` once it was evicted.
+    pub(crate) fn get(&mut self, session: u64) -> Option<T> {
+        let at = self.entries.iter().position(|(id, _)| *id == session)?;
+        let entry = self.entries.remove(at);
+        let snapshot = entry.1.clone();
+        self.entries.push(entry);
+        Some(snapshot)
+    }
+
+    /// How many sessions are held.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// How a thumbnail fills the requested box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -367,6 +590,180 @@ mod tests {
     #[test]
     fn ids_do_not_leak_in_debug() {
         assert_eq!(format!("{:?}", AlbumId::from_raw("secret")), "AlbumId(..)");
+    }
+
+    fn asset(id: &str) -> Asset {
+        Asset {
+            id: AssetId::from_raw(id),
+            kind: MediaKind::Image,
+            width: 1,
+            height: 1,
+            created_unix_ms: None,
+            duration_ms: None,
+            modified_unix_ms: None,
+            is_favorite: None,
+            burst_id: None,
+            file_name: None,
+            content_type: None,
+        }
+    }
+
+    #[test]
+    fn a_cursor_round_trips_its_position() {
+        let query = AssetQuery::new().album(AlbumId::from_raw("a"));
+        let keyset = CursorPosition::Keyset { key: -5, id: 42 };
+        let cursor = AssetCursor::new(&query, keyset);
+        assert!(cursor.position_for(&query) == Ok(keyset));
+        assert_eq!(cursor.keyset_for(&query), Ok((-5, 42)));
+        let snapshot = CursorPosition::Snapshot {
+            session: 3,
+            index: 200,
+        };
+        let cursor = AssetCursor::new(&query, snapshot);
+        assert_eq!(cursor.snapshot_for(&query), Ok((3, 200)));
+        assert_eq!(cursor.clone(), cursor);
+    }
+
+    #[test]
+    fn a_cursor_ignores_offset_limit_and_details() {
+        let query = AssetQuery::new().filter(MediaFilter::Videos);
+        let cursor = AssetCursor::new(&query, CursorPosition::Keyset { key: 1, id: 2 });
+        let paged = query.clone().offset(900).limit(7).with_details();
+        assert_eq!(cursor.keyset_for(&paged), Ok((1, 2)));
+    }
+
+    #[test]
+    fn a_cursor_from_another_query_is_an_invalid_request() {
+        let query = AssetQuery::new().album(AlbumId::from_raw("a"));
+        let cursor = AssetCursor::new(&query, CursorPosition::Keyset { key: 1, id: 2 });
+        let other_query = PhotoError::InvalidRequest {
+            reason: CURSOR_OTHER_QUERY,
+        };
+        for other in [
+            AssetQuery::new(),
+            AssetQuery::new().album(AlbumId::from_raw("b")),
+            query.clone().filter(MediaFilter::Images),
+        ] {
+            assert_eq!(cursor.keyset_for(&other), Err(other_query.clone()));
+            assert_eq!(cursor.snapshot_for(&other), Err(other_query.clone()));
+        }
+    }
+
+    #[test]
+    fn a_cursor_from_another_platform_is_an_invalid_request() {
+        let query = AssetQuery::new();
+        let android = AssetCursor::new(&query, CursorPosition::Keyset { key: 1, id: 2 });
+        let ios = AssetCursor::new(
+            &query,
+            CursorPosition::Snapshot {
+                session: 1,
+                index: 0,
+            },
+        );
+        assert_eq!(android.snapshot_for(&query), Err(other_platform()));
+        assert_eq!(ios.keyset_for(&query), Err(other_platform()));
+    }
+
+    #[test]
+    fn a_cursor_prints_no_position() {
+        let query = AssetQuery::new().album(AlbumId::from_raw("secret"));
+        let cursor = AssetCursor::new(&query, CursorPosition::Keyset { key: 77, id: 99 });
+        assert_eq!(format!("{cursor:?}"), "AssetCursor(..)");
+        let page = AssetCursorPage {
+            items: Vec::new(),
+            next: Some(cursor),
+        };
+        let printed = format!("{page:?}");
+        assert!(!printed.contains("77") && !printed.contains("secret"));
+    }
+
+    #[test]
+    fn a_keyset_page_has_a_next_only_when_more_rows_follow() {
+        let query = AssetQuery::new();
+        let page = keyset_page(&query, vec![asset("a"), asset("b")], true, 10, 4);
+        let next = page.next.expect("more rows follow");
+        assert_eq!(next.keyset_for(&query), Ok((10, 4)));
+
+        // The last page, full or short, ends the session.
+        let last = keyset_page(&query, vec![asset("a"), asset("b")], false, 10, 4);
+        assert_eq!(last.next, None);
+        assert_eq!(last.items.len(), 2);
+        let empty = keyset_page(&query, Vec::new(), false, 0, 0);
+        assert_eq!(empty.next, None);
+        // An empty page has no last row to resume after.
+        assert_eq!(keyset_page(&query, Vec::new(), true, 0, 0).next, None);
+    }
+
+    #[test]
+    fn a_snapshot_page_has_a_next_until_the_snapshot_ends() {
+        let query = AssetQuery::new();
+        let next = snapshot_next(&query, 7, 100, 250).expect("a page follows");
+        assert_eq!(next.snapshot_for(&query), Ok((7, 100)));
+        assert_eq!(snapshot_next(&query, 7, 250, 250), None);
+        assert_eq!(snapshot_next(&query, 7, 0, 0), None);
+    }
+
+    #[test]
+    fn the_snapshot_store_is_bounded_and_evicts_the_least_recently_used() {
+        let mut store = SnapshotStore::new(SNAPSHOT_SESSIONS);
+        let sessions: Vec<u64> = (0..SNAPSHOT_SESSIONS).map(|n| store.insert(n)).collect();
+        assert_eq!(store.len(), SNAPSHOT_SESSIONS);
+        for (n, session) in sessions.iter().enumerate() {
+            assert_eq!(store.get(*session), Some(n));
+        }
+
+        // Touch the oldest session, so the second-oldest is now the least recently used.
+        assert_eq!(store.get(sessions[0]), Some(0));
+        let fifth = store.insert(99);
+        assert_eq!(store.len(), SNAPSHOT_SESSIONS, "the bound holds");
+        assert_eq!(store.get(sessions[1]), None, "the LRU session was evicted");
+        assert_eq!(store.get(sessions[0]), Some(0));
+        assert_eq!(store.get(fifth), Some(99));
+
+        // Session ids are never reused, so an evicted cursor never lands on a newer snapshot.
+        let sixth = store.insert(100);
+        assert!(!sessions.contains(&sixth) && sixth != fifth);
+        assert_eq!(store.get(sessions[1]), None);
+    }
+
+    #[test]
+    fn a_zero_capacity_store_still_holds_one_session() {
+        let mut store = SnapshotStore::new(0);
+        let a = store.insert("a");
+        assert_eq!(store.get(a), Some("a"));
+        let b = store.insert("b");
+        assert_eq!(
+            (store.get(a), store.get(b), store.len()),
+            (None, Some("b"), 1)
+        );
+    }
+
+    #[cfg(not(feature = "library"))]
+    #[test]
+    fn cursor_paging_is_refused_without_the_feature() {
+        use crate::PhotoLibrary;
+        let off = PhotoError::FeatureDisabled { feature: "library" };
+        assert_eq!(
+            PhotoLibrary::assets_after(&AssetQuery::new(), None).unwrap_err(),
+            off
+        );
+        let cursor = AssetCursor::new(&AssetQuery::new(), CursorPosition::Keyset { key: 1, id: 1 });
+        assert_eq!(
+            PhotoLibrary::assets_after(&AssetQuery::new(), Some(&cursor)).unwrap_err(),
+            off
+        );
+    }
+
+    #[cfg(all(
+        feature = "library",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    #[test]
+    fn cursor_paging_is_unsupported_without_a_library() {
+        assert_eq!(
+            crate::PhotoLibrary::assets_after(&AssetQuery::new(), None),
+            Err(PhotoError::Unsupported)
+        );
     }
 
     #[cfg(not(feature = "library"))]

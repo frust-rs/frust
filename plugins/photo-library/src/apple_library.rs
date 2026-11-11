@@ -14,6 +14,14 @@
 //! [`PhotoError::UiThread`]. Browsing is read-only and never takes the pick
 //! guard; [`manage_limited_selection`] presents system UI and does.
 //!
+//! # Cursor paging
+//!
+//! PhotoKit sorts on `creationDate` alone and has no keyset fetch, so
+//! [`assets_after`] pages by position within one `PHFetchResult` snapshot per
+//! cursor session. A bounded store keeps the [`SNAPSHOT_SESSIONS`] most
+//! recently used snapshots under a session id carried in the cursor; a
+//! cursor whose snapshot was evicted answers [`PhotoError::InvalidRequest`].
+//!
 //! # Thumbnails
 //!
 //! `PHImageManager.h` documents that a `highQualityFormat` request calls its
@@ -63,7 +71,7 @@ use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -79,7 +87,7 @@ use objc2_core_graphics::{
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSPredicate, NSSortDescriptor, NSString};
 use objc2_photos::{
     PHAccessLevel, PHAsset, PHAssetCollection, PHAssetCollectionSubtype, PHAssetCollectionType,
-    PHAssetMediaType, PHAuthorizationStatus, PHCachingImageManager, PHFetchOptions,
+    PHAssetMediaType, PHAuthorizationStatus, PHCachingImageManager, PHFetchOptions, PHFetchResult,
     PHImageCancelledKey, PHImageContentMode, PHImageErrorKey, PHImageRequestID,
     PHImageRequestOptions, PHImageRequestOptionsDeliveryMode, PHImageRequestOptionsResizeMode,
     PHImageResultIsDegradedKey, PHPhotoLibrary,
@@ -89,8 +97,9 @@ use objc2_ui_kit::{UIImage, UIImageOrientation, UIViewController};
 use super::{PRESENT_GRACE, presenter};
 use crate::cancel::CancelToken;
 use crate::library::{
-    Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, Thumbnail, ThumbnailMode,
-    ThumbnailRequest,
+    Album, AlbumId, AlbumKind, Asset, AssetCursor, AssetCursorPage, AssetPage, AssetQuery,
+    CURSOR_EXPIRED, SNAPSHOT_SESSIONS, SnapshotStore, Thumbnail, ThumbnailMode, ThumbnailRequest,
+    snapshot_next,
 };
 use crate::pick_cache::PickGuard;
 use crate::pixels;
@@ -241,29 +250,37 @@ fn push_albums(
     }
 }
 
+/// The fetch result of `query`'s album and filter, newest first.
+fn fetch_assets(query: &AssetQuery) -> Result<Retained<PHFetchResult<PHAsset>>, PhotoError> {
+    let options = fetch_options(query.filter);
+    // SAFETY: the album lookup takes an `NSArray<NSString>` of identifiers
+    // and null options, and `firstObject` reads the immutable result. The
+    // asset fetches take a live collection and options object.
+    unsafe {
+        match &query.album {
+            Some(album) => {
+                let ids = NSArray::from_retained_slice(&[NSString::from_str(album.as_str())]);
+                let collection =
+                    PHAssetCollection::fetchAssetCollectionsWithLocalIdentifiers_options(
+                        &ids, None,
+                    )
+                    .firstObject()
+                    .ok_or(PhotoError::NotFound)?;
+                Ok(PHAsset::fetchAssetsInAssetCollection_options(
+                    &collection,
+                    Some(&options),
+                ))
+            }
+            None => Ok(PHAsset::fetchAssetsWithOptions(Some(&options))),
+        }
+    }
+}
+
 pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
     refuse_main_thread()?;
     autoreleasepool(|_| {
         ensure_readable()?;
-        let options = fetch_options(query.filter);
-        // SAFETY: the album lookup takes an `NSArray<NSString>` of identifiers
-        // and null options, and `firstObject` reads the immutable result. The
-        // asset fetches take a live collection and options object.
-        let assets = unsafe {
-            match &query.album {
-                Some(album) => {
-                    let ids = NSArray::from_retained_slice(&[NSString::from_str(album.as_str())]);
-                    let collection =
-                        PHAssetCollection::fetchAssetCollectionsWithLocalIdentifiers_options(
-                            &ids, None,
-                        )
-                        .firstObject()
-                        .ok_or(PhotoError::NotFound)?;
-                    PHAsset::fetchAssetsInAssetCollection_options(&collection, Some(&options))
-                }
-                None => PHAsset::fetchAssetsWithOptions(Some(&options)),
-            }
-        };
+        let assets = fetch_assets(query)?;
         // SAFETY: `count` reads the immutable fetch result.
         let total = unsafe { assets.count() };
         let started = Instant::now();
@@ -284,6 +301,76 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
         Ok(AssetPage {
             items,
             total: total as u64,
+        })
+    })
+}
+
+/// One cursor session's fetch result, held in [`SNAPSHOTS`] so every page of the
+/// session slices the same snapshot of the library.
+struct Snapshot(Retained<PHFetchResult<PHAsset>>);
+
+// SAFETY: a `PHFetchResult` is an immutable snapshot once returned: later
+// library changes reach an app only as a new result
+// (`PHFetchResultChangeDetails.fetchResultAfterChanges`), never by mutating
+// this one. `assets` already reads fetch results on whichever worker thread
+// calls it; here a result is read the same way, only (`count`,
+// `objectAtIndex:`), possibly from another worker thread than the one that
+// fetched it. Its element type, `PHAsset`, is marked `Send + Sync` by the
+// bindings.
+unsafe impl Send for Snapshot {}
+// SAFETY: as for `Send`; nothing reachable through `&Snapshot` mutates it.
+unsafe impl Sync for Snapshot {}
+
+/// The snapshots of the most recent cursor sessions.
+static SNAPSHOTS: Mutex<SnapshotStore<Arc<Snapshot>>> =
+    Mutex::new(SnapshotStore::new(SNAPSHOT_SESSIONS));
+
+fn snapshots() -> MutexGuard<'static, SnapshotStore<Arc<Snapshot>>> {
+    SNAPSHOTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The crate root's `assets_after` arm. `None` fetches a new snapshot and
+/// stores it as a new session; a cursor slices its session's snapshot, which
+/// the store may have evicted (`InvalidRequest`, restart from `None`). The
+/// store's lock is held only to insert or look up, never across a page's
+/// reads.
+pub(crate) fn assets_after(
+    query: &AssetQuery,
+    cursor: Option<&AssetCursor>,
+) -> Result<AssetCursorPage, PhotoError> {
+    refuse_main_thread()?;
+    // A cursor of another query or platform is refused before any Photos work.
+    let resume = cursor
+        .map(|cursor| cursor.snapshot_for(query))
+        .transpose()?;
+    autoreleasepool(|_| {
+        ensure_readable()?;
+        let (session, start, snapshot) = match resume {
+            Some((session, index)) => {
+                let snapshot = snapshots().get(session).ok_or(PhotoError::InvalidRequest {
+                    reason: CURSOR_EXPIRED,
+                })?;
+                (session, index, snapshot)
+            }
+            None => {
+                let snapshot = Arc::new(Snapshot(fetch_assets(query)?));
+                let session = snapshots().insert(Arc::clone(&snapshot));
+                (session, 0, snapshot)
+            }
+        };
+        // SAFETY: `count` reads the immutable fetch result.
+        let total = unsafe { snapshot.0.count() };
+        let range = page_bounds(start, query.effective_limit(), total);
+        let end = range.end;
+        let items: Vec<Asset> = range
+            // SAFETY: the page is clamped below `total`, the result's count.
+            .map(|index| asset_of(&*unsafe { snapshot.0.objectAtIndex(index) }, query.details))
+            .collect();
+        Ok(AssetCursorPage {
+            items,
+            next: snapshot_next(query, session, end, total),
         })
     })
 }

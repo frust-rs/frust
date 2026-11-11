@@ -110,8 +110,8 @@ pub use decode::{DecodeOptions, DecodedImage, ImageColorSpace};
 ))]
 pub use folder_scan::{FolderMedia, FolderPage, FolderScan};
 pub use library::{
-    Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE,
-    Thumbnail, ThumbnailMode, ThumbnailRequest,
+    Album, AlbumId, AlbumKind, Asset, AssetCursor, AssetCursorPage, AssetPage, AssetQuery,
+    MAX_PAGE_LIMIT, MAX_THUMBNAIL_EDGE, Thumbnail, ThumbnailMode, ThumbnailRequest,
 };
 pub use metadata::MetadataOptions;
 pub use originals::{
@@ -250,6 +250,49 @@ impl PhotoLibrary {
         #[cfg(not(feature = "library"))]
         {
             let _ = query;
+            Err(library_disabled())
+        }
+    }
+
+    /// One page of assets, newest first, resuming after `cursor`: paging that stays stable while
+    /// the library changes between pages. Blocks; see [`albums`](Self::albums) for the rules.
+    ///
+    /// `cursor: None` returns the first page; pass the returned [`AssetCursorPage::next`] for the
+    /// page after it, until `next` is `None` on the last page. The query's
+    /// [`offset`](AssetQuery::offset) is ignored and no total is computed. Its
+    /// [`limit`](AssetQuery::limit) and [`details`](AssetQuery::details) apply to each page and
+    /// may change between pages, but its album and filter may not: a cursor used with a query
+    /// whose album or filter differs from the one that made it, or a cursor from another
+    /// platform, answers [`PhotoError::InvalidRequest`]. A cursor lives in memory only; start
+    /// again from `None` after a relaunch.
+    ///
+    /// - **Android:** keyset paging on the order [`assets`](Self::assets) uses (the taken time,
+    ///   or the added time when there is none, then the `MediaStore` id, both descending). Each
+    ///   page resumes after the last row it returned, so an insert or a delete between pages
+    ///   neither repeats nor skips a row; an asset inserted with a time older than the cursor
+    ///   appears on a later page, and one newer than it does not appear until a new session.
+    ///   No row count is taken. On API 29, where `MediaStore` cannot limit a query, the page
+    ///   reads only its own rows from the start of the result.
+    /// - **iOS:** PhotoKit has neither a secondary sort on the identifier nor a keyset fetch, so
+    ///   a cursor session pins one snapshot of the library, fetched by the first page: inserts
+    ///   and deletes after the first page do not appear until a new session starts from `None`
+    ///   (an asset deleted since may answer [`PhotoError::NotFound`] from
+    ///   [`thumbnail`](Self::thumbnail)), and assets that share a creation date keep PhotoKit's
+    ///   order within the snapshot. The four most recently used sessions keep their snapshot;
+    ///   a cursor of an evicted session answers [`PhotoError::InvalidRequest`], and paging
+    ///   restarts from `None`.
+    /// - **Desktop and web:** [`PhotoError::Unsupported`], as for [`assets`](Self::assets).
+    pub fn assets_after(
+        query: &AssetQuery,
+        cursor: Option<&AssetCursor>,
+    ) -> Result<AssetCursorPage, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            platform::assets_after(query, cursor)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = (query, cursor);
             Err(library_disabled())
         }
     }
