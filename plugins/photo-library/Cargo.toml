@@ -55,6 +55,14 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSProgress",
     # `mainBundle` and `objectForInfoDictionaryKey:` for the usage-description precheck.
     "NSBundle",
+    # The change feed: a persistent change token archived to bytes and back, the change details'
+    # identifier sets, and the cloud-identifier mapping dictionary.
+    "NSData",
+    "NSCoder",
+    "NSKeyedArchiver",
+    "NSSet",
+    "NSEnumerator",
+    "NSDictionary",
 ] }
 # Presenter walk (same set as plugins/share); `block2` for `presentViewController:animated:completion:`.
 objc2-ui-kit = { version = "0.3", default-features = false, features = [
@@ -93,6 +101,12 @@ objc2-photos = { version = "0.3", default-features = false, features = [
     "PHAssetCreationRequest",
     "PHAssetChangeRequest",
     "PHAssetCollectionChangeRequest",
+    # The change feed (iOS 16+ persistent changes) and the cloud-identifier mapping (iOS 15+).
+    "PHPersistentChange",
+    "PHPersistentChangeFetchResult",
+    "PHPersistentChangeToken",
+    "PHPersistentObjectChangeDetails",
+    "PHCloudIdentifier",
 ] }
 block2 = { version = "0.6", default-features = false, features = ["std"] }
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "block2", "objc2"] }

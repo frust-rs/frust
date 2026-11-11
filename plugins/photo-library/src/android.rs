@@ -47,13 +47,17 @@
 //!   — an export's answer, with the provider's MIME type and display name.
 //! - `Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnSaveDone(env, class, requestId: jlong, code: jint, uri: String)`
 //!   — a save's answer, with the new asset's URI.
+//! - `Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeOnLibraryChanged(env, class)`
+//!   — the change observer's wake (`library`); carries no data.
 //!
 //! Every export upgrades its [`jni::EnvUnowned`] via
 //! [`jni::EnvUnowned::with_env`], which wraps the body in `catch_unwind`, and
 //! resolve with [`LogErrorAndDefault`] — the crate's no-unwind-across-FFI
 //! guarantee (`docs/CODE_STANDARDS.md`'s Language Idioms), with no direct
-//! `catch_unwind` here. This module holds no `unsafe` block; each export's
-//! `#[unsafe(no_mangle)]` attribute is its only `unsafe` token.
+//! `catch_unwind` here. The pick exports live in this module, the export and
+//! save ones in `android_originals`, and `nativeOnLibraryChanged` in
+//! `android_changes`; none of the three holds an `unsafe` block, so each
+//! export's `#[unsafe(no_mangle)]` attribute is its only `unsafe` token.
 //!
 //! # Copies and names
 //!
@@ -110,8 +114,17 @@
 //! # Library browsing
 //!
 //! With the `library` feature, `android_library` adds the `albums`, `assets`,
-//! `thumbnail` and `manageLimitedSelection` host calls and refuses the UI
-//! thread on each; see that module and the Kotlin host's contract table.
+//! `assetsAfter`, `thumbnail` and `manageLimitedSelection` host calls and
+//! refuses the UI thread on each; see that module and the Kotlin host's
+//! contract table.
+//!
+//! # Change feed
+//!
+//! With the `library` feature, `android_changes` adds the `changeSnapshot`,
+//! `startChangeObserver` and `stopChangeObserver` host calls and the
+//! `nativeOnLibraryChanged` export: tokens from `MediaStore` versions,
+//! generations and id sets, and a `ContentObserver` wake. Its token and diff
+//! logic is platform-free and checked on the host; see that module.
 //!
 //! # Originals and saves
 //!
@@ -802,12 +815,14 @@ pub extern "system" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeO
     .resolve::<LogErrorAndDefault>();
 }
 
-// Library browsing: `albums`, `assets`, `thumbnail`, `manage_limited_selection`.
+// Library browsing: `albums`, `assets`, `assets_after`, `thumbnail`, `manage_limited_selection`.
 #[cfg(feature = "library")]
 #[path = "android_library.rs"]
 mod android_library;
 #[cfg(feature = "library")]
-pub(crate) use android_library::{albums, assets, manage_limited_selection, thumbnail};
+pub(crate) use android_library::{
+    albums, assets, assets_after, manage_limited_selection, thumbnail,
+};
 
 // Originals and saving: `export_original` and `save`.
 #[cfg(any(feature = "library", feature = "save"))]
@@ -817,6 +832,15 @@ mod android_originals;
 pub(crate) use android_originals::export_original;
 #[cfg(feature = "save")]
 pub(crate) use android_originals::save;
+
+// Change feed: `current_change_token`, `changes_since` and the `ContentObserver` wake.
+#[cfg(feature = "library")]
+#[path = "android_changes.rs"]
+mod android_changes;
+#[cfg(feature = "library")]
+pub(crate) use android_changes::{
+    changes_since, current_change_token, start_change_observer, stop_change_observer,
+};
 
 // EXIF: the `DecodeResult` read both calls share, and `asset_metadata`'s host call.
 #[cfg(any(feature = "decode", feature = "library"))]

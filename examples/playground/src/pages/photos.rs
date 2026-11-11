@@ -48,7 +48,29 @@
 //! When a picked item carries an asset id (iOS), the Picker preview tries the native thumbnail
 //! first and decodes the copied file only when that fails.
 //!
-//! An Originals panel below Browse acts on one asset: the thumbnail tapped in the Browse grid
+//! A **Cursor paging** toggle beside Refresh switches Browse to `PhotoLibrary::assets_after`:
+//! each page keeps the returned `next` cursor for **Load more**, the count line drops the total
+//! (cursor paging computes none), and Load more is disabled once `next` is `None`. Off, Browse
+//! pages by offset exactly as above. Switching the toggle or the album reloads the first page,
+//! which drops the listing and its cursor; Load more continues in the mode the listing on screen
+//! was loaded with. A failed cursor page (an `InvalidRequest` for an evicted iOS snapshot, say)
+//! shows its text, and the next Refresh starts again from the first page.
+//!
+//! A Changes panel below Browse drives the library change feed. **Save token** reads
+//! `PhotoLibrary::current_change_token` and stores its bytes as hex in shared preferences (key
+//! `playground.change_token`), so the token survives a relaunch; the mount-time step reads it
+//! back, and a line shows whether one is stored and its byte length, never its bytes. **Check**
+//! calls `PhotoLibrary::changes_since` with the stored token, shows `Delta: +inserted ~updated
+//! -deleted` or `Full rescan` (or the typed error's `Display` text), and stores the `next`
+//! token. Each step runs in [`frust::spawn_blocking`] behind a [`use_task`] and its result
+//! reaches `build` through the task's value. **Watch** subscribes with
+//! `PhotoLibrary::on_library_changed`, off the UI thread; the [`ChangeSubscription`] lives in
+//! [`LibraryWatch`], held in the app state so a watch outlives a section switch, and **Stop**
+//! drops it. The callback runs on an arbitrary thread and only bumps the watch's atomic count;
+//! the watch task polls the count and copies it into a signal while the watch lasts (the shape
+//! the Picker uses for progress). A subscribe error shows as text.
+//!
+//! An Originals panel below the Changes panel acts on one asset: the thumbnail tapped in the Browse grid
 //! (it insets while selected) or, without a selection, the Picker's most recent asset id.
 //! Version (Original / Current) and Network (allowed / off) toggles feed
 //! `PhotoLibrary::export_original`, which runs in [`frust::spawn_blocking`] behind a
@@ -88,7 +110,7 @@ use frust::authoring::Rect;
 use frust::{
     Align, Alignment, AsyncValue, ButtonStyle, ChildKey, Component, EdgeInsets, GestureDetector,
     Get, GetUntracked, Image, ImageFit, ImageSource, ListView, Padding, RwSignal, ScrollbarStyle,
-    Set, SizedBox, Theme, UseTask, View, button, colored_box, column, component,
+    Set, SizedBox, Theme, Update, UseTask, View, button, colored_box, column, component,
     decode_image_async, either, on_cleanup, row, spawn_blocking, stack, text, use_context,
     use_task, wrap,
 };
@@ -100,10 +122,11 @@ use frust_permissions::{
 };
 use frust_photo_library::folder::FolderEntry;
 use frust_photo_library::{
-    Album, AlbumId, Asset, AssetId, AssetPage, AssetQuery, AssetVersion, CancelToken,
-    DecodeOptions, ExifData, ExportOptions, ExportedOriginal, FolderMedia, FolderPage, FolderScan,
-    ImageColorSpace, MediaFilter, MediaKind, MetadataOptions, PhotoError, PhotoLibrary,
-    PickOptions, PickProgress, PickedItem, SaveRequest, Thumbnail, ThumbnailMode, ThumbnailRequest,
+    Album, AlbumId, Asset, AssetCursor, AssetCursorPage, AssetId, AssetPage, AssetQuery,
+    AssetVersion, CancelToken, ChangeSubscription, ChangeToken, DecodeOptions, ExifData,
+    ExportOptions, ExportedOriginal, FolderMedia, FolderPage, FolderScan, ImageColorSpace,
+    LibraryChanges, MediaFilter, MediaKind, MetadataOptions, PhotoError, PhotoLibrary, PickOptions,
+    PickProgress, PickedItem, SaveRequest, Thumbnail, ThumbnailMode, ThumbnailRequest,
 };
 use frust_shared_preferences::SharedPreferences;
 
@@ -146,11 +169,16 @@ const LIMITS: [(&str, u32); 3] = [("1", 1), ("5", 5), ("Unlimited", 0)];
 const UNREAD: &str = "not read yet";
 
 /// See the page-fn contract in [`crate::pages`].
-pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
-    component(PhotosPage)
+pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
+    component(PhotosPage {
+        watch: state.photo_watch.clone(),
+    })
 }
 
-struct PhotosPage;
+struct PhotosPage {
+    /// The app-held library-change watch, handed to the Changes panel.
+    watch: LibraryWatch,
+}
 
 /// The asset ids the Browse and Picker panels hand to the Originals panel.
 #[derive(Clone, Copy)]
@@ -199,6 +227,10 @@ impl Component for PhotosPage {
                 .child(SizedBox(None, Some(16.0)))
                 .child(component(BrowsePanel {
                     selected: shared.selected,
+                }))
+                .child(SizedBox(None, Some(16.0)))
+                .child(component(ChangesPanel {
+                    watch: self.watch.clone(),
                 }))
                 .child(SizedBox(None, Some(16.0)))
                 .child(component(OriginalsPanel {
@@ -945,11 +977,34 @@ fn type_badge(content_type: Option<&str>) -> Option<&'static str> {
     }
 }
 
-/// The assets loaded so far for the selected album, and the library's total for it.
-#[derive(Clone, Default)]
+/// The assets loaded so far for the selected album, and how the next page continues them.
+#[derive(Clone)]
 struct Listing {
     ids: Arc<Vec<GridAsset>>,
-    total: u64,
+    /// The library's total for the album under offset paging; `None` for a cursor-paged
+    /// listing, which has no total.
+    total: Option<u64>,
+    /// Where the next cursor page starts; `None` for an offset-paged listing and after the
+    /// last cursor page.
+    next: Option<AssetCursor>,
+}
+
+impl Default for Listing {
+    fn default() -> Self {
+        Self {
+            ids: Arc::new(Vec::new()),
+            total: Some(0),
+            next: None,
+        }
+    }
+}
+
+/// How Browse pages through the library: by offset with a total (the default), or by
+/// `PhotoLibrary::assets_after` cursor with none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Paging {
+    Offset,
+    Cursor,
 }
 
 /// List rows needed for `count` assets.
@@ -1000,6 +1055,43 @@ fn count_line(loaded: usize, total: u64) -> String {
     format!("Showing {loaded} of {total} assets")
 }
 
+/// The count line under a cursor-paged list, which has no total.
+fn cursor_count_line(loaded: usize) -> String {
+    format!("Showing {loaded} assets (cursor paging, no total)")
+}
+
+/// The count line for `listing`, in the paging mode it was loaded with.
+fn listing_line(listing: &Listing) -> String {
+    match listing.total {
+        Some(total) => count_line(listing.ids.len(), total),
+        None => cursor_count_line(listing.ids.len()),
+    }
+}
+
+/// Load more's step for `listing` of `album`, in the paging mode the listing was loaded with
+/// (not the toggle's, which may have changed since a failed switch); `None` when there is no
+/// next page.
+fn more_action(album: &Option<AlbumId>, listing: &Listing) -> Option<BrowseAction> {
+    let loaded = listing.ids.len();
+    match listing.total {
+        Some(total) => {
+            has_more(loaded, total).then(|| BrowseAction::More(album.clone(), loaded as u64))
+        }
+        None => listing
+            .next
+            .clone()
+            .map(|cursor| BrowseAction::After(album.clone(), cursor)),
+    }
+}
+
+/// The paging toggle's label.
+fn paging_label(paging: Paging) -> &'static str {
+    match paging {
+        Paging::Offset => "Cursor paging: off",
+        Paging::Cursor => "Cursor paging: on",
+    }
+}
+
 /// The query for the page starting at `offset`.
 fn browse_query(album: &Option<AlbumId>, offset: u64) -> AssetQuery {
     let query = AssetQuery::new()
@@ -1036,19 +1128,50 @@ fn album_label(album: &Album) -> String {
 #[derive(Debug, Clone)]
 enum BrowseAction {
     /// Re-list the albums and the first page of the selected album.
-    Refresh(Option<AlbumId>),
-    /// The first page of another album.
-    Select(Option<AlbumId>),
-    /// The page after the `offset` assets already loaded.
+    Refresh(Option<AlbumId>, Paging),
+    /// The first page of another album, or of the same one in the other paging mode.
+    Select(Option<AlbumId>, Paging),
+    /// The offset page after the `offset` assets already loaded.
     More(Option<AlbumId>, u64),
+    /// The cursor page after `cursor`.
+    After(Option<AlbumId>, AssetCursor),
     /// Present the limited-selection UI, then re-read access and re-list.
-    Manage(Option<AlbumId>),
+    Manage(Option<AlbumId>, Paging),
+}
+
+/// One loaded page in either paging mode.
+struct LoadedPage {
+    items: Vec<Asset>,
+    /// The album's total under offset paging; `None` for a cursor page.
+    total: Option<u64>,
+    /// Where the next cursor page starts; always `None` for an offset page.
+    next: Option<AssetCursor>,
+}
+
+impl From<AssetPage> for LoadedPage {
+    fn from(page: AssetPage) -> Self {
+        Self {
+            items: page.items,
+            total: Some(page.total),
+            next: None,
+        }
+    }
+}
+
+impl From<AssetCursorPage> for LoadedPage {
+    fn from(page: AssetCursorPage) -> Self {
+        Self {
+            items: page.items,
+            total: None,
+            next: page.next,
+        }
+    }
 }
 
 /// How a loaded page combines with the current listing.
 enum PageUpdate {
-    Replace(AssetPage),
-    Append(AssetPage),
+    Replace(LoadedPage),
+    Append(LoadedPage),
 }
 
 /// What one background step learned; each part is `None` when the step did not touch it.
@@ -1083,21 +1206,67 @@ fn record_page(
     step: &mut BrowseStep,
 ) {
     match result {
-        Ok(page) if append => step.page = Some(PageUpdate::Append(page)),
-        Ok(page) => {
-            step.page = Some(PageUpdate::Replace(page));
-            step.album = Some(album.clone());
-        }
+        Ok(page) => record_loaded(album, append, page.into(), step),
         Err(err) => step.message = format!("error: {err}"),
     }
 }
 
+/// [`record_page`] for a cursor page. A failure keeps the listing and its cursor; an
+/// `InvalidRequest` (a cursor whose iOS snapshot was evicted, or one made for another query)
+/// says that Refresh starts over from the first page.
+fn record_cursor_page(
+    album: &Option<AlbumId>,
+    append: bool,
+    result: Result<AssetCursorPage, PhotoError>,
+    step: &mut BrowseStep,
+) {
+    match result {
+        Ok(page) => record_loaded(album, append, page.into(), step),
+        Err(err) => step.message = cursor_error_text(&err),
+    }
+}
+
+/// A failed cursor page as one line: its `Display` text, and for an `InvalidRequest` how to
+/// start over.
+fn cursor_error_text(err: &PhotoError) -> String {
+    match err {
+        PhotoError::InvalidRequest { .. } => {
+            format!("error: {err}. Refresh starts again from the first page.")
+        }
+        other => format!("error: {other}"),
+    }
+}
+
+/// Records a loaded page into `step`; see [`record_page`].
+fn record_loaded(album: &Option<AlbumId>, append: bool, page: LoadedPage, step: &mut BrowseStep) {
+    if append {
+        step.page = Some(PageUpdate::Append(page));
+    } else {
+        step.page = Some(PageUpdate::Replace(page));
+        step.album = Some(album.clone());
+    }
+}
+
+/// Loads the first page of `album` in `paging` mode into `step`. A cursor first page starts a
+/// new cursor session, so it drops whatever cursor the listing held.
+fn load_first_page(album: &Option<AlbumId>, paging: Paging, step: &mut BrowseStep) {
+    match paging {
+        Paging::Offset => load_page(album, 0, false, step),
+        Paging::Cursor => record_cursor_page(
+            album,
+            false,
+            PhotoLibrary::assets_after(&browse_query(album, 0), None),
+            step,
+        ),
+    }
+}
+
 /// Albums, then the first page, into `step` (stops at the first failure).
-fn load_albums_and_first_page(album: &Option<AlbumId>, step: &mut BrowseStep) {
+fn load_albums_and_first_page(album: &Option<AlbumId>, paging: Paging, step: &mut BrowseStep) {
     match PhotoLibrary::albums() {
         Ok(albums) => {
             step.albums = Some(albums);
-            load_page(album, 0, false, step);
+            load_first_page(album, paging, step);
         }
         Err(err) => step.message = format!("error: {err}"),
     }
@@ -1107,13 +1276,21 @@ fn load_albums_and_first_page(album: &Option<AlbumId>, step: &mut BrowseStep) {
 fn run_browse(action: Option<BrowseAction>) -> Option<BrowseStep> {
     let mut step = BrowseStep::default();
     match action? {
-        BrowseAction::Refresh(album) => load_albums_and_first_page(&album, &mut step),
-        BrowseAction::Select(album) => load_page(&album, 0, false, &mut step),
+        BrowseAction::Refresh(album, paging) => {
+            load_albums_and_first_page(&album, paging, &mut step)
+        }
+        BrowseAction::Select(album, paging) => load_first_page(&album, paging, &mut step),
         BrowseAction::More(album, offset) => load_page(&album, offset, true, &mut step),
-        BrowseAction::Manage(album) => match PhotoLibrary::manage_limited_selection() {
+        BrowseAction::After(album, cursor) => record_cursor_page(
+            &album,
+            true,
+            PhotoLibrary::assets_after(&browse_query(&album, 0), Some(&cursor)),
+            &mut step,
+        ),
+        BrowseAction::Manage(album, paging) => match PhotoLibrary::manage_limited_selection() {
             Ok(()) => {
                 step.access = Some(read_access());
-                load_albums_and_first_page(&album, &mut step);
+                load_albums_and_first_page(&album, paging, &mut step);
             }
             Err(err) => step.message = format!("error: {err}"),
         },
@@ -1153,12 +1330,14 @@ impl BrowseSignals {
             Some(PageUpdate::Replace(page)) => self.listing.set(Listing {
                 ids: Arc::new(page_ids(page.items)),
                 total: page.total,
+                next: page.next,
             }),
             Some(PageUpdate::Append(page)) => {
                 let current = self.listing.get_untracked();
                 self.listing.set(Listing {
                     ids: Arc::new(merge_page(&current.ids, page_ids(page.items))),
                     total: page.total,
+                    next: page.next,
                 });
             }
             None => {}
@@ -1478,7 +1657,9 @@ struct BrowsePanelState {
     albums: RwSignal<Vec<Album>>,
     /// The selected album; `None` is the whole library.
     album: RwSignal<Option<AlbumId>>,
-    /// The loaded assets and the total.
+    /// The paging mode the next first page loads in; written by the toggle only.
+    paging: RwSignal<Paging>,
+    /// The loaded assets, the total (offset paging) and the next cursor (cursor paging).
     listing: RwSignal<Listing>,
     /// The last failure, empty when none.
     message: RwSignal<String>,
@@ -1526,6 +1707,7 @@ impl Component for BrowsePanel {
             limited,
             albums,
             album,
+            paging: RwSignal::new(Paging::Offset),
             listing,
             message,
             action,
@@ -1543,8 +1725,37 @@ impl Component for BrowsePanel {
         let limited = state.limited.get();
         let albums = state.albums.get();
         let selected = state.album.get();
+        let paging = state.paging.get();
         let listing = state.listing.get();
         let message = state.message.get();
+        let next_page = more_action(&selected, &listing);
+
+        // Switching the mode reloads the first page of the selected album, which drops the
+        // listing and any cursor it held.
+        let (paging_signal, paging_album, paging_action, paging_work) = (
+            state.paging,
+            state.album,
+            state.action.clone(),
+            state.work.clone(),
+        );
+        let paging_toggle = button(
+            paging_label(paging),
+            move |_state: &mut BrowsePanelState| {
+                let next = match paging_signal.get_untracked() {
+                    Paging::Offset => Paging::Cursor,
+                    Paging::Cursor => Paging::Offset,
+                };
+                paging_signal.set(next);
+                queue(
+                    &paging_action,
+                    &paging_work,
+                    BrowseAction::Select(paging_album.get_untracked(), next),
+                );
+            },
+        )
+        .style(selector_style(paging == Paging::Cursor))
+        .disabled(busy)
+        .small();
 
         let mut selector = column();
         selector = selector.child(album_button(state, "All", None, selected.is_none(), busy));
@@ -1583,7 +1794,10 @@ impl Component for BrowsePanel {
                 text(
                     "Lists the photo library through frust-photo-library: Refresh reads \
                      the access status and the albums, then the first page of 60 assets \
-                     as thumbnails. Load more fetches the next page. With limited access \
+                     as thumbnails. Load more fetches the next page. Cursor paging pages \
+                     with a cursor instead of an offset, so a library change between pages \
+                     neither repeats nor skips an asset; it has no total, and switching it \
+                     reloads the first page. With limited access \
                      Manage selection reopens the system selection. Cells badge the \
                      content type (HEIC, RAW, ...) and mark favourites. Thumbnails share \
                      the cache's allocation without copying it, and each cell copies the \
@@ -1608,7 +1822,13 @@ impl Component for BrowsePanel {
                 .child(SizedBox(None, Some(4.0)));
         }
         panel
-            .child(refresh_browse_button(state, busy))
+            .child(
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
+                    .child(refresh_browse_button(state, busy))
+                    .child(paging_toggle),
+            )
             .child(SizedBox(None, Some(8.0)))
             .child(selector)
             .child(SizedBox(None, Some(8.0)))
@@ -1620,17 +1840,13 @@ impl Component for BrowsePanel {
                         text(if busy {
                             "Loading\u{2026}".to_string()
                         } else {
-                            count_line(listing.ids.len(), listing.total)
+                            listing_line(&listing)
                         })
                         .size(12.0)
                         .color(muted),
                     )
                     .child(SizedBox(Some(12.0), None))
-                    .child(more_button(
-                        state,
-                        busy || !has_more(listing.ids.len(), listing.total),
-                        listing.ids.len() as u64,
-                    )),
+                    .child(more_button(state, busy, next_page)),
             )
             .child(component(ThumbStatsLine))
             .child(text(message).size(11.0).color(muted))
@@ -1666,12 +1882,16 @@ fn queue(action: &Arc<Mutex<Option<BrowseAction>>>, work: &UseTask<()>, next: Br
 
 fn refresh_browse_button(state: &BrowsePanelState, busy: bool) -> impl View<BrowsePanelState> {
     let (action, work) = (state.action.clone(), state.work.clone());
-    let (access, limited, album) = (state.access, state.limited, state.album);
+    let (access, limited, album, paging) = (state.access, state.limited, state.album, state.paging);
     button("Refresh", move |_state: &mut BrowsePanelState| {
         let (line, is_limited) = read_access();
         access.set(line);
         limited.set(is_limited);
-        queue(&action, &work, BrowseAction::Refresh(album.get_untracked()));
+        queue(
+            &action,
+            &work,
+            BrowseAction::Refresh(album.get_untracked(), paging.get_untracked()),
+        );
     })
     .style(ButtonStyle::Secondary)
     .disabled(busy)
@@ -1680,8 +1900,13 @@ fn refresh_browse_button(state: &BrowsePanelState, busy: bool) -> impl View<Brow
 
 fn manage_button(state: &BrowsePanelState, busy: bool) -> impl View<BrowsePanelState> {
     let (action, work, album) = (state.action.clone(), state.work.clone(), state.album);
+    let paging = state.paging;
     button("Manage selection", move |_state: &mut BrowsePanelState| {
-        queue(&action, &work, BrowseAction::Manage(album.get_untracked()));
+        queue(
+            &action,
+            &work,
+            BrowseAction::Manage(album.get_untracked(), paging.get_untracked()),
+        );
     })
     .disabled(busy)
     .small()
@@ -1694,27 +1919,31 @@ fn album_button(
     selected: bool,
     busy: bool,
 ) -> impl View<BrowsePanelState> {
-    let (action, work) = (state.action.clone(), state.work.clone());
+    let (action, work, paging) = (state.action.clone(), state.work.clone(), state.paging);
     button(label.to_string(), move |_state: &mut BrowsePanelState| {
-        queue(&action, &work, BrowseAction::Select(target.clone()));
+        queue(
+            &action,
+            &work,
+            BrowseAction::Select(target.clone(), paging.get_untracked()),
+        );
     })
     .style(selector_style(selected))
     .disabled(busy)
     .small()
 }
 
+/// Load more: queues `next` (see [`more_action`]); disabled while busy or without a next page.
 fn more_button(
     state: &BrowsePanelState,
-    disabled: bool,
-    loaded: u64,
+    busy: bool,
+    next: Option<BrowseAction>,
 ) -> impl View<BrowsePanelState> {
-    let (action, work, album) = (state.action.clone(), state.work.clone(), state.album);
+    let (action, work) = (state.action.clone(), state.work.clone());
+    let disabled = busy || next.is_none();
     button("Load more", move |_state: &mut BrowsePanelState| {
-        queue(
-            &action,
-            &work,
-            BrowseAction::More(album.get_untracked(), loaded),
-        );
+        if let Some(next) = next.clone() {
+            queue(&action, &work, next);
+        }
     })
     .style(ButtonStyle::Secondary)
     .disabled(disabled)
@@ -2619,6 +2848,375 @@ fn save_button(
     .style(ButtonStyle::Secondary)
     .disabled(!enabled)
     .small()
+}
+
+/// The shared-preferences key holding the Changes panel's change token, as lowercase hex.
+const CHANGE_TOKEN_KEY: &str = "playground.change_token";
+
+/// How often the watch task copies the wake-up count into its signal.
+const WAKE_POLL: Duration = Duration::from_millis(250);
+
+/// Lowercase hex of a token's bytes, the form the token is stored in.
+fn token_to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The bytes of a stored hex token; `None` when the text is not hex pairs.
+fn token_from_hex(text: &str) -> Option<Vec<u8>> {
+    if !text.len().is_multiple_of(2) || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&text[at..at + 2], 16).ok())
+        .collect()
+}
+
+/// The stored token, if one is stored and readable.
+fn stored_token(prefs: &SharedPreferences) -> Option<ChangeToken> {
+    prefs
+        .get_string(CHANGE_TOKEN_KEY)
+        .and_then(|text| token_from_hex(&text))
+        .map(ChangeToken::from_bytes)
+}
+
+/// Stores `token` for the next Check, and the next launch.
+fn store_token(prefs: &SharedPreferences, token: &ChangeToken) -> Result<(), String> {
+    prefs
+        .set_string(CHANGE_TOKEN_KEY, token_to_hex(token.as_bytes()))
+        .map_err(|err| format!("could not store the token: {err}"))
+}
+
+/// The stored-token line: whether one is stored and its byte length, never its bytes.
+fn token_line(stored: Option<usize>) -> String {
+    match stored {
+        Some(len) => format!("Stored token: {len} bytes"),
+        None => "No token stored".to_string(),
+    }
+}
+
+/// A change report as one line, and the token it answers with.
+fn changes_summary(changes: &LibraryChanges) -> (String, Option<&ChangeToken>) {
+    match changes {
+        LibraryChanges::Delta {
+            inserted,
+            updated,
+            deleted,
+            next,
+        } => (
+            format!(
+                "Delta: +{} ~{} -{}",
+                inserted.len(),
+                updated.len(),
+                deleted.len()
+            ),
+            Some(next),
+        ),
+        LibraryChanges::FullRescan { next } => ("Full rescan".to_string(), Some(next)),
+        _ => ("Unrecognised change report".to_string(), None),
+    }
+}
+
+/// What a Changes press asks the background step to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChangesAction {
+    /// The mount-time step: read the stored token back.
+    Load,
+    /// Store the library's current token.
+    Save,
+    /// Ask what changed since the stored token, then store the token the answer carries.
+    Check,
+}
+
+/// One Changes step's result, carried in the task's value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChangesOutcome {
+    /// The stored token's byte length after the step; `None` when none is stored.
+    stored: Option<usize>,
+    /// The step's result line; empty for the mount-time load.
+    line: String,
+}
+
+/// Runs `action` against `prefs`, with `current` and `since` as the token and change calls (call
+/// inside `spawn_blocking` with the plugin's calls; tests pass stand-ins).
+fn changes_step(
+    prefs: &SharedPreferences,
+    action: ChangesAction,
+    current: impl FnOnce() -> Result<ChangeToken, PhotoError>,
+    since: impl FnOnce(&ChangeToken) -> Result<LibraryChanges, PhotoError>,
+) -> ChangesOutcome {
+    let line = match action {
+        ChangesAction::Load => String::new(),
+        ChangesAction::Save => match current() {
+            Ok(token) => match store_token(prefs, &token) {
+                Ok(()) => "Saved the current token.".to_string(),
+                Err(text) => text,
+            },
+            Err(err) => format!("error: {err}"),
+        },
+        ChangesAction::Check => match stored_token(prefs) {
+            None => "No token stored: press Save token first.".to_string(),
+            Some(token) => match since(&token) {
+                Ok(changes) => {
+                    let (summary, next) = changes_summary(&changes);
+                    match next.map(|next| store_token(prefs, next)) {
+                        Some(Err(text)) => format!("{summary}, but {text}"),
+                        _ => summary,
+                    }
+                }
+                Err(err) => format!("error: {err}"),
+            },
+        },
+    };
+    ChangesOutcome {
+        stored: stored_token(prefs).map(|token| token.as_bytes().len()),
+        line,
+    }
+}
+
+/// Runs one Changes action against the app's preferences (call inside `spawn_blocking`).
+fn run_changes(action: ChangesAction) -> ChangesOutcome {
+    match SharedPreferences::standard() {
+        Ok(prefs) => changes_step(
+            &prefs,
+            action,
+            PhotoLibrary::current_change_token,
+            PhotoLibrary::changes_since,
+        ),
+        Err(err) => ChangesOutcome {
+            stored: None,
+            line: format!("preferences unavailable: {err}"),
+        },
+    }
+}
+
+/// The watch line: the wake-up count while watching, the last count after Stop, or a subscribe
+/// error.
+fn watch_line(watching: bool, wakes: u64, error: Option<&str>) -> String {
+    match (watching, error) {
+        (true, _) => format!("Watching: {wakes} wake-up(s)"),
+        (false, Some(text)) => text.to_string(),
+        (false, None) => format!("Not watching ({wakes} wake-up(s) counted)"),
+    }
+}
+
+/// The Changes panel's library-change watch, held in [`PlaygroundState`] so a watch outlives a
+/// switch to another section. Clones share one subscription and one count.
+///
+/// The subscription's callback runs on an arbitrary thread, so it only bumps `wakes`; the
+/// panel's watch task copies the count into a signal.
+#[derive(Clone, Default)]
+pub struct LibraryWatch {
+    subscription: Arc<Mutex<Option<ChangeSubscription>>>,
+    wakes: Arc<AtomicU64>,
+}
+
+impl LibraryWatch {
+    /// Whether a subscription is live.
+    fn is_active(&self) -> bool {
+        lock_cell(&self.subscription).is_some()
+    }
+
+    /// The wake-ups counted since the live (or last) subscription started.
+    fn wakes(&self) -> u64 {
+        self.wakes.load(Ordering::Relaxed)
+    }
+
+    /// Subscribes, unless a subscription is already live, with the count restarted at zero (call
+    /// inside `spawn_blocking`). A failure leaves nothing subscribed.
+    fn start(&self) -> Result<(), PhotoError> {
+        let mut held = lock_cell(&self.subscription);
+        if held.is_some() {
+            return Ok(());
+        }
+        self.wakes.store(0, Ordering::Relaxed);
+        let wakes = Arc::clone(&self.wakes);
+        *held = Some(PhotoLibrary::on_library_changed(move || {
+            wakes.fetch_add(1, Ordering::Relaxed);
+        })?);
+        Ok(())
+    }
+
+    /// Drops the subscription, which unregisters the callback (and stops the platform observer
+    /// when it was the last one). The drop runs outside the cell's lock.
+    fn stop(&self) {
+        let ended = lock_cell(&self.subscription).take();
+        drop(ended);
+    }
+}
+
+struct ChangesPanel {
+    /// The app-held watch; see [`LibraryWatch`].
+    watch: LibraryWatch,
+}
+
+struct ChangesPanelState {
+    /// The pending action; the mount-time run loads, and every run leaves `Load` behind.
+    action: Arc<Mutex<ChangesAction>>,
+    /// The latest step's result; a press restarts it.
+    outcome: UseTask<ChangesOutcome>,
+    watch: LibraryWatch,
+    /// Whether the next watch run subscribes; the mount-time run only resumes a live watch.
+    start: Arc<Mutex<bool>>,
+    /// Loading while a watch lasts; ready with the subscribe error text, if any, once it ends.
+    watching: UseTask<Option<String>>,
+    /// The wake-up count, copied from the watch by the watch task.
+    wakes: RwSignal<u64>,
+}
+
+impl Component for ChangesPanel {
+    type State = ChangesPanelState;
+
+    fn init(&self) -> ChangesPanelState {
+        let action = Arc::new(Mutex::new(ChangesAction::Load));
+        let cell = action.clone();
+        let outcome = use_task(move || {
+            let requested = std::mem::replace(&mut *lock_cell(&cell), ChangesAction::Load);
+            async move {
+                spawn_blocking(move || run_changes(requested))
+                    .await
+                    .map_err(|err| JoinFailure(err.to_string()))
+            }
+        });
+
+        let start = Arc::new(Mutex::new(false));
+        let wakes = RwSignal::new(self.watch.wakes());
+        let (start_cell, task_watch) = (start.clone(), self.watch.clone());
+        let watching = use_task(move || {
+            let subscribe = std::mem::take(&mut *lock_cell(&start_cell));
+            let watch = task_watch.clone();
+            async move {
+                if subscribe {
+                    let starting = watch.clone();
+                    let started = spawn_blocking(move || starting.start())
+                        .await
+                        .map_err(|err| JoinFailure(err.to_string()))?;
+                    if let Err(err) = started {
+                        return Ok(Some(format!("error: {err}")));
+                    }
+                }
+                // The callback only bumps the shared count: copy it into the signal while the
+                // watch lasts, and stop once the panel is gone.
+                while watch.is_active() {
+                    let Some(current) = wakes.try_get_untracked() else {
+                        return Ok(None);
+                    };
+                    // `try_update`: the panel can be torn down between the read above and this
+                    // write, and `set` panics on a disposed signal.
+                    let latest = watch.wakes();
+                    if latest != current && wakes.try_update(|count| *count = latest).is_none() {
+                        return Ok(None);
+                    }
+                    let _ = spawn_blocking(move || std::thread::sleep(WAKE_POLL)).await;
+                }
+                let latest = watch.wakes();
+                if wakes
+                    .try_get_untracked()
+                    .is_some_and(|current| current != latest)
+                {
+                    let _ = wakes.try_update(|count| *count = latest);
+                }
+                Ok::<Option<String>, JoinFailure>(None)
+            }
+        });
+
+        ChangesPanelState {
+            action,
+            outcome,
+            watch: self.watch.clone(),
+            start,
+            watching,
+            wakes,
+        }
+    }
+
+    fn build(&self, state: &mut ChangesPanelState) -> impl View<ChangesPanelState> {
+        let theme = use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+        let accent = theme.scheme().primary;
+        let muted = theme.scheme().on_surface_variant;
+
+        let outcome = state.outcome.signal().get();
+        let busy = matches!(outcome, AsyncValue::Loading(_));
+        let (token_text, result_text) = match &outcome {
+            AsyncValue::Ready(done) => (token_line(done.stored), done.line.clone()),
+            AsyncValue::Loading(Some(previous)) => {
+                (token_line(previous.stored), "Working\u{2026}".to_string())
+            }
+            AsyncValue::Error(err) => ("Stored token: unknown".to_string(), err.to_string()),
+            _ => (
+                "Reading the stored token\u{2026}".to_string(),
+                String::new(),
+            ),
+        };
+
+        let watch_value = state.watching.signal().get();
+        let watching = matches!(watch_value, AsyncValue::Loading(_));
+        let watch_error = match &watch_value {
+            AsyncValue::Ready(Some(text)) => Some(text.clone()),
+            AsyncValue::Error(err) => Some(err.to_string()),
+            _ => None,
+        };
+        let watch_text = watch_line(watching, state.wakes.get(), watch_error.as_deref());
+
+        let press = |label: &'static str, next: ChangesAction| {
+            let (cell, task) = (state.action.clone(), state.outcome.clone());
+            button(label, move |_state: &mut ChangesPanelState| {
+                *lock_cell(&cell) = next;
+                task.restart();
+            })
+            .style(ButtonStyle::Secondary)
+            .disabled(busy)
+            .small()
+        };
+        let (start, watch_task) = (state.start.clone(), state.watching.clone());
+        let watch_button = button("Watch", move |_state: &mut ChangesPanelState| {
+            *lock_cell(&start) = true;
+            watch_task.restart();
+        })
+        .disabled(watching)
+        .small();
+        let stop_watch = state.watch.clone();
+        let stop_button = button("Stop", move |_state: &mut ChangesPanelState| {
+            stop_watch.stop();
+        })
+        .style(ButtonStyle::Secondary)
+        .disabled(!watching)
+        .small();
+
+        column()
+            .child(text("Changes").size(13.0).color(accent))
+            .child(
+                text(
+                    "Save token stores the library's current change token in shared \
+                     preferences, so the next launch reads it back. Check asks what changed \
+                     since the stored token (a delta of inserted, updated and deleted assets, \
+                     or a full rescan) and stores the token it answers with. Watch counts the \
+                     library's change wake-ups until Stop.",
+                )
+                .size(11.0)
+                .color(muted),
+            )
+            .child(SizedBox(None, Some(8.0)))
+            .child(text(token_text).size(12.0))
+            .child(SizedBox(None, Some(4.0)))
+            .child(
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
+                    .child(press("Save token", ChangesAction::Save))
+                    .child(press("Check", ChangesAction::Check)),
+            )
+            .child(text(result_text).size(12.0).color(muted))
+            .child(SizedBox(None, Some(8.0)))
+            .child(
+                wrap()
+                    .spacing(8.0)
+                    .run_spacing(8.0)
+                    .child(watch_button)
+                    .child(stop_button),
+            )
+            .child(text(watch_text).size(12.0).color(muted))
+    }
 }
 
 /// The shared-preferences key holding the picked folder's grant token.
@@ -3867,5 +4465,264 @@ mod tests {
             "Waiting for the picker\u{2026}"
         );
         assert_eq!(folder_count_line(50, 120), "Showing 50 of 120 file(s)");
+    }
+
+    #[test]
+    fn token_hex_round_trips_and_rejects_non_hex() {
+        let bytes = vec![0x00, 0x0f, 0xa5, 0xff];
+        assert_eq!(token_to_hex(&bytes), "000fa5ff");
+        assert_eq!(token_from_hex("000fa5ff"), Some(bytes));
+        assert_eq!(
+            token_from_hex("000FA5FF"),
+            Some(vec![0x00, 0x0f, 0xa5, 0xff])
+        );
+        assert_eq!(token_from_hex(""), Some(Vec::new()));
+        assert_eq!(token_from_hex("abc"), None);
+        assert_eq!(token_from_hex("zz"), None);
+        assert_eq!(token_from_hex("+f"), None);
+        assert_eq!(token_from_hex("\u{e9}\u{e9}"), None);
+    }
+
+    #[test]
+    fn token_line_shows_the_length_only() {
+        assert_eq!(token_line(Some(32)), "Stored token: 32 bytes");
+        assert_eq!(token_line(None), "No token stored");
+    }
+
+    fn token(bytes: &[u8]) -> ChangeToken {
+        ChangeToken::from_bytes(bytes.to_vec())
+    }
+
+    #[test]
+    fn change_summaries() {
+        let delta = LibraryChanges::Delta {
+            inserted: vec![AssetId::from_raw("a"), AssetId::from_raw("b")],
+            updated: vec![AssetId::from_raw("c")],
+            deleted: Vec::new(),
+            next: token(&[1, 2]),
+        };
+        let (line, next) = changes_summary(&delta);
+        assert_eq!(line, "Delta: +2 ~1 -0");
+        assert_eq!(next, Some(&token(&[1, 2])));
+        let rescan = LibraryChanges::FullRescan { next: token(&[3]) };
+        let (line, next) = changes_summary(&rescan);
+        assert_eq!(line, "Full rescan");
+        assert_eq!(next, Some(&token(&[3])));
+    }
+
+    fn no_current() -> Result<ChangeToken, PhotoError> {
+        panic!("the step must not read the current token")
+    }
+
+    fn no_since(_: &ChangeToken) -> Result<LibraryChanges, PhotoError> {
+        panic!("the step must not ask for changes")
+    }
+
+    #[test]
+    fn load_reads_back_the_stored_token_length() {
+        let prefs = SharedPreferences::in_memory();
+        let empty = changes_step(&prefs, ChangesAction::Load, no_current, no_since);
+        assert_eq!(empty.stored, None);
+        assert_eq!(empty.line, "");
+        prefs
+            .set_string(CHANGE_TOKEN_KEY, "0102030405")
+            .expect("in-memory store");
+        let stored = changes_step(&prefs, ChangesAction::Load, no_current, no_since);
+        assert_eq!(stored.stored, Some(5));
+    }
+
+    #[test]
+    fn save_stores_the_current_token_as_hex() {
+        let prefs = SharedPreferences::in_memory();
+        let saved = changes_step(
+            &prefs,
+            ChangesAction::Save,
+            || Ok(token(&[0xab, 0xcd])),
+            no_since,
+        );
+        assert_eq!(saved.stored, Some(2));
+        assert_eq!(saved.line, "Saved the current token.");
+        assert_eq!(prefs.get_string(CHANGE_TOKEN_KEY).as_deref(), Some("abcd"));
+        assert_eq!(stored_token(&prefs), Some(token(&[0xab, 0xcd])));
+    }
+
+    #[test]
+    fn a_failed_save_shows_the_error_and_keeps_the_stored_token() {
+        let prefs = SharedPreferences::in_memory();
+        store_token(&prefs, &token(&[7])).expect("in-memory store");
+        let failed = changes_step(
+            &prefs,
+            ChangesAction::Save,
+            || Err(PhotoError::PermissionDenied),
+            no_since,
+        );
+        assert_eq!(failed.stored, Some(1));
+        assert_eq!(
+            failed.line,
+            format!("error: {}", PhotoError::PermissionDenied)
+        );
+    }
+
+    #[test]
+    fn check_without_a_token_says_so() {
+        let prefs = SharedPreferences::in_memory();
+        let checked = changes_step(&prefs, ChangesAction::Check, no_current, no_since);
+        assert_eq!(checked.stored, None);
+        assert_eq!(checked.line, "No token stored: press Save token first.");
+    }
+
+    #[test]
+    fn check_reports_the_delta_and_stores_next() {
+        let prefs = SharedPreferences::in_memory();
+        store_token(&prefs, &token(&[1])).expect("in-memory store");
+        let checked = changes_step(&prefs, ChangesAction::Check, no_current, |stored| {
+            assert_eq!(stored, &token(&[1]));
+            Ok(LibraryChanges::Delta {
+                inserted: vec![AssetId::from_raw("new")],
+                updated: vec![AssetId::from_raw("edited")],
+                deleted: vec![AssetId::from_raw("gone")],
+                next: token(&[2, 2, 2]),
+            })
+        });
+        assert_eq!(checked.line, "Delta: +1 ~1 -1");
+        assert_eq!(checked.stored, Some(3));
+        assert_eq!(stored_token(&prefs), Some(token(&[2, 2, 2])));
+    }
+
+    #[test]
+    fn check_reports_a_full_rescan_and_stores_next() {
+        let prefs = SharedPreferences::in_memory();
+        store_token(&prefs, &token(&[1])).expect("in-memory store");
+        let checked = changes_step(&prefs, ChangesAction::Check, no_current, |_| {
+            Ok(LibraryChanges::FullRescan {
+                next: token(&[9, 9]),
+            })
+        });
+        assert_eq!(checked.line, "Full rescan");
+        assert_eq!(stored_token(&prefs), Some(token(&[9, 9])));
+    }
+
+    #[test]
+    fn a_failed_check_shows_the_error_and_keeps_the_token() {
+        let prefs = SharedPreferences::in_memory();
+        store_token(&prefs, &token(&[1])).expect("in-memory store");
+        let checked = changes_step(&prefs, ChangesAction::Check, no_current, |_| {
+            Err(PhotoError::Unsupported)
+        });
+        assert_eq!(checked.line, format!("error: {}", PhotoError::Unsupported));
+        assert_eq!(stored_token(&prefs), Some(token(&[1])));
+    }
+
+    #[test]
+    fn an_unreadable_stored_token_counts_as_none() {
+        let prefs = SharedPreferences::in_memory();
+        prefs
+            .set_string(CHANGE_TOKEN_KEY, "not hex")
+            .expect("in-memory store");
+        assert_eq!(stored_token(&prefs), None);
+    }
+
+    #[test]
+    fn watch_lines() {
+        assert_eq!(watch_line(true, 3, None), "Watching: 3 wake-up(s)");
+        assert_eq!(
+            watch_line(false, 3, None),
+            "Not watching (3 wake-up(s) counted)"
+        );
+        assert_eq!(watch_line(false, 0, Some("error: x")), "error: x");
+    }
+
+    #[test]
+    fn an_idle_watch_is_inactive_and_stop_is_a_no_op() {
+        let watch = LibraryWatch::default();
+        assert!(!watch.is_active());
+        watch.stop();
+        assert!(!watch.is_active());
+        assert_eq!(watch.wakes(), 0);
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_failed_watch_subscribes_nothing() {
+        let watch = LibraryWatch::default();
+        assert!(watch.start().is_err());
+        assert!(!watch.is_active());
+    }
+
+    #[test]
+    fn offset_listing_lines_and_more() {
+        let listing = Listing {
+            ids: Arc::new(ids(&["a", "b"])),
+            total: Some(5),
+            next: None,
+        };
+        assert_eq!(listing_line(&listing), "Showing 2 of 5 assets");
+        let album = Some(AlbumId::from_raw("x"));
+        assert!(matches!(
+            more_action(&album, &listing),
+            Some(BrowseAction::More(Some(_), 2))
+        ));
+        let done = Listing {
+            total: Some(2),
+            ..listing
+        };
+        assert!(more_action(&album, &done).is_none());
+        assert_eq!(listing_line(&Listing::default()), "Showing 0 of 0 assets");
+    }
+
+    #[test]
+    fn a_cursor_listing_has_no_total_and_no_more_without_next() {
+        let listing = Listing {
+            ids: Arc::new(ids(&["a", "b", "c"])),
+            total: None,
+            next: None,
+        };
+        assert_eq!(
+            listing_line(&listing),
+            "Showing 3 assets (cursor paging, no total)"
+        );
+        assert!(more_action(&None, &listing).is_none());
+    }
+
+    #[test]
+    fn an_offset_page_keeps_its_total_and_no_cursor() {
+        let mut step = BrowseStep::default();
+        let page = AssetPage {
+            items: Vec::new(),
+            total: 42,
+        };
+        record_page(&None, false, Ok(page), &mut step);
+        match step.page {
+            Some(PageUpdate::Replace(loaded)) => {
+                assert_eq!(loaded.total, Some(42));
+                assert!(loaded.next.is_none());
+            }
+            _ => panic!("expected a replacing page"),
+        }
+    }
+
+    #[test]
+    fn a_failed_cursor_page_keeps_the_listing_and_says_how_to_restart() {
+        let mut step = BrowseStep::default();
+        let err = PhotoError::InvalidRequest {
+            reason: "the cursor's snapshot was evicted",
+        };
+        record_cursor_page(&None, true, Err(err.clone()), &mut step);
+        assert!(step.page.is_none());
+        assert!(step.album.is_none());
+        assert_eq!(
+            step.message,
+            format!("error: {err}. Refresh starts again from the first page.")
+        );
+        assert_eq!(
+            cursor_error_text(&PhotoError::Busy),
+            format!("error: {}", PhotoError::Busy)
+        );
+    }
+
+    #[test]
+    fn paging_toggle_labels() {
+        assert_eq!(paging_label(Paging::Offset), "Cursor paging: off");
+        assert_eq!(paging_label(Paging::Cursor), "Cursor paging: on");
     }
 }
