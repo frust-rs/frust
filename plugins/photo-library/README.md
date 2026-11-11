@@ -54,14 +54,14 @@ Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibra
   flag; an iCloud-only original shows as `NetworkRequired` when you ask for it
   (`photo-library-no-local-availability`).
 - `PhotoLibrary::thumbnail_shared(&AssetId, &ThumbnailRequest, &CancelToken)` returns an `Arc<Thumbnail>`:
-  a cache hit shares the cached allocation instead of copying its pixels, and cancelling the token abandons
+  the cache never copies pixels and a hit shares the cached allocation, but building an `ImageSource` from the pixels copies them once; cancelling the token abandons
   a miss on iOS and Android (`PhotoError::Cancelled`, nothing cached). `thumbnail` shares the same cache.
   A token is single-use, so give each cell's load its own. Build one `ImageSource` per asset and keep it with
   the cell's state: each `ImageSource` made from pixels is a new engine image.
 - `PhotoLibrary::asset_metadata(&AssetId, &MetadataOptions)` reads one asset's `ExifData` with only the
   `library` feature (it links `ImageIO` on iOS, which the TUI's `library` option adds). An asset without EXIF,
   a video included, gives an empty `ExifData`. On iOS Photos has no header-only read, so the call reads the
-  whole local original into memory (`photo-library-ios-metadata-reads-original`) and an iCloud-only original
+  whole local original into one in-memory buffer that ImageIO reads in place (`photo-library-ios-metadata-reads-original`); a read with no data for 30 s times out, an original over 256 MiB is `InvalidRequest`, and an iCloud-only original
   is `NetworkRequired` unless `MetadataOptions::allow_network(true)`. On Android GPS fields need
   `ACCESS_MEDIA_LOCATION`. `MetadataOptions::cancel(token)` stops the read.
 - iOS shows its own prompt while access is Limited; to silence it add the boolean key
