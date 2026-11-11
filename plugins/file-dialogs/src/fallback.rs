@@ -28,6 +28,13 @@ pub(crate) fn list_folder(
     Err(FileDialogError::Unsupported)
 }
 
+pub(crate) fn resolve_entry(
+    _grant: &FolderGrant,
+    _segments: &[&str],
+) -> Result<Option<FolderEntry>, FileDialogError> {
+    Err(FileDialogError::Unsupported)
+}
+
 pub(crate) fn release_folder(_state: GrantState, _token: &str) {}
 
 pub(crate) fn export_file(

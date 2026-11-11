@@ -53,6 +53,14 @@ pub(crate) fn list_folder(
     crate::walk::list(root, options)
 }
 
+pub(crate) fn resolve_entry(
+    grant: &FolderGrant,
+    segments: &[&str],
+) -> Result<Option<FolderEntry>, FileDialogError> {
+    let root = grant.local_path().ok_or(FileDialogError::AccessLost)?;
+    crate::walk::entry(root, segments)
+}
+
 pub(crate) fn release_folder(_state: GrantState, _token: &str) {}
 
 /// Refuses a bad `source` before asking the user anything, then copies it to the
@@ -222,6 +230,103 @@ mod tests {
             grant.list(&ListOptions::new()),
             Err(FileDialogError::AccessLost)
         );
+    }
+
+    fn grant_on(dir: &TestDir) -> FolderGrant {
+        FolderGrant::restore(dir.path().to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn an_entry_looked_up_by_path_equals_the_listed_one() {
+        let dir = TestDir::new();
+        dir.write("top.txt", b"t");
+        dir.write("sub/deep/two.png", b"22");
+        let grant = grant_on(&dir);
+        let listed = grant.list(&ListOptions::new().recursive(true)).unwrap();
+        for relative in ["top.txt", "sub/deep/two.png"] {
+            let found = grant.entry(relative).unwrap().expect("file found");
+            let same = listed
+                .iter()
+                .find(|e| e.relative_path == relative)
+                .expect("file listed");
+            assert_eq!(&found, same);
+        }
+        let two = grant.entry("sub/deep/two.png").unwrap().unwrap();
+        assert_eq!(two.read_to_vec(16).unwrap(), b"22");
+        let out = dir.path().join("out");
+        assert_eq!(two.copy_to(&out).unwrap(), out.join("two.png"));
+    }
+
+    #[test]
+    fn a_missing_file_or_a_folder_is_no_entry() {
+        let dir = TestDir::new();
+        dir.write("sub/a.txt", b"a");
+        dir.write(".hidden/b.txt", b"b");
+        let grant = grant_on(&dir);
+        for relative in [
+            "missing.txt",
+            "sub/missing.txt",
+            "missing/a.txt",
+            "sub",
+            "sub/a.txt/inner",
+            "SUB/a.txt",
+            "sub/A.txt",
+            ".hidden/b.txt",
+        ] {
+            assert_eq!(grant.entry(relative), Ok(None), "{relative:?}");
+        }
+    }
+
+    #[test]
+    fn an_entry_path_that_climbs_or_is_absolute_is_refused() {
+        let dir = TestDir::new();
+        dir.write("sub/a.txt", b"a");
+        let grant = grant_on(&dir);
+        let absolute = dir.path().join("sub").join("a.txt");
+        for relative in [
+            "..",
+            "../a.txt",
+            "sub/../sub/a.txt",
+            absolute.to_str().unwrap(),
+        ] {
+            assert_eq!(
+                grant.entry(relative),
+                Err(FileDialogError::Io),
+                "{relative:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_entry_of_a_folder_that_disappeared_is_access_lost() {
+        let dir = TestDir::new();
+        dir.write("kept/a.txt", b"a");
+        let kept = dir.path().join("kept");
+        let grant = FolderGrant::restore(kept.to_str().unwrap()).unwrap();
+        std::fs::remove_dir_all(&kept).unwrap();
+        assert_eq!(grant.entry("a.txt"), Err(FileDialogError::AccessLost));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_entry_through_a_link_is_none() {
+        use std::os::unix::fs::symlink;
+        let outside = TestDir::new();
+        let secret = outside.write("secret.txt", b"s");
+        let dir = TestDir::new();
+        dir.write("real/a.txt", b"a");
+        symlink(&secret, dir.path().join("linked-file.txt")).unwrap();
+        symlink(outside.path(), dir.path().join("linked-dir")).unwrap();
+        symlink(dir.path().join("real"), dir.path().join("linked-real")).unwrap();
+        let grant = grant_on(&dir);
+        assert!(grant.entry("real/a.txt").unwrap().is_some());
+        for relative in [
+            "linked-file.txt",
+            "linked-dir/secret.txt",
+            "linked-real/a.txt",
+        ] {
+            assert_eq!(grant.entry(relative), Ok(None), "{relative:?}");
+        }
     }
 
     #[test]
