@@ -335,6 +335,7 @@ impl<C: Component> Widget for ComponentWidget<C> {
         // state, then mirror the results onto the outer one. A synthesized `Cancel`
         // arrives over throwaway outer `()` state, but this handler never touches outer
         // state (the Cancel-never-reads-state contract binds the subtree's handlers).
+        // Handlers run under this component's owner, like its build, rebuild and teardown.
         let size = ctx.size();
         let has_focus = ctx.has_focus();
         // Hover link, epoch and claim eligibility cross the boundary unchanged, as
@@ -357,7 +358,13 @@ impl<C: Component> Widget for ComponentWidget<C> {
             inner.set_hovered(hovered);
             inner.set_hover_epoch(hover_epoch);
             inner.set_hover_eligible(hover_eligible);
-            let result = route_child(&mut self.child, &mut inner, event);
+            // A disposed owner is not entered, so nothing registers on a cleaned owner.
+            let result = if self.disposed {
+                route_child(&mut self.child, &mut inner, event)
+            } else {
+                let child = &mut self.child;
+                self.owner.with(|| route_child(child, &mut inner, event))
+            };
             (
                 result,
                 inner.needs_redraw(),
@@ -1422,6 +1429,353 @@ mod tests {
         let v2 = component(Labeled { text: "b" });
         let flags = View::<()>::rebuild(&v2, &v_same, &mut widget, &mut ctx);
         assert_eq!(flags, ChangeFlags::PAINT);
+    }
+
+    // --- Event handlers run under the component's owner ----------------------
+
+    mod handler_owner {
+        use super::*;
+        use std::cell::RefCell;
+
+        type Handler = Rc<dyn Fn(&InputEvent) -> EventResult>;
+        type Pair = (Option<i32>, Option<i32>);
+        type Named = (&'static str, Option<i32>);
+
+        /// A leaf whose `event` runs a test-supplied closure.
+        struct HandlerWidget {
+            f: Handler,
+        }
+        impl Widget for HandlerWidget {
+            fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                bc.constrain(Size::new(10.0, 10.0))
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+                (self.f)(event)
+            }
+        }
+        struct HandlerView {
+            f: Handler,
+        }
+        impl View<()> for HandlerView {
+            type Element = HandlerWidget;
+            fn build(&self, _ctx: &mut BuildCtx<'_>) -> HandlerWidget {
+                HandlerWidget { f: self.f.clone() }
+            }
+            fn rebuild(
+                &self,
+                _prev: &Self,
+                _element: &mut HandlerWidget,
+                _ctx: &mut BuildCtx<'_>,
+            ) -> ChangeFlags {
+                ChangeFlags::NONE
+            }
+        }
+
+        /// A component whose leaf runs `handler`; provides `Theme(provide)` on its owner.
+        struct HandlerComp {
+            handler: Handler,
+            provide: Option<i32>,
+        }
+        impl Component for HandlerComp {
+            type State = ();
+            fn init(&self) {
+                if let Some(v) = self.provide {
+                    provide_context(Theme(v));
+                }
+            }
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                any(HandlerView {
+                    f: self.handler.clone(),
+                })
+            }
+        }
+
+        fn handler(f: impl Fn(&InputEvent) -> EventResult + 'static) -> Handler {
+            Rc::new(f)
+        }
+
+        fn comp(h: Handler, provide: Option<i32>) -> ComponentView<HandlerComp> {
+            component(HandlerComp {
+                handler: h,
+                provide,
+            })
+        }
+
+        fn laid_out<C: Component>(view: &ComponentView<C>) -> ComponentWidget<C> {
+            let mut widget = build_widget::<(), _>(view);
+            widget.layout(
+                &mut LayoutCtx::new(),
+                &BoxConstraints::tight(Size::new(10.0, 10.0)),
+            );
+            widget
+        }
+
+        fn dispatch<C: Component>(
+            widget: &mut ComponentWidget<C>,
+            event: &InputEvent,
+        ) -> EventResult {
+            let mut outer = ();
+            let mut ectx = EventCtx::new(&mut outer, Point::ZERO, Size::new(10.0, 10.0));
+            widget.event(&mut ectx, event)
+        }
+
+        fn down() -> InputEvent {
+            pointer(PointerPhase::Down, 5.0, 5.0)
+        }
+
+        fn teardown<C: Component>(view: &ComponentView<C>, widget: &mut ComponentWidget<C>) {
+            let mut next_id = 0u64;
+            let mut ctx = BuildCtx::new(&mut next_id);
+            View::<()>::teardown(view, widget, &mut ctx);
+        }
+
+        #[test]
+        fn handler_cleanup_survives_rebuild_and_runs_once_at_teardown() {
+            let _owner = ambient();
+            let probe = Arc::new(AtomicU32::new(0));
+            let p = probe.clone();
+            let view = comp(
+                handler(move |_| {
+                    let p = p.clone();
+                    on_cleanup(move || {
+                        p.fetch_add(1, Ordering::SeqCst);
+                    });
+                    EventResult::Handled
+                }),
+                None,
+            );
+            let mut widget = laid_out(&view);
+            assert_eq!(dispatch(&mut widget, &down()), EventResult::Handled);
+
+            let mut next_id = 0u64;
+            let mut ctx = BuildCtx::new(&mut next_id);
+            View::<()>::rebuild(&view, &view, &mut widget, &mut ctx);
+            assert_eq!(probe.load(Ordering::SeqCst), 0, "a rebuild runs no cleanup");
+
+            teardown(&view, &mut widget);
+            assert_eq!(probe.load(Ordering::SeqCst), 1, "teardown runs it once");
+            drop(widget);
+            assert_eq!(probe.load(Ordering::SeqCst), 1, "drop does not repeat it");
+        }
+
+        #[derive(Clone)]
+        struct Ambient(i32);
+
+        #[test]
+        fn handler_resolves_own_and_ancestor_context() {
+            let ambient_owner = ambient();
+            ambient_owner.with(|| provide_context(Ambient(5)));
+            let seen: Rc<RefCell<Vec<Pair>>> = Rc::default();
+            let s = seen.clone();
+            let view = comp(
+                handler(move |_| {
+                    s.borrow_mut().push((
+                        use_context::<Theme>().map(|t| t.0),
+                        use_context::<Ambient>().map(|a| a.0),
+                    ));
+                    EventResult::Handled
+                }),
+                Some(7),
+            );
+            let mut widget = laid_out(&view);
+            dispatch(&mut widget, &down());
+            assert_eq!(*seen.borrow(), vec![(Some(7), Some(5))]);
+        }
+
+        /// Hosts an inner component in a pod and runs its own handler after it.
+        struct HostView {
+            inner: ComponentView<HandlerComp>,
+            f: Handler,
+        }
+        struct HostWidget {
+            child: ChildPod,
+            f: Handler,
+        }
+        impl Widget for HostWidget {
+            fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+                self.child.set_origin(Point::ZERO);
+                self.child.layout_child(ctx, bc)
+            }
+            fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+            fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+                let inner = self.child.event_child(ctx, event);
+                let own = (self.f)(event);
+                if inner == EventResult::Handled || own == EventResult::Handled {
+                    EventResult::Handled
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            fn visit_children(&self, visitor: &mut dyn FnMut(&ChildPod)) {
+                visitor(&self.child);
+            }
+        }
+        impl View<()> for HostView {
+            type Element = HostWidget;
+            fn build(&self, ctx: &mut BuildCtx<'_>) -> HostWidget {
+                HostWidget {
+                    child: ChildPod::new(Box::new(View::<()>::build(&self.inner, ctx))),
+                    f: self.f.clone(),
+                }
+            }
+            fn rebuild(
+                &self,
+                _prev: &Self,
+                _element: &mut HostWidget,
+                _ctx: &mut BuildCtx<'_>,
+            ) -> ChangeFlags {
+                ChangeFlags::NONE
+            }
+        }
+
+        struct OuterComp {
+            inner_handler: Handler,
+            outer_handler: Handler,
+        }
+        impl Component for OuterComp {
+            type State = ();
+            fn init(&self) {
+                provide_context(Theme(1));
+            }
+            fn build(&self, _state: &mut ()) -> impl View<()> {
+                any(HostView {
+                    inner: comp(self.inner_handler.clone(), Some(2)),
+                    f: self.outer_handler.clone(),
+                })
+            }
+        }
+
+        #[test]
+        fn nested_components_each_see_their_own_owner() {
+            let _owner = ambient();
+            let seen: Rc<RefCell<Vec<Named>>> = Rc::default();
+            let (si, so) = (seen.clone(), seen.clone());
+            let view = component(OuterComp {
+                // The inner handler ignores the event: the outer one must still
+                // run under the outer owner afterwards.
+                inner_handler: handler(move |_| {
+                    si.borrow_mut()
+                        .push(("inner", use_context::<Theme>().map(|t| t.0)));
+                    EventResult::Ignored
+                }),
+                outer_handler: handler(move |_| {
+                    so.borrow_mut()
+                        .push(("outer", use_context::<Theme>().map(|t| t.0)));
+                    EventResult::Handled
+                }),
+            });
+            let mut widget = laid_out(&view);
+            assert_eq!(dispatch(&mut widget, &down()), EventResult::Handled);
+            assert_eq!(*seen.borrow(), vec![("inner", Some(2)), ("outer", Some(1))]);
+        }
+
+        #[test]
+        fn housekeeping_broadcast_runs_handlers_under_the_owner() {
+            let _owner = ambient();
+            let seen: Rc<RefCell<Vec<Option<i32>>>> = Rc::default();
+            let s = seen.clone();
+            let view = comp(
+                handler(move |e| {
+                    if matches!(e, InputEvent::Housekeeping) {
+                        s.borrow_mut().push(use_context::<Theme>().map(|t| t.0));
+                    }
+                    EventResult::Ignored
+                }),
+                Some(9),
+            );
+            let mut widget = laid_out(&view);
+            dispatch(&mut widget, &InputEvent::Housekeeping);
+            assert_eq!(*seen.borrow(), vec![Some(9)]);
+        }
+
+        #[test]
+        fn synthesized_cancel_registers_on_the_owner_and_spares_outer_state() {
+            let _owner = ambient();
+            let probe = Arc::new(AtomicU32::new(0));
+            let p = probe.clone();
+            let view = comp(
+                handler(move |_| {
+                    let p = p.clone();
+                    on_cleanup(move || {
+                        p.fetch_add(1, Ordering::SeqCst);
+                    });
+                    EventResult::Handled
+                }),
+                None,
+            );
+            let mut widget = laid_out(&view);
+            let mut throwaway = 42u32;
+            let r = {
+                let mut ectx = EventCtx::new(&mut throwaway, Point::ZERO, Size::new(10.0, 10.0));
+                widget.event(&mut ectx, &pointer(PointerPhase::Cancel, 5.0, 5.0))
+            };
+            assert_eq!(r, EventResult::Handled);
+            assert_eq!(throwaway, 42, "outer state is untouched");
+            assert_eq!(probe.load(Ordering::SeqCst), 0);
+            teardown(&view, &mut widget);
+            assert_eq!(probe.load(Ordering::SeqCst), 1, "registered on the owner");
+        }
+
+        #[test]
+        fn ambient_owner_is_restored_after_dispatch() {
+            let ambient_owner = ambient();
+            let inside: Rc<RefCell<Option<Owner>>> = Rc::default();
+            let i = inside.clone();
+            let view = comp(
+                handler(move |_| {
+                    *i.borrow_mut() = Owner::current();
+                    EventResult::Handled
+                }),
+                None,
+            );
+            let mut widget = laid_out(&view);
+            assert_eq!(Owner::current(), Some(ambient_owner.clone()));
+            dispatch(&mut widget, &down());
+            assert_eq!(
+                *inside.borrow(),
+                Some(widget.owner.clone()),
+                "the handler ran under the component's owner"
+            );
+            assert_eq!(
+                Owner::current(),
+                Some(ambient_owner),
+                "the previous ambient owner is back"
+            );
+        }
+
+        #[test]
+        fn event_on_a_disposed_component_leaves_the_cleaned_owner_unused() {
+            let ambient_owner = ambient();
+            let probe = Arc::new(AtomicU32::new(0));
+            let runs = Rc::new(Cell::new(0u32));
+            let inside: Rc<RefCell<Option<Owner>>> = Rc::default();
+            let (p, r, i) = (probe.clone(), runs.clone(), inside.clone());
+            let view = comp(
+                handler(move |_| {
+                    r.set(r.get() + 1);
+                    *i.borrow_mut() = Owner::current();
+                    let p = p.clone();
+                    on_cleanup(move || {
+                        p.fetch_add(1, Ordering::SeqCst);
+                    });
+                    EventResult::Handled
+                }),
+                None,
+            );
+            let mut widget = laid_out(&view);
+            teardown(&view, &mut widget);
+            assert_eq!(dispatch(&mut widget, &down()), EventResult::Handled);
+            assert_eq!(runs.get(), 1, "the event still dispatches");
+            assert_ne!(
+                *inside.borrow(),
+                Some(widget.owner.clone()),
+                "the cleaned owner is not entered"
+            );
+            assert_eq!(*inside.borrow(), Some(ambient_owner));
+            drop(widget);
+            assert_eq!(probe.load(Ordering::SeqCst), 0, "nothing registered on it");
+        }
     }
 
     // --- Hot-patch seam: the creator-image layout witness --------------------

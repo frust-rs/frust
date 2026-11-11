@@ -532,6 +532,40 @@ impl Timer {
     /// cleaned up, so a self-re-arming timer or per-event debounce that runs indefinitely
     /// should arm under a short-lived child owner.
     ///
+    /// A timer armed in a component's event handler is bound to that component: the handler
+    /// runs under the component's owner, so removing the component cancels the timer even
+    /// after [`detach`](Self::detach). A debounce keeps one child owner in its state, created
+    /// on first use, cleaned up before each re-arm, and arms the new timer under it, so the
+    /// component's owner does not grow per event:
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    ///
+    /// use frust_reactive::Owner;
+    /// use frust_reactive::time::Timer;
+    ///
+    /// #[derive(Default)]
+    /// struct Search {
+    ///     scope: Option<Owner>,
+    /// }
+    ///
+    /// impl Search {
+    ///     fn on_input(&mut self, query: String) {
+    ///         let owner = self.scope.get_or_insert_with(|| {
+    ///             Owner::current()
+    ///                 .expect("a handler runs under its component's owner")
+    ///                 .child()
+    ///         });
+    ///         owner.cleanup();
+    ///         owner.with(|| {
+    ///             Timer::new(Duration::from_millis(300), move || run_search(&query)).detach();
+    ///         });
+    ///     }
+    /// }
+    ///
+    /// fn run_search(_query: &str) {}
+    /// ```
+    ///
     /// # Panics
     ///
     /// Panics off the UI thread, or before [`ReactiveRuntime::init`](crate::ReactiveRuntime::init).

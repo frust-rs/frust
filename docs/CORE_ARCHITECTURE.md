@@ -304,12 +304,12 @@ context, re-provided on change like `WindowMetrics`. Drain points: [SHELLS_ARCHI
 **Contexts are visible inside both build and event passes.** A root-level `provide_context` (the
 shell's root `Owner`) makes its context available to every `Component::build` **and** every
 `Widget::event` handler, since the shell runs both passes under the same owner. This includes
-`Theme`, `WindowMetrics`, and a root component's own `init`-installed contexts. A **nested**
-component's own `provide_context` is invisible from its subtree's event handlers: `ComponentWidget::event`
-routes the event through an inner `EventCtx` over the component's local state but does not install
-the component's owner, so `use_context` inside a handler cannot resolve a sibling's ancestor-provided
-value. This is an accepted residual: event handlers can read root-level context but not nested
-component context.
+`Theme`, `WindowMetrics`, and a root component's own `init`-installed contexts. A handler runs under
+its nearest enclosing component's owner (`ComponentWidget::event` enters it around the child
+dispatch), so it sees that component's context and its ancestors'. Owner-scoped work armed there
+(`Timer`, `on_cleanup`, `spawn_local_scoped`) stops when the component is disposed, not on rebuild; a
+disposed component dispatches without entering its owner. A child `frust::Owner` held in state cancels
+a group of that work earlier; work meant to outlive the component is armed under a longer-lived owner.
 
 **Orientation is derived, not platform-sourced:** no platform callback in either mobile shell carries
 an orientation enum — the shell furnishes only `(width, height, scale)`. `Orientation` is computed
