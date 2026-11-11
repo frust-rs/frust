@@ -57,7 +57,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Kotlin → Rust | `nativeOnPickError(requestId: Long, code: Int)` | [NO_ACTIVITY], [LAUNCH_FAILED], [COPY_FAILED] or [CANCELLED] |
  * | Kotlin → Rust | `nativeOnPickProgress(requestId: Long, done: Int, items: Int, fraction: Double)` | copy progress, never an answer |
  * | Rust → Kotlin | `albums(): AlbumsResult` | an [AlbumsResult]; `code` is [OK], [NOT_INITIALIZED], [PERMISSION_DENIED] or [QUERY_FAILED] |
- * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult` | an [AssetsResult], same codes as `albums` |
+ * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult` | an [AssetsResult], same codes as `albums` |
  * | Rust → Kotlin | `thumbnail(id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] |
  * | Rust → Kotlin | `manageLimitedSelection(requestId: Long): Int` — `(J)I` | [PENDING] after posting the prompt, [NOT_LIMITED], [NO_ACTIVITY], [BUSY] or [NOT_INITIALIZED]; answered through [nativeOnPickResult] (three empty arrays) or [nativeOnPickError] |
  * | Rust → Kotlin | `exportOriginal(requestId: Long, uri: String, destPath: String): Int` — `(JLjava/lang/String;Ljava/lang/String;)I` | [PENDING] after queuing the copy, [NOT_INITIALIZED], or [NOT_FOUND] for an id that is not a `MediaStore` image or video item on an external volume |
@@ -257,7 +257,12 @@ object FrustPhotoLibraryHost {
         @JvmField val counts: LongArray,
     )
 
-    /** [assets]: parallel arrays for one page; [total] counts the whole query. */
+    /**
+     * [assets]: parallel arrays for one page; [total] counts the whole query.
+     * [modified] is `DATE_MODIFIED` in seconds; [favorites] is 1, 0 or -1 when
+     * the platform does not report it; [names] and [types] are filled only when
+     * the call asked for details and hold only nulls otherwise.
+     */
     class AssetsResult(
         @JvmField val code: Int,
         @JvmField val total: Long,
@@ -267,6 +272,10 @@ object FrustPhotoLibraryHost {
         @JvmField val heights: IntArray,
         @JvmField val dates: LongArray,
         @JvmField val durations: LongArray,
+        @JvmField val modified: LongArray,
+        @JvmField val favorites: IntArray,
+        @JvmField val names: Array<String?>,
+        @JvmField val types: Array<String?>,
     )
 
     /** [thumbnail]: premultiplied RGBA8 with [rowBytes] per row. */
@@ -437,8 +446,8 @@ object FrustPhotoLibraryHost {
 
     /** One page of assets, newest first. Any thread but the main one (the query blocks). */
     @JvmStatic
-    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult =
-        MediaStoreBrowser.assets(appContext, albumId, filter, offset, limit)
+    fun assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult =
+        MediaStoreBrowser.assets(appContext, albumId, filter, offset, limit, details)
 
     /** One thumbnail. Any thread but the main one (the decode blocks). */
     @JvmStatic

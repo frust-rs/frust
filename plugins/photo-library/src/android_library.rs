@@ -29,7 +29,7 @@ use super::{
 };
 use crate::library::{
     Album, AlbumId, AlbumKind, Asset, AssetPage, AssetQuery, Thumbnail, ThumbnailMode,
-    ThumbnailRequest,
+    ThumbnailRequest, favorite_from_code, modified_ms_from_seconds,
 };
 use crate::pick_cache;
 use crate::pixels;
@@ -115,6 +115,7 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
     let offset = jlong::try_from(query.offset).unwrap_or(jlong::MAX);
     let limit = jint::try_from(query.effective_limit()).unwrap_or(jint::MAX);
     let filter = filter_code(query.filter);
+    let details = query.details;
     with_host(|env, class| {
         ensure_off_ui_thread(env)?;
         run_jni(env, "FrustPhotoLibraryHost.assets", |env| {
@@ -127,13 +128,14 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
                     class,
                     jni_str!("assets"),
                     jni_sig!(
-                        "(Ljava/lang/String;IJI)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;"
+                        "(Ljava/lang/String;IJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;"
                     ),
                     &[
                         JValue::Object(&album),
                         JValue::Int(filter),
                         JValue::Long(offset),
                         JValue::Int(limit),
+                        JValue::Bool(details),
                     ],
                 )?
                 .l()?;
@@ -151,8 +153,12 @@ pub(crate) fn assets(query: &AssetQuery) -> Result<AssetPage, PhotoError> {
                 heights: int_array_field(env, &result, jni_str!("heights"))?,
                 dates: long_array_field(env, &result, jni_str!("dates"))?,
                 durations: long_array_field(env, &result, jni_str!("durations"))?,
+                modified: long_array_field(env, &result, jni_str!("modified"))?,
+                favorites: int_array_field(env, &result, jni_str!("favorites"))?,
+                names: string_array_field(env, &result, jni_str!("names"))?,
+                types: string_array_field(env, &result, jni_str!("types"))?,
             };
-            Ok(assets_from(columns, total))
+            Ok(assets_from(columns, total, details))
         })?
     })
 }
@@ -165,10 +171,22 @@ struct AssetColumns {
     heights: Vec<jint>,
     dates: Vec<jlong>,
     durations: Vec<jlong>,
+    /// `DATE_MODIFIED`, in seconds.
+    modified: Vec<jlong>,
+    /// `1`, `0`, or `-1` when the platform does not report it.
+    favorites: Vec<jint>,
+    /// Only meaningful when the query asked for details.
+    names: Vec<Option<String>>,
+    /// Only meaningful when the query asked for details.
+    types: Vec<Option<String>>,
 }
 
 /// Zip [`AssetColumns`] into a page.
-fn assets_from(columns: AssetColumns, total: jlong) -> Result<AssetPage, PhotoError> {
+fn assets_from(
+    columns: AssetColumns,
+    total: jlong,
+    details: bool,
+) -> Result<AssetPage, PhotoError> {
     let n = columns.ids.len();
     if [
         columns.kinds.len(),
@@ -176,12 +194,19 @@ fn assets_from(columns: AssetColumns, total: jlong) -> Result<AssetPage, PhotoEr
         columns.heights.len(),
         columns.dates.len(),
         columns.durations.len(),
+        columns.modified.len(),
+        columns.favorites.len(),
     ]
     .iter()
     .any(|len| *len != n)
     {
         return Err(mismatched_arrays());
     }
+    if details && (columns.names.len() != n || columns.types.len() != n) {
+        return Err(mismatched_arrays());
+    }
+    let mut names = columns.names;
+    let mut types = columns.types;
     let mut items = Vec::with_capacity(n);
     for (index, id) in columns.ids.into_iter().enumerate() {
         let Some(id) = id else {
@@ -196,6 +221,12 @@ fn assets_from(columns: AssetColumns, total: jlong) -> Result<AssetPage, PhotoEr
             duration_ms: u64::try_from(columns.durations[index])
                 .ok()
                 .filter(|ms| *ms > 0),
+            modified_unix_ms: modified_ms_from_seconds(columns.modified[index]),
+            is_favorite: favorite_from_code(columns.favorites[index]),
+            // Android has no burst identifier.
+            burst_id: None,
+            file_name: if details { names[index].take() } else { None },
+            content_type: if details { types[index].take() } else { None },
         });
     }
     Ok(AssetPage {
@@ -389,4 +420,62 @@ fn long_array_field(
     let mut values = vec![0; array.len(env)?];
     array.get_region(env, 0, &mut values)?;
     Ok(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn columns(n: usize) -> AssetColumns {
+        AssetColumns {
+            ids: (0..n).map(|i| Some(format!("content://m/{i}"))).collect(),
+            kinds: vec![KIND_IMAGE; n],
+            widths: vec![4; n],
+            heights: vec![3; n],
+            dates: vec![1_000; n],
+            durations: vec![0; n],
+            modified: vec![1_700_000_000; n],
+            favorites: vec![1; n],
+            names: vec![Some("a.jpg".into()); n],
+            types: vec![Some("image/jpeg".into()); n],
+        }
+    }
+
+    #[test]
+    fn new_columns_decode_into_the_asset() {
+        let page = assets_from(columns(1), 1, true).unwrap();
+        let asset = &page.items[0];
+        assert_eq!(asset.modified_unix_ms, Some(1_700_000_000_000));
+        assert_eq!(asset.is_favorite, Some(true));
+        assert_eq!(asset.burst_id, None);
+        assert_eq!(asset.file_name.as_deref(), Some("a.jpg"));
+        assert_eq!(asset.content_type.as_deref(), Some("image/jpeg"));
+    }
+
+    #[test]
+    fn a_missing_favourite_is_none_not_false() {
+        let mut c = columns(2);
+        c.favorites = vec![-1, 0];
+        let page = assets_from(c, 2, false).unwrap();
+        assert_eq!(page.items[0].is_favorite, None);
+        assert_eq!(page.items[1].is_favorite, Some(false));
+    }
+
+    #[test]
+    fn name_and_type_stay_none_without_details() {
+        let page = assets_from(columns(1), 1, false).unwrap();
+        assert_eq!(page.items[0].file_name, None);
+        assert_eq!(page.items[0].content_type, None);
+    }
+
+    #[test]
+    fn short_detail_arrays_are_a_protocol_error_only_with_details() {
+        let mut c = columns(2);
+        c.names.clear();
+        assert!(assets_from(c, 2, true).is_err());
+        let mut c = columns(2);
+        c.names.clear();
+        c.types.clear();
+        assert!(assets_from(c, 2, false).is_ok());
+    }
 }

@@ -109,7 +109,26 @@ internal object MediaStoreBrowser {
         MediaStore.MediaColumns.DATE_ADDED,
         MediaStore.MediaColumns.DURATION,
         MediaStore.MediaColumns.ORIENTATION,
+        MediaStore.MediaColumns.DATE_MODIFIED,
     )
+
+    /** Projected only when the query asks for details: the file name and the MIME type. */
+    private val DETAIL_COLUMNS = arrayOf(
+        MediaStore.MediaColumns.DISPLAY_NAME,
+        MediaStore.MediaColumns.MIME_TYPE,
+    )
+
+    /**
+     * [ASSET_PROJECTION], plus `IS_FAVORITE` on API 30 and later (the column does
+     * not exist on 29), plus [DETAIL_COLUMNS] only when [details] is set. Columns
+     * are read back by name, so the positions here carry no meaning.
+     */
+    private fun projection(details: Boolean): Array<String> {
+        var columns = ASSET_PROJECTION
+        if (Build.VERSION.SDK_INT >= 30) columns += MediaStore.MediaColumns.IS_FAVORITE
+        if (details) columns += DETAIL_COLUMNS
+        return columns
+    }
 
     /** The photo permissions on [sdk] (`frust-permissions`' `Photos(ReadWrite)` set). */
     internal fun mediaPermissions(sdk: Int): List<String> = when {
@@ -158,7 +177,10 @@ internal object MediaStoreBrowser {
     private fun albumsFailed(code: Int) = AlbumsResult(code, emptyArray(), emptyArray(), LongArray(0))
 
     private fun assetsFailed(code: Int, total: Long = 0) =
-        AssetsResult(code, total, emptyArray(), IntArray(0), IntArray(0), IntArray(0), LongArray(0), LongArray(0))
+        AssetsResult(
+            code, total, emptyArray(), IntArray(0), IntArray(0), IntArray(0), LongArray(0), LongArray(0),
+            LongArray(0), IntArray(0), emptyArray(), emptyArray(),
+        )
 
     private fun thumbnailFailed(code: Int) = ThumbnailResult(code, 0, 0, 0, null)
 
@@ -202,6 +224,9 @@ internal object MediaStoreBrowser {
         AlbumsResult(FrustPhotoLibraryHost.OK, ids, titles, counts)
     }
 
+    /** `AssetsResult.favorites`: the platform does not report it (below API 30). */
+    private const val FAVORITE_UNKNOWN = -1
+
     private const val ALL_MEDIA_TITLE = "All Media"
 
     /** One row of a listing, read before it is split into parallel arrays. */
@@ -212,14 +237,19 @@ internal object MediaStoreBrowser {
         val height: Int,
         val date: Long,
         val duration: Long,
+        val modified: Long,
+        val favorite: Int,
+        val name: String?,
+        val type: String?,
     )
 
     /**
      * One page, newest first, with the total row count of the query. Pages with
      * `QUERY_ARG_OFFSET`/`QUERY_ARG_LIMIT` on API 30+ and
-     * `Cursor.moveToPosition` on API 29 (class doc).
+     * `Cursor.moveToPosition` on API 29 (class doc). [details] adds the file
+     * name and MIME type to the same query; there is no extra query per row.
      */
-    fun assets(ctx: Context?, albumId: String?, filter: Int, offset: Long, limit: Int): AssetsResult =
+    fun assets(ctx: Context?, albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult =
         browse(ctx, "assets", { assetsFailed(it) }) { context ->
             val mediaType = mediaSelection(filter)
                 ?: return@browse assetsFailed(FrustPhotoLibraryHost.QUERY_FAILED)
@@ -231,9 +261,9 @@ internal object MediaStoreBrowser {
                 ?: return@browse assetsFailed(FrustPhotoLibraryHost.QUERY_FAILED)
             if (offset >= total) return@browse assetsPage(emptyList(), total)
             // `offset < total`, and a row count fits in an Int.
-            val cursor = queryPage(resolver, selection, args, offset.toInt(), limit)
+            val cursor = queryPage(resolver, selection, args, offset.toInt(), limit, details)
                 ?: return@browse assetsFailed(FrustPhotoLibraryHost.QUERY_FAILED, total.toLong())
-            val rows = cursor.use { c -> readRows(c, offset.toInt(), limit) }
+            val rows = cursor.use { c -> readRows(c, offset.toInt(), limit, details) }
             assetsPage(rows, total)
         }
 
@@ -246,9 +276,11 @@ internal object MediaStoreBrowser {
         args: Array<String>?,
         offset: Int,
         limit: Int,
+        details: Boolean,
     ): Cursor? {
+        val projection = projection(details)
         if (Build.VERSION.SDK_INT < 30) {
-            return resolver.query(FILES_URI, ASSET_PROJECTION, selection, args, SORT_ORDER)
+            return resolver.query(FILES_URI, projection, selection, args, SORT_ORDER)
         }
         val queryArgs = Bundle().apply {
             putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
@@ -257,14 +289,19 @@ internal object MediaStoreBrowser {
             putInt(ContentResolver.QUERY_ARG_OFFSET, offset)
             putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
         }
-        return resolver.query(FILES_URI, ASSET_PROJECTION, queryArgs, null)
+        return resolver.query(FILES_URI, projection, queryArgs, null)
     }
 
     /** At most [limit] rows of [cursor]; on API 29 the cursor is unpaged, so it seeks [offset]. */
-    private fun readRows(cursor: Cursor, offset: Int, limit: Int): List<Row> {
+    private fun readRows(cursor: Cursor, offset: Int, limit: Int, details: Boolean): List<Row> {
         val first = if (Build.VERSION.SDK_INT < 30) offset else 0
         val rows = ArrayList<Row>()
         if (!cursor.moveToPosition(first)) return rows
+        val modifiedAt = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+        // Absent below API 30, where the favourite is unknown rather than false.
+        val favoriteAt = cursor.getColumnIndex(MediaStore.MediaColumns.IS_FAVORITE)
+        val nameAt = if (details) cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME) else -1
+        val typeAt = if (details) cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE) else -1
         do {
             val video = cursor.getInt(1) == MEDIA_TYPE_VIDEO
             val base = if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
@@ -279,6 +316,11 @@ internal object MediaStoreBrowser {
                     height = height,
                     date = if (taken > 0) taken else cursor.getLong(5) * 1000,
                     duration = if (video) cursor.getLong(6) else 0,
+                    // Seconds; the Rust side converts to milliseconds.
+                    modified = cursor.getLong(modifiedAt),
+                    favorite = if (favoriteAt < 0) FAVORITE_UNKNOWN else cursor.getInt(favoriteAt).coerceIn(0, 1),
+                    name = if (nameAt < 0) null else cursor.getString(nameAt),
+                    type = if (typeAt < 0) null else cursor.getString(typeAt),
                 ),
             )
         } while (rows.size < limit && cursor.moveToNext())
@@ -298,6 +340,10 @@ internal object MediaStoreBrowser {
         IntArray(rows.size) { rows[it].height },
         LongArray(rows.size) { rows[it].date },
         LongArray(rows.size) { rows[it].duration },
+        LongArray(rows.size) { rows[it].modified },
+        IntArray(rows.size) { rows[it].favorite },
+        Array(rows.size) { rows[it].name },
+        Array(rows.size) { rows[it].type },
     )
 
     /**
