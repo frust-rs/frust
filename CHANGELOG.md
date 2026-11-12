@@ -71,6 +71,12 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   Migration: code or tests that expect the blur right after a pointer `Down` must wait for the `Up`;
   an app that relied on a drag outside a field to dismiss the keyboard must dismiss it explicitly, or
   opt in to `ScrollView::dismiss_keyboard_on_drag(true)` on its vertical scroll view.
+  A custom container that routes pointer events by hand must follow the same rule: it ends a
+  child's focus link only when the same dispatch records a focus claim through another child, never
+  on a press that claims nothing, and it reads `holds_live_focus` where it read `is_focused`. The
+  routers in `frust-widgets` and the first-party design systems do. `frust::authoring` gains
+  `retire_stale_focus_links`, `event_child_reporting_claim` and `route_event_reporting_claim` for
+  this.
 
 ### Added
 
