@@ -26,6 +26,20 @@ use super::transition::{PageTransition, TransitionDriver, make_driver, settle_dr
 /// ~20dp is the value the community-reverse-engineered reimplementations
 /// converge on. A `Down` at `x <= EDGE_SWIPE_ZONE_DP` (with a poppable stack)
 /// arms the gesture.
+///
+/// **Coordinate space.** The zone is measured in the *navigator's own* local
+/// coordinates: `x` is the `Down`'s `position.x` as the navigator's `event_at`
+/// receives it, with `0` at the navigator's left edge, not the screen's or the
+/// window's. A navigator that reaches the screen's left edge therefore has its
+/// zone at the screen edge. One that does not (for example inside a
+/// `Padding` of 16 points) has its zone shifted right by its offset: a press
+/// at parent `x = 1` falls outside the navigator, which never receives it, and
+/// arms nothing, while a press at parent `x = 18` or `24` is 2 or 8 points
+/// inside it and arms. The gesture arms only when the press is also primary,
+/// the stack has more than one page, and the top page honours the swipe (its
+/// back policy is `Pop` and its `pop_swipe` override, else the navigator's
+/// resolved default, is on). The facade's `navigator` sets that default on iOS
+/// only.
 pub(super) const EDGE_SWIPE_ZONE_DP: f64 = 20.0;
 
 /// Progress past which a *released* edge-swipe completes the pop; at or below
