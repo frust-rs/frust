@@ -27,13 +27,19 @@
 //! unchanged, and a safe area with every edge disabled passes the insets
 //! through untouched.
 //!
-//! Flutter's `maintainBottomViewPadding` (an override that substitutes
-//! `viewPadding.bottom` for the derived `padding.bottom` while the keyboard is
-//! up, to avoid a layout jump) is intentionally **deferred** past v1: the
-//! bottom edge always uses the same [`WindowInsets::padding`] formula as every
-//! other edge, so an IME overlapping the bottom system inset collapses that
-//! edge's resolved padding to zero rather than holding it at the system-bar
-//! value.
+//! # Keyboard edge
+//!
+//! By default the bottom edge uses the same [`WindowInsets::padding`] formula
+//! as every other edge, so an IME overlapping the bottom system inset
+//! collapses that edge's resolved padding to zero and the keyboard itself adds
+//! nothing. [`SafeAreaView::keyboard`] opts into holding the bottom edge above
+//! the keyboard: with it (and the bottom edge enabled) the bottom padding is
+//! `max(view_padding.bottom, view_insets.bottom)`, so the subtree's bottom edge
+//! sits at the top of the keyboard when it is up and at the system inset
+//! otherwise. Both the bottom `view_padding` and the bottom `view_insets` are
+//! then consumed from the subtree, so a self-insetting bar inside does not add
+//! the system inset under the keyboard and a nested keyboard safe area does not
+//! pad twice.
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
@@ -47,6 +53,7 @@ pub struct SafeAreaView<State: 'static> {
     top: bool,
     right: bool,
     bottom: bool,
+    keyboard: bool,
     minimum: crate::EdgeInsets,
     child: frust_core::AnyView<State>,
 }
@@ -62,6 +69,7 @@ pub fn safe_area<State: 'static, V: View<State>>(child: V) -> SafeAreaView<State
         top: true,
         right: true,
         bottom: true,
+        keyboard: false,
         minimum: crate::EdgeInsets::all(0.0),
         child: any(child),
     }
@@ -94,6 +102,18 @@ impl<State: 'static> SafeAreaView<State> {
         self
     }
 
+    /// Hold the bottom edge above the soft keyboard (default `false`). When
+    /// `true` and the bottom edge is enabled, the bottom padding is
+    /// `max(view_padding.bottom, view_insets.bottom)` (still combined with
+    /// `minimum.bottom`): the keyboard's height while it is up, the system
+    /// inset otherwise. The subtree's bottom edge therefore sits at the top of
+    /// the keyboard. Both the bottom `view_padding` and `view_insets` are
+    /// consumed from the subtree. Other edges are unchanged.
+    pub fn keyboard(mut self, enabled: bool) -> Self {
+        self.keyboard = enabled;
+        self
+    }
+
     /// Floor for the resolved per-edge padding — an enabled edge never pads by
     /// less than this even where the window inset is smaller, and a disabled
     /// edge still pads by at least this (default zero on all edges). Mirrors
@@ -110,6 +130,7 @@ pub struct SafeAreaWidget {
     top: bool,
     right: bool,
     bottom: bool,
+    keyboard: bool,
     minimum: crate::EdgeInsets,
     child: ChildPod,
 }
@@ -123,6 +144,7 @@ impl<State: 'static> View<State> for SafeAreaView<State> {
             top: self.top,
             right: self.right,
             bottom: self.bottom,
+            keyboard: self.keyboard,
             minimum: self.minimum,
             child: crate::authoring::build_child(&self.child, ctx),
         }
@@ -139,12 +161,14 @@ impl<State: 'static> View<State> for SafeAreaView<State> {
             || prev.top != self.top
             || prev.right != self.right
             || prev.bottom != self.bottom
+            || prev.keyboard != self.keyboard
             || prev.minimum != self.minimum
         {
             element.left = self.left;
             element.top = self.top;
             element.right = self.right;
             element.bottom = self.bottom;
+            element.keyboard = self.keyboard;
             element.minimum = self.minimum;
             flags |= ChangeFlags::LAYOUT;
         }
@@ -161,7 +185,13 @@ impl SafeAreaWidget {
     /// `insets` with this safe area's enabled edges consumed — the value its
     /// subtree reads during both layout and paint.
     fn consumed_insets(&self, insets: WindowInsets) -> WindowInsets {
-        insets.consuming(self.left, self.top, self.right, self.bottom)
+        let mut consumed = insets.consuming(self.left, self.top, self.right, self.bottom);
+        if self.keyboard && self.bottom {
+            // The keyboard edge covers both the system inset and the keyboard.
+            consumed.view_padding.bottom = 0.0;
+            consumed.view_insets.bottom = 0.0;
+        }
+        consumed
     }
 }
 
@@ -170,11 +200,19 @@ impl Widget for SafeAreaWidget {
         // Resolve per-edge padding dynamically: the window insets arrive via
         // ctx every pass (unlike Padding's view-declared constant), so this is
         // computed fresh rather than cached on the widget.
-        let padding = ctx.window_insets().padding();
+        let insets = ctx.window_insets();
+        let padding = insets.padding();
         let left = (if self.left { padding.left } else { 0.0 }).max(self.minimum.left);
         let top = (if self.top { padding.top } else { 0.0 }).max(self.minimum.top);
         let right = (if self.right { padding.right } else { 0.0 }).max(self.minimum.right);
-        let bottom = (if self.bottom { padding.bottom } else { 0.0 }).max(self.minimum.bottom);
+        let bottom_inset = if !self.bottom {
+            0.0
+        } else if self.keyboard {
+            insets.view_padding.bottom.max(insets.view_insets.bottom)
+        } else {
+            padding.bottom
+        };
+        let bottom = bottom_inset.max(self.minimum.bottom);
 
         let h = left + right;
         let v = top + bottom;
@@ -328,6 +366,155 @@ mod tests {
             Point::new(0.0, 24.0),
             "bottom padding clamps to 0 under the IME overlap; top is unaffected"
         );
+    }
+
+    /// Reports the bottom padding a child sees via `ctx.window_insets()`.
+    struct Probe {
+        seen: std::rc::Rc<std::cell::Cell<f64>>,
+        seen_insets: std::rc::Rc<std::cell::Cell<f64>>,
+    }
+
+    impl Widget for Probe {
+        fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            self.seen.set(ctx.window_insets().padding().bottom);
+            self.seen_insets.set(ctx.window_insets().view_insets.bottom);
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, _: &mut PaintCtx, _: &mut dyn PaintScene) {}
+        fn event(&mut self, _: &mut EventCtx, _: &InputEvent) -> EventResult {
+            EventResult::Ignored
+        }
+    }
+
+    fn kb_insets(system: f64, keyboard: f64) -> WindowInsets {
+        WindowInsets::new(
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, system),
+            WindowEdgeInsets::new(0.0, 0.0, 0.0, keyboard),
+        )
+    }
+
+    #[test]
+    fn keyboard_bottom_padding_formula() {
+        fn run(kb: bool, system: f64, keyboard: f64) -> f64 {
+            fn logic_on(_: &mut ()) -> SafeAreaView<()> {
+                safe_area(leaf(40.0, 20.0)).keyboard(true)
+            }
+            fn logic_off(_: &mut ()) -> SafeAreaView<()> {
+                safe_area(leaf(40.0, 20.0)).keyboard(false)
+            }
+            let mut root: RenderRoot<(), SafeAreaView<()>> = RenderRoot::new();
+            let mut state = ();
+            if kb {
+                root.rebuild(&mut logic_on, &mut state);
+            } else {
+                root.rebuild(&mut logic_off, &mut state);
+            }
+            root.set_insets(kb_insets(system, keyboard));
+            let size = root.layout(Size::new(500.0, 500.0));
+            size.height - 20.0
+        }
+        assert_eq!(run(true, 34.0, 0.0), 34.0, "no keyboard: system inset");
+        assert_eq!(run(true, 34.0, 340.0), 340.0, "keyboard up: its height");
+        assert_eq!(run(false, 34.0, 340.0), 0.0, "off: today's collapse");
+        assert_eq!(run(false, 34.0, 0.0), 34.0, "off: today's system inset");
+    }
+
+    fn probe_pair() -> (
+        std::rc::Rc<std::cell::Cell<f64>>,
+        std::rc::Rc<std::cell::Cell<f64>>,
+    ) {
+        (
+            std::rc::Rc::new(std::cell::Cell::new(-1.0)),
+            std::rc::Rc::new(std::cell::Cell::new(-1.0)),
+        )
+    }
+
+    fn lay_out_widget(w: &mut SafeAreaWidget, insets: WindowInsets) -> Size {
+        let mut text_ctx = frust_text::TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut text_ctx);
+        lctx.with_window_insets(insets, |ctx| {
+            w.layout(ctx, &BoxConstraints::loose(Size::new(500.0, 500.0)))
+        })
+    }
+
+    fn widget_with_probe(
+        kb: bool,
+        nested: bool,
+    ) -> (SafeAreaWidget, std::rc::Rc<std::cell::Cell<f64>>) {
+        let (seen, seen_insets) = probe_pair();
+        let probe = Probe {
+            seen: seen.clone(),
+            seen_insets,
+        };
+        let child = ChildPod::new(Box::new(probe));
+        let inner = if nested {
+            SafeAreaWidget {
+                left: true,
+                top: true,
+                right: true,
+                bottom: true,
+                keyboard: true,
+                minimum: crate::EdgeInsets::all(0.0),
+                child,
+            }
+        } else {
+            return (
+                SafeAreaWidget {
+                    left: true,
+                    top: true,
+                    right: true,
+                    bottom: true,
+                    keyboard: kb,
+                    minimum: crate::EdgeInsets::all(0.0),
+                    child,
+                },
+                seen,
+            );
+        };
+        (
+            SafeAreaWidget {
+                left: true,
+                top: true,
+                right: true,
+                bottom: true,
+                keyboard: kb,
+                minimum: crate::EdgeInsets::all(0.0),
+                child: ChildPod::new(Box::new(inner)),
+            },
+            seen,
+        )
+    }
+
+    #[test]
+    fn keyboard_consumes_padding_for_descendants() {
+        for keyboard in [0.0, 340.0] {
+            let (mut w, seen) = widget_with_probe(true, false);
+            lay_out_widget(&mut w, kb_insets(34.0, keyboard));
+            assert_eq!(seen.get(), 0.0, "keyboard {keyboard}");
+        }
+    }
+
+    #[test]
+    fn nested_keyboard_safe_area_adds_nothing() {
+        for keyboard in [0.0, 340.0] {
+            let (mut w, seen) = widget_with_probe(true, true);
+            let size = lay_out_widget(&mut w, kb_insets(34.0, keyboard));
+            let expected = if keyboard > 0.0 { keyboard } else { 34.0 };
+            assert_eq!(size.height, 20.0 + expected, "padded once");
+            assert_eq!(seen.get(), 0.0);
+        }
+    }
+
+    #[test]
+    fn toggling_keyboard_relayouts() {
+        let a: SafeAreaView<()> = safe_area(leaf(1.0, 1.0)).keyboard(false);
+        let b: SafeAreaView<()> = safe_area(leaf(1.0, 1.0)).keyboard(true);
+        let mut counter = 0u64;
+        let mut ctx = BuildCtx::new(&mut counter);
+        let mut el = a.build(&mut ctx);
+        let flags = b.rebuild(&a, &mut el, &mut ctx);
+        assert!(flags.contains(ChangeFlags::LAYOUT));
+        assert!(el.keyboard);
     }
 
     // -- Event routing through the resolved offset --

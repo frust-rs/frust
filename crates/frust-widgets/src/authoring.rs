@@ -167,7 +167,7 @@
 //!
 //!     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
 //!         // Never re-hit-test a captured child by hand — this helper owns the
-//!         // capture/focus fast paths and the blur-on-outside-tap rule.
+//!         // capture/focus fast paths and the focus-link rule.
 //!         route_event_single(&mut self.child, ctx, event)
 //!     }
 //!
@@ -342,14 +342,15 @@ pub fn rebuild_child<State: 'static, V: View<State>>(
 ) -> ChangeFlags {
     // Read before the nested rebuild, exactly as `rebuild_child_tracked` reads
     // its own `link_focused`: the gate describes the link this pod held *going
-    // into* the swap.
-    let link_focused = pod.is_focused();
+    // into* the swap, and only a link on the live session counts (see
+    // `mark_orphan_if_live`).
+    let link_focused = pod.holds_live_focus();
     let (flags, swapped) = rebuild_child_tracked(prev, next, pod, ctx);
     if swapped {
         if pod.is_active() {
             pod.set_active(false);
         }
-        if link_focused {
+        if pod.is_focused() {
             pod.set_focused(false);
         }
         // `ctx` carries the chain down to *this wrapper*; the pod's own flag is
@@ -384,7 +385,7 @@ pub fn rebuild_child<State: 'static, V: View<State>>(
 ///   the swapped subtree ran its own scope and consumed its own.
 ///
 /// **This is the descent that extends the focus chain.** The nested rebuild runs
-/// under [`BuildCtx::with_focus_link`]`(pod.is_focused(), …)`, so a container
+/// under [`BuildCtx::with_focus_link`]`(pod.holds_live_focus(), …)`, so a container
 /// deeper in the tree sees `ctx.has_focus()` == "is the whole chain from the root
 /// to me focused" — the value the orphan-marking sites gate on. Every route into
 /// a child's `rebuild`/`teardown` funnels through here (or through
@@ -396,8 +397,10 @@ fn rebuild_child_tracked<State: 'static, V: View<State>>(
     pod: &mut ChildPod,
     ctx: &mut BuildCtx<'_>,
 ) -> (ChangeFlags, bool) {
-    // Read before the `widget_mut` borrow below.
-    let link_focused = pod.is_focused();
+    // Read before the `widget_mut` borrow below. The live link, never the raw
+    // flag: a link the session stranded extends no chain (see
+    // `mark_orphan_if_live`).
+    let link_focused = pod.holds_live_focus();
     // The non-marking accessor: this function marks the pod itself, below, from
     // the rebuild's flags — `widget_mut` would dirty it on every rebuild.
     let element = pod
@@ -451,8 +454,9 @@ fn widget_type_id<E: Widget>(element: &E) -> std::any::TypeId {
 /// shrinking list) unwinds its state machine instead of vanishing with no
 /// terminating `Up`/`Cancel`.
 ///
-/// A pod still holding the recorded **focus** path ([`ChildPod::is_focused`])
-/// *on the live focus chain* ([`BuildCtx::has_focus`]) raises
+/// A pod still holding the recorded **focus** path on the live session
+/// ([`ChildPod::holds_live_focus`]) *on the live focus chain*
+/// ([`BuildCtx::has_focus`]) raises
 /// [`mark_focus_orphaned`](frust_core::mark_focus_orphaned) instead: the focused
 /// widget is about to stop existing, so the whole focus/IME session dies with it
 /// and `RenderRoot::rebuild` releases it before the frame ends (see
@@ -468,8 +472,8 @@ pub fn teardown_child<State: 'static, V: View<State>>(
         cancel_pod(pod);
         pod.set_active(false);
     }
-    let link_focused = pod.is_focused();
-    if link_focused {
+    let link_focused = pod.holds_live_focus();
+    if pod.is_focused() {
         // The caller drops the pod right after this returns (or, in
         // `pattern_switcher`, keeps it only to paint its exit), so clearing the
         // flag is bookkeeping hygiene, not the load-bearing part — the mark is.
@@ -489,16 +493,21 @@ pub fn teardown_child<State: 'static, V: View<State>>(
 /// ([`teardown_child`], [`cancel_active_children`], the keyed reconciler's
 /// type-swap arm, and [`rebuild_child`]'s).
 ///
-/// `link_focused` is the dying pod's own [`ChildPod::is_focused`] flag and
-/// `ctx.has_focus()` is the chain above it, so the mark means exactly one thing:
-/// **a LIVE session just lost its owner.** Both halves are required. The flag
-/// alone is not evidence of a live session — a container-routed blur clears the
-/// focus link at the nearest common ancestor only, leaving flags deeper in the
-/// blurred branch legitimately set (see [`route_event`]) — and marking on the
-/// flag alone is what let a recycled list row, a filtered-out item, or a switched
-/// pattern release the *currently typed-into* field somewhere else in the tree.
-/// The chain alone is not evidence either: a live chain running past an unfocused
-/// sibling says nothing about that sibling.
+/// `link_focused` is the dying pod's own link **on the live session**
+/// ([`ChildPod::holds_live_focus`]) and `ctx.has_focus()` is the chain above it,
+/// so the mark means exactly one thing: **a LIVE session just lost its owner.**
+/// Both halves are required. The raw flag is not evidence of a live session — a
+/// container-routed blur clears the focus link at the nearest common ancestor
+/// only, leaving flags deeper in the blurred branch legitimately set (see
+/// [`route_event`]), and a container that claims focus itself leaves the link of
+/// the child it routed through set until the next dispatch retires it — and
+/// marking on the flag alone is what let a recycled list row, a filtered-out
+/// item, a switched pattern, or the old field inside a sheet that just took the
+/// session release the *currently live* session somewhere else in the tree. The
+/// chain alone is not evidence either: a live chain running past an unfocused
+/// sibling says nothing about that sibling. The descent that extends the chain
+/// ([`rebuild_child`], [`teardown_child`]) reads the same live link, so a
+/// stranded link closes the chain for its whole subtree.
 fn mark_orphan_if_live(ctx: &BuildCtx<'_>, link_focused: bool) {
     if link_focused && ctx.has_focus() {
         frust_core::mark_focus_orphaned();
@@ -606,8 +615,8 @@ fn cancel_active_children(pods: &mut [ChildPod], ctx: &BuildCtx<'_>) {
             cancel_pod(pod);
             pod.set_active(false);
         }
-        let link_focused = pod.is_focused();
-        if link_focused {
+        let link_focused = pod.holds_live_focus();
+        if pod.is_focused() {
             pod.set_focused(false);
         }
         mark_orphan_if_live(ctx, link_focused);
@@ -839,8 +848,8 @@ fn rebuild_children_keyed<State: 'static, C>(
                 // if this pod's link was on the LIVE chain; a stale flag under a
                 // blurred ancestor owns no session (see `mark_orphan_if_live` and
                 // `cancel_active_children`'s note).
-                let link_focused = pod.is_focused();
-                if link_focused {
+                let link_focused = pod.holds_live_focus();
+                if pod.is_focused() {
                     pod.set_focused(false);
                 }
                 mark_orphan_if_live(ctx, link_focused);
@@ -982,9 +991,9 @@ pub(crate) fn releases_capture(event: &InputEvent) -> bool {
 ///
 /// Move/hover arms deliberately do **not** consult this: hover chrome and cursor
 /// shapes are position-driven, and a move carries no meaningful button. Neither
-/// do the focus-session arms — [`is_pointer_down`]'s blur-on-outside-tap, and a
-/// widget's own `request_focus`/IME publish — because the root reads *any* `Down`
-/// that bubbles no claim as a blur, whatever button carried it.
+/// do the focus-session arms — the routers' focus-link rule (see [`route_event`])
+/// and a widget's own `request_focus`/IME publish — because the root reads *any*
+/// tap that bubbles no claim as a blur, whatever button carried it.
 ///
 /// `frust_shadcn`'s `hit::presses` is the same predicate for that catalog; each
 /// catalog keeps its own copy rather than depending on a sibling crate.
@@ -992,13 +1001,89 @@ pub(crate) fn presses(p: &PointerEvent) -> bool {
     p.button == PointerButton::Primary
 }
 
-/// Whether `event` is a pointer `Down` — the phase that both opens a capture and
-/// triggers blur-on-outside-tap evaluation in the routing helpers.
-fn is_pointer_down(event: &InputEvent) -> bool {
-    matches!(
-        event,
-        InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Down)
-    )
+/// A child's recorded focus link as it stood before one dispatch into it, so a
+/// router can tell afterwards whether that dispatch recorded a focus claim
+/// through the child.
+///
+/// A claim re-stamps every pod on the claimant's path with the dispatch's
+/// candidate session ([`ChildPod::set_focused`]), so a claim shows as a link
+/// that appeared or as a link whose stamp moved — a re-claim by the widget that
+/// already held focus included. A link the dispatch left alone keeps its stamp.
+#[derive(Clone, Copy)]
+pub(crate) struct FocusMark {
+    focused: bool,
+    epoch: u64,
+}
+
+impl FocusMark {
+    pub(crate) fn of(pod: &ChildPod) -> Self {
+        Self {
+            focused: pod.is_focused(),
+            epoch: pod.focus_epoch(),
+        }
+    }
+
+    /// Whether the dispatch since the mark recorded a focus claim through `pod`.
+    pub(crate) fn claimed(self, pod: &ChildPod) -> bool {
+        pod.is_focused() && (!self.focused || pod.focus_epoch() != self.epoch)
+    }
+}
+
+/// Drop every link among `pods` that the live session already stranded
+/// ([`ChildPod::retire_stale_focus_link`]); a live link is never touched.
+///
+/// The routers run this ahead of every dispatch, and a hand-rolled router owes
+/// the same call. No router clears a focused child on a press that claims
+/// nothing (the root ends that session at the tap's `Up`, by epoch, see
+/// [`route_event`]), so a link can outlive its session with its raw flag still
+/// set; retiring it here, before the child is dispatched, is what keeps that
+/// flag from seeding the child's [`EventCtx::has_focus`] as if it were live.
+pub fn retire_stale_focus_links<'a>(pods: impl IntoIterator<Item = &'a mut ChildPod>) {
+    for pod in pods {
+        pod.retire_stale_focus_link();
+    }
+}
+
+/// Dispatch `event` into `pod` ([`ChildPod::event_child`]) and report whether
+/// this dispatch recorded a **focus claim** through it, as `(result, claimed)`.
+///
+/// This is the half of [`route_event`]'s focus-link rule a hand-rolled router
+/// (one that picks its target child itself instead of calling `route_event`)
+/// needs: after a hit-tested dispatch, end every *other* child's link
+/// (`set_focused(false)`) only when some child reports `claimed`, and leave every
+/// link alone when none does — whether an unclaimed press blurs is the root's
+/// call, made at the end of the gesture. A claim shows as a link that appeared
+/// or whose session stamp moved, so a re-claim by the child that already held
+/// focus counts too.
+pub fn event_child_reporting_claim(
+    pod: &mut ChildPod,
+    ctx: &mut EventCtx<'_>,
+    event: &InputEvent,
+) -> (EventResult, bool) {
+    let mark = FocusMark::of(pod);
+    let result = pod.event_child(ctx, event);
+    (result, mark.claimed(pod))
+}
+
+/// [`route_event`], also reporting whether the dispatch recorded a focus claim
+/// through any of `children`, as `(result, claimed)`.
+///
+/// For a router that hands only part of its children to `route_event` (a
+/// cascade that routes input to the revealed prefix alone): the rest saw no
+/// event, so they follow the focus-link rule by hand — their links end when
+/// `claimed`, and stay when it is not.
+pub fn route_event_reporting_claim(
+    children: &mut [ChildPod],
+    ctx: &mut EventCtx<'_>,
+    event: &InputEvent,
+) -> (EventResult, bool) {
+    let marks: Vec<FocusMark> = children.iter().map(FocusMark::of).collect();
+    let result = route_event(children, ctx, event);
+    let claimed = children
+        .iter()
+        .zip(marks)
+        .any(|(pod, mark)| mark.claimed(pod));
+    (result, claimed)
 }
 
 /// Route a pointer/scroll/keyboard/IME event — or a broadcast — to a
@@ -1019,8 +1104,8 @@ fn is_pointer_down(event: &InputEvent) -> bool {
 /// This is the focus mirror of the capture fast-path.
 ///
 /// The liveness half is not a refinement, it is the question. Two children can
-/// carry a recorded link at the same time — the blur sweep below runs on a
-/// hit-tested `Down`, and a claim made from a broadcast (an overlay surface's
+/// carry a recorded link at the same time — the sweep below runs only on a
+/// hit-tested claim, and a claim made from a broadcast (an overlay surface's
 /// own press, which reaches no container's hit test) never triggers it — so a
 /// container that answered "which child is focused?" with the first flagged one
 /// delivered the keyboard by child order rather than by who holds the session.
@@ -1032,28 +1117,38 @@ fn is_pointer_down(event: &InputEvent) -> bool {
 /// first child that both contains the point and reports [`EventResult::Handled`]
 /// consumes it. This is the z-order convention Flex establishes and Stack shares.
 ///
-/// **Blur-on-outside-tap:** a pointer `Down` that does not (re)establish focus on
-/// the child it hits clears every focused child in this container. At the nearest
-/// common ancestor of a stale focus branch and the tapped branch, this breaks the
-/// recorded focus chain (a `Down` inside the still-focused child keeps it — that
-/// child stays focused and is not cleared).
+/// **Focus links follow the root's session.** A hit-tested dispatch that records
+/// a focus claim through one child (a press on another field moves focus at its
+/// `Down`) ends every other child's link in the same pass, which breaks the old
+/// focus chain at the nearest common ancestor of the old and the new branch. The
+/// root strands the old link by epoch as well (the claim commits a new session),
+/// but the raw flag is cleared here too, because the rebuild pass's orphan check
+/// reads it. A dispatch that records **no** claim leaves every link alone, even
+/// on a `Down` outside the focused child: whether that press blurs is the root's
+/// call, made at the end of the gesture. A tap ends the session at its `Up`,
+/// advancing the focus epoch, which strands the link without touching it; a drag
+/// or a cancelled press ends nothing, so the field keeps its caret, its IME
+/// publication and its key routing. Clearing the link at the `Down` instead
+/// would orphan a session the root still holds.
 ///
-/// **Deeper stale flags below a cleared link are harmless by construction**, not
-/// merely "corrected later". Nothing reads a `focused` flag on its own: every
-/// consumer composes it with the chain above it, so a cleared link forces the
-/// whole subtree below to read as unfocused. Focus-routed events stop at the
-/// cleared link (this function finds no live-linked child to forward to); paint
-/// ANDs the same way (`ChildPod::paint_child` composes the link, its stamp and
-/// the chain); and the rebuild pass ANDs the same way too
-/// ([`BuildCtx::has_focus`]), so tearing a stale branch down marks no orphan and
-/// cannot release the session of the field that really is focused
-/// ([`mark_orphan_if_live`]). The flags themselves are still cleaned up the next
-/// time focus enters that subtree (a focus request re-records the whole chain).
+/// **A stranded link is never read as live.** Every routing decision here goes
+/// through [`ChildPod::holds_live_focus`], and a link the session stranded is
+/// retired before any dispatch into this container's children (see
+/// [`retire_stale_focus_links`]), so its flag cannot seed a child's
+/// [`EventCtx::has_focus`] either. Paint composes the link, its stamp and the
+/// chain (`ChildPod::paint_child`), and the rebuild pass ANDs each pod's live
+/// link onto the chain down from the root's session mirror
+/// ([`BuildCtx::has_focus`]), so a stale branch torn down after a blur (or after
+/// the container above it took the session itself) marks no orphan
+/// ([`mark_orphan_if_live`]). A hand-rolled router follows the same rule with
+/// [`retire_stale_focus_links`] and [`event_child_reporting_claim`] (or
+/// [`route_event_reporting_claim`] over the part of its children it routes).
 pub fn route_event(
     children: &mut [ChildPod],
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
+    retire_stale_focus_links(children.iter_mut());
     if event.is_broadcast() {
         for pod in children.iter_mut() {
             // Results are discarded on purpose: a broadcast is never consumed,
@@ -1073,24 +1168,27 @@ pub fn route_event(
     }
     let position = event.position();
     let mut handled = EventResult::Ignored;
-    // The index of the hit child *if* it holds focus after dispatch — the one
-    // focused child blur-on-Down must preserve.
-    let mut kept_focus: Option<usize> = None;
+    // The children this dispatch recorded a focus claim through: the links the
+    // claim keeps, every other one ending with it.
+    let mut claimants: Vec<usize> = Vec::new();
     let n = children.len();
     for i in (0..n).rev() {
-        if children[i].contains(position)
-            && children[i].event_child(ctx, event) == EventResult::Handled
-        {
-            if children[i].holds_live_focus() {
-                kept_focus = Some(i);
-            }
+        if !children[i].contains(position) {
+            continue;
+        }
+        let mark = FocusMark::of(&children[i]);
+        let result = children[i].event_child(ctx, event);
+        if mark.claimed(&children[i]) {
+            claimants.push(i);
+        }
+        if result == EventResult::Handled {
             handled = EventResult::Handled;
             break;
         }
     }
-    if is_pointer_down(event) {
+    if !claimants.is_empty() {
         for (i, pod) in children.iter_mut().enumerate() {
-            if Some(i) != kept_focus && pod.is_focused() {
+            if !claimants.contains(&i) && pod.is_focused() {
                 pod.set_focused(false);
             }
         }
@@ -1110,11 +1208,19 @@ pub fn route_event(
 /// only receives the event if it contains the point. Re-hit-testing
 /// `pod.contains()` on every event instead of consulting [`ChildPod::is_active`]
 /// is the bug this helper exists to prevent — see `ChildPod::contains`'s docs.
+///
+/// A `Down` outside the child leaves its focus link alone, under the same rule
+/// as [`route_event`]: no claim can be recorded through a child the press never
+/// reached, so the session either ends at the root (a tap's `Up` strands the
+/// link by epoch) or moves to a claim elsewhere, whose own pass breaks the old
+/// chain at the common ancestor and commits a session this link does not name.
+/// A link the session stranded is retired before anything is dispatched.
 pub fn route_event_single(
     pod: &mut ChildPod,
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
+    pod.retire_stale_focus_link();
     if event.is_broadcast() {
         // Never consumed: forward, discard the result.
         pod.event_child(ctx, event);
@@ -1136,19 +1242,11 @@ pub fn route_event_single(
         }
         return result;
     }
-    let inside = pod.contains(event.position());
-    let result = if inside {
+    if pod.contains(event.position()) {
         pod.event_child(ctx, event)
     } else {
         EventResult::Ignored
-    };
-    // Blur-on-outside-tap: a `Down` that lands *outside* the (single) focused
-    // child drops its recorded focus path. A `Down` inside the child keeps focus
-    // (the child re-requests it, or simply stays the focused widget).
-    if is_pointer_down(event) && !inside && pod.is_focused() {
-        pod.set_focused(false);
     }
-    result
 }
 
 /// Compile-time proof that the whole authoring toolkit is reachable through the
@@ -1213,6 +1311,16 @@ mod authoring_surface_tests {
             crate::authoring::route_event;
         let _route_single: fn(&mut ChildPod, &mut EventCtx<'_>, &InputEvent) -> EventResult =
             crate::authoring::route_event_single;
+        // The focus-link rule's two halves, for a hand-rolled router.
+        // (`impl IntoIterator` cannot be turbofished either: call it.)
+        crate::authoring::retire_stale_focus_links(pods.iter_mut());
+        let _claiming: fn(&mut ChildPod, &mut EventCtx<'_>, &InputEvent) -> (EventResult, bool) =
+            crate::authoring::event_child_reporting_claim;
+        let _route_claiming: fn(
+            &mut [ChildPod],
+            &mut EventCtx<'_>,
+            &InputEvent,
+        ) -> (EventResult, bool) = crate::authoring::route_event_reporting_claim;
 
         // Themed text roles (color and family): each enum here, each builder
         // method on `TextView`.
@@ -2364,7 +2472,7 @@ mod typed_child_tests {
 
 /// Focus-path routing tests for [`route_event`]/[`route_event_single`]: Key/IME
 /// events reach only the focused child (including through a nested container),
-/// blur-on-outside-tap breaks the chain, a second focus request moves focus,
+/// an unclaimed press leaves the chain to the root, a second focus request moves focus,
 /// `ApplyEditingState` routes to the focused child, a published IME surface
 /// bubbles up, and the capture and focus paths stay independent.
 #[cfg(test)]
@@ -2561,7 +2669,7 @@ mod focus_tests {
     }
 
     #[test]
-    fn blur_on_outside_tap_clears_focus_chain() {
+    fn an_unclaimed_press_leaves_the_focus_chain_to_the_root() {
         // Child 1 takes focus; child 2 does NOT (a non-editable widget).
         let mut children = vec![leaf_pod(1, true, false), leaf_pod(2, false, false)];
         lay_out_vertically(&mut children);
@@ -2570,19 +2678,21 @@ mod focus_tests {
         route(&mut children, &mut state, &down(5.0)); // focus child 1
         assert!(children[0].is_focused());
 
-        // Tap child 2 (does not take focus) → blur clears the focus chain.
+        // A press on child 2 claims nothing, so the router keeps the link: only
+        // the root knows whether the gesture ends as a tap (a blur, applied at
+        // its `Up` by epoch) or as a drag (no blur). With no root here, nothing
+        // ends the session.
         route(&mut children, &mut state, &down(15.0));
         assert!(
-            !children[0].is_focused(),
-            "outside tap blurs the focused child"
+            children[0].is_focused(),
+            "an unclaimed press does not clear the focused child's link"
         );
         assert!(!children[1].is_focused());
         state.clear();
 
-        // A Key event now reaches nobody.
-        let result = route(&mut children, &mut state, &key());
-        assert_eq!(result, EventResult::Ignored);
-        assert!(state.is_empty());
+        // The focused child still takes the keyboard.
+        route(&mut children, &mut state, &key());
+        assert_eq!(state, vec![1]);
     }
 
     #[test]
@@ -2806,5 +2916,200 @@ mod layout_skip_tests {
         assert!(flags.contains(ChangeFlags::LAYOUT));
         let dirty: Vec<bool> = pods.iter().map(ChildPod::is_layout_dirty).collect();
         assert_eq!(dirty, [false, true, true]);
+    }
+}
+
+/// The focus-link rule across a component boundary, driven through a real
+/// `RenderRoot` over the real routers: a text field built inside its own
+/// [`Component`](frust_core::Component), in `scroll_view(column(caption,
+/// component))`, keeps typing through a drag that starts on the caption, and a
+/// tap on the caption still blurs it at the tap's `Up`.
+#[cfg(test)]
+mod component_field_focus_tests {
+    use std::any::Any;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use frust_core::{
+        ChildPod, Component, DiscardScene, FrameTime, ImeEvent, InputEvent, PointerButton,
+        PointerEvent, PointerPhase, RenderRoot, View, component,
+    };
+    use frust_text::TextContext;
+    use kurbo::{Point, Size};
+
+    use crate::{ScrollView, SizedBox, column, scroll_view, text, text_input};
+
+    const W: f64 = 400.0;
+    const H: f64 = 300.0;
+    /// Inside the caption's box (the first 40 px of the page).
+    const CAPTION: (f64, f64) = (10.0, 20.0);
+
+    thread_local! {
+        /// The caption is a real text run, so layout needs a text context.
+        static TEXT: RefCell<TextContext> = RefCell::new(TextContext::new());
+    }
+
+    /// A field over the component's own state; every change is mirrored into
+    /// `sink`, which is how the test reads what the field received.
+    struct FieldComponent {
+        sink: Rc<RefCell<String>>,
+    }
+
+    impl Component for FieldComponent {
+        type State = String;
+        fn init(&self) -> String {
+            String::new()
+        }
+        fn build(&self, state: &mut String) -> impl View<String> {
+            let sink = self.sink.clone();
+            text_input(state.clone(), move |s: &mut String, v: String| {
+                sink.borrow_mut().clone_from(&v);
+                *s = v;
+            })
+        }
+    }
+
+    struct Page {
+        sink: Rc<RefCell<String>>,
+        clock_ms: f64,
+    }
+
+    fn page(state: &mut Page) -> ScrollView<Page> {
+        let caption = SizedBox(Some(W), Some(40.0)).child(text("Caption"));
+        let field = component(FieldComponent {
+            sink: state.sink.clone(),
+        });
+        // The spacer makes the page scroll, so a drag from the caption is a
+        // real scroll.
+        scroll_view(
+            column()
+                .child(caption)
+                .child(field)
+                .child(SizedBox(Some(W), Some(1000.0))),
+        )
+    }
+
+    type Root = RenderRoot<Page, ScrollView<Page>>;
+
+    fn frame(root: &mut Root, state: &mut Page) {
+        state.clock_ms += 16.0;
+        root.rebuild(&mut page, state);
+        TEXT.with_borrow_mut(|tcx| root.layout_with_text(Size::new(W, H), tcx as &mut dyn Any));
+        let t = FrameTime::from_nanos((state.clock_ms * 1_000_000.0) as u64);
+        root.paint(&mut DiscardScene, t);
+    }
+
+    fn touch(phase: PointerPhase, (x, y): (f64, f64)) -> InputEvent {
+        InputEvent::PointerContact {
+            pointer_id: frust_core::event::PointerId::touch(0),
+            event: PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            },
+        }
+    }
+
+    fn commit(text: &str) -> InputEvent {
+        InputEvent::Ime(ImeEvent::Commit(text.to_string()))
+    }
+
+    /// Whether the field holds a live focus link all the way down from the root.
+    fn field_link(root: &Root) -> bool {
+        fn walk(pod: &ChildPod, chain: bool, out: &mut Option<bool>) {
+            let chain = chain && pod.holds_live_focus();
+            let widget = pod.widget();
+            // By name: an erased child is boxed twice, so a downcast misses it.
+            if widget.type_name().ends_with("TextInputWidget") {
+                *out = Some(chain);
+                return;
+            }
+            widget.visit_children(&mut |child| walk(child, chain, out));
+        }
+        let id = root.root_id().expect("root built");
+        let mut out = None;
+        let live = root.is_focus_active();
+        root.tree()
+            .pod(id)
+            .expect("root pod")
+            .widget()
+            .visit_children(&mut |child| walk(child, live, &mut out));
+        out.expect("the field is in the tree")
+    }
+
+    fn field_centre(root: &Root) -> (f64, f64) {
+        let bounds = root
+            .inspect()
+            .into_iter()
+            .find(|node| node.type_name.ends_with("TextInputWidget"))
+            .expect("the field is in the tree")
+            .bounds;
+        (bounds.center().x, bounds.center().y)
+    }
+
+    /// Mount the page and focus the field with a tap on it; it types "a".
+    fn focused() -> (Root, Page) {
+        let mut state = Page {
+            sink: Rc::new(RefCell::new(String::new())),
+            clock_ms: 0.0,
+        };
+        let mut root = RenderRoot::new();
+        frame(&mut root, &mut state);
+        let at = field_centre(&root);
+        root.event(&mut state, &touch(PointerPhase::Down, at));
+        root.event(&mut state, &touch(PointerPhase::Up, at));
+        frame(&mut root, &mut state);
+        assert!(root.is_focus_active(), "the tap focused the field");
+        assert!(field_link(&root), "the field holds the link");
+        root.event(&mut state, &commit("a"));
+        frame(&mut root, &mut state);
+        assert_eq!(*state.sink.borrow(), "a", "the focused field types");
+        (root, state)
+    }
+
+    #[test]
+    fn a_drag_from_a_caption_keeps_a_component_wrapped_field_typing() {
+        let (mut root, mut state) = focused();
+        root.event(&mut state, &touch(PointerPhase::Down, CAPTION));
+        for step in 1..=4 {
+            let y = CAPTION.1 - 10.0 * f64::from(step);
+            root.event(&mut state, &touch(PointerPhase::Move, (CAPTION.0, y)));
+            frame(&mut root, &mut state);
+        }
+        root.event(
+            &mut state,
+            &touch(PointerPhase::Up, (CAPTION.0, CAPTION.1 - 40.0)),
+        );
+        frame(&mut root, &mut state);
+
+        root.event(&mut state, &commit("bc"));
+        frame(&mut root, &mut state);
+        assert_eq!(
+            *state.sink.borrow(),
+            "abc",
+            "the commit landed in the field"
+        );
+        assert!(root.is_focus_active(), "the session stands");
+        assert!(field_link(&root), "the field holds the live link");
+        let ime = root.ime_state().expect("the field publishes its surface");
+        assert_eq!(ime.editing.text, "abc", "republished after the commit");
+        assert!(ime.caret.is_some(), "with a caret: the field paints it");
+    }
+
+    #[test]
+    fn a_tap_on_the_caption_blurs_a_component_wrapped_field() {
+        let (mut root, mut state) = focused();
+        root.event(&mut state, &touch(PointerPhase::Down, CAPTION));
+        root.event(&mut state, &touch(PointerPhase::Up, CAPTION));
+        frame(&mut root, &mut state);
+        assert!(!root.is_focus_active(), "the tap ended the session");
+        assert!(!field_link(&root), "no live link remains");
+        root.event(&mut state, &commit("bc"));
+        frame(&mut root, &mut state);
+        assert_eq!(
+            *state.sink.borrow(),
+            "a",
+            "a commit after the blur changes nothing"
+        );
     }
 }

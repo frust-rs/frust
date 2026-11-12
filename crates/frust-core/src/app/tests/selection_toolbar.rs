@@ -145,9 +145,10 @@ fn a_blur_clears_the_selection_toolbar_on_the_event_pass() {
     assert!(h.root.selection_toolbar().is_some());
     let gen_before = h.root.selection_toolbar_generation();
 
-    // A press on chrome that claims no focus ends the session — and the menu
-    // must go with it immediately, not a frame later.
+    // A tap on chrome that claims no focus ends the session at its Up — and
+    // the menu must go with it immediately, not a frame later.
     h.down(150.0, 30.0);
+    h.dispatch(&pointer(PointerPhase::Up, 150.0, 30.0));
     assert!(!h.root.is_focus_active());
     assert_eq!(
         h.root.selection_toolbar(),

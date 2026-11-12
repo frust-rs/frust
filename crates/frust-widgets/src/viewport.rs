@@ -614,8 +614,9 @@ impl ViewportWidget {
     /// event or a captured gesture through
     /// [`crate::authoring::route_event`]'s own paths; anything else hit-tested
     /// first child to last against each child's hit region
-    /// ([`ViewportWidget::hits`]), with `route_event`'s blur-on-outside-`Down`
-    /// sweep.
+    /// ([`ViewportWidget::hits`]), under `route_event`'s focus-link rule: a
+    /// claim recorded through one sliver ends the others' links, and a dispatch
+    /// that claims nothing leaves every link to the root's session.
     fn route_to_slivers(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if event.is_broadcast()
             || event.is_focus_routed()
@@ -623,23 +624,27 @@ impl ViewportWidget {
         {
             return crate::authoring::route_event(&mut self.children, ctx, event);
         }
+        crate::authoring::retire_stale_focus_links(self.children.iter_mut());
         let position = event.position();
         let mut handled = EventResult::Ignored;
-        let mut kept_focus = None;
+        let mut claimants: Vec<usize> = Vec::new();
         for index in 0..self.children.len() {
-            if self.hits(index, position)
-                && self.children[index].event_child(ctx, event) == EventResult::Handled
-            {
-                if self.children[index].holds_live_focus() {
-                    kept_focus = Some(index);
-                }
+            if !self.hits(index, position) {
+                continue;
+            }
+            let mark = crate::authoring::FocusMark::of(&self.children[index]);
+            let result = self.children[index].event_child(ctx, event);
+            if mark.claimed(&self.children[index]) {
+                claimants.push(index);
+            }
+            if result == EventResult::Handled {
                 handled = EventResult::Handled;
                 break;
             }
         }
-        if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+        if !claimants.is_empty() {
             for (index, pod) in self.children.iter_mut().enumerate() {
-                if Some(index) != kept_focus && pod.is_focused() {
+                if !claimants.contains(&index) && pod.is_focused() {
                     pod.set_focused(false);
                 }
             }

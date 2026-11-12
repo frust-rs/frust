@@ -768,7 +768,7 @@ fn home_page(state: &PlaygroundState) -> impl View<PlaygroundState> + use<> {
     let body = pattern_switcher(
         section,
         SharedAxis::X,
-        scroll_view(pages::current(section, &handles)),
+        scroll_view(pages::current(section, &handles)).dismiss_keyboard_on_drag(true),
     )
     .reverse(reverse);
 
@@ -776,30 +776,59 @@ fn home_page(state: &PlaygroundState) -> impl View<PlaygroundState> + use<> {
     // would size its container (the row at wide width, the column at narrow
     // width) to the body's own intrinsic extent, so the viewport would never
     // be smaller than the content and scrolling would never engage.
-    let content = if wide {
-        Either::Left(row().child(side_rail(section)).flex(1, body))
-    } else {
-        Either::Right(column().flex(1, body).child(bottom_nav_bar(section)))
-    };
+    let theme = frust::use_context::<Theme>().unwrap_or_else(frust_material::baseline);
+    let background_color = theme.scheme().surface;
+    let bar_color = theme.scheme().surface_container;
 
     // One safe area around the whole column: unlike a design-system app bar
     // that consumes the top window inset itself, the M3 `app_bar` above is a
-    // plain 64dp row, so the shell owns every edge's inset here. At narrow
-    // width the Material navigation bar consumes the bottom inset itself
-    // (self-sizing chrome rule), so the safe area leaves that edge to it; at
-    // wide width nothing else sits on that edge, so the safe area consumes it
-    // instead (`.bottom(wide)`).
-    let column = safe_area(column().child(playground_app_bar(state)).flex(1, content)).bottom(wide);
+    // plain 64dp row, so the shell owns every edge's inset here.
+    //
+    // At wide width nothing sits on the bottom edge, so the safe area consumes
+    // it (`.bottom(true)`) beside the side rail.
+    //
+    // At narrow width the bottom edge belongs to the keyboard: a second,
+    // bottom-only safe area with `keyboard(true)` holds the page and the
+    // navigation bar above the soft keyboard (bottom padding is
+    // `max(system inset, keyboard)`), so the scroll body ends at the keyboard's
+    // top edge and the content does not slide when the keyboard opens (the
+    // system inset no longer collapses into the bar's height). That area
+    // consumes the bottom inset, so the bar inside it stays at its bare band;
+    // the system-inset strip it leaves below is filled with the bar's own
+    // container colour by the layer underneath, which keeps today's look: the
+    // bar's fill runs through the bottom system inset. With the keyboard up the
+    // bar sits directly above the keyboard.
+    let column = if wide {
+        let content = row().child(side_rail(section)).flex(1, body);
+        Either::Left(
+            safe_area(column().child(playground_app_bar(state)).flex(1, content)).bottom(true),
+        )
+    } else {
+        let content = column().flex(1, body).child(bottom_nav_bar(section));
+        let page = stack()
+            .child(AppBackground(background_color))
+            .child(column().child(playground_app_bar(state)).flex(1, content));
+        let held_above_keyboard = safe_area(page)
+            .top(false)
+            .left(false)
+            .right(false)
+            .bottom(true)
+            .keyboard(true);
+        Either::Right(
+            safe_area(
+                stack()
+                    .child(AppBackground(bar_color))
+                    .child(held_above_keyboard),
+            )
+            .bottom(false),
+        )
+    };
 
     // `AppBackground` is the BOTTOM-most layer (see the module docs' "Mode B
     // background" section above): under the ON `FRUST_TRANSLUCENT_SURFACE`/
     // `translucentSurface` mobile glue, an unpainted pixel anywhere in
     // `column` would otherwise be a window straight through the surface, not
     // just `platform_views`'s own deliberate slot.
-    let background_color = frust::use_context::<Theme>()
-        .unwrap_or_else(frust_material::baseline)
-        .scheme()
-        .surface;
     stack()
         .child(AppBackground(background_color))
         .child(column)
@@ -1016,5 +1045,106 @@ mod deep_link_tests {
     #[test]
     fn parse_section_deep_link_rejects_empty_label() {
         assert_eq!(parse_section_deep_link("frustplay://section/"), None);
+    }
+}
+
+/// Headless layout check of [`home_page`]'s narrow shape under window insets: the bottom
+/// navigation bar's glyph origins pin where the page body ends (the bar sits directly under it).
+#[cfg(test)]
+mod keyboard_layout_tests {
+    use super::*;
+    use frust::authoring::WindowEdgeInsets as CoreInsets;
+    use frust::authoring::WindowInsets;
+    use frust::component;
+    use frust_core::{FrameTime, RenderRoot};
+    use frust_reactive::ReactiveRuntime;
+    use frust_text::TextContext;
+    use kurbo::Point;
+    use kurbo::{BezPath, Rect};
+    use peniko::{Brush, Color};
+    use reactive_graph::owner::Owner;
+
+    const PHONE_W: f64 = 390.0;
+    const PHONE_H: f64 = 844.0;
+    /// `NavBarSize::Medium` band height.
+    const BAR_BAND: f64 = 80.0;
+    /// Label block top offset inside a single-line bar item (see `tests/smoke.rs`).
+    const LABEL_TOP_OFFSET: f64 = 50.0;
+
+    #[derive(Default)]
+    struct Origins(Vec<Point>);
+
+    impl PaintScene for Origins {
+        fn fill_rect(&mut self, _: Point, _: Size, _: Color) {}
+        fn draw_text(&mut self, _: Point, _: &str) {}
+        fn fill_rounded_rect(&mut self, _: Point, _: Size, _: f64, _: Color) {}
+        fn fill_rounded_rect_brush(&mut self, _: Point, _: Size, _: f64, _: &Brush) {}
+        fn draw_glyph_run(&mut self, run: frust_scene::GlyphRun) {
+            let t = run.transform.translation();
+            self.0.push(Point::new(t.x, t.y));
+        }
+        fn draw_image(&mut self, _: &peniko::ImageData, _: Rect) {}
+        fn fill_path(&mut self, _: Point, _: &BezPath, _: &Brush) {}
+        fn stroke_path(&mut self, _: Point, _: &BezPath, _: f64, _: &Brush) {}
+        fn stroke_line(&mut self, _: Point, _: Point, _: f64, _: Color) {}
+        fn draw_scene_texture(&mut self, _: u64, _: Rect) {}
+    }
+
+    /// Mounts the shell at phone size under the given bottom insets and returns every painted
+    /// glyph run's block origin.
+    fn painted_origins(view_padding_bottom: f64, view_insets_bottom: f64) -> Vec<Point> {
+        let _ = ReactiveRuntime::init(std::sync::Arc::new(|| {}));
+        let owner = Owner::new();
+        owner.set();
+        let mut tcx = TextContext::new();
+        let mut root: RenderRoot<(), _> = RenderRoot::new();
+        root.set_insets(WindowInsets::new(
+            CoreInsets {
+                bottom: view_padding_bottom,
+                ..CoreInsets::default()
+            },
+            CoreInsets {
+                bottom: view_insets_bottom,
+                ..CoreInsets::default()
+            },
+        ));
+        let mut logic = |_s: &mut ()| component(PlaygroundApp);
+        let mut state = ();
+        root.rebuild(&mut logic, &mut state);
+        let tcx_any: &mut dyn std::any::Any = &mut tcx;
+        root.layout_with_text(Size::new(PHONE_W, PHONE_H), tcx_any);
+        let mut scene = Origins::default();
+        root.paint(&mut scene, FrameTime::from_nanos(0));
+        scene.0
+    }
+
+    /// Whether a glyph run's block origin lies at exactly `y` inside the first bar slot.
+    fn has_label_at(origins: &[Point], y: f64) -> bool {
+        let slot_w = PHONE_W / (PRIMARY_NAV_COUNT + 1) as f64;
+        origins
+            .iter()
+            .any(|p| p.x < slot_w && (p.y - y).abs() < 0.5)
+    }
+
+    #[test]
+    fn bar_keeps_its_place_without_a_keyboard_and_rides_the_keyboard_top() {
+        let label_y = |bottom_of_bar: f64| bottom_of_bar - BAR_BAND + LABEL_TOP_OFFSET;
+        // No keyboard: the bar still spans the bottom inset (band + 34), as before.
+        let down = painted_origins(34.0, 0.0);
+        assert!(
+            has_label_at(&down, label_y(PHONE_H - 34.0)),
+            "keyboard down: the bar label sits one band above the system inset"
+        );
+        // Keyboard up (bottom view padding 34, keyboard 340): the body ends at the keyboard's
+        // top and the bar sits directly above the keyboard, so nothing slid down.
+        let up = painted_origins(34.0, 340.0);
+        assert!(
+            has_label_at(&up, label_y(PHONE_H - 340.0)),
+            "keyboard up: the bar label sits one band above the keyboard"
+        );
+        assert!(
+            !has_label_at(&up, label_y(PHONE_H - 34.0)),
+            "keyboard up: the bar is not left behind at the system inset"
+        );
     }
 }

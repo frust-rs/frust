@@ -90,6 +90,8 @@ fn focus_and_ime_state_surface_and_clear_on_blur() {
 
     // A right-half Down is a blur: focus and the IME surface both clear.
     root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
+    assert!(root.is_focus_active(), "the blur waits for the Up");
+    root.event(&mut state, &pointer(PointerPhase::Up, 80.0, 10.0));
     assert!(!root.is_focus_active());
     assert!(root.ime_state().is_none());
 }
@@ -421,6 +423,7 @@ fn focus_ime_generation_moves_on_every_pointer_transition_only() {
 
     // Blur: focus cleared and the surface dropped — a real transition.
     root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
+    root.event(&mut state, &pointer(PointerPhase::Up, 80.0, 10.0));
     let blurred = root.focus_ime_generation();
     assert_ne!(blurred, focused, "a blur must move the generation");
 
@@ -783,6 +786,7 @@ fn focus_epoch_ignores_an_edit_inside_one_session() {
     // A release ends the identity too, so a stale one can never come back
     // round to matching by standing still.
     root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 90.0));
+    root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 90.0));
     assert!(!root.is_focus_active());
     assert_ne!(
         root.focus_epoch(),
@@ -830,9 +834,96 @@ fn outside_tap_blur_still_clears_the_surface() {
     let mut scene = RecordingScene::default();
     root.paint(&mut scene, FrameTime::ZERO);
     root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 90.0));
+    root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 90.0));
     root.paint(&mut scene, FrameTime::ZERO);
     assert!(!root.is_focus_active());
     assert!(root.ime_state().is_none());
+}
+
+fn touch_event(slot: u32, phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+    InputEvent::PointerContact {
+        pointer_id: crate::event::PointerId::touch(slot),
+        event: crate::event::PointerEvent {
+            phase,
+            position: kurbo::Point::new(x, y),
+            button: crate::event::PointerButton::Primary,
+        },
+    }
+}
+
+#[test]
+fn outside_tap_blurs_at_up_not_at_down() {
+    let (mut root, mut state) = two_fields_focused(true);
+    root.event(&mut state, &touch_event(0, PointerPhase::Down, 10.0, 90.0));
+    assert!(root.is_focus_active(), "Down alone does not blur");
+    assert!(root.ime_state().is_some());
+    root.event(&mut state, &touch_event(0, PointerPhase::Move, 14.0, 92.0));
+    assert!(
+        root.is_focus_active(),
+        "a move inside the slop keeps it pending"
+    );
+    root.event(&mut state, &touch_event(0, PointerPhase::Up, 14.0, 92.0));
+    assert!(!root.is_focus_active());
+    assert!(root.ime_state().is_none());
+}
+
+#[test]
+fn outside_drag_keeps_focus_and_the_ime_state() {
+    let (mut root, mut state) = two_fields_focused(true);
+    let mut scene = RecordingScene::default();
+    root.event(&mut state, &touch_event(0, PointerPhase::Down, 10.0, 90.0));
+    root.event(&mut state, &touch_event(0, PointerPhase::Move, 10.0, 130.0));
+    root.event(&mut state, &touch_event(0, PointerPhase::Up, 10.0, 130.0));
+    root.paint(&mut scene, FrameTime::ZERO);
+    assert!(root.is_focus_active());
+    assert!(
+        root.ime_state().is_some(),
+        "the IME state is still published"
+    );
+}
+
+#[test]
+fn outside_mouse_drag_does_not_blur() {
+    let (mut root, mut state) = two_fields_focused(true);
+    root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 90.0));
+    root.event(&mut state, &pointer(PointerPhase::Move, 30.0, 90.0));
+    root.event(&mut state, &pointer(PointerPhase::Up, 30.0, 90.0));
+    assert!(root.is_focus_active());
+}
+
+#[test]
+fn cancelled_outside_press_does_not_blur() {
+    let (mut root, mut state) = two_fields_focused(true);
+    root.event(&mut state, &touch_event(0, PointerPhase::Down, 10.0, 90.0));
+    root.event(
+        &mut state,
+        &touch_event(0, PointerPhase::Cancel, 10.0, 90.0),
+    );
+    assert!(root.is_focus_active());
+    // The pending blur is gone: a later stray Up does not blur either.
+    root.event(&mut state, &touch_event(0, PointerPhase::Up, 10.0, 90.0));
+    assert!(root.is_focus_active());
+}
+
+#[test]
+fn press_on_another_focusable_widget_moves_focus_at_down() {
+    let (mut root, mut state) = two_fields_focused(true);
+    let epoch = root.focus_epoch();
+    root.event(&mut state, &touch_event(0, PointerPhase::Down, 10.0, 60.0));
+    assert!(root.is_focus_active());
+    assert_ne!(root.focus_epoch(), epoch, "focus moved at Down");
+    root.event(&mut state, &touch_event(0, PointerPhase::Up, 10.0, 60.0));
+    assert!(root.is_focus_active(), "the Up does not blur the new focus");
+}
+
+#[test]
+fn second_pointer_down_cancels_the_pending_blur() {
+    let (mut root, mut state) = two_fields_focused(true);
+    root.event(&mut state, &touch_event(0, PointerPhase::Down, 10.0, 90.0));
+    root.event(&mut state, &touch_event(1, PointerPhase::Down, 50.0, 90.0));
+    root.event(&mut state, &touch_event(0, PointerPhase::Up, 10.0, 90.0));
+    root.event(&mut state, &touch_event(1, PointerPhase::Up, 50.0, 90.0));
+    assert!(root.is_focus_active());
 }
 
 /// A field whose first `Down` publishes the surface and later ones claim focus and publish nothing.
@@ -921,4 +1012,47 @@ fn a_reclaim_from_the_live_chain_keeps_the_surface() {
         "a live re-claim keeps the surface"
     );
     assert_eq!(root.focus_ime_generation(), edge, "and fires no IME edge");
+}
+
+/// The pending blur's end on a path that never reaches the main tree: an outside press whose
+/// `Up` lands on a surface that floated under it is consumed by the overlay route, which spends
+/// the pending blur without applying it (`advance_pending_blur`), so the session stands.
+#[test]
+fn an_outside_tap_whose_up_an_overlay_consumes_does_not_blur() {
+    let mut spec = SurfaceSpec::floating("popover", Rect::new(120.0, 10.0, 200.0, 60.0));
+    spec.register = false;
+    let mut h = OverlayHarness::new(vec![spec]);
+    // The sibling claims focus on a press inside it.
+    h.down(10.0, 110.0);
+    h.dispatch(&pointer(PointerPhase::Up, 10.0, 110.0));
+    h.frame();
+    assert!(h.root.is_focus_active(), "the sibling holds the session");
+    let session = h.root.focus_epoch();
+
+    // A press on nothing arms the pending blur...
+    h.down(150.0, 30.0);
+    assert!(h.root.is_focus_active(), "a Down alone does not blur");
+    // ...then a surface floats under the held finger, and the Up lands on it.
+    h.state.specs[0].register = true;
+    h.frame();
+    assert_eq!(h.root.overlay_hits.len(), 1, "the surface is registered");
+    h.dispatch(&pointer(PointerPhase::Up, 150.0, 30.0));
+    assert!(
+        h.root.is_focus_active(),
+        "the overlay route consumed the Up, so the tap never ended on the main tree"
+    );
+    assert_eq!(h.root.focus_epoch(), session, "the session is the same one");
+    assert!(h.root.ime_state().is_some(), "the surface stands");
+
+    // The blur was spent, not deferred: a stray Up on the main tree does not revive it.
+    h.dispatch(&pointer(PointerPhase::Up, 100.0, 180.0));
+    assert!(h.root.is_focus_active());
+
+    // A tap that does end on the main tree still blurs.
+    h.down(100.0, 180.0);
+    h.dispatch(&pointer(PointerPhase::Up, 100.0, 180.0));
+    assert!(
+        !h.root.is_focus_active(),
+        "an outside tap on the main tree blurs"
+    );
 }
