@@ -71,6 +71,62 @@ let _listener = frust::AppLifecycleListener::new()
 
 Keep the listener alive: dropping it unregisters it.
 
+## Start-up work before the first screen
+
+`app!` setup and `Component::init` run synchronously on the UI thread, before the first frame.
+Opening a database, running migrations or reading a store there blocks that thread, and the user
+sees nothing until it returns. Do that work behind `frust::StartGate`: it runs an async task, shows
+a splash view while the task is pending, an error view if it fails, and builds the real UI from the
+task's value once it succeeds.
+
+```rust
+use frust::{Component, StartGate, View, spawn_blocking, text};
+
+#[derive(Default)]
+pub struct App;
+
+impl Component for App {
+    type State = ();
+
+    fn init(&self) {}
+
+    fn build(&self, _state: &mut ()) -> impl View<()> {
+        StartGate::new(|| async {
+            // Blocking plugin calls belong on the blocking pool.
+            spawn_blocking(open_and_migrate)
+                .await
+                .map_err(std::io::Error::other)?
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        })
+        .splash(text("Starting"))
+        .ready(|_db: &frust_database::Database| text("Ready"))
+    }
+}
+```
+
+`open_and_migrate` is the app's own function returning
+`Result<frust_database::Database, frust_database::DatabaseError>`. It calls
+`Database::open(name)` and then `db.migrate(&[Migration { to_version, statements }])`; both are
+synchronous. The secure-storage store's `open(name)` (`frust-secure-storage`) is synchronous in the same way.
+
+- `StartGate::new` takes a closure returning a future of `Result<T, E>`, where `E` is a
+  `std::error::Error + Send + Sync`. The task starts when the gate is mounted and is aborted when
+  the gate is dropped.
+- `.splash(view)`, `.error(|message: &str, retry: Retry| view)` and `.ready(|value: &T| view)`
+  each produce a `View<()>`, so they have no app state of their own. A nested `component(..)`
+  carries state.
+  Without `.error`, the gate shows the message and a Retry button. `retry.run()` restarts the task
+  and returns to the splash.
+- The `ready` closure runs once per success, and the subtree it returns is retained across
+  unrelated rebuilds. State created inside it is disposed when the gate swaps arm or is dropped.
+- The gate does not hold the system launch screen. The splash is the app's first frame, so give it
+  the launch screen's background colour to avoid a visible flash.
+- Create the `Router` inside the ready view, in the `init` of a nested component, with
+  `router_with_deep_links`. A cold-start link pushed with `push_deep_link` while the gate is still
+  loading wins over the router's default route, and later links navigate normally. The tests push
+  the link after the test runtime exists and before the first pump, so they do not exercise a
+  link delivered earlier in real process start-up.
+
 ## See Also
 
 - [DEVELOPMENT.md](DEVELOPMENT.md) — prerequisites, build/run/test gates, version-pin policy
