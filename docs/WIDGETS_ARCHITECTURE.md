@@ -162,7 +162,7 @@ Design-System Contract*).
   **removes** what it consumed from its subtree via `WindowInsets::consuming` — installed for the
   child through `LayoutCtx::with_window_insets`/`PaintCtx::with_window_insets` — so a self-insetting
   descendant, or a nested `safe_area`, does not inset the same edge twice. `.minimum` is extra
-  padding, never consumed, and `view_insets` (the IME) always flows through unchanged. A pod floated
+  padding, never consumed, and `view_insets` (the IME) flows through unchanged unless `.keyboard(true)` (default off) lifts the bottom edge to `max(view_padding.bottom, view_insets.bottom)` and consumes both. A pod floated
   through the overlay portal carries its owner's consumed `WindowInsets` in its `OverlayEntry`, so
   paint-time reads inside floated content agree with layout-time ones; hit testing and event routing are
   unaffected. `WindowInsets` also carries `corner_insets: CornerInsets` — four physical corners (`top_left`,
@@ -549,7 +549,7 @@ the sliver protocol (`frust_core::sliver`, see CORE_ARCHITECTURE.md). The layout
 
 Paint runs last to first, hit-testing first to last, within `hit_test_extent`; the semantics node is
 `Role::ScrollView` with `scroll_x`/`scroll_y` per axis. An unbounded main axis shrink-wraps; a
-horizontal viewport builds its core on its own axis (only the stretch overscroll transform is transposed).
+horizontal viewport builds its core on its own axis (only the stretch overscroll transform is transposed). A vertical `ScrollView` holding the focused widget scrolls its caret into view (`reveal_focused_caret(bool)`, default on; `ListView`/`CustomScrollView` do not).
 
 | Sliver | Behavior |
 |--------|----------|

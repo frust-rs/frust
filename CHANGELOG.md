@@ -64,6 +64,12 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   `button()` on the wrapper now also merge the subtree into one node when the wrapper has a label or
   value, and stay a container over the child's nodes otherwise. An explicit `merged(bool)` wins in
   either call order.
+- A press outside the focused widget now blurs it when the gesture ends as a tap, not when the press
+  lands. A tap is an `Up` within the slop of its `Down` (18 px for touch, 3 px for the mouse), with one
+  contact and no cancel; a drag, a cancel or a second contact does not blur, so scrolling a page under a
+  focused text field keeps the keyboard up. A press on a focusable widget still moves focus at `Down`.
+  Migration: code or tests that expect the blur right after a pointer `Down` must wait for the `Up`;
+  an app that relied on a drag outside a field to dismiss the keyboard must dismiss it explicitly.
 
 ### Added
 
@@ -204,6 +210,16 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   library that job builds.
 - `deny.toml` (advisories only, each ignore with its reason) and an `advisories` CI job that runs a
   pinned `cargo-deny` on pull requests and weekly. It is not a merge gate.
+- `safe_area(..).keyboard(bool)` (default `false`): with the bottom edge enabled, the bottom padding is
+  the larger of the system bottom inset and the soft keyboard's inset, so the subtree ends at the top
+  of the keyboard; both bottom insets are consumed from the subtree.
+- A vertical `ScrollView` that contains the focused widget scrolls the minimal distance that brings the
+  text caret, plus a 16 px margin, into view when the caret or the viewport size changes; a scroll by
+  the user is never undone. `ScrollView::reveal_focused_caret(bool)` switches it (default `true`).
+  `ListView`, `CustomScrollView` and horizontal scrolling do not reveal. `PaintCtx::focused_caret()`
+  exposes the stored caret to widgets that paint.
+- `TextInput::label(text)` names a field for accessibility without drawing anything. The placeholder
+  is now published as the node's placeholder, and as its label when no label is set.
 
 ### Changed
 
@@ -223,6 +239,10 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 - On Android, a tap on a text field that still has focus shows the soft keyboard again after the
   user dismissed it with back; before, the keyboard stayed down until focus had moved away. A
   composition in progress is kept. Checked on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15).
+- On iOS, the shell's text-input view no longer reports the focused field's text to accessibility.
+  Before, a screen reader or UI automation could read the text of the focused field, a password
+  included, from that view even though the field's own accessibility node was masked. This is a
+  privacy fix. An app has nothing to change: update to this version.
 
 ## 0.6.6 — 2026-11-11
 

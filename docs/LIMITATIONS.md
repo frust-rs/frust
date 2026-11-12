@@ -429,6 +429,13 @@ second holding only that character, with no blur in between; on the
 password field typed text is drawn as dots, Dictate is disabled and the
 keyboard is left out of screenshots. Still not seen: whether the suggestion
 bar is empty on the password field, and any non-touch focus move.
+A separate channel was open on iOS: the view that is the `UITextInput`
+responder reported the focused field's real text as its accessibility value,
+a password field's included, although frust's own node for the field was
+masked (seen on the phone, 2026-11-12). `FrustView.swift` now overrides
+`accessibilityValue` (nil) and drops the keyboard-key trait, so the view
+reports no text. The fix is in; it is unverified on a device until an
+accessibility snapshot taken after it is recorded.
 
 **Also covers**: `syncImeFocus`'s per-frame
 `becomeFirstResponder()` retry is **bounded** (`imeFocusSatisfied`)
@@ -477,7 +484,7 @@ Neither is device verification of the content-type behaviour.
 
 **Why not closed**: the only proof is on-device verification, and the one
 run so far did not reach a password field. **The
-leak is therefore not confirmed closed on any platform** — the Rust-side
+leak (the accessibility channel above included) is therefore not confirmed closed on any platform** — the Rust-side
 wire encoding (`content_type_wire`) has unit coverage, but nothing has
 exercised the UIKit trait application for a password field, the mirror
 re-seed on a direct field-to-field move, the per-frame reconcile on a
@@ -526,6 +533,31 @@ the best-reasoned fix available, not as a verified fix.
 **Evidence**: `swiftc -typecheck` exit 0; one partial device run, 2026-11-12, recorded in
 [SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) under the safe-area / keyboard / back gate. Runs 1 to 5
 above have not been done as written: the playground lacks the two-field and password fixtures.
+
+---
+
+### `keyboard-avoidance-opt-in-vertical-scrollview-only` — keeping a focused field above the soft keyboard is opt-in and covers a vertical `ScrollView` only
+
+**Observed**: a text field at the bottom of a scrolling page can stay under
+the soft keyboard. The mechanism is in: a `safe_area(..).keyboard(true)`
+holds the subtree's bottom edge at the top of the keyboard, and a vertical
+`ScrollView` containing the focused field scrolls its caret into view
+(`reveal_focused_caret`, on by default). Its device verification is
+pending: the only phone runs (2026-11-12, Android 16 on a Pixel 4a and iOS
+27.2 on an iPhone 13 mini) predate it and recorded the failure, a field at
+the bottom of a scrolling page left under the keyboard.
+
+**Applies to**: Android and iOS. Not covered: a `ListView`, a
+`CustomScrollView`, horizontal scrolling, and an app that does not opt in
+with `keyboard(true)` (without it the keyboard overlaps the page and the
+reveal has no shrunken viewport to react to).
+
+**Why not closed**: the mechanism has not been run on a device since it
+merged. A field in an uncovered container needs the app to scroll it
+explicitly (a `ScrollController`).
+
+**Evidence**: the two 2026-11-12 device runs above; the `Caret reveal` module
+docs in `scroll.rs` and the `Keyboard edge` docs in `safe_area.rs`.
 
 ---
 

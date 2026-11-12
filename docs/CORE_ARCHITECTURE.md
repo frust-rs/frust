@@ -338,9 +338,9 @@ widget holds focus") and `ime_state` (the last-published IME surface) — and th
 both cleared or paired into one **active** session; there is no at-rest inactive surface. A widget
 publishing an *inactive* IME surface therefore reads as a full session release, not a value update:
 one primitive clears `focus_active` and `ime_state` together, exactly like an outside-tap blur or an
-explicit `EventCtx::release_focus`. A pointer press that moves focus to a pod whose pass publishes
-no `ImeState` clears the surface at event time (`commit_pointer`), so tapping a button lowers the
-soft keyboard.
+explicit `EventCtx::release_focus`. A press that moves focus to a pod publishing no `ImeState` clears the
+surface at event time (`commit_pointer`); a press no widget took focus on blurs at its `Up`, only if it was a
+tap (within slop of its `Down`, one contact, not cancelled), so a drag keeps the keyboard up. `PaintCtx::focused_caret()` reads the stored caret.
 
 A monotonic `focus_ime_generation` counter bumps exactly once per release (a paired clear counts as
 one edge, not two) and once per focus/IME change otherwise. `RenderRoot::focus_ime_generation()`
