@@ -1360,9 +1360,10 @@ mod tests {
         let outcome = root.event(&mut state, &key_enter());
         assert!(outcome.handled, "Key routed to the focused inner leaf");
 
-        // A right-half Down does not re-establish focus: blur clears both the
-        // focus state and the IME surface at the root.
+        // A right-half tap does not re-establish focus: the blur at its Up
+        // clears both the focus state and the IME surface at the root.
         root.event(&mut state, &pointer(PointerPhase::Down, 80.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 80.0, 10.0));
         assert!(!root.is_focus_active(), "blur crossed the boundary");
         assert!(root.ime_state().is_none());
     }

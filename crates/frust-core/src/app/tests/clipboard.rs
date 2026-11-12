@@ -303,8 +303,9 @@ fn a_paste_answered_after_a_blur_reaches_nobody() {
     assert!(h.root.take_paste_request());
 
     // Focus is released while the shell's clipboard read is in flight: a
-    // `Down` on empty chrome past both leaves blurs the chain.
+    // tap (`Down` then `Up`) on empty chrome past both leaves blurs the chain.
     h.dispatch(&pointer(PointerPhase::Down, 50.0, 100.0));
+    h.dispatch(&pointer(PointerPhase::Up, 50.0, 100.0));
     assert!(!h.root.is_focus_active(), "the tap blurred the field");
 
     // The shell answers anyway; focus was released by the tap on empty chrome, so

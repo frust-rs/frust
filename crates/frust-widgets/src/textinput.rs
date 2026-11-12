@@ -3586,6 +3586,7 @@ mod tests {
         let _slot = crate::test_support::LocaleSlotGuard::hold();
         let (mut state, mut root, rebuilds) = deferred_by_a_preedit();
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 150.0));
         assert!(!root.is_focus_active());
         root.layout(Size::new(300.0, 200.0));
         let still_composing = widget(&root).editor.has_preedit();
@@ -4020,8 +4021,10 @@ mod tests {
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         assert!(root.ime_state().is_some());
 
-        // Tap outside the field's height (still reaches the root widget).
+        // Tap outside the field's height (still reaches the root widget). The
+        // blur is decided at the end of the gesture, so the tap needs its Up.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 150.0));
 
         assert!(!root.is_focus_active(), "outside tap blurs the field");
         assert!(root.ime_state().is_none());
@@ -8712,9 +8715,10 @@ mod tests {
                 .is_none()
         );
 
-        // A primary press outside the field: the blur takes it too.
+        // A primary tap outside the field: the blur at its Up takes it too.
         open_toolbar(&mut root, &mut logic, &mut state, 400.0);
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 150.0));
         assert!(!widget(&root).toolbar_open, "an outside press puts it away");
         assert!(
             !root.is_focus_active(),
