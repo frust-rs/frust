@@ -4496,8 +4496,8 @@ mod tests {
                     hit = true;
                     result = pod.event_child(ctx, event);
                 } else if blurs {
-                    // A press landing elsewhere blurs the chain, exactly as
-                    // `frust-widgets`' routers do.
+                    // This fixture's own rule: a press landing elsewhere blurs the
+                    // chain at the Down.
                     pod.set_focused(false);
                 }
             }

@@ -369,8 +369,8 @@ A structural rebuild that tears down, type-swaps, or clears the `focused` flag o
 recorded focus path — *on the live focus chain* — runs inside a state-free view diff with no
 `RenderRoot` handle to release the session itself. Liveness is tracked through the rebuild pass by
 a `BuildCtx` effective-focus AND-chain (`has_focus`/`with_focus_link`), seeded at the root from the
-session mirror (`focus_active || ime_state.is_some()`) and threaded through pod descent and the
-component boundary, so a stale `focused` flag under an already-blurred ancestor marks nothing. A
+session mirror (`focus_active || ime_state.is_some()`) and ANDed with each pod's live link
+(`holds_live_focus`, never the raw flag), so a link the session already stranded marks nothing. A
 live loss instead raises a thread-local `mark_focus_orphaned` flag — mirroring
 `mark_pending_result_flush` above, including the same idempotent, thread-affine, data-free shape —
 and `RenderRoot::rebuild` drains it (`take_focus_orphaned`) after its deferred-callback loop and

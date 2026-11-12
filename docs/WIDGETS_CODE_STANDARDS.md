@@ -287,6 +287,13 @@ Semantics.
   `FocusRingPolicy` (`KeyboardOnly` by default: focus came from Tab and no pointer press has landed
   since; `Always`; never under `Never`). `frust_shadcn::input` keeps `has_focus`, because the
   browser shows `:focus-visible` on a text field focused by a click too.
+- **A router ends a child's focus link only on a claim elsewhere.** A press that claims no focus
+  leaves every link alone: the root blurs at the Up of a tap, and a drag or a cancel ends nothing,
+  so a page can scroll under a focused field. A router ends another child's link only when the
+  same dispatch records a focus claim through a different child. A hand-rolled router calls
+  `authoring::retire_stale_focus_links` before it dispatches and detects the claim with
+  `event_child_reporting_claim` or `route_event_reporting_claim`. Any gate on "the content holds
+  focus" (an Escape guard, a session check) reads `holds_live_focus`, never `is_focused`.
 
 ## See Also
 
