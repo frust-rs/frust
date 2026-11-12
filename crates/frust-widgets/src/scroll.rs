@@ -185,6 +185,40 @@
 //! simulation are never live together and `is_animating` cannot outlive a
 //! tween.
 //!
+//! # Caret reveal
+//!
+//! While this surface contains the focused widget (its child holds the live
+//! focus link), it keeps the focused editable's caret in view. The input is
+//! the caret the render root stored from the last publish
+//! ([`PaintCtx::focused_caret`], absolute window coordinates), re-based into
+//! content coordinates against where this surface last painted its content —
+//! the origin that publish was measured from — so a scroll, which moves the
+//! absolute caret, is not a caret change. Each paint, before the motion pump,
+//! compares that content-space caret and this viewport's size with what the
+//! last paint saw; on a change it scrolls the minimal distance that brings the
+//! caret, grown by 16 logical px above and below, inside the viewport (the
+//! grown rect's top when it is taller), clamped to the range. The move is a
+//! jump: it owes `on_scroll` the same flush a controller jump does, publishes
+//! to an attached controller and requests the next frame.
+//!
+//! The rule never fights the user: a drag, wheel, fling or controller call
+//! that leaves the caret and the viewport alone changes neither baseline, so
+//! nothing is undone; a change landing while a drag, settle, fling or tween is
+//! in flight is spent, not deferred. A tap that focuses a field reveals on the
+//! frame after its publish; a viewport resize (an ancestor giving way to the
+//! soft keyboard, a window resize) reveals in the paint after the layout that
+//! measured it. Nested surfaces each reveal the same caret on
+//! their own pass, with no ordering between them: an inner surface's move
+//! republishes the caret, which an outer one sees as a change on the next
+//! paint and answers with whatever minimal move is still owed (often none),
+//! so the pair settles within a frame or two. A caret published against a layout
+//! that moved the field may reveal a frame early to its old place and then
+//! correct on the next paint.
+//!
+//! [`ScrollView::reveal_focused_caret`] turns it off. Only this vertical
+//! `ScrollView` reveals; `ListView`, `CustomScrollView` and horizontal
+//! scrolling do not.
+//!
 //! # Shared core
 //!
 //! Everything above but the viewport geometry — the drag, takeover, claim and
@@ -633,6 +667,9 @@ pub struct ScrollView<State: 'static> {
     controller: Option<ScrollController>,
     /// The opt-in scrollbar. See [`ScrollView::scrollbar`].
     scrollbar: Option<ScrollbarStyle>,
+    /// Whether the surface keeps the focused caret in view. See
+    /// [`ScrollView::reveal_focused_caret`].
+    reveal_focused_caret: bool,
 }
 
 impl<State: 'static> ScrollView<State> {
@@ -646,6 +683,7 @@ impl<State: 'static> ScrollView<State> {
             effect: default_overscroll_effect(),
             controller: None,
             scrollbar: None,
+            reveal_focused_caret: true,
         }
     }
 
@@ -769,6 +807,66 @@ impl<State: 'static> ScrollView<State> {
         self.scrollbar = Some(style);
         self
     }
+
+    /// Keep the focused text caret visible (on by default; `false` turns it
+    /// off). The module docs' *Caret reveal* spells the rule out: while this
+    /// surface contains the focused widget, a change of the caret's position
+    /// in the content, or of this viewport's size, scrolls the minimal
+    /// distance that brings the caret, grown by 16 logical px above and
+    /// below, inside the viewport (its top aligned when it is taller),
+    /// clamped to the scroll range. A user scroll while neither changes is
+    /// never undone.
+    ///
+    /// ```
+    /// use frust_widgets::{ScrollView, scroll_view, text};
+    /// let view: ScrollView<()> = scroll_view(text("hi")).reveal_focused_caret(false);
+    /// # let _ = view;
+    /// ```
+    ///
+    /// Only this vertical `ScrollView` reveals: `ListView`,
+    /// `CustomScrollView` and horizontal scrolling do not. Plain view-owned
+    /// data, carried down on every build and rebuild.
+    pub fn reveal_focused_caret(mut self, reveal: bool) -> Self {
+        self.reveal_focused_caret = reveal;
+        self
+    }
+}
+
+/// The vertical room kept above and below a revealed caret (logical px), so a
+/// single-line field's whole box lands inside the viewport, not just its
+/// caret line. A frust choice, not a platform value: UIKit and Android each
+/// scroll a focused field clear of the keyboard by an unpublished amount.
+const CARET_REVEAL_MARGIN: f64 = 16.0;
+
+/// Below this (logical px) a caret or offset change is rounding, not motion.
+const REVEAL_EPSILON: f64 = 0.01;
+
+/// What the caret reveal compares against: the caret (content coordinates) and
+/// viewport size it last saw, and where the content was last painted — the
+/// origin a caret stored by the root was published against.
+#[derive(Default)]
+struct CaretReveal {
+    enabled: bool,
+    caret: Option<Rect>,
+    viewport: Option<Size>,
+    painted_content_origin: Option<Point>,
+}
+
+/// The offset that shows `caret` (content coordinates) grown by
+/// [`CARET_REVEAL_MARGIN`] inside a `viewport`-tall window currently at
+/// `offset`: the minimal move, the target's top when it is taller than the
+/// viewport, clamped to `[0, max_offset]`.
+fn reveal_offset(caret: Rect, offset: f64, viewport: f64, max_offset: f64) -> f64 {
+    let top = caret.y0 - CARET_REVEAL_MARGIN;
+    let bottom = caret.y1 + CARET_REVEAL_MARGIN;
+    let target = if bottom - top > viewport || top < offset {
+        top
+    } else if bottom > offset + viewport {
+        bottom - viewport
+    } else {
+        offset
+    };
+    target.clamp(0.0, max_offset.max(0.0))
 }
 
 /// Wrap `child` in a vertical [`ScrollView`] — the free-function spelling of
@@ -797,6 +895,8 @@ pub struct ScrollWidget {
     content: Size,
     /// The shared scroll machinery and its state.
     core: ScrollSurfaceCore,
+    /// The focused-caret reveal's switch and baselines.
+    reveal: CaretReveal,
 }
 
 /// The in-file tests predate the core and name its state as this widget's own
@@ -827,7 +927,70 @@ impl ScrollWidget {
             viewport: Size::ZERO,
             content: Size::ZERO,
             core: ScrollSurfaceCore::default(),
+            reveal: CaretReveal {
+                enabled: true,
+                ..CaretReveal::default()
+            },
         }
+    }
+
+    /// Switch the caret reveal; switching it off forgets the baselines, so
+    /// switching it back on reveals a caret standing out of view.
+    fn set_reveal_focused_caret(&mut self, enabled: bool) {
+        if !enabled {
+            self.reveal = CaretReveal::default();
+        }
+        self.reveal.enabled = enabled;
+    }
+
+    /// The caret reveal (module docs' *Caret reveal*), run at the head of
+    /// paint, before the motion pump: compare the root's stored caret, re-based
+    /// into content coordinates against where the content was last painted,
+    /// and this viewport's size with what the last check saw, and on a change
+    /// scroll the minimal distance that shows it. A drag, settle, fling or
+    /// tween in flight owns the position: the change is spent, not deferred.
+    fn reveal_focused_caret(&mut self, ctx: &mut PaintCtx) {
+        let contains_focus = ctx.has_focus() && self.child.holds_live_focus();
+        let caret = ctx
+            .focused_caret()
+            .filter(|_| self.reveal.enabled && contains_focus);
+        let Some(caret) = caret else {
+            self.reveal.caret = None;
+            self.reveal.viewport = None;
+            return;
+        };
+        let painted = self
+            .reveal
+            .painted_content_origin
+            .unwrap_or(ctx.origin() + self.child.origin().to_vec2());
+        let content = caret.rect() - painted.to_vec2();
+        let caret_moved = self.reveal.caret.is_none_or(|last| {
+            (last.y0 - content.y0).abs() > REVEAL_EPSILON
+                || (last.y1 - content.y1).abs() > REVEAL_EPSILON
+        });
+        let resized = self.reveal.viewport != Some(self.viewport);
+        self.reveal.caret = Some(content);
+        self.reveal.viewport = Some(self.viewport);
+        let core = &self.core;
+        if !(caret_moved || resized) || core.scrolling || core.settling || core.is_flinging() {
+            return;
+        }
+        let target = reveal_offset(
+            content,
+            self.offset,
+            self.viewport.height,
+            self.max_offset(),
+        );
+        if (target - self.offset).abs() <= REVEAL_EPSILON {
+            return;
+        }
+        self.set_offset(target);
+        self.core.drag_position = self.offset;
+        self.sync_child_origin();
+        // Owed like a jump's: `paint_motion` publishes it and raises the flush.
+        self.core.pending_scroll_notify = true;
+        self.core.scroll_notify_owed = true;
+        ctx.request_frame();
     }
 
     /// The current scroll offset.
@@ -1069,6 +1232,7 @@ impl<State: 'static> View<State> for ScrollView<State> {
         widget.core.install(self.physics.as_ref(), self.effect);
         widget.core.install_scrollbar(self.scrollbar);
         widget.core.attach_controller(self.controller.as_ref());
+        widget.set_reveal_focused_caret(self.reveal_focused_caret);
         widget
     }
 
@@ -1095,6 +1259,10 @@ impl<State: 'static> View<State> for ScrollView<State> {
         element.core.install(self.physics.as_ref(), self.effect);
         let mut flags =
             crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
+        if element.reveal.enabled != self.reveal_focused_caret {
+            element.set_reveal_focused_caret(self.reveal_focused_caret);
+            flags |= ChangeFlags::PAINT;
+        }
         // A new binding publishes, and a queued command applies, at the next
         // layout or paint — make sure a frame-gated shell runs one.
         let restyled = element.core.install_scrollbar(self.scrollbar);
@@ -1182,6 +1350,7 @@ impl Widget for ScrollWidget {
         let reduce_motion = Theme::from_paint_ctx(ctx)
             .map(|t| t.motion.reduce_motion)
             .unwrap_or(false);
+        self.reveal_focused_caret(ctx);
         self.paint_motion(ctx, reduce_motion);
         scene.push_clip(ctx.origin(), ctx.size());
         self.sync_child_origin();
@@ -1206,6 +1375,8 @@ impl Widget for ScrollWidget {
             scene.push_transform(transform);
         }
         self.child.paint_child(ctx, scene);
+        // Where this paint's caret publish was measured from (the reveal's re-basing).
+        self.reveal.painted_content_origin = Some(ctx.origin() + self.child.origin().to_vec2());
         if stretch.is_some() {
             scene.pop_transform();
         }
@@ -5397,5 +5568,362 @@ mod scrollbar_tests {
             "the scrollbar state held no Rc to either controller"
         );
         drop(subs);
+    }
+}
+
+#[cfg(test)]
+mod caret_reveal_tests {
+    //! The focused-caret reveal (module docs' *Caret reveal*), driven through a
+    //! real `RenderRoot`: a tap, a viewport shrink, a user drag that must not be
+    //! undone, the opt-out, a bystander surface, and typing at the edge.
+
+    use std::any::Any;
+
+    use frust_core::{
+        DiscardScene, FrameTime, ImeEvent, Key, KeyEvent, Modifiers, NamedKey, RenderRoot,
+        ScrollDelta,
+    };
+
+    use super::*;
+    use crate::{SizedBox, column, row, text_input};
+
+    const W: f64 = 400.0;
+
+    #[derive(Default)]
+    struct Form {
+        value: String,
+        reveal: bool,
+        clock_ms: f64,
+    }
+
+    /// A column: a `above`-tall spacer, the field, a `below`-tall spacer.
+    fn page(state: &Form, above: f64, below: f64, lines: Option<usize>) -> ScrollView<Form> {
+        let field = text_input(state.value.clone(), |s: &mut Form, v: String| s.value = v);
+        let field = match lines {
+            Some(n) => field.multiline(n),
+            None => field,
+        };
+        scroll_view(
+            column()
+                .child(SizedBox(Some(W), Some(above)))
+                .child(field)
+                .child(SizedBox(Some(W), Some(below))),
+        )
+        .reveal_focused_caret(state.reveal)
+    }
+
+    fn form() -> Form {
+        Form {
+            reveal: true,
+            ..Form::default()
+        }
+    }
+
+    /// One frame: rebuild, lay out in a `W` x `height` window, paint.
+    fn frame<V: View<Form>>(
+        root: &mut RenderRoot<Form, V>,
+        logic: &mut impl FnMut(&mut Form) -> V,
+        state: &mut Form,
+        height: f64,
+    ) {
+        state.clock_ms += 16.0;
+        root.rebuild(logic, state);
+        root.layout(Size::new(W, height));
+        let t = FrameTime::from_nanos((state.clock_ms * 1_000_000.0) as u64);
+        root.paint(&mut DiscardScene, t);
+    }
+
+    fn settle<V: View<Form>>(
+        root: &mut RenderRoot<Form, V>,
+        logic: &mut impl FnMut(&mut Form) -> V,
+        state: &mut Form,
+        height: f64,
+    ) {
+        for _ in 0..6 {
+            frame(root, logic, state, height);
+        }
+    }
+
+    fn pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent {
+            phase,
+            position: Point::new(x, y),
+            button: PointerButton::Primary,
+        })
+    }
+
+    fn tap<V: View<Form>>(root: &mut RenderRoot<Form, V>, state: &mut Form, x: f64, y: f64) {
+        root.event(state, &pointer(PointerPhase::Down, x, y));
+        root.event(state, &pointer(PointerPhase::Up, x, y));
+        assert!(root.is_focus_active(), "the tap focused the field");
+    }
+
+    /// The caret the root holds, in absolute window coordinates.
+    fn caret<V: View<Form>>(root: &RenderRoot<Form, V>) -> Rect {
+        root.ime_state()
+            .and_then(|ime| ime.caret)
+            .expect("a focused field publishes a caret")
+    }
+
+    fn inside(caret: Rect, top: f64, bottom: f64) -> bool {
+        caret.y0 >= top && caret.y1 <= bottom
+    }
+
+    fn root_scroll(root: &RenderRoot<Form, ScrollView<Form>>) -> &ScrollWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<ScrollWidget>()
+            .expect("root is a ScrollWidget")
+    }
+
+    fn key(key: Key) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            key,
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    fn wheel(x: f64, y: f64, dy: f64) -> InputEvent {
+        InputEvent::Scroll {
+            position: Point::new(x, y),
+            delta: ScrollDelta::Pixels(0.0, dy),
+        }
+    }
+
+    /// (1) Tapping a field that peeks in at the bottom edge scrolls it in.
+    #[test]
+    fn tapping_a_field_at_the_bottom_edge_scrolls_its_caret_inside() {
+        let mut logic = |s: &mut Form| page(s, 280.0, 0.0, None);
+        let mut state = form();
+        let mut root: RenderRoot<Form, ScrollView<Form>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state, 300.0);
+        assert_eq!(root_scroll(&root).offset(), 0.0, "scrolled to the top");
+
+        tap(&mut root, &mut state, 50.0, 290.0);
+        assert!(
+            !inside(caret(&root), 0.0, 300.0),
+            "the tap left the caret clipped"
+        );
+        settle(&mut root, &mut logic, &mut state, 300.0);
+
+        let scroll = root_scroll(&root);
+        assert!(scroll.offset() > 0.0, "the surface moved");
+        assert_eq!(scroll.offset(), scroll.max_offset(), "clamped to the range");
+        assert!(inside(caret(&root), 0.0, 300.0), "caret {:?}", caret(&root));
+    }
+
+    /// Keyboard traversal onto a field wholly below the fold reveals it with
+    /// the margin, the minimal move.
+    #[test]
+    fn tabbing_onto_a_field_below_the_fold_reveals_it_with_the_margin() {
+        let mut logic = |s: &mut Form| page(s, 600.0, 600.0, None);
+        let mut state = form();
+        let mut root: RenderRoot<Form, ScrollView<Form>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state, 300.0);
+        root.event(&mut state, &key(Key::Named(NamedKey::Tab)));
+        assert!(root.is_focus_active(), "Tab focused the field");
+        settle(&mut root, &mut logic, &mut state, 300.0);
+
+        let c = caret(&root);
+        assert!(inside(c, 0.0, 300.0), "caret {c:?}");
+        assert!(
+            (c.y1 + CARET_REVEAL_MARGIN - 300.0).abs() < 1e-6,
+            "the minimal move leaves the margin below the caret: {c:?}"
+        );
+    }
+
+    /// (2) Shrinking the viewport under a visible field reveals it in the new
+    /// viewport.
+    #[test]
+    fn a_shrinking_viewport_reveals_a_caret_it_would_cover() {
+        let mut logic = |s: &mut Form| page(s, 200.0, 400.0, None);
+        let mut state = form();
+        let mut root: RenderRoot<Form, ScrollView<Form>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state, 300.0);
+        tap(&mut root, &mut state, 50.0, 210.0);
+        settle(&mut root, &mut logic, &mut state, 300.0);
+        assert_eq!(
+            root_scroll(&root).offset(),
+            0.0,
+            "already comfortably inside"
+        );
+
+        settle(&mut root, &mut logic, &mut state, 180.0);
+        let c = caret(&root);
+        assert!(
+            root_scroll(&root).offset() > 0.0,
+            "the shrink moved the surface"
+        );
+        assert!(inside(c, 0.0, 180.0), "caret {c:?} inside the new viewport");
+    }
+
+    /// (3) A user drag that carries a focused field out of view is never
+    /// undone while the caret and the viewport stay put.
+    #[test]
+    fn a_user_drag_away_from_a_focused_field_is_not_undone() {
+        let mut logic = |s: &mut Form| page(s, 250.0, 1000.0, None);
+        let mut state = form();
+        let mut root: RenderRoot<Form, ScrollView<Form>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state, 300.0);
+        tap(&mut root, &mut state, 50.0, 260.0);
+        settle(&mut root, &mut logic, &mut state, 300.0);
+        let resting = root_scroll(&root).offset();
+        assert!(inside(caret(&root), 0.0, 300.0));
+
+        // Grab the field and drag well past the top (the capture follows the
+        // finger out of the window), then hold still before letting go so no
+        // fling carries on.
+        root.event(&mut state, &pointer(PointerPhase::Down, 50.0, 260.0));
+        for step in 1..=20 {
+            let y = 260.0 - 30.0 * f64::from(step);
+            root.event(&mut state, &pointer(PointerPhase::Move, 50.0, y));
+            frame(&mut root, &mut logic, &mut state, 300.0);
+        }
+        for _ in 0..12 {
+            root.event(&mut state, &pointer(PointerPhase::Move, 50.0, -340.0));
+            frame(&mut root, &mut logic, &mut state, 300.0);
+        }
+        root.event(&mut state, &pointer(PointerPhase::Up, 50.0, -340.0));
+        assert!(root.is_focus_active(), "the drag kept the field focused");
+        settle(&mut root, &mut logic, &mut state, 300.0);
+        let dragged = root_scroll(&root).offset();
+        assert!(dragged > resting + 400.0, "the drag scrolled: {dragged}");
+        assert!(!inside(caret(&root), 0.0, 300.0), "the field left the view");
+
+        for _ in 0..30 {
+            frame(&mut root, &mut logic, &mut state, 300.0);
+        }
+        assert_eq!(root_scroll(&root).offset(), dragged, "never pulled back");
+        // A wheel is a user scroll too.
+        root.event(&mut state, &wheel(200.0, 150.0, 40.0));
+        settle(&mut root, &mut logic, &mut state, 300.0);
+        assert_eq!(
+            root_scroll(&root).offset(),
+            dragged + 40.0,
+            "the wheel stands"
+        );
+    }
+
+    /// (4) The opt-out disables both triggers.
+    #[test]
+    fn reveal_focused_caret_false_disables_the_tap_and_the_resize_reveal() {
+        let mut logic = |s: &mut Form| page(s, 280.0, 200.0, None);
+        let mut state = Form::default();
+        assert!(!state.reveal);
+        let mut root: RenderRoot<Form, ScrollView<Form>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state, 300.0);
+        tap(&mut root, &mut state, 50.0, 290.0);
+        settle(&mut root, &mut logic, &mut state, 300.0);
+        assert_eq!(root_scroll(&root).offset(), 0.0, "no tap reveal");
+        settle(&mut root, &mut logic, &mut state, 200.0);
+        assert_eq!(root_scroll(&root).offset(), 0.0, "no resize reveal");
+
+        // Switched back on by a rebuild, the caret standing out of view is
+        // revealed: the opt-out forgot its baselines.
+        state.reveal = true;
+        settle(&mut root, &mut logic, &mut state, 200.0);
+        assert!(inside(caret(&root), 0.0, 200.0), "caret {:?}", caret(&root));
+    }
+
+    /// (5) A scroll view that does not contain the focused field never moves,
+    /// even when its own viewport changes alongside the one that reveals.
+    #[test]
+    fn a_surface_without_the_focused_field_never_moves() {
+        let (with_field, bystander) = (ScrollController::new(), ScrollController::new());
+        let handles = (with_field.clone(), bystander.clone());
+        let mut logic = move |s: &mut Form| {
+            let field = text_input(s.value.clone(), |s: &mut Form, v: String| s.value = v);
+            let left = scroll_view(
+                column()
+                    .child(SizedBox(Some(200.0), Some(200.0)))
+                    .child(field)
+                    .child(SizedBox(Some(200.0), Some(400.0))),
+            )
+            .controller(handles.0.clone());
+            let right =
+                scroll_view(SizedBox(Some(200.0), Some(1000.0))).controller(handles.1.clone());
+            row()
+                .child(SizedBox(Some(200.0), None).child(left))
+                .child(SizedBox(Some(200.0), None).child(right))
+        };
+        let mut state = form();
+        let mut root = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state, 300.0);
+        root.event(&mut state, &wheel(300.0, 150.0, 100.0));
+        tap(&mut root, &mut state, 50.0, 210.0);
+        settle(&mut root, &mut logic, &mut state, 300.0);
+        assert_eq!(bystander.offset(), 100.0, "the wheel moved the bystander");
+        assert_eq!(with_field.offset(), 0.0, "the field was comfortably inside");
+
+        settle(&mut root, &mut logic, &mut state, 150.0);
+        assert!(with_field.offset() > 0.0, "the field's surface revealed");
+        assert_eq!(bystander.offset(), 100.0, "the bystander kept its offset");
+        assert!(inside(caret(&root), 0.0, 150.0));
+    }
+
+    /// (6) Typing new lines into a multiline field at the viewport's edge
+    /// keeps the caret inside as the field grows.
+    #[test]
+    fn typing_new_lines_at_the_edge_keeps_the_caret_inside() {
+        let mut logic = |s: &mut Form| page(s, 240.0, 400.0, Some(20));
+        let mut state = form();
+        let mut root: RenderRoot<Form, ScrollView<Form>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state, 300.0);
+        tap(&mut root, &mut state, 50.0, 250.0);
+        settle(&mut root, &mut logic, &mut state, 300.0);
+        let first = caret(&root);
+        assert!(inside(first, 0.0, 300.0));
+
+        for line in 0..8 {
+            root.event(&mut state, &key(Key::Named(NamedKey::Enter)));
+            root.event(
+                &mut state,
+                &InputEvent::Ime(ImeEvent::Commit(format!("{line}"))),
+            );
+            settle(&mut root, &mut logic, &mut state, 300.0);
+            let c = caret(&root);
+            assert!(inside(c, 0.0, 300.0), "line {line}: caret {c:?}");
+        }
+        assert_eq!(state.value.lines().count(), 9, "the edits landed");
+        assert!(
+            root_scroll(&root).offset() > 0.0,
+            "the growth scrolled the page"
+        );
+    }
+
+    /// Nested surfaces both reveal the same caret: it ends inside each.
+    #[test]
+    fn nested_surfaces_settle_with_the_caret_inside_both() {
+        fn nested(s: &mut Form) -> ScrollView<Form> {
+            let field = text_input(s.value.clone(), |s: &mut Form, v: String| s.value = v);
+            let inner = scroll_view(
+                column()
+                    .child(SizedBox(Some(W), Some(300.0)))
+                    .child(field)
+                    .child(SizedBox(Some(W), Some(300.0))),
+            );
+            scroll_view(
+                column()
+                    .child(SizedBox(Some(W), Some(250.0)))
+                    .child(SizedBox(Some(W), Some(200.0)).child(inner))
+                    .child(SizedBox(Some(W), Some(600.0))),
+            )
+        }
+        let mut logic = nested;
+        let mut state = form();
+        let mut root: RenderRoot<Form, ScrollView<Form>> = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state, 300.0);
+        root.event(&mut state, &key(Key::Named(NamedKey::Tab)));
+        settle(&mut root, &mut logic, &mut state, 300.0);
+        let c = caret(&root);
+        let outer = root_scroll(&root).offset();
+        // The inner viewport sits at 250 - outer in the window.
+        let inner_top = 250.0 - outer;
+        assert!(inside(c, 0.0, 300.0), "inside the outer viewport: {c:?}");
+        assert!(
+            inside(c, inner_top, inner_top + 200.0),
+            "inside the inner: {c:?}"
+        );
     }
 }

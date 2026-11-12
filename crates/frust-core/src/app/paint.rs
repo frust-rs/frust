@@ -146,6 +146,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let (paint_epoch, retained_layers) = (self.paint_epoch, self.retained_layers);
         let paint_serial = self.paint_serial;
         let focus_ring = self.focus_ring_visible();
+        let (caret, caret_generation) = self.stored_caret();
         let retained_ledger = &self.retained_ledger;
         let hints = Rc::clone(&self.last_hints);
         let Some(pod) = self.tree.pod_mut(root_id) else {
@@ -169,6 +170,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         ctx.set_has_focus(self.focus_active);
         ctx.set_focus_ring(focus_ring);
         ctx.set_focus_epoch(self.focus_epoch);
+        ctx.set_focused_caret(caret, caret_generation);
         ctx.set_hovered(self.hover_active);
         ctx.set_hover_epoch(self.hover_epoch);
         pod.widget_mut().paint(&mut ctx, scene);
@@ -220,6 +222,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         let focus_active = self.focus_active;
         let focus_epoch = self.focus_epoch;
         let focus_ring = self.focus_ring_visible();
+        // Read before the pods paint: each sees the caret the main tree saw.
+        let (caret, caret_generation) = self.stored_caret();
 
         // One pair, so a publish is never attributed to an entry that did not make it.
         let mut holder: Option<(OverlayKey, Option<ImeState>)> = None;
@@ -243,6 +247,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ctx.set_has_focus(focus_active);
             ctx.set_focus_ring(focus_ring);
             ctx.set_focus_epoch(focus_epoch);
+            ctx.set_focused_caret(caret, caret_generation);
             ctx.set_hovered(hover_active);
             ctx.set_hover_epoch(hover_epoch);
             let pod_holds_focus = {
@@ -360,5 +365,88 @@ fn fold_overlay_outcome(ctx: &PaintCtx<'_>, outcome: &mut PaintOutcome, pending:
     }
     if ctx.is_layout_path_dirty() {
         *pending |= ChangeFlags::LAYOUT;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use kurbo::{Point, Rect, Size};
+
+    use crate::anim::FrameTime;
+    use crate::app::RenderRoot;
+    use crate::event::{
+        EventCtx, EventResult, ImeState, InputEvent, PointerButton, PointerEvent, PointerPhase,
+    };
+    use crate::layout::BoxConstraints;
+    use crate::view::{BuildCtx, ChangeFlags, View};
+    use crate::widget::{DiscardScene, FocusedCaret, LayoutCtx, PaintCtx, PaintScene, Widget};
+
+    const CARET: Rect = Rect::new(4.0, 30.0, 5.0, 44.0);
+
+    thread_local! {
+        static SEEN: Cell<Option<FocusedCaret>> = const { Cell::new(None) };
+    }
+
+    /// Focuses and publishes [`CARET`] on a `Down`; records the caret each paint carried.
+    struct Field;
+
+    impl Widget for Field {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            SEEN.with(|seen| seen.set(ctx.focused_caret()));
+        }
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    ctx.publish_ime_state(ImeState {
+                        active: true,
+                        caret: Some(CARET),
+                        ..ImeState::default()
+                    });
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    struct FieldView;
+
+    impl View<()> for FieldView {
+        type Element = Field;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Field {
+            Field
+        }
+        fn rebuild(&self, _prev: &Self, _el: &mut Field, _ctx: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    #[test]
+    fn a_paint_carries_the_stored_caret_and_its_generation() {
+        let mut root: RenderRoot<(), FieldView> = RenderRoot::new();
+        root.rebuild(&mut |_: &mut ()| FieldView, &mut ());
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut DiscardScene, FrameTime::ZERO);
+        assert_eq!(SEEN.with(Cell::get), None, "no session, no caret");
+
+        let down = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(10.0, 10.0),
+            button: PointerButton::Primary,
+        });
+        root.event(&mut (), &down);
+        root.layout(Size::new(100.0, 100.0));
+        root.paint(&mut DiscardScene, FrameTime::ZERO);
+        let seen = SEEN
+            .with(Cell::get)
+            .expect("the focused session's caret reached paint");
+        assert_eq!(seen.rect(), CARET);
+        assert_eq!(seen.generation(), root.focus_ime_generation());
     }
 }
