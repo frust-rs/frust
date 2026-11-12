@@ -49,7 +49,8 @@ Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibra
   Android API 30 and `burst_id` is always `None` on Android (`photo-library-android-asset-fields`).
   `AssetQuery::with_details()` also fills `file_name` (untrusted, display only) and `content_type`, which is
   platform-shaped: a MIME type on Android, a uniform type identifier on iOS
-  (`photo-library-content-type-platform-shaped`). They are off by default because on iOS each row then costs
+  (`photo-library-content-type-platform-shaped`). `Asset::mime_type()` gives a MIME type on both phones: it maps the
+  iOS identifiers in a fixed table and returns `None` for an identifier it does not know rather than guessing. They are off by default because on iOS each row then costs
   one resource lookup (Android reads them in the same query). An asset has no cloud or locally-available
   flag; an iCloud-only original shows as `NetworkRequired` when you ask for it
   (`photo-library-no-local-availability`).

@@ -95,8 +95,26 @@ pub struct Asset {
     /// [`AssetQuery::with_details`].
     pub file_name: Option<String>,
     /// The content type, platform-shaped: a MIME type on Android, a uniform type identifier on
-    /// iOS. Filled only when the query set [`AssetQuery::with_details`].
+    /// iOS. Filled only when the query set [`AssetQuery::with_details`]. For a MIME type on both
+    /// phones, use [`Asset::mime_type`].
     pub content_type: Option<String>,
+}
+
+impl Asset {
+    /// The asset's MIME type on both phones, from [`content_type`](Self::content_type).
+    ///
+    /// A `content_type` that already contains a `/` is a MIME type and is returned unchanged.
+    /// An iOS uniform type identifier is mapped through a fixed table covering the common image,
+    /// raw and video identifiers. An identifier the table does not know gives `None` rather than
+    /// a guess, and so does a missing `content_type` (it is only filled with
+    /// [`AssetQuery::with_details`]).
+    pub fn mime_type(&self) -> Option<String> {
+        let content_type = self.content_type.as_deref()?;
+        if content_type.contains('/') {
+            return Some(content_type.to_owned());
+        }
+        crate::media_types::mime_for_uti(content_type).map(str::to_owned)
+    }
 }
 
 /// Which assets to list, newest first. Pages with [`offset`](Self::offset) and
@@ -784,5 +802,26 @@ mod tests {
             PhotoLibrary::set_thumbnail_cache_budget(1).unwrap_err(),
             off
         );
+    }
+
+    #[test]
+    fn mime_type_passes_a_mime_through_unchanged() {
+        let mut a = asset("a");
+        a.content_type = Some("image/x-unlisted-thing".to_owned());
+        assert_eq!(a.mime_type().as_deref(), Some("image/x-unlisted-thing"));
+    }
+
+    #[test]
+    fn mime_type_maps_a_uti_and_rejects_an_unknown_one() {
+        let mut a = asset("a");
+        a.content_type = Some("public.heic".to_owned());
+        assert_eq!(a.mime_type().as_deref(), Some("image/heic"));
+        a.content_type = Some("com.example.unknown".to_owned());
+        assert_eq!(a.mime_type(), None);
+    }
+
+    #[test]
+    fn mime_type_is_none_without_a_content_type() {
+        assert_eq!(asset("a").mime_type(), None);
     }
 }
