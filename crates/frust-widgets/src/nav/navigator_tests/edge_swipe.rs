@@ -1484,3 +1484,169 @@ fn r_b3_inner_claim_clears_on_cancel_so_a_later_swipe_works() {
         "the later swipe steals normally — not blocked by a stale claim"
     );
 }
+
+// ---------------------------------------------------------------------
+// Headless reproduction of the playground Tabs page's navigator: the edge
+// swipe in a full-width navigator and in one inset from the screen's left
+// edge. The fixture mirrors the page: the facade's `navigator` (a plain
+// navigator with `platform_pop_swipe(cfg!(target_os = "ios"))`, no explicit
+// `pop_swipe`, no default transition) with pages pushed through the plain
+// `push` (default options: instant transition, `BackPolicy::Pop`), three
+// levels deep, optionally under `Padding(16)`.
+// ---------------------------------------------------------------------
+
+/// The logical screen size the tabs fixtures lay out against.
+const TABS_SCREEN: Size = Size::new(390.0, 600.0);
+/// The padding the Tabs page puts around its navigators, in points.
+const TABS_INSET: f64 = 16.0;
+
+type TabsRoot = RenderRoot<(), crate::PaddingView<()>>;
+type TabsApp = Box<dyn FnMut(&mut ()) -> crate::PaddingView<()>>;
+
+/// A page shaped like the playground's: content inset by 12 points, so a press
+/// near the page's left edge lands on no hit-testing widget.
+fn tabs_page() -> impl View<()> {
+    crate::Padding(
+        crate::EdgeInsets::all(12.0),
+        sized_page(TABS_SCREEN.width, TABS_SCREEN.height),
+    )
+}
+
+/// A navigator at depth 3, inside `Padding(inset)`, with the platform slot set
+/// to `platform_pop_swipe` (`true` is what the facade sets on iOS) and the
+/// back-swipe left otherwise unconfigured.
+fn tabs_fixture(
+    inset: f64,
+    platform_pop_swipe: bool,
+) -> (NavigatorController<()>, TabsRoot, TabsApp) {
+    let controller: NavigatorController<()> = NavigatorController::new();
+    let mut root: TabsRoot = RenderRoot::new();
+    let mut app: TabsApp = {
+        let ctrl = controller.clone();
+        Box::new(move |_: &mut ()| {
+            crate::Padding(
+                crate::EdgeInsets::all(inset),
+                navigator(&ctrl, tabs_page).platform_pop_swipe(platform_pop_swipe),
+            )
+        })
+    };
+    controller.push(tabs_page);
+    controller.push(tabs_page);
+    tabs_frame(&mut root, &mut app, 0);
+    assert_eq!(controller.depth(), 3, "fixture starts at depth 3");
+    (controller, root, app)
+}
+
+/// One rebuild/layout/paint frame at `ms`; returns whether another is wanted.
+fn tabs_frame(root: &mut TabsRoot, app: &mut TabsApp, ms: u64) -> bool {
+    root.rebuild(app, &mut ());
+    root.layout(TABS_SCREEN);
+    root.paint(&mut TransitionScene::default(), ft(ms))
+        .needs_frame
+}
+
+/// Run `f` on the navigator nested under the root padding.
+fn with_tabs_nav<R>(root: &TabsRoot, f: impl FnOnce(&NavigatorWidget<()>) -> R) -> R {
+    let id = root.root_id().expect("root built");
+    let mut out = None;
+    let mut f = Some(f);
+    root.tree()
+        .pod(id)
+        .expect("root pod")
+        .widget()
+        .visit_children(&mut |child| {
+            let boxed = (child.widget() as &dyn Any)
+                .downcast_ref::<Box<dyn Widget>>()
+                .expect("AnyView-erased child: double-boxed ChildPod element");
+            let nav = (boxed.as_ref() as &dyn Any)
+                .downcast_ref::<NavigatorWidget<()>>()
+                .expect("the padding hosts the navigator directly");
+            out = Some((f.take().expect("one child"))(nav));
+        });
+    out.expect("padding has a child")
+}
+
+/// A finger drag along `y = 300`: Down at `x0`, `STEPS` Moves to `x1` spread
+/// over ~200 ms (a paint before each event so the navigator sees the frame
+/// time), Up at `x1`, then frames until the tree stops asking for more.
+/// Returns the stack depth after it settles.
+fn tabs_drag(root: &mut TabsRoot, app: &mut TabsApp, x0: f64, x1: f64) -> usize {
+    const STEPS: u64 = 12;
+    let mut state = ();
+    let mut now = 1000;
+    tabs_frame(root, app, now);
+    root.event(&mut state, &down(x0, 300.0));
+    for i in 1..=STEPS {
+        now += 200 / STEPS;
+        tabs_frame(root, app, now);
+        let x = x0 + (x1 - x0) * i as f64 / STEPS as f64;
+        root.event(&mut state, &move_to(x, 300.0));
+    }
+    now += 16;
+    tabs_frame(root, app, now);
+    root.event(&mut state, &up(x1, 300.0));
+    for _ in 0..500 {
+        now += 16;
+        if !tabs_frame(root, app, now) {
+            break;
+        }
+    }
+    with_tabs_nav(root, |nav| nav.pages.len())
+}
+
+// --- (1) Full-width navigator: a drag from x = 5 pops one level. ---
+
+#[test]
+fn tabs_full_width_edge_drag_pops_one_level() {
+    let (controller, mut root, mut app) = tabs_fixture(0.0, true);
+    assert!(with_tabs_nav(&root, |nav| nav.swipe_armable()));
+    let depth = tabs_drag(&mut root, &mut app, 5.0, 300.0);
+    assert_eq!(depth, 2, "the swipe popped one level");
+    assert_eq!(controller.depth(), 2);
+}
+
+// --- (2) Navigator inset 16 points: drags that start at parent x = 18 and
+//     24 land 2 and 8 points inside the navigator, in its zone. ---
+
+#[test]
+fn tabs_inset_navigator_pops_from_inside_the_zone() {
+    for start in [18.0, 24.0] {
+        let (controller, mut root, mut app) = tabs_fixture(TABS_INSET, true);
+        let depth = tabs_drag(&mut root, &mut app, start, 300.0);
+        assert_eq!(depth, 2, "a drag from parent x = {start} popped one level");
+        assert_eq!(controller.depth(), 2);
+    }
+}
+
+// --- (3) The same drag from parent x = 1, outside the inset navigator. ---
+
+#[test]
+fn tabs_inset_navigator_ignores_a_drag_starting_outside_it() {
+    let (controller, mut root, mut app) = tabs_fixture(TABS_INSET, true);
+    let depth = tabs_drag(&mut root, &mut app, 1.0, 300.0);
+    assert_eq!(
+        depth, 3,
+        "a drag from parent x = 1 never reaches the navigator"
+    );
+    assert_eq!(controller.depth(), 3);
+}
+
+// --- (4) The Tabs page's options only arm on a platform whose facade sets the
+//     platform slot (iOS). Everywhere else the resolved default is off. ---
+
+#[test]
+fn tabs_options_do_not_arm_when_the_platform_slot_is_off() {
+    let (controller, mut root, mut app) = tabs_fixture(0.0, false);
+    assert!(
+        !with_tabs_nav(&root, |nav| nav.pop_swipe_enabled),
+        "no explicit pop_swipe, platform slot off, instant preset: resolved off"
+    );
+    assert!(
+        !with_tabs_nav(&root, |nav| nav.swipe_armable()),
+        "swipe_armable is false because the top page has no pop_swipe override \
+         and the navigator's resolved default is off"
+    );
+    let depth = tabs_drag(&mut root, &mut app, 5.0, 300.0);
+    assert_eq!(depth, 3, "no level popped off iOS");
+    assert_eq!(controller.depth(), 3);
+}
