@@ -180,6 +180,22 @@ defect are not told apart. The playground needs four fixtures before this gate c
 field near the bottom of a page, a password field, two fields on one page, and a pushed route in a
 full-width navigator.
 
+**iOS: re-run 2026-11-12 on the Forms page, does not pass** on the same iPhone 13 mini (iOS 27.2),
+against `examples/playground` built from `f36a8cbd`, with the Apple keyboard. Every leg is
+XCUITest-driven (synthetic touches and the accessibility snapshot); none was run by hand.
+
+| Check | Result | Observed |
+|---|---|---|
+| Keyboard over the bottom field | **fail** | field D, the last row, scrolled to the end and tapped: the keyboard shows and D ends up 171 pt below the keyboard's top edge; the content moves 34 pt down on focus, not up. Seen twice from a clean launch |
+| Keyboard reopen | pass | a drag dismisses the keyboard, it stays down, and a tap on the same field brings it back |
+| Back | pass | full-width navigator at depth 3: two edge drags from x = 3 and x = 1 pop to depth 1. Tabs page (navigators inset 16 pt): drags starting at x = 18 and x = 24 pop one level each when they start within the navigator's height; a start at x = 14, x = 40 or x = 3 does not |
+| Text input | partial | typed in A, tapped B, typed one character: B holds only that character and A keeps its text. Field C draws dots, Dictate is disabled and the keyboard is left out of screenshots; whether the suggestion bar is empty was not seen. **Not run:** IME composition, Return or Next between fields |
+
+The earlier back failure is explained for the synthetic drags: they started below the Tabs
+navigator, whose hit area ends at the bottom of its short content, so no press reached it. The
+hand-run failure of that pass has not been repeated or explained; a hand swipe low on that page
+would fail the same way.
+
 ## Clipboard manual test (Android + iOS)
 
 A device gate for the two mobile clipboard routes, against an installed app (`frust run -d

@@ -422,6 +422,13 @@ none of the three behaviours named above in full: the password traits were
 not exercised at all, the mirror re-seed was seen only across a page change
 with a blur in between (the second field held only its own text), and the
 non-touch focus move was not exercised.
+A second run (2026-11-12, same phone, built from `f36a8cbd`, the Apple
+keyboard, XCUITest-driven) used a page with two fields and a password
+field: text typed in one field and then one character in the next left the
+second holding only that character, with no blur in between; on the
+password field typed text is drawn as dots, Dictate is disabled and the
+keyboard is left out of screenshots. Still not seen: whether the suggestion
+bar is empty on the password field, and any non-touch focus move.
 
 **Also covers**: `syncImeFocus`'s per-frame
 `becomeFirstResponder()` retry is **bounded** (`imeFocusSatisfied`)
@@ -8089,11 +8096,11 @@ flush per `onStop`, 12.1 ms then 0.1 ms, none for the share sheet, and the cache
 
 **Observed**: device gates ran on 2026-11-11 on a Pixel 5 (Android 14) and an iPhone 13 mini (iOS 27.2) and passed for the core paths: token save, empty, inserted, updated and deleted deltas on Android, an inserted delta and the wake counter on iOS, a token surviving a relaunch, and cursor paging on both. Still unverified on a device:
 
-- iOS: updated and deleted deltas; a forged or expired token answering `FullRescan`; `cloud_identifiers`; anything on iOS 15 (the no-history path).
+- iOS: a forged or expired token answering `FullRescan`; `cloud_identifiers`; anything on iOS 15 (the no-history path). An updated and a deleted delta ran on 2026-11-12 (iPhone 13 mini, iOS 27.2); the delete also reported one updated asset that was not touched, cause not looked into.
 - Android: API 29 (always `FullRescan`); the observer's Stop; token size and per-call snapshot cost on a large library (only 156 assets were measured).
 - Both: an iOS cursor session with an item added part-way; thumbnail refresh after a delta on iOS.
 
-**Applies to**: iOS apps that use `cloud_identifiers`, read updated or deleted deltas or run on iOS 15; Android apps on API 29, with a large library, or that rely on the observer's Stop.
+**Applies to**: iOS apps that use `cloud_identifiers` or run on iOS 15; Android apps on API 29, with a large library, or that rely on the observer's Stop.
 
 **Workaround**: none; verify the listed paths on the target device before depending on them.
 
@@ -8481,19 +8488,19 @@ shows the guard works, not that it was needed. Notification display was not obse
 
 ---
 
-### `a11y-wrapper-phone-exposure-unverified` — the `semantics(child)` wrapper is checked in the Android accessibility tree only; TalkBack speech and iOS are not observed
+### `a11y-wrapper-phone-exposure-unverified` — the `semantics(child)` wrapper is checked in the phones' accessibility trees only; what VoiceOver and TalkBack speak is not observed
 
-**Observed**: on Android the wrapper's nodes reach the platform accessibility tree: a `uiautomator` dump of the playground's A11y page shows one node each for a heading, a labelled image, a merged cell (label and value), a button tile and a labelled group with its two children, and none for a hidden subtree. What TalkBack speaks for them, the hint, and activating a tappable wrapper through the accessibility action were not run. On iOS nothing has been observed: the expectation there rests on reading the adapter's filter code (which nodes it keeps or drops), and a node the adapter drops would be silent on the phone while present in the headless semantics tree.
+**Observed**: the wrapper's nodes reach the platform accessibility tree on both phones. A `uiautomator` dump on Android and an XCUITest accessibility snapshot on iOS of the playground's A11y page each show one element for a heading, a labelled image, a merged cell (label and value), a button tile and a labelled group with its two children, and none for a hidden subtree; on iOS an accessibility tap on the tile runs its handler. Not observed on either phone: what the screen reader speaks, the hint, and the heading trait (neither tool reports them); on Android, activating a tappable wrapper through the accessibility action.
 
-**Applies to**: apps that rely on `semantics(child)`, `TextView::heading` or `ImageView::label` for screen-reader users, on iOS above all.
+**Applies to**: apps that rely on `semantics(child)`, `TextView::heading` or `ImageView::label` for screen-reader users on Android and iOS.
 
-**Workaround**: check the screen with VoiceOver and TalkBack before relying on it; prefer a widget's own semantics where it has one.
+**Workaround**: check the screen with VoiceOver and TalkBack before relying on the heading level or the hint; prefer a widget's own semantics where it has one.
 
-**Why accepted**: the Android tree is verified; a spoken pass and an iOS pass have not been recorded yet, and the entry stays until they are.
+**Why accepted**: the trees are verified on both phones; a spoken pass has not been recorded yet, and the entry stays until it is.
 
 **Trigger for removal**: a recorded VoiceOver pass and a TalkBack spoken pass over a screen using the wrapper.
 
-**Evidence**: (2026-11-12) `uiautomator` dumps on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15), recorded in `examples/playground/README.md`; code reading of the `accesskit_ios` node filter; the headless tests of `crates/frust-widgets/src/semantics.rs`.
+**Evidence**: (2026-11-12) `uiautomator` dumps on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15) and an XCUITest snapshot on an iPhone 13 mini (iOS 27.2), recorded in `examples/playground/README.md`; the headless tests of `crates/frust-widgets/src/semantics.rs`.
 
 ---
 
