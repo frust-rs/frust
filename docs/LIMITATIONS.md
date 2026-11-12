@@ -411,14 +411,17 @@ a previous field's text across a focus move (`syncImeFocus`'s `seedMirror`
 on the content-type branch and `FrustView.reconcileMirror(to:)` on the
 steady-active branch), and the **per-frame `syncImeFocus()` call from
 `renderFrame`** that makes non-touch focus moves (Return-to-next-field,
-programmatic focus) reach any of it — has never run on an iOS device or
-simulator. `cargo` cannot compile Swift, so no ordinary workspace gate
-touches this path; it has been `swiftc -typecheck`-verified on a macOS host,
-which confirms the sources parse and type-check but
-does not link, run, or exercise any of the behavior below. Only
-`xcodebuild -scheme FrustEmbedding -destination 'generic/platform=iOS'
-build` (a full build) or an on-device/simulator run validates that, and
-neither has occurred since this path was introduced.
+programmatic focus) reach any of it — has been run on a device only in
+part. `cargo` cannot compile Swift, so no ordinary workspace gate touches
+this path. One device run has occurred (2026-11-12, iPhone 13 mini, iOS
+27.2, the playground built with Xcode 27.0 from `355d6f1a`, a third-party
+keyboard active): the path builds, links and runs, and typing, autocorrect
+and dictation reach the field. That run had no password-classified field,
+no page with two fields, and no Return-to-next-field move, so it verified
+none of the three behaviours named above in full: the password traits were
+not exercised at all, the mirror re-seed was seen only across a page change
+with a blur in between (the second field held only its own text), and the
+non-touch focus move was not exercised.
 
 **Also covers**: `syncImeFocus`'s per-frame
 `becomeFirstResponder()` retry is **bounded** (`imeFocusSatisfied`)
@@ -437,8 +440,10 @@ reassert the keyboard on the next UIKit-originated dismissal — reopening the
 very pop-back the bound exists to prevent. A touch inside a Mode B hosted slot never reaches `onTouch`
 (`FrustView.hitTest` returns `nil` there), so a sibling native control
 retaining first responder is unaffected by the per-frame tick. This
-mechanism is Swift-only and is exactly as device-unverified as the rest of
-this entry.
+mechanism is Swift-only. The 2026-11-12 device run saw one part of it: a
+keyboard dismissed by a tap outside the field came back on a re-tap of the
+field. Swipe-dismiss, the stay-down half and the Mode B sibling case were
+not run.
 
 **Residual limitation, accepted** — the not-already-first-responder
 gating does **not** remove it: when a Mode B sibling holds first responder,
@@ -460,16 +465,17 @@ property-for-property) is likewise device-unverified, but is a materially differ
 `restartInput`/`Editable` vs. UIKit `UITextInputTraits`/resign-become/
 `NSMutableString`) and this entry makes no claim about it. Android's
 `applyImeContentType` inputType/imeOptions flags have cleared `compileDebugKotlin`,
-while the iOS Swift side has only been `swiftc -typecheck`-verified, never built
-via `xcodebuild`. Neither is device verification.
+and the iOS Swift side has been built with `xcodebuild` and run once (above).
+Neither is device verification of the content-type behaviour.
 
-**Why not closed**: the only proof is on-device verification, which has
-not been run. **The
+**Why not closed**: the only proof is on-device verification, and the one
+run so far did not reach a password field. **The
 leak is therefore not confirmed closed on any platform** — the Rust-side
 wire encoding (`content_type_wire`) has unit coverage, but nothing has
-exercised the UIKit trait application, the resign/become keyboard cycle,
-the mirror re-seed, the per-frame reconcile, or the bounded-retry/touch-
-re-arm mechanism above against a real (or simulated) keyboard. The
+exercised the UIKit trait application for a password field, the mirror
+re-seed on a direct field-to-field move, the per-frame reconcile on a
+non-touch focus move, or the swipe-dismiss half of the bounded retry
+against a real keyboard. The
 per-frame reconcile in particular has an unmeasured cost (one
 `frust_ime_state_json` FFI call plus one `JSONSerialization` parse per
 `CADisplayLink` tick, matching Android's per-frame `nativeImeState` budget)
@@ -510,7 +516,9 @@ the best-reasoned fix available, not as a verified fix.
    but **that gating is reasoned, not device-measured** — this run is what
    would catch a regression.
 
-**Evidence**: `swiftc -typecheck` exit 0; no device or simulator run has occurred.
+**Evidence**: `swiftc -typecheck` exit 0; one partial device run, 2026-11-12, recorded in
+[SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) under the safe-area / keyboard / back gate. Runs 1 to 5
+above have not been done as written: the playground lacks the two-field and password fixtures.
 
 ---
 

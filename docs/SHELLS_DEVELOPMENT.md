@@ -134,7 +134,7 @@ is a person-driven check:
   home bar's brand slot sits clear of the window control; full screen reads zeros.
 
 **Android: run 2026-11-12** on a Pixel 4a (Android 16), `adb`-driven with screenshots read by
-eye, against `examples/playground` built from `0f55c1af`. iOS: not yet recorded.
+eye, against `examples/playground` built from `0f55c1af`.
 
 | Check | Result | Observed |
 |---|---|---|
@@ -147,6 +147,24 @@ eye, against `examples/playground` built from `0f55c1af`. iOS: not yet recorded.
 Defects seen on this run (open): after the keyboard is dismissed with back, a tap on the same
 still-focused field does not reopen it until focus has moved away; `adb shell input text` inserts
 nothing into a focused field; the density change put the playground back on its first page.
+
+**iOS: run 2026-11-12, does not pass** on an iPhone 13 mini (iOS 27.2), XCUITest-driven with the
+hand-run legs noted, against `examples/playground` built from `355d6f1a` with Xcode 27.0. The
+active keyboard was a third-party one, not the system keyboard.
+
+| Check | Result | Observed |
+|---|---|---|
+| Safe-area | pass | portrait and landscape-left: content clears the notch and the home indicator, and the layout switches to the side rail in landscape; landscape-right not tried |
+| Keyboard | partial | focus raises the keyboard and dismissing it restores the layout; **not checked:** content shifting clear of the keyboard (no field near the bottom of a page) |
+| Back | **fail** | Tabs page pushed to depth 3: four synthetic edge drags and a hand-run edge swipe left the depth at 3; the root-level leg was not reached |
+| Density refresh | not run | no external display |
+| Text input | partial | the Swift half builds, links and runs; typing reaches the field; autocorrect and dictation work (hand-run); a re-tap on a field brings back a dismissed keyboard; **not run:** IME composition, a password-classified field, a direct field-to-field focus move |
+
+The back failure is not yet attributed: the Tabs navigators sit 16 pt in from the screen edge and
+the edge-swipe arms only near the navigator's own left edge, so the fixture's geometry and a real
+defect are not told apart. The playground needs four fixtures before this gate can pass in full: a
+field near the bottom of a page, a password field, two fields on one page, and a pushed route in a
+full-width navigator.
 
 ## Clipboard manual test (Android + iOS)
 
