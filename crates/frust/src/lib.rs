@@ -2283,6 +2283,7 @@ pub mod time {
 pub use frust_reactive::{AsyncValue, TaskError, UseTask, spawn_blocking, use_task};
 
 mod image_async;
+mod start_gate;
 
 /// Off-thread image decode: [`decode_image_async`] wraps
 /// the existing synchronous `ImageSource::decode` in `spawn_blocking`, so it
@@ -2292,6 +2293,11 @@ mod image_async;
 /// reactive-free by charter) and for the Arc-move contract the decoded
 /// [`ImageSource`] crosses threads under.
 pub use image_async::{ImageDecodeError, decode_image_async};
+
+/// A splash-then-ready view for asynchronous start-up work: [`StartGate`] runs a [`use_task`]
+/// start-up task behind a splash view, shows an error view with a [`Retry`] on failure, and
+/// builds the app's real root from the task's value on success. See `start_gate`'s module docs.
+pub use start_gate::{Retry, StartGate};
 
 // Re-export the Android JNI-bridge macro so generated apps write
 // `frust::android_app!(AppState, build)`. `pub use` of a
