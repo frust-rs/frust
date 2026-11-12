@@ -898,24 +898,42 @@ impl CarouselWidget {
         }
     }
 
-    /// Clear the recorded focus link on every item but the one a `Down` just
-    /// landed on and left focused — the blur
-    /// [`frust::authoring::route_event`] performs for containers that route
-    /// through it, which this widget's hand-rolled routing owes too
-    /// (`docs/CODE_STANDARDS.md`'s focus-routing rule).
-    fn blur_unhit(&mut self, hit: Option<usize>) {
-        let kept = hit.filter(|index| self.pods.get(*index).is_some_and(ChildPod::is_focused));
-        for (index, pod) in self.pods.iter_mut().enumerate() {
-            if Some(index) != kept && pod.is_focused() {
-                pod.set_focused(false);
+    /// Forward a `Down` to the item under it under
+    /// [`frust::authoring::route_event`]'s focus-link rule, which this widget's
+    /// hand-rolled routing owes too (`docs/CODE_STANDARDS.md`'s focus-routing
+    /// rule): a press that records a focus claim through the item ends every
+    /// other item's link in the same pass; a press that claims nothing (on no
+    /// item, or on one that takes no focus) leaves every link to the root's
+    /// session, so a swipe that starts beside a focused field keeps it typing
+    /// and a tap there blurs at its `Up`.
+    fn press_item(
+        &mut self,
+        ctx: &mut EventCtx,
+        event: &InputEvent,
+        item: Option<usize>,
+    ) -> EventResult {
+        let Some(index) = item.filter(|index| *index < self.pods.len()) else {
+            return EventResult::Ignored;
+        };
+        let (result, claimed) =
+            frust::authoring::event_child_reporting_claim(&mut self.pods[index], ctx, event);
+        if claimed {
+            for (other, pod) in self.pods.iter_mut().enumerate() {
+                if other != index && pod.is_focused() {
+                    pod.set_focused(false);
+                }
             }
         }
+        result
     }
 
     /// The event body, parameterised on an explicit timestamp so the velocity
     /// math is deterministic in tests; [`Widget::event`] supplies the real
     /// clock (see the [module docs](self)).
     fn event_at(&mut self, ctx: &mut EventCtx, event: &InputEvent, t_ms: f64) -> EventResult {
+        // A link the root's session already stranded is retired before any
+        // dispatch, so its raw flag never reads as live in an item.
+        frust::authoring::retire_stale_focus_links(self.pods.iter_mut());
         // A broadcast is not user input: it reaches every child ahead of the
         // capture/hit-test branches and is never consumed.
         if event.is_broadcast() {
@@ -943,9 +961,7 @@ impl CarouselWidget {
                 if !presses(p) {
                     // A secondary press is a context gesture: it reaches the
                     // item but starts no drag and arms no press.
-                    let result = self.forward_to_item(ctx, event, item);
-                    self.blur_unhit(item);
-                    return result;
+                    return self.press_item(ctx, event, item);
                 }
                 let main = self.main_of(p.position);
                 self.drag = Some(Drag {
@@ -960,8 +976,7 @@ impl CarouselWidget {
                 self.pressed = item;
                 self.state.set_pressed(item.is_some());
                 ctx.capture_pointer();
-                self.forward_to_item(ctx, event, item);
-                self.blur_unhit(item);
+                self.press_item(ctx, event, item);
                 ctx.request_redraw();
                 EventResult::Handled
             }
@@ -1331,6 +1346,9 @@ mod tests {
         presses: usize,
     }
 
+    /// The item-local height above which an [`Item`]'s press claims focus.
+    const FOCUS_BAND: f64 = 150.0;
+
     /// A leaf that fills whatever it is given and counts the presses that reach
     /// it, generic over the app state.
     struct Item;
@@ -1363,9 +1381,12 @@ mod tests {
                 && p.phase == PointerPhase::Down
             {
                 ctx.state_mut::<Reports>().presses += 1;
-                // An item with its own focusable content, so the carousel's
-                // blur bookkeeping has something to clear.
-                ctx.request_focus();
+                // An item with its own focusable content above `FOCUS_BAND`, so
+                // the carousel's focus-link bookkeeping has something to keep
+                // and to end; a press below the band claims nothing.
+                if p.position.y < FOCUS_BAND {
+                    ctx.request_focus();
+                }
                 return EventResult::Handled;
             }
             EventResult::Ignored
@@ -2012,6 +2033,59 @@ mod tests {
             32.0,
         );
         assert!(!w.pods[0].is_focused(), "a press elsewhere blurs it");
+        assert!(w.pods[1].is_focused());
+    }
+
+    /// A press that claims no focus (on an item's non-focusable band) leaves
+    /// the focused item's link to the root's session; a press that moves focus
+    /// to another item ends it in the same pass.
+    #[test]
+    fn a_press_that_claims_nothing_keeps_the_focused_items_link() {
+        let mut w = laid_out(&view(6));
+        let mut state = Reports::default();
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Down, 100.0, 100.0),
+            0.0,
+        );
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Up, 100.0, 100.0),
+            16.0,
+        );
+        assert!(
+            w.pods[0].is_focused(),
+            "the item claimed focus on its press"
+        );
+
+        let below = FOCUS_BAND + 20.0;
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Down, 400.0, below),
+            32.0,
+        );
+        assert!(
+            w.pods[0].holds_live_focus(),
+            "a press that claims nothing leaves the focused item's link"
+        );
+        assert!(!w.pods[1].is_focused());
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Up, 400.0, below),
+            48.0,
+        );
+
+        dispatch(
+            &mut w,
+            &mut state,
+            &ev(PointerPhase::Down, 400.0, 100.0),
+            64.0,
+        );
+        assert!(!w.pods[0].is_focused(), "a claim on another item ends it");
         assert!(w.pods[1].is_focused());
     }
 

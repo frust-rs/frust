@@ -225,7 +225,8 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
             };
             #[cfg(not(feature = "hotpatch"))]
             let new_view = AnyView::new(self.component.build(element.state_mut()));
-            let child_focused = element.child.is_focused();
+            // The live link: a stranded one extends no chain and orphans nothing.
+            let child_focused = element.child.holds_live_focus();
             let (flags, swapped) = {
                 let boxed = element
                     .child
@@ -283,7 +284,7 @@ impl<Outer: 'static, C: Component> View<Outer> for ComponentView<C> {
         let hints = ctx.shortcut_hints();
         // Forward teardown to the child under the owner, then dispose it. The focus
         // chain crosses the boundary as in `rebuild` (see `BuildCtx::has_focus`).
-        let inner_has_focus = ctx.has_focus() && element.child.is_focused();
+        let inner_has_focus = ctx.has_focus() && element.child.holds_live_focus();
         element.owner.clone().with(|| {
             let mut next_id = element.next_id;
             let mut inner = BuildCtx::new(&mut next_id).with_shortcut_hints(hints);
@@ -416,22 +417,22 @@ impl<C: Component> SliverWidget for ComponentWidget<C> {
     }
 }
 
-/// Route an event to the single child pod with the recorded-path semantics of
-/// single-child containers (the in-crate mirror of `frust-widgets`'
-/// `route_event_single`).
-///
-/// A broadcast is checked first so no capture/focus/hit-test branch can swallow
-/// it (a deferred pop-result flush must reach a navigator below a component). A
-/// focus-routed event needs the recorded focus path; a captured child gets
-/// pointer events unconditionally (released on `Up`/`Cancel`); otherwise the
-/// child needs to contain the point, and a missed `Down` blurs a focused child.
+/// Route an event to the single child pod (the in-crate mirror of
+/// `frust-widgets`' `route_event_single`). A stranded link is retired first; a
+/// broadcast always reaches the child (a deferred pop-result flush must reach a
+/// navigator below a component); a focus-routed event needs a live link
+/// ([`ChildPod::holds_live_focus`]); a captured child gets pointer events
+/// unconditionally (released on `Up`/`Cancel`); otherwise the child needs to
+/// contain the point. A `Down` outside the child leaves its link alone: whether
+/// it blurs is the root's call at the end of the gesture.
 fn route_child(pod: &mut ChildPod, ctx: &mut EventCtx<'_>, event: &InputEvent) -> EventResult {
+    pod.retire_stale_focus_link();
     if event.is_broadcast() {
         pod.event_child(ctx, event);
         return EventResult::Ignored;
     }
     if event.is_focus_routed() {
-        if pod.is_focused() {
+        if pod.holds_live_focus() {
             return pod.event_child(ctx, event);
         }
         return EventResult::Ignored;
@@ -443,16 +444,11 @@ fn route_child(pod: &mut ChildPod, ctx: &mut EventCtx<'_>, event: &InputEvent) -
         }
         return result;
     }
-    let inside = pod.contains(event.position());
-    let result = if inside {
+    if pod.contains(event.position()) {
         pod.event_child(ctx, event)
     } else {
         EventResult::Ignored
-    };
-    if is_pointer_down(event) && !inside && pod.is_focused() {
-        pod.set_focused(false);
     }
-    result
 }
 
 /// Whether `event` is the phase that auto-releases a recorded capture
@@ -461,14 +457,6 @@ fn releases_capture(event: &InputEvent) -> bool {
     matches!(
         event,
         InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Up | PointerPhase::Cancel)
-    )
-}
-
-/// Whether `event` is a pointer `Down` (opens capture / triggers blur eval).
-fn is_pointer_down(event: &InputEvent) -> bool {
-    matches!(
-        event,
-        InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Down)
     )
 }
 
@@ -1366,6 +1354,71 @@ mod tests {
         root.event(&mut state, &pointer(PointerPhase::Up, 80.0, 10.0));
         assert!(!root.is_focus_active(), "blur crossed the boundary");
         assert!(root.ime_state().is_none());
+    }
+
+    /// A component laid out at the leaf's 100 x 100 inside a 200 x 100 slot, with
+    /// the leaf focused by a left-half Down: what a parent that forwards every
+    /// press to the component (the root, or a hand-rolled router) hands it.
+    fn focused_ime_component() -> ComponentWidget<ImeComp> {
+        let view = component(ImeComp);
+        let mut widget = build_widget::<(), _>(&view);
+        let mut lctx = LayoutCtx::new();
+        widget.layout(&mut lctx, &BoxConstraints::loose(Size::new(200.0, 100.0)));
+        let mut outer = ();
+        let mut ectx = EventCtx::new(&mut outer, Point::ZERO, Size::new(200.0, 100.0));
+        widget.event(&mut ectx, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert!(ectx.is_focus_requested(), "the leaf claimed focus");
+        assert!(
+            widget.child.holds_live_focus(),
+            "the claim recorded the link"
+        );
+        widget
+    }
+
+    fn dispatch_ime(widget: &mut ComponentWidget<ImeComp>, event: &InputEvent) -> EventResult {
+        let mut outer = ();
+        let mut ectx = EventCtx::new(&mut outer, Point::ZERO, Size::new(200.0, 100.0));
+        widget.event(&mut ectx, event)
+    }
+
+    /// A press that reaches the component but misses its child claims nothing,
+    /// so the child keeps its link: whether the press blurs is the root's call
+    /// at the end of the gesture, and a drag from there keeps the field typing.
+    #[test]
+    fn a_press_outside_the_child_keeps_its_focus_link() {
+        let _owner = ambient();
+        let mut widget = focused_ime_component();
+        dispatch_ime(&mut widget, &pointer(PointerPhase::Down, 150.0, 10.0));
+        assert!(
+            widget.child.holds_live_focus(),
+            "an unclaimed outside Down leaves the link to the root's session"
+        );
+        dispatch_ime(&mut widget, &pointer(PointerPhase::Move, 150.0, 60.0));
+        dispatch_ime(&mut widget, &pointer(PointerPhase::Up, 150.0, 60.0));
+        assert_eq!(
+            dispatch_ime(&mut widget, &key_enter()),
+            EventResult::Handled,
+            "a key still reaches the focused leaf"
+        );
+    }
+
+    /// A link the session stranded (the root blurred at a tap's `Up`, or a claim
+    /// elsewhere committed a new session) is never read as live: a key is not
+    /// routed into it, and the next event retires the raw flag.
+    #[test]
+    fn a_stranded_link_takes_no_keys_and_is_retired() {
+        let _owner = ambient();
+        let mut widget = focused_ime_component();
+        // A new session: what the root publishes once it ends or moves the old one.
+        crate::widget::set_live_focus_session(0, 7, 7);
+        assert!(widget.child.is_focused() && !widget.child.holds_live_focus());
+        assert_eq!(
+            dispatch_ime(&mut widget, &key_enter()),
+            EventResult::Ignored,
+            "a stranded link routes no key"
+        );
+        assert!(!widget.child.is_focused(), "and its raw flag is retired");
+        crate::widget::set_live_focus_session(0, 0, 0);
     }
 
     // --- Criterion 5: ChangeFlags propagation -------------------------------
