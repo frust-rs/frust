@@ -479,6 +479,7 @@ frust::app!(Gallery);
 | iPhone 13 mini, iOS 27.2 | passed (pick, loading progress, cancel, swipe-down, share picked, clear cache; browsing: albums, paging, thumbnails, Limited and Manage selection) |
 | Pixel 5, Android 14 | passed, browsing, export and save included; Xiaomi 12 (Android 17) passed the picker and share legs on an earlier build |
 | Pixel 4a, Android 16 | passed: `assets_by_id` on a change-feed delta (2 inserted ids, file name and MIME type), and browsing with only `READ_MEDIA_IMAGES` declared (status `NotDetermined`, request granted, 7 of 7 images listed) |
+| iPhone 13 mini, iOS 27.2 | passed: `assets_by_id` on inserted, updated and deleted change-feed deltas (a HEIC answers `image/heic` from `mime_type()`); 1 id in 20 to 67 ms against 40.6 s for a full listing of 6,157 with details |
 | macOS | passed through the file dialog; `decode` has a host test that encoded and decoded a HEIC through ImageIO |
 | `with_details`, the new `Asset` fields, `asset_metadata` and `thumbnail_shared` (including a thumbnail cancel) | not device-tested; covered by host tests and the Android contract test only |
 | `decode` on iOS and Android devices, Android 10/11 fallback picker, Linux, Windows, DNG export on a phone | not device-tested (the API 29/30 leg is owed; so are API 29 paging and a second API 31+ device for browsing) |
