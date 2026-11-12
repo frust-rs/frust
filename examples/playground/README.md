@@ -282,6 +282,16 @@ The sections, in order:
     both buttons are separately reachable); a `hidden(true)` text; and a
     `Taps: N` status line. Each item has a caption naming what assistive
     technology should announce. Deep link: `frustplay://section/a11y`.
+25. **Forms** — fixtures for the safe-area / keyboard / back gate: a status line (the
+    field whose caret reported last, the full-width navigator's depth, Return presses); two
+    normal fields A and B; an obscured field C (password-classified); a **Push full-width
+    route** button over a navigator with no horizontal padding (pushed pages show their depth
+    and their own Push, so depth 3 is reachable); numbered filler rows; and field D as the last
+    row of the page, above the bottom navigation bar once scrolled to the end. The framework has
+    no programmatic focus, so Return on A does not move focus to B (it counts a press), and no
+    blur callback, so the status line shows the last caret report. The shell adds no inset around
+    the page; the navigator is at the left edge in portrait at phone width (with the wide-width
+    side rail it starts at the rail's right edge). Deep link: `frustplay://section/forms`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -464,6 +474,14 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Folders panel Open stored path / Open missing path, quit and relaunch, Release | macOS (MacBook, Apple M4), 2026-11-11 | PASS (feature/folder-grant-entry f66e02dc, debug build, human-run with one nested image: every step passed, the stored path was found after the relaunch with no re-pick, and after Release the panel read `No stored path`. The status strings and the byte count were not recorded) |
 | A11y: heading, labelled image, merged cell, tappable tile (counter), unmerged group, hidden text announce as their captions say | TalkBack (Android device) | NOT YET RUN |
 | A11y: heading, labelled image, merged cell, tappable tile (counter), unmerged group, hidden text announce as their captions say | VoiceOver (iPhone) | NOT YET RUN |
+| Forms: field D at the bottom of the page; content shifts clear of the open keyboard | Android device | NOT YET RUN |
+| Forms: field D at the bottom of the page; content shifts clear of the open keyboard | iPhone | NOT YET RUN |
+| Forms: password field C (obscured, password-classified; keyboard type and autofill behaviour) | Android device | NOT YET RUN |
+| Forms: password field C (obscured, password-classified; keyboard type and autofill behaviour) | iPhone | NOT YET RUN |
+| Forms: focus moves from field A to field B by tap, and by the keyboard's Return or Next key (Return only counts a press) | Android device | NOT YET RUN |
+| Forms: focus moves from field A to field B by tap, and by the keyboard's Return or Next key (Return only counts a press) | iPhone | NOT YET RUN |
+| Forms: Push full-width route to depth 3, then the back edge swipe from the screen's left edge pops one level per swipe | Android device | NOT YET RUN |
+| Forms: Push full-width route to depth 3, then the back edge swipe from the screen's left edge pops one level per swipe | iPhone | NOT YET RUN |
 | Photos: Changes panel Check fetches inserted and updated ids by id (file name, MIME type or `not visible`, milliseconds, count) | Android device | NOT YET RUN |
 | Photos: Changes panel Check fetches inserted and updated ids by id | iPhone | NOT YET RUN |
 | Photos: Changes panel Time full listing (asset count, milliseconds) beside the by-id time | Android device | NOT YET RUN |
