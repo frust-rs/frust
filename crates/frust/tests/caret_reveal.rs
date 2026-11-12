@@ -1,7 +1,8 @@
 //! A vertical scroll view keeps the focused text caret in view: a tap on a field peeking in at
 //! the bottom edge, a viewport shrunk under a visible field and keyboard traversal onto a field
 //! below the fold all scroll the field inside, a user drag away from it is never undone, and
-//! `reveal_focused_caret(false)` turns the whole rule off.
+//! `reveal_focused_caret(false)` turns the whole rule off. A drag that starts on a caption beside
+//! the focused field keeps the field typing; a tap there blurs it.
 //!
 //! Needs the facade's `test-support` feature (`cargo test -p frust-ui --features test-support`);
 //! without it the file compiles to nothing.
@@ -11,9 +12,9 @@
 use std::time::Duration;
 
 use frust::testing::Tester;
-use frust::{ScrollController, ScrollView, SizedBox, column, scroll_view, text_input};
-use frust_core::{InputEvent, Key, KeyEvent, Modifiers, NamedKey, View};
-use kurbo::{Point, Rect, Size};
+use frust::{ScrollController, ScrollView, SizedBox, column, scroll_view, text, text_input};
+use frust_core::{ImeEvent, InputEvent, Key, KeyEvent, Modifiers, NamedKey, View};
+use kurbo::{Point, Rect, Size, Vec2};
 
 const W: f64 = 400.0;
 const FRAME: Duration = Duration::from_millis(16);
@@ -190,4 +191,69 @@ fn reveal_focused_caret_false_leaves_the_page_where_the_user_put_it() {
     tester.resize(Size::new(W, 200.0));
     frames(&mut tester, 6);
     assert_eq!(controller.offset(), 0.0, "no resize reveal");
+}
+
+/// A caption over the field, and a tall spacer so a drag from the caption scrolls the page.
+fn captioned(s: &mut Form) -> ScrollView<Form> {
+    scroll_view(
+        column()
+            .child(SizedBox(Some(W), Some(40.0)).child(text("Caption")))
+            .child(text_input(s.value.clone(), |s: &mut Form, v: String| {
+                s.value = v
+            }))
+            .child(SizedBox(Some(W), Some(1000.0))),
+    )
+}
+
+fn commit<V: View<Form>>(tester: &mut Tester<Form, V>, text: &str) {
+    tester.send(&InputEvent::Ime(ImeEvent::Commit(text.to_string())));
+    tester.pump(FRAME);
+}
+
+/// Focus the field with a tap and type into it.
+fn focused_and_typing() -> Tester<Form, ScrollView<Form>> {
+    let mut tester = Tester::new(Form::default(), captioned, Size::new(W, 300.0));
+    let at = field(&tester).center();
+    let finger = tester.start_touch(0, at);
+    tester.up(finger);
+    tester.pump(FRAME);
+    commit(&mut tester, "a");
+    assert_eq!(tester.state().value, "a", "the tapped field types");
+    assert!(tester.semantics().focus.is_some(), "and reports focus");
+    tester
+}
+
+#[test]
+fn a_drag_from_a_caption_keeps_the_focused_field_typing() {
+    let mut tester = focused_and_typing();
+    let mut finger = tester.start_touch(0, Point::new(10.0, 20.0));
+    for _ in 0..4 {
+        tester.move_by(&mut finger, Vec2::new(0.0, -10.0));
+        tester.pump(FRAME);
+    }
+    tester.up(finger);
+    tester.pump(FRAME);
+
+    commit(&mut tester, "bc");
+    assert_eq!(
+        tester.state().value,
+        "abc",
+        "the drag left the field typing"
+    );
+    assert!(
+        tester.semantics().focus.is_some(),
+        "the field still reports focus"
+    );
+}
+
+#[test]
+fn a_tap_on_a_caption_blurs_the_focused_field() {
+    let mut tester = focused_and_typing();
+    let finger = tester.start_touch(0, Point::new(10.0, 20.0));
+    tester.up(finger);
+    tester.pump(FRAME);
+
+    commit(&mut tester, "bc");
+    assert_eq!(tester.state().value, "a", "a blurred field takes no text");
+    assert!(tester.semantics().focus.is_none(), "nothing reports focus");
 }

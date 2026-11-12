@@ -1013,3 +1013,46 @@ fn a_reclaim_from_the_live_chain_keeps_the_surface() {
     );
     assert_eq!(root.focus_ime_generation(), edge, "and fires no IME edge");
 }
+
+/// The pending blur's end on a path that never reaches the main tree: an outside press whose
+/// `Up` lands on a surface that floated under it is consumed by the overlay route, which spends
+/// the pending blur without applying it (`advance_pending_blur`), so the session stands.
+#[test]
+fn an_outside_tap_whose_up_an_overlay_consumes_does_not_blur() {
+    let mut spec = SurfaceSpec::floating("popover", Rect::new(120.0, 10.0, 200.0, 60.0));
+    spec.register = false;
+    let mut h = OverlayHarness::new(vec![spec]);
+    // The sibling claims focus on a press inside it.
+    h.down(10.0, 110.0);
+    h.dispatch(&pointer(PointerPhase::Up, 10.0, 110.0));
+    h.frame();
+    assert!(h.root.is_focus_active(), "the sibling holds the session");
+    let session = h.root.focus_epoch();
+
+    // A press on nothing arms the pending blur...
+    h.down(150.0, 30.0);
+    assert!(h.root.is_focus_active(), "a Down alone does not blur");
+    // ...then a surface floats under the held finger, and the Up lands on it.
+    h.state.specs[0].register = true;
+    h.frame();
+    assert_eq!(h.root.overlay_hits.len(), 1, "the surface is registered");
+    h.dispatch(&pointer(PointerPhase::Up, 150.0, 30.0));
+    assert!(
+        h.root.is_focus_active(),
+        "the overlay route consumed the Up, so the tap never ended on the main tree"
+    );
+    assert_eq!(h.root.focus_epoch(), session, "the session is the same one");
+    assert!(h.root.ime_state().is_some(), "the surface stands");
+
+    // The blur was spent, not deferred: a stray Up on the main tree does not revive it.
+    h.dispatch(&pointer(PointerPhase::Up, 100.0, 180.0));
+    assert!(h.root.is_focus_active());
+
+    // A tap that does end on the main tree still blurs.
+    h.down(100.0, 180.0);
+    h.dispatch(&pointer(PointerPhase::Up, 100.0, 180.0));
+    assert!(
+        !h.root.is_focus_active(),
+        "an outside tap on the main tree blurs"
+    );
+}

@@ -696,16 +696,15 @@ impl PanZoomWidget {
         self.scroll_veto = ambient_scroll_veto();
         self.recognizer.handle(id, p, self.last_input_ms);
         self.sync_scroll_veto();
-        let inside = self.child.contains(p.position);
-        let result = if inside {
+        // A `Down` outside the child leaves its focus link to the root's
+        // session, as `route_event_single` does: a pan that starts beside a
+        // focused field keeps the keyboard, and a tap there blurs at its `Up`.
+        self.child.retire_stale_focus_link();
+        let result = if self.child.contains(p.position) {
             self.child.event_child(ctx, event)
         } else {
             EventResult::Ignored
         };
-        if !inside && self.child.is_focused() {
-            // Blur-on-outside-tap, as `route_event_single` does.
-            self.child.set_focused(false);
-        }
         if result == EventResult::Handled {
             self.drag = Drag::Child;
             // The child owns the gesture, not this view — publish nothing.
