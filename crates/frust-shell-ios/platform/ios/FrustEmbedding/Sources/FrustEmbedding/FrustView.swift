@@ -110,6 +110,35 @@ final class FrustView: UIView {
         metalLayer.frame = bounds
     }
 
+    // MARK: - Accessibility (text)
+    //
+    // Rule: this view is the single `UITextInput` responder and holds the
+    // focused field's REAL text in `mirror`, so it must never be an
+    // accessibility source of text. The accesskit nodes are, and an obscured
+    // field's node is already masked (role PasswordInput, bullet value).
+    // `isSecureTextEntry` only protects the keyboard; UIKit does not apply it
+    // to the value a `UITextInput` view reports to accessibility, so a screen
+    // reader or UI automation would otherwise read a password in clear.
+    //
+    // `isAccessibilityElement` is deliberately NOT overridden here: the
+    // accesskit adapter subclasses this view at run time and owns it. The
+    // adapter does not override `accessibilityValue` or `accessibilityTraits`,
+    // so these two overrides are what closes the leak. The `UITextInput` /
+    // `UIKeyInput` conformance and `text(in:)` are untouched; the keyboard
+    // keeps working from the mirror.
+
+    /// Never reports text: the view is not an accessibility source of it.
+    override var accessibilityValue: String? {
+        get { nil }
+        set {}
+    }
+
+    /// No text-entry or keyboard-key trait is claimed on behalf of the view.
+    override var accessibilityTraits: UIAccessibilityTraits {
+        get { super.accessibilityTraits.subtracting(.keyboardKey) }
+        set { super.accessibilityTraits = newValue }
+    }
+
     // MARK: - Text input
     //
     // Frust adopts the *full* `UITextInput` protocol (Flutter-style) so the
