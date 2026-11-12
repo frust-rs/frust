@@ -148,6 +148,20 @@ Defects seen on this run (open): after the keyboard is dismissed with back, a ta
 still-focused field does not reopen it until focus has moved away; `adb shell input text` inserts
 nothing into a focused field; the density change put the playground back on its first page.
 
+**Android: re-run 2026-11-12 on the Forms page** on the same Pixel 4a (Android 16), `adb`-driven
+with screenshots read by eye, against `examples/playground` built from `bc46fc9b`. The keyboard
+state is read from `dumpsys input_method` (`mInputShown`).
+
+| Check | Result | Observed |
+|---|---|---|
+| Keyboard reopen | pass | field A: tap shows the keyboard, back hides it, a second tap on the still-focused field shows it again (twice in a row); the same on the obscured field C; a tap on a caption does not raise it. The reopen leg alone also passes on a OnePlus 9 (Android 15) |
+| Keyboard over the bottom field | **fail** | field D, the last row, scrolled to the end and tapped: the keyboard shows and the tab bar hides, but the page does not scroll and D stays under the keyboard; a scroll drag with the keyboard up hides the keyboard instead of revealing D. The layout returns on dismiss |
+| Back | pass | full-width navigator pushed to depth 3: the back key pops 3 → 2, the back gesture from the left edge pops 2 → 1, and back at the root leaves to the launcher |
+
+Not run on this pass: moving focus with the keyboard's Return or Next key (the Forms page has no
+way to move focus from app code, so Return only counts a press) and typing with a composing
+keyboard.
+
 **iOS: run 2026-11-12, does not pass** on an iPhone 13 mini (iOS 27.2), XCUITest-driven with the
 hand-run legs noted, against `examples/playground` built from `355d6f1a` with Xcode 27.0. The
 active keyboard was a third-party one, not the system keyboard.

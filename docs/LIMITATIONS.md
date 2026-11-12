@@ -8481,19 +8481,19 @@ shows the guard works, not that it was needed. Notification display was not obse
 
 ---
 
-### `a11y-wrapper-phone-exposure-unverified` — the `semantics(child)` wrapper's exposure to VoiceOver and TalkBack is read from code, not observed
+### `a11y-wrapper-phone-exposure-unverified` — the `semantics(child)` wrapper is checked in the Android accessibility tree only; TalkBack speech and iOS are not observed
 
-**Observed**: the wrapper's nodes (label, value, hint, role, heading level, merged, tappable) are published into the accessibility tree and are expected to reach the screen readers, but that was established by reading the filter code of the Android and iOS accessibility adapters (which nodes each keeps or drops), not by running VoiceOver or TalkBack. A node the adapter drops would be silent on the phone while present in the headless semantics tree.
+**Observed**: on Android the wrapper's nodes reach the platform accessibility tree: a `uiautomator` dump of the playground's A11y page shows one node each for a heading, a labelled image, a merged cell (label and value), a button tile and a labelled group with its two children, and none for a hidden subtree. What TalkBack speaks for them, the hint, and activating a tappable wrapper through the accessibility action were not run. On iOS nothing has been observed: the expectation there rests on reading the adapter's filter code (which nodes it keeps or drops), and a node the adapter drops would be silent on the phone while present in the headless semantics tree.
 
-**Applies to**: apps that rely on `semantics(child)`, `TextView::heading` or `ImageView::label` for screen-reader users on Android and iOS.
+**Applies to**: apps that rely on `semantics(child)`, `TextView::heading` or `ImageView::label` for screen-reader users, on iOS above all.
 
-**Workaround**: check the screen with TalkBack and VoiceOver before relying on it; prefer a widget's own semantics where it has one.
+**Workaround**: check the screen with VoiceOver and TalkBack before relying on it; prefer a widget's own semantics where it has one.
 
-**Why accepted**: no phone accessibility run has been recorded yet; the entry stays until one is.
+**Why accepted**: the Android tree is verified; a spoken pass and an iOS pass have not been recorded yet, and the entry stays until they are.
 
-**Trigger for removal**: a recorded TalkBack and VoiceOver pass over a screen using the wrapper.
+**Trigger for removal**: a recorded VoiceOver pass and a TalkBack spoken pass over a screen using the wrapper.
 
-**Evidence**: code reading of the `accesskit_android` and `accesskit_ios` node filters and the headless tests of `crates/frust-widgets/src/semantics.rs`. Not run on a device.
+**Evidence**: (2026-11-12) `uiautomator` dumps on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15), recorded in `examples/playground/README.md`; code reading of the `accesskit_ios` node filter; the headless tests of `crates/frust-widgets/src/semantics.rs`.
 
 ---
 

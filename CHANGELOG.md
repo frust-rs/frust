@@ -216,6 +216,9 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   rotation). On a OnePlus 9 (Android 15) the build before the bump aborted 10 of 10 and this one
   0 of 10; a Pixel 4a (Android 16) also ran 10 of 10 clean. TalkBack speech, focus order and typing
   under TalkBack were not verified by hand.
+- On Android, a tap on a text field that still has focus shows the soft keyboard again after the
+  user dismissed it with back; before, the keyboard stayed down until focus had moved away. A
+  composition in progress is kept. Checked on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15).
 
 ## 0.6.6 — 2026-11-11
 
