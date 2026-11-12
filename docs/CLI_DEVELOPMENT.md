@@ -71,21 +71,24 @@ writes `version = "1.0.0"` and `build-number = 1`.
 
 `version` is one to three dot-separated non-negative integers (`2`, `2.3`, `2.3.4`); a suffix such
 as `1.0.0-beta` is rejected when `frust.toml` is read, because the same string becomes the Android
-`versionName` and the iOS `CFBundleShortVersionString`. `build-number` and `--build-number` must be
+`versionName` and the iOS `CFBundleShortVersionString`. `build-number` in `frust.toml` must be
+between 1 and 2100000000 (Android's maximum `versionCode`); `--build-number` is only checked for
 `>= 1`.
 
 | Target | Name / number when neither is set |
 |---|---|
 | Android (`build apk`, `appbundle`; `run -d <android>`) | `1.0` / `1`, written to `android/local.properties` |
 | iOS (`build ios`, `ipa`; `run` on a device) | Nothing is passed, so the Xcode project's own values apply (the scaffold ships `1.0` / `1`) |
-| macOS bundle with a generated `Info.plist` | `0.1.0` / `1` |
+| macOS bundle with a generated `Info.plist` | `0.1.0` / `1` (a scaffolded project ships its own plist at `1.0.0` / `1`, matching its `frust.toml`) |
 | Installer (`--installer`) | Name `0.1.0`; the build number is not used |
 | Windows `.exe` | Fixed in the project's `windows/build.rs`; flags and `[app]` do not reach it |
 | Linux bundle, web | No version is embedded (an installer still takes the name) |
 
-A release `frust build apk`, `appbundle` or `ipa` prints `warning: app version not set: building
-<name> (<number>); ...` when either value fell to its default. Debug and profile builds, other
-targets and `frust run` stay silent.
+A release `frust build apk` or `appbundle` prints `warning: app version not set: building <name>
+(<number>); ...` when either value fell to its default. A release `ipa` prints `warning: app
+version not set: the Xcode project's own version applies for the unset value; ...`, naming no
+numbers. Both end with a hint to set `[app] version` and `build-number` or pass the flags. Debug
+and profile builds, `build ios`, other targets and `frust run` stay silent.
 
 A project that ships its own `macos/Info.plist` has it copied verbatim and never rewritten. If its
 `CFBundleShortVersionString` or `CFBundleVersion` differs from a value that came from a flag or
