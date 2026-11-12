@@ -337,7 +337,7 @@ impl PhotoLibrary {
     /// ```
     ///
     /// - **Android:** each id is a `content://media` item URI; any other text is `None`.
-    /// - **iOS:** not implemented yet, [`PhotoError::Unsupported`] for a non-empty `ids`.
+    /// - **iOS:** each id is a Photos local identifier; one that does not resolve is `None`.
     /// - **Desktop and web:** [`PhotoError::Unsupported`], as for [`assets`](Self::assets).
     pub fn assets_by_id(ids: &[AssetId], details: bool) -> Result<Vec<Option<Asset>>, PhotoError> {
         #[cfg(feature = "library")]
