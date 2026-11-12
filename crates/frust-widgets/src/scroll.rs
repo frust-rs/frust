@@ -229,8 +229,9 @@
 //! is downward (the finger moves toward the keyboard), the focus session ends
 //! once for that gesture and the drag keeps scrolling. An upward drag, a wheel
 //! scroll, a fling in flight, a scrollbar thumb drag, a controller move and the
-//! caret reveal's own move never dismiss, and a drag that starts on the focused
-//! field belongs to the field. With no focused caret left, the reveal has
+//! caret reveal's own move never dismiss. A downward drag that starts on the
+//! focused field and that this view takes over as a scroll dismisses like any
+//! other. With no focused caret left, the reveal has
 //! nothing to do, so the dismissal causes no jump. Only this vertical
 //! `ScrollView` offers it; `ListView` and `CustomScrollView` do not.
 //!
@@ -856,9 +857,10 @@ impl<State: 'static> ScrollView<State> {
     /// ends the focus session once for that gesture, and the drag keeps
     /// scrolling normally. An upward drag never dismisses; neither does a
     /// wheel scroll, a fling already in flight, a scrollbar thumb drag, a
-    /// [`ScrollController`] move or the caret reveal's own move. A drag that
-    /// starts on the focused field belongs to the field and never reaches
-    /// this rule. With `false` the behaviour is unchanged: only a tap outside
+    /// [`ScrollController`] move or the caret reveal's own move. A downward
+    /// drag that starts on the focused field dismisses too, once this view
+    /// takes the gesture over as a scroll: the field does not hold a vertical
+    /// drag. With `false` the behaviour is unchanged: only a tap outside
     /// the field dismisses the keyboard.
     ///
     /// ```
