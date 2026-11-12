@@ -23,10 +23,11 @@ impl std::fmt::Display for Boom {
 
 impl std::error::Error for Boom {}
 
-/// Shared knobs: how many attempts ran, how many were allowed to fail, ready-builder calls.
+/// Shared knobs: how many attempts ran, how many panic, how many more fail, ready-builder calls.
 #[derive(Clone, Default)]
 struct Probe {
     attempts: Arc<AtomicUsize>,
+    panics: Arc<AtomicUsize>,
     failures: Arc<AtomicUsize>,
     ready_calls: Arc<AtomicUsize>,
     release: Arc<AtomicBool>,
@@ -44,6 +45,9 @@ fn gate_tester(probe: &Probe) -> Tester<(), impl View<()>> {
                     let attempt = probe.attempts.fetch_add(1, Ordering::SeqCst);
                     while !probe.release.load(Ordering::SeqCst) {
                         frust::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    if attempt < probe.panics.load(Ordering::SeqCst) {
+                        panic!("kaput");
                     }
                     if attempt < probe.failures.load(Ordering::SeqCst) {
                         Err(Boom)
@@ -85,6 +89,24 @@ fn error_shows_the_error_view_and_retry_recovers() {
     let mut tester = gate_tester(&probe);
     tester.pump_until("error view", WAIT, |t| shows(t, "boom"));
     assert!(shows(&tester, "Retry"));
+    assert_eq!(probe.ready_calls.load(Ordering::SeqCst), 0);
+    tester.tap(find::text("Retry"));
+    tester.pump_until("ready after retry", WAIT, |t| shows(t, "ready 7"));
+    assert_eq!(probe.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(probe.ready_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_panicking_task_shows_the_error_view_and_retry_recovers() {
+    let probe = Probe::default();
+    probe.panics.store(1, Ordering::SeqCst);
+    probe.release.store(true, Ordering::SeqCst);
+    let mut tester = gate_tester(&probe);
+    tester.pump_until("panic error view", WAIT, |t| {
+        shows(t, "start-up task panicked: kaput")
+    });
+    assert!(shows(&tester, "Retry"));
+    assert!(!shows(&tester, "splash"));
     assert_eq!(probe.ready_calls.load(Ordering::SeqCst), 0);
     tester.tap(find::text("Retry"));
     tester.pump_until("ready after retry", WAIT, |t| shows(t, "ready 7"));
