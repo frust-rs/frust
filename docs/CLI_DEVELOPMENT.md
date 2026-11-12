@@ -62,6 +62,37 @@ Debug/profile/hot builds enable `<key>/perf-trace`, `<key>/devtools` and `<key>/
 `<key>` is the app's dependency key for `frust-ui`, resolved by `frust-drive::facade_key` from
 cargo metadata (fallback: manifest read; default `frust`).
 
+## App version and build number
+
+Each build resolves its version name and build number independently, in this order:
+`--build-name` / `--build-number`, then `[app] version` / `build-number` in `frust.toml`
+(`frust-drive::build_info::resolve_version`), then the platform default below. `frust create`
+writes `version = "1.0.0"` and `build-number = 1`.
+
+`version` is one to three dot-separated non-negative integers (`2`, `2.3`, `2.3.4`); a suffix such
+as `1.0.0-beta` is rejected when `frust.toml` is read, because the same string becomes the Android
+`versionName` and the iOS `CFBundleShortVersionString`. `build-number` and `--build-number` must be
+`>= 1`.
+
+| Target | Name / number when neither is set |
+|---|---|
+| Android (`build apk`, `appbundle`; `run -d <android>`) | `1.0` / `1`, written to `android/local.properties` |
+| iOS (`build ios`, `ipa`; `run` on a device) | Nothing is passed, so the Xcode project's own values apply (the scaffold ships `1.0` / `1`) |
+| macOS bundle with a generated `Info.plist` | `0.1.0` / `1` |
+| Installer (`--installer`) | Name `0.1.0`; the build number is not used |
+| Windows `.exe` | Fixed in the project's `windows/build.rs`; flags and `[app]` do not reach it |
+| Linux bundle, web | No version is embedded (an installer still takes the name) |
+
+A release `frust build apk`, `appbundle` or `ipa` prints `warning: app version not set: building
+<name> (<number>); ...` when either value fell to its default. Debug and profile builds, other
+targets and `frust run` stay silent.
+
+A project that ships its own `macos/Info.plist` has it copied verbatim and never rewritten. If its
+`CFBundleShortVersionString` or `CFBundleVersion` differs from a value that came from a flag or
+`frust.toml`, the build reports a mismatch note; edit the plist or the setting to agree.
+
+`frust run` on an iOS simulator passes no version, so the Xcode project's values apply there.
+
 ## Adding android/ and ios/ to an existing crate
 
 No command does this. The CLI commands are `create`, `doctor`, `devices`, `clean`, `plugin`,
