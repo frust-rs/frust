@@ -449,6 +449,8 @@ pub struct PlaygroundState {
     pub a11y: pages::accessibility::A11yState,
     /// The "Forms" section's fields, focus report and full-width navigator (`pages::forms`).
     pub forms: pages::forms::FormsState,
+    /// The "Gate" section's run counter and failure toggle (`pages::start_gate`).
+    pub start_gate: pages::start_gate::GateState,
 }
 
 impl PlaygroundState {
@@ -495,6 +497,7 @@ impl PlaygroundState {
             photo_watch: pages::photos::LibraryWatch::default(),
             a11y: pages::accessibility::A11yState::new(),
             forms: pages::forms::FormsState::new(),
+            start_gate: pages::start_gate::GateState::new(),
         }
     }
 }
