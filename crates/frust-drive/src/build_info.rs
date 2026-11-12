@@ -384,6 +384,27 @@ mod tests {
     }
 
     #[test]
+    fn unset_version_warnings_state_their_wording() {
+        let defaulted = ResolvedVersion {
+            name: None,
+            number: None,
+            name_source: VersionSource::Default,
+            number_source: VersionSource::Default,
+        };
+        assert_eq!(
+            defaulted.android_unset_warning(),
+            "warning: app version not set: building 1.0 (1); set [app] version and build-number \
+             in frust.toml or pass --build-name / --build-number"
+        );
+        assert_eq!(
+            ResolvedVersion::native_unset_warning(),
+            "warning: app version not set: the Xcode project's own version applies for the unset \
+             value; set [app] version and build-number in frust.toml or pass --build-name / \
+             --build-number"
+        );
+    }
+
+    #[test]
     fn flag_beats_manifest() {
         let m = manifest("version = \"1.0\"\nbuild-number = 5\n");
         let r = resolve_version(&info(Some("2.0"), Some(9)), Some(&m));

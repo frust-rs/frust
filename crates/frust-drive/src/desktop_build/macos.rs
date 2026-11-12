@@ -89,8 +89,10 @@ const ICON_KEY_SOURCE: &str = "`macos/Info.plist`'s CFBundleIconFile";
 /// icon name with it and without it, so both spellings compare equal here.
 const ICNS_EXTENSION: &str = ".icns";
 
-/// Fallback `CFBundleShortVersionString` when `--build-name` isn't given —
-/// the same `0.1.0` a scaffolded `Info.plist` and `Cargo.toml` carry.
+/// Fallback `CFBundleShortVersionString` for a generated `Info.plist` when
+/// neither `--build-name` nor `frust.toml`'s `[app] version` supplies one. A
+/// scaffolded project ships its own `Info.plist` at `1.0.0`, matching its
+/// `frust.toml`, so this applies only to a project without one.
 const DEFAULT_SHORT_VERSION: &str = "0.1.0";
 
 /// Assembles the `.app` bundle for `config` around the compiled `binary`.
