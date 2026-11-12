@@ -1,7 +1,7 @@
 //! The playground sections listed in [`SECTION_LABELS`], one module per section: `platform_views`,
 //! `camera`, `responsive`, `terminal`, `keys`, `i18n`, `video_player`,
 //! `url_launcher`, `auth_session`, `database`, `graph_canvas`,
-//! `scroll_control`, `drag_drop`, `tabs`, `images`, `slivers`, `desktop_services`, `shortcuts`, `network`, `glass`, `gpu_pass`, `device_memory`, `photos`, and `accessibility` (the assistive-technology fixture page) — each one an
+//! `scroll_control`, `drag_drop`, `tabs`, `images`, `slivers`, `desktop_services`, `shortcuts`, `network`, `glass`, `gpu_pass`, `device_memory`, `photos`, `accessibility` (the assistive-technology fixture page), and `forms` (the keyboard / back-swipe fixture page) — each one an
 //! OS-facing capability (or, for `graph_canvas`/`scroll_control`/`drag_drop`/
 //! `slivers`, a widget demo: `CanvasView`/`PanZoomView` for the first, a keyed
 //! `ListView` bound to a `ScrollController` for the second,
@@ -46,6 +46,7 @@ pub mod database;
 pub mod desktop_services;
 pub mod device_memory;
 pub mod drag_drop;
+pub mod forms;
 pub mod glass;
 pub mod gpu_pass;
 pub mod graph_canvas;
@@ -83,7 +84,7 @@ use crate::PlaygroundState;
 /// single line at that width. A page wanting a longer heading for itself
 /// (e.g. `platform_views`'s own on-page title) uses its own string literal
 /// rather than this array — see `pages/platform_views.rs`.
-pub const SECTION_LABELS: [&str; 24] = [
+pub const SECTION_LABELS: [&str; 25] = [
     "Platform",
     "Camera",
     "Layout",
@@ -108,6 +109,7 @@ pub const SECTION_LABELS: [&str; 24] = [
     "Memory",
     "Photos",
     "A11y",
+    "Forms",
 ];
 
 /// How many of [`SECTION_LABELS`], in order, count as "primary" — shown
@@ -150,6 +152,7 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         21 => any(device_memory::page(state)),
         22 => any(photos::page(state)),
         23 => any(accessibility::page(state)),
+        24 => any(forms::page(state)),
         _ => any(platform_views::page(state)),
     }
 }
