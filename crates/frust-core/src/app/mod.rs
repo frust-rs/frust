@@ -71,6 +71,10 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     window_size: Size,
     /// The contact whose `Down` claimed the live capture; only its own `Up`/`Cancel` clears it.
     capture_claimant: Option<PointerId>,
+    /// A press that found no focus claim on its path: its contact and `Down` position. It blurs
+    /// at that contact's `Up` unless dragged past the slop, cancelled or joined by a second
+    /// contact (see `commit_pointer`).
+    pending_blur: Option<(PointerId, kurbo::Point)>,
     /// Whether the live captor opted into the gesture's other contacts; `false` when uncaptured.
     capture_contacts: bool,
     /// Whether that opt-in came from the root widget itself rather than a pod below it.
@@ -169,6 +173,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             next_id: 0,
             window_size: Size::ZERO,
             capture_claimant: None,
+            pending_blur: None,
             capture_contacts: false,
             contacts_captor_is_root: false,
             focus_active: false,
