@@ -94,8 +94,9 @@ use std::time::Duration;
 use frust::Theme;
 use frust::authoring::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, ViewSeq, Widget,
-    build_child, rebuild_children, route_event, teardown_child, visit_children,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, ViewSeq, Widget, build_child,
+    rebuild_children, retire_stale_focus_links, route_event, route_event_reporting_claim,
+    teardown_child, visit_children,
 };
 use frust::{AnimationController, Curve, FrameTime, Tween};
 use kurbo::{Affine, Point, Size, Vec2};
@@ -658,12 +659,16 @@ impl Widget for GlyphRevealWidget {
         // Pointer/scroll input reaches only what the last paint revealed: a
         // child whose cascade window has not opened paints nothing, so routing
         // a tap into its rect would have blank space accept it.
-        let result = route_event(&mut self.pods[..frontier], ctx, event);
-        // Blur-on-outside-tap still covers the whole container, not just the
-        // routed prefix: a `Down` that re-claimed nothing must drop a hidden
-        // child's stale focus link exactly as ungated routing would (mirroring
-        // `route_event`'s own rule over the children it never saw).
-        if matches!(event, InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Down)) {
+        //
+        // `route_event`'s focus-link rule still covers the whole container, not
+        // just the routed prefix: a hidden child's stranded link is retired
+        // before the dispatch, and a claim recorded through a revealed child
+        // ends a hidden child's link in the same pass. A dispatch that claims
+        // nothing leaves every link to the root's session (a tap blurs at its
+        // `Up`; a drag or a cancel ends nothing).
+        retire_stale_focus_links(self.pods[frontier..].iter_mut());
+        let (result, claimed) = route_event_reporting_claim(&mut self.pods[..frontier], ctx, event);
+        if claimed {
             for pod in &mut self.pods[frontier..] {
                 if pod.is_focused() {
                     pod.set_focused(false);
@@ -824,7 +829,7 @@ fn mix_ink(from: Color, to: Color, t: f64) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use frust::authoring::{PointerButton, PointerEvent, Role, any};
+    use frust::authoring::{PointerButton, PointerEvent, PointerPhase, Role, any};
     use std::any::Any;
 
     const WINDOW: Size = Size::new(300.0, 400.0);
@@ -954,6 +959,9 @@ mod tests {
     /// The retained half of [`Block`].
     struct BlockWidget(Size);
 
+    /// The leading strip of a [`Block`] whose `Down` claims focus.
+    const FOCUS_STRIP: f64 = 10.0;
+
     impl<S: 'static> View<S> for Block {
         type Element = BlockWidget;
         fn build(&self, _ctx: &mut BuildCtx<'_>) -> BlockWidget {
@@ -979,10 +987,16 @@ mod tests {
         }
         /// Consumes any pointer event that reaches it, the way a real row's
         /// press target would — so a container test can read "did this child get
-        /// the tap?" straight off the routed result.
-        fn event(&mut self, _ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        /// the tap?" straight off the routed result. A `Down` in its first
+        /// [`FOCUS_STRIP`] px claims focus, the way a field in the row would.
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
             match event {
-                InputEvent::Pointer(_) => EventResult::Handled,
+                InputEvent::Pointer(p) => {
+                    if p.phase == PointerPhase::Down && p.position.x < FOCUS_STRIP {
+                        ctx.request_focus();
+                    }
+                    EventResult::Handled
+                }
                 _ => EventResult::Ignored,
             }
         }
@@ -1384,6 +1398,41 @@ mod tests {
         let (rec, _) = paint(&mut w, size, 400.0, None);
         assert_eq!(rec.child_progress(), vec![1.0; 3], "all three settled");
         assert_eq!(tap(&mut w, in_child_2), EventResult::Handled);
+    }
+
+    /// Mid-cascade only the revealed prefix is routed, but the focus-link rule
+    /// covers the hidden rows too: a press that claims nothing leaves a hidden
+    /// row's link to the root's session, and a press that moves focus to a
+    /// revealed row ends it in the same pass.
+    #[test]
+    fn a_hidden_rows_focus_link_ends_only_on_a_claim_elsewhere() {
+        let (closed, open) = (view(false), view(true));
+        let mut w = build(&closed);
+        layout(&mut w);
+        rebuild(&closed, &open, &mut w);
+        let mut size = layout(&mut w);
+        paint(&mut w, size, 0.0, None);
+        size = layout(&mut w);
+        let (rec, _) = paint(&mut w, size, 165.0, None);
+        assert_eq!(rec.child_progress().len(), 2, "child 2 is still hidden");
+        // The hidden row holds the session (focused before it was collapsed).
+        w.pods[2].set_focused(true);
+
+        assert_eq!(tap(&mut w, Point::new(60.0, 10.0)), EventResult::Handled);
+        assert!(
+            w.pods[2].holds_live_focus(),
+            "a press that claims nothing leaves the hidden row's link"
+        );
+
+        assert_eq!(
+            tap(&mut w, Point::new(FOCUS_STRIP / 2.0, 10.0)),
+            EventResult::Handled
+        );
+        assert!(w.pods[0].is_focused(), "the press moved focus to row 0");
+        assert!(
+            !w.pods[2].is_focused(),
+            "and ended the hidden row's link in the same pass"
+        );
     }
 
     #[test]
