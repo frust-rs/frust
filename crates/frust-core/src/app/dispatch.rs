@@ -180,7 +180,10 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if is_pointer_down(event) {
             self.set_keyboard_focus(false);
         }
-        // Decided before the gate, so a contact the gate drops still ends a tap.
+        // Advanced before the gate and the overlay route, so a `Move`, `Down` or `Cancel` either
+        // of them swallows still moves the pending blur on. An `Up` either swallows consumes it
+        // WITHOUT blurring (both return below, before the release): the press did not end on the
+        // main tree, so nothing there saw it end as a tap (`advance_pending_blur`).
         let blur_on_up = self.advance_pending_blur(event, pointer_id);
         let Some(secondary) = self.gate_contact(event, pointer_id) else {
             return (EventOutcome::default(), false);
@@ -443,10 +446,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Commit a claimant (or uncaptured) pointer: a `Down` latches a capture and claims focus or
-    /// arms a pending blur (see below); an `Up`/`Cancel` (only the claimant's reaches here) clears the latch. A claim whose
-    /// pass published no `ImeState` drops the previous holder's surface, unless the claimant
-    /// already held a live link (a chrome re-claim). Returns
-    /// whether a claim was honoured; writes the capture latch, `focus_surface` and focus session.
+    /// arms a pending blur (`advance_pending_blur` decides it); an `Up`/`Cancel` (only the
+    /// claimant's reaches here) clears the latch. A claim whose pass published no `ImeState`
+    /// drops the previous holder's surface, unless the claimant already held a live link (a
+    /// chrome re-claim). Returns whether a claim was honoured; writes the capture latch,
+    /// `focus_surface` and focus session.
     fn commit_pointer(
         &mut self,
         phase: PointerPhase,
@@ -477,6 +481,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     // drag that starts outside a focused text field keeps the keyboard up.
                     // The pointer's own travel decides (past its slop it is a drag), a second
                     // contact or a `Cancel` drops the blur, and a wheel scroll never blurred.
+                    // Until then the focused pod keeps its link (the routers clear none on an
+                    // unclaimed press), so the field keeps its caret, IME and keys; the tap's
+                    // release strands that link by epoch.
                     self.pending_blur = Some((pointer_id, position));
                     false
                 }
@@ -489,10 +496,16 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         }
     }
 
-    /// Advance the pending blur for a bare pointer event, before the contact gate. A `Move` of
-    /// the pending pointer past its slop (`TOUCH_SLOP`, or `MOUSE_SLOP` for the mouse) or a
-    /// `Down` of another contact drops it; a `Cancel` drops it; an `Up` of the pending pointer
-    /// consumes it and returns `true`, meaning the gesture was a tap and the caller blurs.
+    /// Advance the pending blur for a bare pointer event, before the contact gate and the overlay
+    /// route. A `Move` of the pending pointer past its slop (`TOUCH_SLOP`, or `MOUSE_SLOP` for
+    /// the mouse), a `Down` of another contact or a `Cancel` drops it; an `Up` of the pending
+    /// pointer consumes it and returns `true`: a tap, which the caller blurs after the main-tree
+    /// dispatch unless a claim was honoured.
+    ///
+    /// An `Up` the overlay route consumes (a surface floated under the held press, which must
+    /// not dismiss the field) or the contact gate drops (another contact holds a capture, which
+    /// only a floated surface capturing a hovering mouse's `Move` latches without a `Down`)
+    /// still consumes it, and nothing blurs: the tap did not end on the main tree.
     fn advance_pending_blur(&mut self, event: &InputEvent, pointer_id: PointerId) -> bool {
         let InputEvent::Pointer(pointer) = event else {
             return false;

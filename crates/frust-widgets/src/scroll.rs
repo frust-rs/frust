@@ -1075,6 +1075,10 @@ impl ScrollWidget {
         ) {
             self.deliver_pending_scroll(ctx);
         }
+        // The focus-link rule of `crate::authoring::route_event`: an outside
+        // press leaves the child's link to the root's session, so a link that
+        // session stranded is retired before anything reaches the child.
+        self.child.retire_stale_focus_link();
         match event {
             // A broadcast is not user input: it bypasses the whole gesture
             // machinery, reaches the child whether or not it is focused or
@@ -1089,9 +1093,10 @@ impl ScrollWidget {
             }
             // Focus-routed events (Key/Ime, and the clipboard verbs an
             // `EditCommand` carries) bypass the scroll gesture machinery and go
-            // straight to the child if it holds the recorded focus path.
+            // straight to the child if it holds the focus link on the live
+            // session (a link an ended session stranded routes nothing).
             InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_) => {
-                if self.child.is_focused() {
+                if self.child.holds_live_focus() {
                     self.child.event_child(ctx, event)
                 } else {
                     EventResult::Ignored
@@ -5925,5 +5930,275 @@ mod caret_reveal_tests {
             inside(c, inner_top, inner_top + 200.0),
             "inside the inner: {c:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod outside_press_focus_tests {
+    //! The focused field's link through a press outside it, driven through a
+    //! real `RenderRoot` over the real routers: a drag that starts on a
+    //! caption keeps the field typing, a held press does too, a tap blurs at
+    //! its `Up`, a press on a second field moves focus at its `Down`, and a
+    //! single-child wrapper around the field changes none of it.
+
+    use std::any::Any;
+    use std::cell::RefCell;
+
+    use frust_core::{ChildPod, DiscardScene, FrameTime, ImeEvent, RenderRoot};
+    use frust_text::TextContext;
+
+    use super::*;
+    use crate::{EdgeInsets, Padding, SizedBox, column, text, text_input};
+
+    const W: f64 = 400.0;
+    const H: f64 = 300.0;
+    /// Inside the caption's box (the first 40 px of the page).
+    const CAPTION: (f64, f64) = (10.0, 20.0);
+
+    thread_local! {
+        /// The caption is a real text run, so layout needs a text context.
+        static TEXT: RefCell<TextContext> = RefCell::new(TextContext::new());
+    }
+
+    #[derive(Default)]
+    struct Form {
+        first: String,
+        second: String,
+        layout: Layout,
+        clock_ms: f64,
+    }
+
+    type Root = RenderRoot<Form, ScrollView<Form>>;
+    type Logic = fn(&mut Form) -> ScrollView<Form>;
+
+    #[derive(Clone, Copy, Default)]
+    enum Layout {
+        /// The caption, then the field.
+        #[default]
+        Bare,
+        /// The caption, then the field inside a 20 px `Padding`.
+        Padded,
+        /// The caption, then two fields.
+        TwoFields,
+    }
+
+    /// `scroll_view(column(caption, field, ..., spacer))`; the spacer makes the
+    /// page scroll, so a drag from the caption is a real scroll.
+    fn page(state: &mut Form) -> ScrollView<Form> {
+        let first = text_input(state.first.clone(), |s: &mut Form, v: String| s.first = v);
+        let second = text_input(state.second.clone(), |s: &mut Form, v: String| s.second = v);
+        let caption = SizedBox(Some(W), Some(40.0)).child(text("Caption"));
+        let body = column().child(caption);
+        let body = match state.layout {
+            Layout::Bare => body.child(first),
+            Layout::Padded => body.child(Padding(EdgeInsets::all(20.0), first)),
+            Layout::TwoFields => body.child(first).child(second),
+        };
+        scroll_view(body.child(SizedBox(Some(W), Some(1000.0))))
+    }
+
+    fn frame<V: View<Form>>(
+        root: &mut RenderRoot<Form, V>,
+        logic: &mut impl FnMut(&mut Form) -> V,
+        state: &mut Form,
+    ) {
+        state.clock_ms += 16.0;
+        root.rebuild(logic, state);
+        TEXT.with_borrow_mut(|tcx| root.layout_with_text(Size::new(W, H), tcx as &mut dyn Any));
+        let t = FrameTime::from_nanos((state.clock_ms * 1_000_000.0) as u64);
+        root.paint(&mut DiscardScene, t);
+    }
+
+    fn touch(phase: PointerPhase, (x, y): (f64, f64)) -> InputEvent {
+        InputEvent::PointerContact {
+            pointer_id: frust_core::event::PointerId::touch(0),
+            event: PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            },
+        }
+    }
+
+    fn commit(text: &str) -> InputEvent {
+        InputEvent::Ime(ImeEvent::Commit(text.to_string()))
+    }
+
+    /// Whether each text field, in paint order, holds a live focus link all
+    /// the way down from the root.
+    fn field_links<V: View<Form>>(root: &RenderRoot<Form, V>) -> Vec<bool> {
+        fn walk(pod: &ChildPod, chain: bool, out: &mut Vec<bool>) {
+            let chain = chain && pod.holds_live_focus();
+            let widget = pod.widget();
+            // By name: an erased child is boxed twice, so a downcast misses it.
+            if widget.type_name().ends_with("TextInputWidget") {
+                out.push(chain);
+                return;
+            }
+            widget.visit_children(&mut |child| walk(child, chain, out));
+        }
+        let id = root.root_id().expect("root built");
+        let mut out = Vec::new();
+        let live = root.is_focus_active();
+        root.tree()
+            .pod(id)
+            .expect("root pod")
+            .widget()
+            .visit_children(&mut |child| walk(child, live, &mut out));
+        out
+    }
+
+    /// The window-space centre of the `index`th text field.
+    fn field_centre<V: View<Form>>(root: &RenderRoot<Form, V>, index: usize) -> (f64, f64) {
+        let bounds = root
+            .inspect()
+            .into_iter()
+            .filter(|node| node.type_name.ends_with("TextInputWidget"))
+            .nth(index)
+            .expect("the field is in the tree")
+            .bounds;
+        (bounds.center().x, bounds.center().y)
+    }
+
+    /// Mount `layout` and focus the first field with a tap on it.
+    fn focused(layout: Layout) -> (Root, Logic, Form) {
+        let mut logic: Logic = page;
+        let mut state = Form {
+            layout,
+            ..Form::default()
+        };
+        let mut root = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state);
+        let at = field_centre(&root, 0);
+        root.event(&mut state, &touch(PointerPhase::Down, at));
+        root.event(&mut state, &touch(PointerPhase::Up, at));
+        frame(&mut root, &mut logic, &mut state);
+        assert!(root.is_focus_active(), "the tap focused the field");
+        assert!(field_links(&root)[0], "the field holds the link");
+        root.event(&mut state, &commit("a"));
+        frame(&mut root, &mut logic, &mut state);
+        assert_eq!(state.first, "a", "the focused field types");
+        (root, logic, state)
+    }
+
+    /// The field is still the live session's: a commit lands in it, it holds
+    /// the link, and its next paint republishes its surface with a caret.
+    fn assert_still_typing<V: View<Form>>(
+        root: &mut RenderRoot<Form, V>,
+        logic: &mut impl FnMut(&mut Form) -> V,
+        state: &mut Form,
+        expected: &str,
+    ) {
+        root.event(state, &commit("bc"));
+        frame(root, logic, state);
+        assert_eq!(state.first, expected, "the commit landed in the field");
+        assert!(root.is_focus_active(), "the session stands");
+        assert!(field_links(root)[0], "the field holds the live link");
+        let ime = root.ime_state().expect("the field publishes its surface");
+        assert_eq!(ime.editing.text, expected, "republished after the commit");
+        assert!(ime.caret.is_some(), "with a caret: the field paints it");
+    }
+
+    /// Down on the caption, drag 40 px (past the slop) and lift: a scroll, not
+    /// a tap, so the field keeps typing.
+    fn drag_from(
+        root: &mut Root,
+        logic: &mut impl FnMut(&mut Form) -> ScrollView<Form>,
+        state: &mut Form,
+        from: (f64, f64),
+    ) {
+        root.event(state, &touch(PointerPhase::Down, from));
+        for step in 1..=4 {
+            let y = from.1 - 10.0 * f64::from(step);
+            root.event(state, &touch(PointerPhase::Move, (from.0, y)));
+            frame(root, logic, state);
+        }
+        root.event(state, &touch(PointerPhase::Up, (from.0, from.1 - 40.0)));
+        frame(root, logic, state);
+    }
+
+    /// (1) A drag that starts on the caption keeps the field's link.
+    #[test]
+    fn a_drag_from_a_caption_keeps_the_field_typing() {
+        let (mut root, mut logic, mut state) = focused(Layout::Bare);
+        drag_from(&mut root, &mut logic, &mut state, CAPTION);
+        assert_still_typing(&mut root, &mut logic, &mut state, "abc");
+    }
+
+    /// (2) Between the `Down` and the `Up` of an outside press nothing has been
+    /// decided yet, so the field still holds the link and takes text.
+    #[test]
+    fn a_held_outside_press_keeps_the_field_typing() {
+        let (mut root, mut logic, mut state) = focused(Layout::Bare);
+        root.event(&mut state, &touch(PointerPhase::Down, CAPTION));
+        assert_still_typing(&mut root, &mut logic, &mut state, "abc");
+        // Lifted in place, the press was a tap after all: it blurs now.
+        root.event(&mut state, &touch(PointerPhase::Up, CAPTION));
+        assert!(!root.is_focus_active(), "the tap blurred at its Up");
+    }
+
+    /// (3) A tap outside blurs: the link is stranded, nothing types, and the
+    /// surface is gone.
+    #[test]
+    fn an_outside_tap_blurs_the_field() {
+        let (mut root, mut logic, mut state) = focused(Layout::Bare);
+        root.event(&mut state, &touch(PointerPhase::Down, CAPTION));
+        root.event(&mut state, &touch(PointerPhase::Up, CAPTION));
+        frame(&mut root, &mut logic, &mut state);
+        assert!(!root.is_focus_active(), "the tap ended the session");
+        assert_eq!(field_links(&root), vec![false], "no live link remains");
+        root.event(&mut state, &commit("bc"));
+        frame(&mut root, &mut logic, &mut state);
+        assert_eq!(state.first, "a", "a commit after the blur changes nothing");
+        assert!(!root.is_focus_active());
+        assert_eq!(root.ime_state(), None, "the surface is gone");
+        assert_eq!(field_links(&root), vec![false]);
+    }
+
+    /// (4) A press on a second field moves focus at its `Down`: the first
+    /// field's link ends in that pass, and text goes to the second only.
+    #[test]
+    fn a_press_on_a_second_field_moves_focus_at_down() {
+        let (mut root, mut logic, mut state) = focused(Layout::TwoFields);
+        let second = field_centre(&root, 1);
+        root.event(&mut state, &touch(PointerPhase::Down, second));
+        assert!(root.is_focus_active());
+        assert_eq!(
+            field_links(&root),
+            vec![false, true],
+            "the Down moved the link to the second field"
+        );
+        root.event(&mut state, &commit("x"));
+        assert_eq!(state.second, "x", "the commit landed in the second field");
+        assert_eq!(state.first, "a", "and not in the first");
+        root.event(&mut state, &touch(PointerPhase::Up, second));
+        frame(&mut root, &mut logic, &mut state);
+        assert!(root.is_focus_active(), "the Up does not blur the new focus");
+        root.event(&mut state, &commit("y"));
+        frame(&mut root, &mut logic, &mut state);
+        assert_eq!((state.first.as_str(), state.second.as_str()), ("a", "xy"));
+        assert_eq!(field_links(&root), vec![false, true]);
+    }
+
+    /// (5) The same drag as (1) with the field inside a single-child wrapper,
+    /// once from the caption and once from the wrapper's own inset (inside the
+    /// `Padding`, outside the field: the single-child router's outside press).
+    #[test]
+    fn a_drag_beside_a_wrapped_field_keeps_it_typing() {
+        let (mut root, mut logic, mut state) = focused(Layout::Padded);
+        drag_from(&mut root, &mut logic, &mut state, CAPTION);
+        assert_still_typing(&mut root, &mut logic, &mut state, "abc");
+
+        let (mut root, mut logic, mut state) = focused(Layout::Padded);
+        let (_, y) = field_centre(&root, 0);
+        drag_from(&mut root, &mut logic, &mut state, (5.0, y));
+        assert_still_typing(&mut root, &mut logic, &mut state, "abc");
+        // A tap on the inset is still an outside tap.
+        let (_, y) = field_centre(&root, 0);
+        root.event(&mut state, &touch(PointerPhase::Down, (5.0, y)));
+        root.event(&mut state, &touch(PointerPhase::Up, (5.0, y)));
+        frame(&mut root, &mut logic, &mut state);
+        assert!(!root.is_focus_active(), "a tap on the inset blurs");
+        assert_eq!(field_links(&root), vec![false]);
     }
 }
