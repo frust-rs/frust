@@ -30,6 +30,10 @@
 //!   the keyset query takes no count, orders by the sort key then `_ID`,
 //!   selects the rows after the cursor's key and `_ID` and reads one row past
 //!   the page, never seeks, and the offset path keeps its count and seek;
+//! - lookup by id: the `assetsById` call and its `AssetsByIdResult` match, the
+//!   Rust arm decodes the page as a listing does and puts the rows back by
+//!   position, and the host rejects a non-`content://media` id and queries
+//!   image and video rows in chunks of at most 500 bound ids;
 //! - thumbnail cancel: the load gets a real `CancellationSignal` held under its
 //!   request id, `cancelThumbnail` fires it, a failure after the cancel answers
 //!   `CANCELLED`, and the Rust hook calls the entry and types the code;
@@ -736,6 +740,11 @@ fn browse_jni_calls_match_the_kotlin_declarations() {
             "manageLimitedSelection",
             "(J)I",
         ),
+        (
+            "@JvmStatic\n    fun assetsById(ids: Array<String>, details: Boolean): AssetsByIdResult",
+            "assetsById",
+            "([Ljava/lang/String;Z)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsByIdResult;",
+        ),
     ] {
         assert!(kotlin.contains(decl), "Kotlin host must declare `{decl}`");
         let at = rust
@@ -859,6 +868,7 @@ fn every_blocking_library_call_refuses_the_ui_thread() {
     for name in [
         "pub(crate) fn albums(",
         "pub(crate) fn assets(",
+        "pub(crate) fn assets_by_id(",
         "pub(crate) fn thumbnail(",
     ] {
         let body = function(&rust, name);
@@ -2458,6 +2468,77 @@ fn cursor_page_fields_match_their_rust_reads() {
         function(&rust, "pub(crate) fn assets(").contains("asset_columns(env, result)?"),
         "both pages read their arrays through one reader"
     );
+}
+
+#[test]
+fn assets_by_id_result_and_host_match_their_rust_reads() {
+    let kotlin = read(KOTLIN_HOST);
+    let rust = read(RUST_ANDROID_LIBRARY);
+    let sig =
+        "([Ljava/lang/String;Z)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsByIdResult;";
+    assert!(
+        kotlin.contains(&format!("`{sig}`")),
+        "the contract table names the `assetsById` signature"
+    );
+    let decl = "fun assetsById(ids: Array<String>, details: Boolean): AssetsByIdResult =";
+    let at = kotlin.find(decl).expect("the host declares `assetsById`");
+    assert!(
+        kotlin[at..(at + 200).min(kotlin.len())]
+            .contains("MediaStoreBrowser.assetsById(appContext, ids, details)"),
+        "the host forwards to the browser"
+    );
+    assert_eq!(
+        jvm_fields(&kotlin, "class AssetsByIdResult("),
+        [
+            ("code", "Int"),
+            ("positions", "IntArray"),
+            ("page", "AssetsResult"),
+        ]
+        .map(|(name, ty)| (name.to_string(), ty.to_string()))
+        .to_vec(),
+        "`AssetsByIdResult` fields changed"
+    );
+    let code = rust_code(&rust);
+    let arm = function(&code, "pub(crate) fn assets_by_id(");
+    for read in [
+        "int_field(env, &result, jni_str!(\"code\"))",
+        "int_array_field(env, &result, jni_str!(\"positions\"))",
+        "jni_sig!(\"Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;\")",
+        "asset_columns(env, page)?",
+        "assets_from(columns, 0, details)",
+        "crate::in_input_order(ids.len(), &positions, page.items)",
+        "JValue::Object(&raw_ids), JValue::Bool(details)",
+    ] {
+        assert!(arm.contains(read), "no `{read}` in `assets_by_id`");
+    }
+    assert!(
+        !arm.contains("PickGuard"),
+        "`assets_by_id` is read-only and never takes the pick guard"
+    );
+}
+
+#[test]
+fn assets_by_id_queries_media_rows_in_bounded_chunks() {
+    let browser = read(KOTLIN_BROWSER);
+    assert!(browser.contains("internal const val BY_ID_CHUNK = 500"));
+    let row_id = function(&browser, "internal fun rowIdOf(");
+    assert!(
+        row_id.contains(
+            "uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY"
+        ),
+        "an id that is not a `content://media` URI has no row, as for a thumbnail"
+    );
+    let by_id = function(&browser, "fun assetsById(ctx: Context?,");
+    assert!(by_id.contains("browse(ctx, \"assetsById\", ::assetsByIdFailed)"));
+    assert!(
+        by_id.contains("mediaSelection(FrustPhotoLibraryHost.FILTER_IMAGES_AND_VIDEOS)"),
+        "only image and video rows answer, as in a listing"
+    );
+    assert!(by_id.contains("wanted.chunked(BY_ID_CHUNK)"));
+    assert!(by_id.contains("${BaseColumns._ID} IN ($placeholders)"));
+    assert!(by_id.contains("val projection = projection(details)"));
+    assert!(by_id.contains("readRows(c, 0, chunk.size, details)"));
+    assert!(by_id.contains("assetsPage(rows, 0)"));
 }
 
 /// The concatenated string literals of the Kotlin `const val` declared by

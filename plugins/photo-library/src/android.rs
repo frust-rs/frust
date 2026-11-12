@@ -815,13 +815,14 @@ pub extern "system" fn Java_dev_frust_photolibrary_FrustPhotoLibraryHost_nativeO
     .resolve::<LogErrorAndDefault>();
 }
 
-// Library browsing: `albums`, `assets`, `assets_after`, `thumbnail`, `manage_limited_selection`.
+// Library browsing: `albums`, `assets`, `assets_after`, `assets_by_id`, `thumbnail`,
+// `manage_limited_selection`.
 #[cfg(feature = "library")]
 #[path = "android_library.rs"]
 mod android_library;
 #[cfg(feature = "library")]
 pub(crate) use android_library::{
-    albums, assets, assets_after, manage_limited_selection, thumbnail,
+    albums, assets, assets_after, assets_by_id, manage_limited_selection, thumbnail,
 };
 
 // Originals and saving: `export_original` and `save`.

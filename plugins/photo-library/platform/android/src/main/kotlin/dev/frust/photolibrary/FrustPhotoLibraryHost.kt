@@ -59,6 +59,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * | Rust → Kotlin | `albums(): AlbumsResult` | an [AlbumsResult]; `code` is [OK], [NOT_INITIALIZED], [PERMISSION_DENIED] or [QUERY_FAILED] |
  * | Rust → Kotlin | `assets(albumId: String?, filter: Int, offset: Long, limit: Int, details: Boolean): AssetsResult` | an [AssetsResult], same codes as `albums` |
  * | Rust → Kotlin | `assetsAfter(albumId: String?, filter: Int, first: Boolean, afterKey: Long, afterId: Long, limit: Int, details: Boolean): AssetsAfterResult` — `(Ljava/lang/String;IZJJIZ)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsAfterResult;` | an [AssetsAfterResult], same codes as `albums` |
+ * | Rust → Kotlin | `assetsById(ids: Array<String>, details: Boolean): AssetsByIdResult` — `([Ljava/lang/String;Z)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsByIdResult;` | an [AssetsByIdResult], same codes as `albums`; an id with no row is simply absent |
  * | Rust → Kotlin | `thumbnail(requestId: Long, id: String, width: Int, height: Int, fill: Boolean): ThumbnailResult` | a [ThumbnailResult], same codes plus [NOT_FOUND] and [CANCELLED] |
  * | Rust → Kotlin | `cancelThumbnail(requestId: Long)` — `(J)V` | nothing; an unknown or finished id is ignored |
  * | Rust → Kotlin | `manageLimitedSelection(requestId: Long): Int` — `(J)I` | [PENDING] after posting the prompt, [NOT_LIMITED], [NO_ACTIVITY], [BUSY] or [NOT_INITIALIZED]; answered through [nativeOnPickResult] (three empty arrays) or [nativeOnPickError] |
@@ -319,6 +320,18 @@ object FrustPhotoLibraryHost {
         @JvmField val hasMore: Boolean,
     )
 
+    /**
+     * [assetsById]: one row in [page] per input id that resolved, in input
+     * order (its `total` is always 0), and the input index each row answers in
+     * [positions]. A duplicate input id gives a duplicate row. A failed call
+     * has only [code].
+     */
+    class AssetsByIdResult(
+        @JvmField val code: Int,
+        @JvmField val positions: IntArray,
+        @JvmField val page: AssetsResult,
+    )
+
     /** [thumbnail]: premultiplied RGBA8 with [rowBytes] per row. */
     class ThumbnailResult(
         @JvmField val code: Int,
@@ -523,6 +536,14 @@ object FrustPhotoLibraryHost {
     @JvmStatic
     fun assetsAfter(albumId: String?, filter: Int, first: Boolean, afterKey: Long, afterId: Long, limit: Int, details: Boolean): AssetsAfterResult =
         MediaStoreBrowser.assetsAfter(appContext, albumId, filter, first, afterKey, afterId, limit, details)
+
+    /**
+     * The assets named by [ids] (`content://media` item URIs), answered by
+     * input position. Any thread but the main one (the queries block).
+     */
+    @JvmStatic
+    fun assetsById(ids: Array<String>, details: Boolean): AssetsByIdResult =
+        MediaStoreBrowser.assetsById(appContext, ids, details)
 
     /**
      * One thumbnail, loaded under [requestId] so [cancelThumbnail] can stop it.

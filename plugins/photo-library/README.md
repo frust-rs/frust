@@ -137,6 +137,46 @@ fn sync(saved: Option<Vec<u8>>) -> Result<Vec<u8>, PhotoError> {
 - The core paths ran on a Pixel 5 and an iPhone 13 mini; iOS updated and deleted deltas, `cloud_identifiers`,
   iOS 15, API 29 and large Android libraries have not run on a device (`photo-library-change-feed-not-device-tested`).
 
+### Apply a delta with `assets_by_id`
+
+`PhotoLibrary::assets_by_id(&[AssetId], details)` returns the `Asset` rows for given ids, so a delta
+needs no re-listing. The answer has one entry per input id, in input order: `None` where the id does
+not exist, was deleted, is outside a limited selection or is not a library id, and a duplicate id gives
+a duplicate entry. `details: true` fills `file_name` and `content_type` as `AssetQuery::with_details`
+does. An empty slice returns an empty `Vec` without a platform call; otherwise the call blocks, refuses
+the UI thread and needs the same access as `assets`. Android takes a whole delta in one call (it
+queries at most 500 ids at a time on its own); iOS, desktop and web answer `Unsupported` for now.
+
+```rust
+use frust_photo_library::{Asset, AssetId, PhotoError, PhotoLibrary};
+use std::collections::HashMap;
+
+// Blocking: call off the UI thread, with the id lists of a `LibraryChanges::Delta`.
+fn apply(
+    catalogue: &mut HashMap<AssetId, Asset>,
+    inserted: Vec<AssetId>,
+    updated: Vec<AssetId>,
+    deleted: Vec<AssetId>,
+) -> Result<(), PhotoError> {
+    for id in &deleted {
+        catalogue.remove(id);
+    }
+    let ids: Vec<AssetId> = inserted.into_iter().chain(updated).collect();
+    for (id, asset) in ids.iter().zip(PhotoLibrary::assets_by_id(&ids, false)?) {
+        match asset {
+            Some(asset) => {
+                catalogue.insert(id.clone(), asset);
+            }
+            // Gone again since the delta, or outside a limited selection.
+            None => {
+                catalogue.remove(id);
+            }
+        }
+    }
+    Ok(())
+}
+```
+
 ## Export originals and save
 
 `PhotoLibrary::export_original(&AssetId, &ExportOptions)` (the `library` feature) writes an asset's
