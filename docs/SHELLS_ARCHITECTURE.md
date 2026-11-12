@@ -502,7 +502,7 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   cosmetic hint on Wayland only and never a secure-text-entry boundary. Both mobile shells reconcile the platform's
   IME mirror on a per-frame poll behind a divergence guard. The iOS text-input view reports no text to accessibility (the
   field's node, masked for a password, is the source). The Swift half builds and runs on a device; its password-field
-  traits, that accessibility fix and non-touch focus moves are unverified — [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
+  traits and non-touch focus moves are unverified — [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
 - **Cursor:** desktop reads `RenderRoot::cursor()` after every event dispatch, beside `sync_ime`
   (`ShellHandler::sync_cursor`), and applies it via winit's `Window::set_cursor` only when it differs from the shape
   last pushed. `winit_cursor_for` (`frust-shell-desktop`) is the one platform touch point mapping the framework's

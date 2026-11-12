@@ -208,6 +208,19 @@ navigator, whose hit area ends at the bottom of its short content, so no press r
 hand-run failure of that pass has not been repeated or explained; a hand swipe low on that page
 would fail the same way.
 
+**iOS: re-run 2026-11-12 after the keyboard edge, the caret reveal and the accessibility fix** on
+the same iPhone 13 mini (iOS 27.2), against `examples/playground` built from `26a3dfb7`, Forms
+page, XCUITest-driven; nothing by hand.
+
+| Check | Result | Observed |
+|---|---|---|
+| Keyboard over the bottom field | pass | field D scrolled to the end and tapped: D ends 89 pt above the top of the keyboard, the tab bar sits directly above the keyboard, and the content moves up by 245 pt. Text typed in D appears |
+| Scroll while typing | **fail on this build** | a drag with the keyboard up scrolls the page and keeps the keyboard, and D is not pulled back; but keys typed after the drag did not reach the field and it drew the unfocused border. Fixed after this build (the same defect was reproduced and re-checked on Android); the iPhone re-run is not recorded yet |
+| Password field in the accessibility tree | pass | with `pw1` typed in field C the full-screen text-input view has no value, `pw1` is nowhere in the snapshot, and the field's own element shows three bullets; the same view has no value with a normal field focused. The fields carry their placeholders as names. Dictate is disabled and the keyboard is left out of screenshots with C focused |
+| Dismiss | pass | a tap on a caption hides the keyboard and the layout returns. No swipe dismissed the keyboard on this build (a drag no longer blurs); drag-to-dismiss was added after it and is not yet run on an iPhone |
+| Back | pass | full-width navigator at depth 3: an edge drag pops 3 → 2, another 2 → 1 |
+| Text input | pass | typed in A, tapped B, typed one character: B holds only that character. **Not verified:** autocorrect (synthetic typing bypasses it), composition |
+
 ## Clipboard manual test (Android + iOS)
 
 A device gate for the two mobile clipboard routes, against an installed app (`frust run -d

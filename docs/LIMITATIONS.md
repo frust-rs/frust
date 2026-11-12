@@ -434,8 +434,10 @@ responder reported the focused field's real text as its accessibility value,
 a password field's included, although frust's own node for the field was
 masked (seen on the phone, 2026-11-12). `FrustView.swift` now overrides
 `accessibilityValue` (nil) and drops the keyboard-key trait, so the view
-reports no text. The fix is in; it is unverified on a device until an
-accessibility snapshot taken after it is recorded.
+reports no text. Verified on the same phone after the fix (2026-11-12,
+build `26a3dfb7`): the view has no value with a normal or a password field
+focused, the typed password is nowhere in the accessibility snapshot, and
+the field's own element shows bullets. What VoiceOver speaks was not run.
 
 **Also covers**: `syncImeFocus`'s per-frame
 `becomeFirstResponder()` retry is **bounded** (`imeFocusSatisfied`)
@@ -484,7 +486,7 @@ Neither is device verification of the content-type behaviour.
 
 **Why not closed**: the only proof is on-device verification, and the one
 run so far did not reach a password field. **The
-leak (the accessibility channel above included) is therefore not confirmed closed on any platform** — the Rust-side
+leak (apart from the accessibility channel above, which a device snapshot shows closed) is therefore not confirmed closed on any platform** — the Rust-side
 wire encoding (`content_type_wire`) has unit coverage, but nothing has
 exercised the UIKit trait application for a password field, the mirror
 re-seed on a direct field-to-field move, the per-frame reconcile on a
@@ -544,18 +546,15 @@ holds the subtree's bottom edge at the top of the keyboard, and a vertical
 `ScrollView` containing the focused field scrolls its caret into view
 (`reveal_focused_caret`, on by default). On Android it is verified on a
 device (2026-11-12, Android 16 on a Pixel 4a: the bottom field of a
-scrolling page stays above the keyboard). On iOS its device verification
-is pending: the only iPhone run (2026-11-12, iOS 27.2 on an iPhone 13 mini)
-predates it and recorded the failure, a field at the bottom of a scrolling
-page left under the keyboard.
+scrolling page stays above the keyboard) and on iOS (2026-11-12, iOS 27.2
+on an iPhone 13 mini: the bottom field ends 89 pt above the keyboard).
 
 **Applies to**: Android and iOS. Not covered: a `ListView`, a
 `CustomScrollView`, horizontal scrolling, and an app that does not opt in
 with `keyboard(true)` (without it the keyboard overlaps the page and the
 reveal has no shrunken viewport to react to).
 
-**Why not closed**: the mechanism has not been run on an iPhone since it
-merged, and it is opt-in. A field in an uncovered container needs the app to scroll it
+**Why not closed**: it is opt-in and covers one container. A field in an uncovered container needs the app to scroll it
 explicitly (a `ScrollController`).
 
 Drag-to-dismiss of the keyboard (`dismiss_keyboard_on_drag`) is likewise
