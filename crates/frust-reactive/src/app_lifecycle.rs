@@ -151,15 +151,31 @@ struct Callbacks {
 type Slot = Arc<Mutex<Callbacks>>;
 
 static LISTENERS: Mutex<Vec<(u64, Slot)>> = Mutex::new(Vec::new());
+/// Under `test-support`, the thread each listener was created on, keyed by listener id.
+#[cfg(feature = "test-support")]
+static OWNER_THREADS: Mutex<Vec<(u64, std::thread::ThreadId)>> = Mutex::new(Vec::new());
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+#[cfg(not(feature = "test-support"))]
 fn snapshot() -> Vec<Slot> {
     lock(&LISTENERS)
         .iter()
+        .map(|(_, slot)| Arc::clone(slot))
+        .collect()
+}
+
+/// Only the slots created on the calling (pushing) thread.
+#[cfg(feature = "test-support")]
+fn snapshot() -> Vec<Slot> {
+    let here = std::thread::current().id();
+    let owners = lock(&OWNER_THREADS);
+    lock(&LISTENERS)
+        .iter()
+        .filter(|(id, _)| owners.iter().any(|(o, t)| o == id && *t == here))
         .map(|(_, slot)| Arc::clone(slot))
         .collect()
 }
@@ -178,6 +194,9 @@ fn live<T>(slot: &Slot, pick: impl FnOnce(&Callbacks) -> Option<T>) -> Option<T>
 /// on construction; each `on_*` method installs (or replaces) one callback. Callbacks run
 /// in registration order, and a step's transition callback runs before its
 /// `on_state_change`. Dropping the listener (or [`dispose`](Self::dispose)) unregisters it.
+///
+/// With the `test-support` feature, a listener only hears pushes made on the thread that
+/// created it, so tests running on separate threads do not see each other's pushes.
 #[must_use = "dropping an AppLifecycleListener unregisters it; keep it alive while its callbacks should run"]
 pub struct AppLifecycleListener {
     id: u64,
@@ -190,6 +209,8 @@ impl AppLifecycleListener {
     pub fn new() -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let slot = Slot::default();
+        #[cfg(feature = "test-support")]
+        lock(&OWNER_THREADS).push((id, std::thread::current().id()));
         lock(&LISTENERS).push((id, Arc::clone(&slot)));
         Self { id, slot }
     }
@@ -269,6 +290,8 @@ impl Drop for AppLifecycleListener {
     fn drop(&mut self) {
         lock(&self.slot).disposed = true;
         lock(&LISTENERS).retain(|(id, _)| *id != self.id);
+        #[cfg(feature = "test-support")]
+        lock(&OWNER_THREADS).retain(|(id, _)| *id != self.id);
     }
 }
 
@@ -367,7 +390,8 @@ fn assert_ui_thread(entry: &str) {
 /// (registration order) gets its transition callback and `on_state_change`: `Resumed` →
 /// `on_resume`; `Inactive` from `Hidden` → `on_show`, from `Resumed`/none → `on_inactive`;
 /// `Hidden` from `Paused` → `on_restart`, from `Inactive`/none → `on_hide`; `Paused` from
-/// `Hidden`/none → `on_pause`; `Detached` → `on_detach`.
+/// `Hidden`/none → `on_pause`; `Detached` → `on_detach`. With `test-support`, only listeners
+/// created on the pushing thread are delivered to.
 pub fn push_app_lifecycle(target: AppLifecycleState) {
     assert_ui_thread("push_app_lifecycle");
     push(ReactiveRuntime::get(), target);
@@ -432,7 +456,8 @@ pub fn last_memory_pressure() -> Option<MemoryPressure> {
 /// runtime exists (the [`push_app_lifecycle`] contract). Every live listener's
 /// [`on_memory_pressure`](AppLifecycleListener::on_memory_pressure) hook runs synchronously
 /// in registration order, each under `catch_unwind`. It does not touch [`AppLifecycleState`]
-/// and fires no lifecycle hook. A hook must not itself push.
+/// and fires no lifecycle hook. A hook must not itself push. With `test-support`, only
+/// listeners created on the pushing thread are delivered to.
 pub fn push_memory_pressure(level: MemoryPressure) {
     assert_ui_thread("push_memory_pressure");
     LAST_PRESSURE.store(level.code(), Ordering::SeqCst);
@@ -751,7 +776,11 @@ mod tests {
         .expect("registering off the UI thread must not panic");
         let lifecycle = app_lifecycle();
         push(None, Resumed);
+        // Under `test-support` the listener belongs to the thread that created it.
+        #[cfg(not(feature = "test-support"))]
         expect(&log, &["a:resume", "a:state:Resumed"]);
+        #[cfg(feature = "test-support")]
+        expect(&log, &[]);
         assert_eq!(pushed_state(), Some(Resumed));
         assert_eq!(lifecycle.state_untracked(), Detached);
         drop(listener);
