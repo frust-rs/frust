@@ -162,6 +162,18 @@ Not run on this pass: moving focus with the keyboard's Return or Next key (the F
 way to move focus from app code, so Return only counts a press) and typing with a composing
 keyboard.
 
+**Android: re-run 2026-11-12 after the keyboard edge and the caret reveal** on the same Pixel 4a
+(Android 16), against `examples/playground` built from `ae10e573`, Forms page.
+
+| Check | Result | Observed |
+|---|---|---|
+| Keyboard over the bottom field | pass | field D scrolled to the end and tapped: the keyboard shows, the page body ends at the top of the tab bar, which sits directly above the keyboard, and D with its caption and caret is visible above it; the content moves up, not down. Text typed on the on-screen keyboard appears in D. Dismissing returns the layout, still scrolled to the end |
+| Scroll while typing | pass | with D focused and the keyboard up, a drag scrolls the page, the keyboard stays up, and D is not pulled back into view afterwards. On that build keys typed after the drag did not reach the field; re-checked on the build from `82c88a60`: after an upward drag that starts on a caption the field keeps focus and the next keys land in it |
+| Drag to dismiss | pass | build from `82c88a60`, where the page scroll view opts in: a downward drag that starts on a caption hides the keyboard and ends the field's focus; an upward drag does not |
+| Keyboard reopen | pass | field A: tap, back, tap again shows the keyboard; a tap on a caption does not |
+| Back | pass | depth 3: the back key pops 3 → 2 and the back gesture 2 → 1 |
+| Password field in the accessibility tree | pass | three characters typed in field C: the node's text is three bullets, `password="true"`, named "Field C"; the typed text is not in the dump |
+
 **iOS: run 2026-11-12, does not pass** on an iPhone 13 mini (iOS 27.2), XCUITest-driven with the
 hand-run legs noted, against `examples/playground` built from `355d6f1a` with Xcode 27.0. The
 active keyboard was a third-party one, not the system keyboard.
@@ -195,6 +207,19 @@ The earlier back failure is explained for the synthetic drags: they started belo
 navigator, whose hit area ends at the bottom of its short content, so no press reached it. The
 hand-run failure of that pass has not been repeated or explained; a hand swipe low on that page
 would fail the same way.
+
+**iOS: re-run 2026-11-12 after the keyboard edge, the caret reveal and the accessibility fix** on
+the same iPhone 13 mini (iOS 27.2), against `examples/playground` built from `26a3dfb7`, Forms
+page, XCUITest-driven; nothing by hand.
+
+| Check | Result | Observed |
+|---|---|---|
+| Keyboard over the bottom field | pass | field D scrolled to the end and tapped: D ends 89 pt above the top of the keyboard, the tab bar sits directly above the keyboard, and the content moves up by 245 pt. Text typed in D appears |
+| Scroll while typing | **fail on this build** | a drag with the keyboard up scrolls the page and keeps the keyboard, and D is not pulled back; but keys typed after the drag did not reach the field and it drew the unfocused border. Fixed after this build (the same defect was reproduced and re-checked on Android); the iPhone re-run is not recorded yet |
+| Password field in the accessibility tree | pass | with `pw1` typed in field C the full-screen text-input view has no value, `pw1` is nowhere in the snapshot, and the field's own element shows three bullets; the same view has no value with a normal field focused. The fields carry their placeholders as names. Dictate is disabled and the keyboard is left out of screenshots with C focused |
+| Dismiss | pass | a tap on a caption hides the keyboard and the layout returns. No swipe dismissed the keyboard on this build (a drag no longer blurs); drag-to-dismiss was added after it and is not yet run on an iPhone |
+| Back | pass | full-width navigator at depth 3: an edge drag pops 3 → 2, another 2 → 1 |
+| Text input | pass | typed in A, tapped B, typed one character: B holds only that character. **Not verified:** autocorrect (synthetic typing bypasses it), composition |
 
 ## Clipboard manual test (Android + iOS)
 

@@ -2225,9 +2225,17 @@ mod tests {
         root.event(&mut (), &down(20.0, 40.0));
         assert!(root.ime_state().is_some());
 
-        // A `Down` this widget claims no focus for is a blur — the exact reason
-        // the `active` toggle cannot be a sibling widget.
+        // A tap this widget claims no focus for is a blur, applied at its `Up` —
+        // the exact reason the `active` toggle cannot be a sibling widget.
         root.event(&mut (), &down(-5.0, -5.0));
+        root.event(
+            &mut (),
+            &InputEvent::Pointer(PointerEvent {
+                phase: PointerPhase::Up,
+                position: Point::new(-5.0, -5.0),
+                button: PointerButton::Primary,
+            }),
+        );
         assert!(!root.is_focus_active());
         assert!(
             root.ime_state().is_none(),

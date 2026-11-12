@@ -1307,11 +1307,15 @@ impl Widget for BottomSheetWidget {
                 // focus path) dismisses through the same path as a scrim/drag
                 // dismiss — content gets first crack at it if it holds the
                 // deeper focus path (mirrors an action's own routing
-                // precedence on `material::dialog`).
+                // precedence on `material::dialog`). The live link, never the
+                // raw flag: a press on the sheet's own chrome takes the
+                // session from a focused field without routing to it, so the
+                // field's flag stays set, stranded, and must not swallow the
+                // sheet's Escape.
                 if let InputEvent::Key(key_event) = event
                     && self.dismissable
                     && key_event.key == Key::Named(NamedKey::Escape)
-                    && !self.content.is_focused()
+                    && !self.content.holds_live_focus()
                     && self.on_dismiss.is_some()
                 {
                     self.request_dismiss(ctx, -SPRING_KICK);
@@ -2248,6 +2252,7 @@ mod tests {
     #[derive(Default)]
     struct FieldState {
         value: String,
+        dismissed: bool,
     }
 
     // A fixed-height (200dp) content slot wrapping a real `TextInput`, giving
@@ -2302,6 +2307,37 @@ mod tests {
             "the field's IME surface must survive a second Down on chrome that \
              never itself routed to the field"
         );
+    }
+
+    /// A press on the sheet's own handle strip takes the session from a
+    /// focused field without routing to it, so the field's link is stranded
+    /// with its raw flag still set. That flag must not read as "content holds
+    /// the focus path": Escape belongs to the sheet now and dismisses it.
+    #[test]
+    fn escape_after_a_handle_press_takes_the_session_from_a_focused_field() {
+        fn logic(state: &mut FieldState) -> BottomSheetView<FieldState> {
+            field_sheet_logic(state).on_dismiss(|s: &mut FieldState| s.dismissed = true)
+        }
+        let mut root: RenderRoot<FieldState, BottomSheetView<FieldState>> = RenderRoot::new();
+        let mut state = FieldState::default();
+        let area = Size::new(400.0, 600.0);
+        root.rebuild(&mut logic, &mut state);
+        settle_navigator_frame(&mut root, area);
+
+        // The field (content spans y in [400, 600]), then the handle strip.
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0, 500.0));
+        root.event(&mut state, &ev(PointerPhase::Up, 200.0, 500.0));
+        assert!(
+            root.ime_state().is_some(),
+            "precondition: the field is focused"
+        );
+        let handle_y = area.height - 248.0 + 10.0;
+        root.event(&mut state, &ev(PointerPhase::Down, 200.0, handle_y));
+        root.event(&mut state, &ev(PointerPhase::Up, 200.0, handle_y));
+        assert!(root.is_focus_active(), "the sheet holds the session");
+
+        root.event(&mut state, &escape_event());
+        assert!(state.dismissed, "Escape dismisses the sheet");
     }
 
     // --- `dismissable(false)` gates Escape too (via the navigator). ---

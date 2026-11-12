@@ -575,6 +575,26 @@ pub enum TickClass {
     Transition,
 }
 
+/// The focused editable's caret as its render root last stored it, read-only: the rect in absolute
+/// window coordinates and the root's focus/IME generation, which moves on every surface change.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FocusedCaret {
+    rect: Rect,
+    generation: u64,
+}
+
+impl FocusedCaret {
+    /// The caret rect, absolute window coordinates, as published (a scroll since moves it).
+    pub fn rect(&self) -> Rect {
+        self.rect
+    }
+
+    /// The root's focus/IME generation when this caret was read.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 /// Context passed to [`Widget::paint`]: resolved geometry, frame-request
 /// signals that bubble into a [`PaintOutcome`], and root-threaded globals.
 pub struct PaintCtx<'a> {
@@ -591,6 +611,8 @@ pub struct PaintCtx<'a> {
     /// The min over paced intervals; a bare paced request contributes zero.
     paced_interval: Option<Duration>,
     ime_state: Option<ImeState>,
+    /// The root's stored caret, threaded down unchanged.
+    focused_caret: Option<FocusedCaret>,
     /// Whether this widget holds the focus path on the live session.
     has_focus: bool,
     /// Whether the root's [`FocusRingPolicy`](crate::app::FocusRingPolicy) shows a ring now.
@@ -644,6 +666,7 @@ impl<'a> PaintCtx<'a> {
             frame_unpaced: false,
             paced_interval: None,
             ime_state: None,
+            focused_caret: None,
             has_focus: false,
             focus_ring: false,
             hovered: false,
@@ -962,6 +985,17 @@ impl<'a> PaintCtx<'a> {
         self.ime_state.take()
     }
 
+    /// The live session's caret as the root stored it before this paint (an event-pass or the
+    /// previous paint's publish), or `None` with no session, no caret, or no root.
+    pub fn focused_caret(&self) -> Option<FocusedCaret> {
+        self.focused_caret
+    }
+
+    /// Seed the root's stored caret: `rect` with the generation it was read at.
+    pub(crate) fn set_focused_caret(&mut self, rect: Option<Rect>, generation: u64) {
+        self.focused_caret = rect.map(|rect| FocusedCaret { rect, generation });
+    }
+
     /// Publish a platform-view slot's frame (pushed; many slots per pass).
     pub fn publish_platform_view(&mut self, frame: PlatformViewFrame) {
         self.note_publication();
@@ -1055,6 +1089,7 @@ impl<'a> PaintCtx<'a> {
             frame_unpaced: false,
             paced_interval: None,
             ime_state: None,
+            focused_caret: self.focused_caret,
             has_focus: self.has_focus,
             focus_ring: self.focus_ring,
             hovered: self.hovered,
@@ -1943,6 +1978,7 @@ impl ChildPod {
         child_ctx.set_hero(ctx.hero_ref());
         child_ctx.set_visible_rect(visible_rect);
         child_ctx.set_translucent(ctx.is_translucent());
+        child_ctx.focused_caret = ctx.focused_caret;
         child_ctx.shortcut_hints = ctx.shortcut_hints.clone();
         child_ctx.set_paint_state(
             ctx.paint_epoch,
@@ -2575,6 +2611,48 @@ mod tests {
         let mut ctx = LayoutCtx::new();
         let bc = BoxConstraints::loose(Size::new(200.0, 100.0));
         assert_eq!(w.layout(&mut ctx, &bc), Size::new(200.0, 100.0));
+    }
+
+    /// Records the caret its paint context carried.
+    struct CaretProbe(std::rc::Rc<Cell<Option<FocusedCaret>>>);
+
+    impl Widget for CaretProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.max()
+        }
+        fn paint(&mut self, ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {
+            self.0.set(ctx.focused_caret());
+        }
+    }
+
+    #[test]
+    fn the_focused_caret_reaches_every_descendant_paint_unchanged() {
+        let seen = std::rc::Rc::new(Cell::new(None));
+        let mut pod = ChildPod::new(Box::new(CaretProbe(std::rc::Rc::clone(&seen))));
+        pod.set_origin(Point::new(5.0, 7.0));
+        let caret = Rect::new(10.0, 20.0, 11.0, 34.0);
+        let mut ctx = PaintCtx::new(Point::ZERO, Size::new(100.0, 100.0));
+        ctx.set_focused_caret(Some(caret), 7);
+        pod.paint_child(&mut ctx, &mut DiscardScene);
+        let got = seen.get().expect("the child saw the caret");
+        assert_eq!(
+            (got.rect(), got.generation()),
+            (caret, 7),
+            "absolute, not re-based"
+        );
+
+        let registry = RefCell::new(HeroFrames::default());
+        seen.set(None);
+        ctx.with_hero_registry(&registry, |ctx| pod.paint_child(ctx, &mut DiscardScene));
+        assert_eq!(
+            seen.get().map(|c| c.rect()),
+            Some(caret),
+            "a hero scope keeps it"
+        );
+
+        ctx.set_focused_caret(None, 8);
+        pod.paint_child(&mut ctx, &mut DiscardScene);
+        assert_eq!(seen.get(), None, "no caret, no reveal input");
     }
 
     #[test]

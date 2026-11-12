@@ -653,6 +653,9 @@ type OnText<State> = Rc<dyn Fn(&mut State, String)>;
 pub struct TextInputView<State: 'static> {
     value: String,
     placeholder: String,
+    /// The accessible name, published on the field's semantics node and never
+    /// drawn — see [`TextInputView::label`]. Empty = unset.
+    label: String,
     text_style: TextStyle,
     /// Whether the app set the content style explicitly (via
     /// [`TextInputView::text_style`]). When `false` and a theme is active, the
@@ -721,6 +724,7 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
     TextInputView {
         value: value.into(),
         placeholder: String::new(),
+        label: String::new(),
         text_style: TextStyle::default(),
         text_style_explicit: false,
         family_source: None,
@@ -754,6 +758,19 @@ impl<State: 'static> TextInputView<State> {
     /// Set the placeholder shown when the field is empty and unfocused.
     pub fn placeholder(mut self, placeholder: impl Into<String>) -> Self {
         self.placeholder = placeholder.into();
+        self
+    }
+
+    /// Set the field's accessible name: published on its semantics node as the
+    /// label, never drawn. Use it when the visible caption is a separate widget
+    /// (a text line above the field, say) that the field itself does not draw.
+    ///
+    /// Without a `label`, a non-empty [`placeholder`](Self::placeholder) is
+    /// published as the label too, so the field still has a name on adapters
+    /// that read only the label; a `label` takes precedence over it there. The
+    /// placeholder is published as the placeholder property in either case.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = label.into();
         self
     }
 
@@ -1080,6 +1097,9 @@ pub struct TextInputWidget {
     #[cfg(test)]
     editor_rebuilds: u32,
     placeholder: String,
+    /// The accessible name published on the semantics node (empty = unset).
+    /// Feeds only the semantics pass; see [`TextInputView::label`].
+    label: String,
     /// `None` = single-line; `Some(n)` = wrapped multi-line capped at `n`
     /// visible lines. Drives the wrap-width feed in `layout`, the height cap,
     /// and the keep-caret-in-view scroll offset (see the [module docs](self)).
@@ -2309,6 +2329,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             #[cfg(test)]
             editor_rebuilds: 0,
             placeholder: self.placeholder.clone(),
+            label: self.label.clone(),
             max_visible_lines: self.max_visible_lines,
             applied_wrap_width: None,
             submit_on_enter: resolve_submit_on_enter(self.max_visible_lines, self.submit_on_enter),
@@ -2374,6 +2395,13 @@ impl<State: 'static> View<State> for TextInputView<State> {
         let mut flags = ChangeFlags::NONE;
         if prev.placeholder != self.placeholder {
             element.placeholder = self.placeholder.clone();
+            flags |= ChangeFlags::PAINT;
+        }
+        // The label feeds only the semantics pass, so a change repaints (the
+        // same flag the placeholder rides), which also advances the semantics
+        // generation.
+        if prev.label != self.label {
+            element.label = self.label.clone();
             flags |= ChangeFlags::PAINT;
         }
         // Reconcile the multi-line configuration. A change to the visible-line
@@ -3314,8 +3342,23 @@ impl TextInputWidget {
             description: description.into(),
         })
         .collect();
+        // The accessible name: an explicit `label` wins; with none, the
+        // placeholder doubles as the label so the field is named on adapters
+        // that read only the label. Neither source is ever the typed text, so
+        // an obscured field's secret stays out of every string property.
+        let name = if self.label.is_empty() {
+            self.placeholder.as_str()
+        } else {
+            self.label.as_str()
+        };
         let id = ctx.push_node(role, |node| {
             node.set_value(value);
+            if !name.is_empty() {
+                node.set_label(name);
+            }
+            if !self.placeholder.is_empty() {
+                node.set_placeholder(self.placeholder.as_str());
+            }
             if !self.enabled {
                 node.set_disabled();
             } else if self.read_only {
@@ -3543,6 +3586,7 @@ mod tests {
         let _slot = crate::test_support::LocaleSlotGuard::hold();
         let (mut state, mut root, rebuilds) = deferred_by_a_preedit();
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 150.0));
         assert!(!root.is_focus_active());
         root.layout(Size::new(300.0, 200.0));
         let still_composing = widget(&root).editor.has_preedit();
@@ -3977,8 +4021,10 @@ mod tests {
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
         assert!(root.ime_state().is_some());
 
-        // Tap outside the field's height (still reaches the root widget).
+        // Tap outside the field's height (still reaches the root widget). The
+        // blur is decided at the end of the gesture, so the tap needs its Up.
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 150.0));
 
         assert!(!root.is_focus_active(), "outside tap blurs the field");
         assert!(root.ime_state().is_none());
@@ -7312,6 +7358,159 @@ mod tests {
     }
 
     #[test]
+    fn obscured_value_is_masked_and_the_real_text_reaches_no_string_property() {
+        let mut state = AppState {
+            value: "pw1".to_string(),
+            ..AppState::default()
+        };
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |s: &mut AppState, v: String| {
+                s.value = v;
+            })
+            .label("Password")
+            .placeholder("Enter password")
+            .obscured(true)
+        };
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::PasswordInput)
+            .expect("an obscured field contributes a Role::PasswordInput node");
+
+        let masked = node.value().expect("the masked value is published");
+        assert_eq!(
+            masked.chars().count(),
+            "pw1".chars().count(),
+            "the masked value keeps one character per typed character"
+        );
+        assert!(
+            masked.chars().all(|c| c == '\u{2022}'),
+            "the masked value is only mask characters, got {masked:?}"
+        );
+        assert_ne!(masked, "pw1");
+
+        for prop in [
+            node.label(),
+            node.value(),
+            node.placeholder(),
+            node.description(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            assert!(
+                !prop.contains("pw1"),
+                "the real text must not appear in any string property: {prop:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn labelled_field_publishes_its_label() {
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |_: &mut AppState, _: String| {}).label("Email")
+        };
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a plain field publishes a Role::TextInput node");
+        assert_eq!(node.label(), Some("Email"));
+        assert_eq!(node.placeholder(), None, "no placeholder was set");
+    }
+
+    #[test]
+    fn placeholder_only_field_publishes_it_as_placeholder_and_label() {
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |_: &mut AppState, _: String| {}).placeholder("Search")
+        };
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a plain field publishes a Role::TextInput node");
+        assert_eq!(node.placeholder(), Some("Search"));
+        assert_eq!(
+            node.label(),
+            Some("Search"),
+            "the placeholder names the field when no label is set"
+        );
+    }
+
+    #[test]
+    fn labelled_field_with_placeholder_publishes_both_separately() {
+        let mut state = AppState::default();
+        let mut logic = |s: &mut AppState| {
+            text_input(s.value.clone(), |_: &mut AppState, _: String| {})
+                .label("Email")
+                .placeholder("you@example.com")
+        };
+        let root = options_root(&mut logic, &mut state);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("a plain field publishes a Role::TextInput node");
+        assert_eq!(node.label(), Some("Email"));
+        assert_eq!(node.placeholder(), Some("you@example.com"));
+    }
+
+    #[test]
+    fn changing_only_the_label_advances_the_semantics_generation() {
+        let mut root: RenderRoot<(), TextInputView<()>> = RenderRoot::new();
+        root.rebuild(
+            &mut |_: &mut ()| text_input("", |_: &mut (), _: String| {}).label("Before"),
+            &mut (),
+        );
+        root.layout(Size::new(300.0, 200.0));
+        let before = root.semantics_generation();
+        root.rebuild(
+            &mut |_: &mut ()| text_input("", |_: &mut (), _: String| {}).label("After"),
+            &mut (),
+        );
+        assert!(root.semantics_generation() > before);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("the field's semantics node");
+        assert_eq!(node.label(), Some("After"));
+    }
+
+    #[test]
+    fn changing_only_the_placeholder_advances_the_semantics_generation() {
+        let mut root: RenderRoot<(), TextInputView<()>> = RenderRoot::new();
+        root.rebuild(
+            &mut |_: &mut ()| text_input("", |_: &mut (), _: String| {}).placeholder("Before"),
+            &mut (),
+        );
+        root.layout(Size::new(300.0, 200.0));
+        let before = root.semantics_generation();
+        root.rebuild(
+            &mut |_: &mut ()| text_input("", |_: &mut (), _: String| {}).placeholder("After"),
+            &mut (),
+        );
+        assert!(root.semantics_generation() > before);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::TextInput)
+            .expect("the field's semantics node");
+        assert_eq!(node.placeholder(), Some("After"));
+    }
+
+    #[test]
     fn disabled_reports_disabled_semantics() {
         let mut state = AppState::default();
         let mut logic = options_logic(false, false, false);
@@ -8516,9 +8715,10 @@ mod tests {
                 .is_none()
         );
 
-        // A primary press outside the field: the blur takes it too.
+        // A primary tap outside the field: the blur at its Up takes it too.
         open_toolbar(&mut root, &mut logic, &mut state, 400.0);
         root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 150.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 150.0));
         assert!(!widget(&root).toolbar_open, "an outside press puts it away");
         assert!(
             !root.is_focus_active(),

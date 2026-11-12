@@ -73,13 +73,18 @@
 //!
 //! **Blur without dismiss:** a `Down` that reaches neither an action nor the
 //! slot — dead panel space: the padding, the title, the gaps — while the slot
-//! *did* hold the session ends that session: the dialog publishes an inactive
-//! IME surface, which the root reads as a full `release_focus_session`, so the
-//! field blurs and the platform keyboard retracts. The dialog itself stays open
-//! and stays focused (the barrier consumes the Down, and the same dispatch's
-//! focus claim re-applies after the release — `RenderRoot::event`'s documented
-//! ordering), so `Escape` keeps working afterwards. Tapping dialog chrome is
-//! how a user dismisses the keyboard without answering the dialog.
+//! *did* hold the live session ends that session: the dialog publishes an
+//! inactive IME surface, which the root reads as a full `release_focus_session`,
+//! and drops the slot's focus link itself, so the field blurs and the platform
+//! keyboard retracts. The dialog has to do both: it claims focus on every
+//! `Down`, so the root never sees an unclaimed press to blur, and the slot's
+//! router leaves a child's link alone on a press that claims nothing through it
+//! (that decision is the root's, made at the end of the gesture). The dialog
+//! itself stays open and stays focused (the barrier consumes the Down, and the
+//! same dispatch's focus claim re-applies after the release —
+//! `RenderRoot::event`'s documented ordering), so `Escape` keeps working
+//! afterwards. Tapping dialog chrome is how a user dismisses the keyboard
+//! without answering the dialog.
 //!
 //! # Keyboard avoidance
 //!
@@ -1082,14 +1087,15 @@ impl Widget for GlyphDialogWidget {
             ctx.request_focus();
         }
         // Whether the body/content slot owned the live focus/IME session on the
-        // way *into* this Down. Snapshotted here because the routing below
-        // blurs the slot's own recorded flag (`route_event_single`'s
-        // blur-on-outside-tap) before the Down arm could ask. Composed with
-        // `ctx.has_focus()`, never the slot flag alone, per CODE_STANDARDS'
-        // focus rule: a stale flag under an already-blurred ancestor must not
-        // let this dialog release somebody else's session.
-        let content_held_session =
-            pointer_down && ctx.has_focus() && self.body.as_ref().is_some_and(|p| p.is_focused());
+        // way *into* this Down. Snapshotted before any routing, so the answer
+        // describes the session this press found. The live link, composed with
+        // `ctx.has_focus()`, never the raw slot flag, per CODE_STANDARDS' focus
+        // rule: a flag the session already stranded, or one under an
+        // already-blurred ancestor, must not let this dialog release somebody
+        // else's session.
+        let content_held_session = pointer_down
+            && ctx.has_focus()
+            && self.body.as_ref().is_some_and(ChildPod::holds_live_focus);
         // An action already capturing (or freshly hit) consumes the event first.
         if frust::authoring::route_event(&mut self.actions, ctx, event) == EventResult::Handled {
             return EventResult::Handled;
@@ -1139,8 +1145,18 @@ impl Widget for GlyphDialogWidget {
                 // outside-Down behavior is unchanged, and a scrim tap that
                 // actually dismisses already ends the session through the
                 // navigator's own pop path.
+                //
+                // The slot's link is dropped here too: no router ends it on a
+                // press that claims nothing through it, and this dialog's own
+                // claim means the root never sees an unclaimed press to blur.
+                // The release strands the link by epoch as well, but the raw
+                // flag is what the slot's paint and the next dispatch would
+                // otherwise carry until then.
                 if content_held_session && !down_outside {
                     ctx.publish_ime_state(cleared_ime_state());
+                    if let Some(pod) = self.body.as_mut() {
+                        pod.set_focused(false);
+                    }
                 }
                 // The barrier swallows a secondary press like every other one —
                 // it blocks the page behind it whatever button pressed — but it
@@ -2298,15 +2314,22 @@ mod tests {
     #[derive(Default)]
     struct FieldState {
         text: String,
+        /// The content is a plain text run instead of the field: flipping it
+        /// tears the field down on the next rebuild.
+        field_gone: bool,
     }
 
     fn field_dialog(s: &mut FieldState) -> GlyphDialogView<FieldState> {
+        let content = if s.field_gone {
+            core_any::<FieldState, _>(text("Saved"))
+        } else {
+            core_any::<FieldState, _>(text_input(s.text.clone(), |s: &mut FieldState, v| {
+                s.text = v
+            }))
+        };
         glyph_dialog()
             .title("New token")
-            .content(core_any::<FieldState, _>(text_input(
-                s.text.clone(),
-                |s: &mut FieldState, v| s.text = v,
-            )))
+            .content(content)
             .action(tap_action(80.0, 36.0, |_s: &mut FieldState| {}))
     }
 
@@ -2481,6 +2504,43 @@ mod tests {
         assert!(
             f.root.ime_state().is_some(),
             "a mouse press on dialog chrome is a live re-claim and keeps the IME surface"
+        );
+    }
+
+    /// The dialog claims focus itself on a press that routes to an action, so
+    /// the field's link is stranded with its raw flag still set (no router ends
+    /// a link on a press that claims nothing through it). Tearing the field down
+    /// in the next rebuild must not read that flag as the live session's and
+    /// release the session the dialog now holds.
+    #[test]
+    fn dropping_a_field_the_dialog_took_the_session_from_releases_nothing() {
+        let area = Size::new(375.0, 667.0);
+        let mut f = focused_field_dialog(area);
+
+        f.root.event(
+            &mut f.state,
+            &ev(PointerPhase::Down, f.action.x, f.action.y),
+        );
+        f.root
+            .event(&mut f.state, &ev(PointerPhase::Up, f.action.x, f.action.y));
+        assert!(f.root.is_focus_active(), "the dialog holds the session");
+        let body = dialog_widget(&f.root).body.as_ref().expect("field");
+        assert!(
+            body.is_focused() && !body.holds_live_focus(),
+            "precondition: the field's link is stranded, its raw flag still set"
+        );
+
+        f.state.field_gone = true;
+        f.root.rebuild(&mut field_dialog, &mut f.state);
+        assert!(
+            f.root.is_focus_active(),
+            "tearing down the stranded field releases nothing"
+        );
+        f.root.event(&mut f.state, &escape_event());
+        assert_eq!(
+            dialog_widget(&f.root).phase,
+            Phase::Exit,
+            "the dialog still owns its key chain"
         );
     }
 

@@ -1122,11 +1122,15 @@ impl GlyphSheetWidget {
             // Escape (when the sheet itself, not deeper content, holds the
             // focus path) begins the exit/cancel — content gets first crack
             // at it if it holds the deeper focus path (mirrors
-            // `crate::material::sheet`'s identical routing precedence).
+            // `crate::material::sheet`'s identical routing precedence). The
+            // live link, never the raw flag: a press on the sheet's own chrome
+            // takes the session from a focused field without routing to it,
+            // so the field's flag stays set, stranded, and must not swallow
+            // the sheet's Escape.
             if let InputEvent::Key(key_event) = event
                 && self.dismissable
                 && key_event.key == Key::Named(NamedKey::Escape)
-                && !self.content.is_focused()
+                && !self.content.holds_live_focus()
             {
                 self.begin_exit();
                 return EventResult::Handled;
@@ -1534,6 +1538,78 @@ mod tests {
         w.event(&mut ctx, &ev(PointerPhase::Up, 200.0, w.panel.y0 + 60.0));
         w.event(&mut ctx, &escape_event());
         assert_eq!(w.phase, Phase::Exit);
+    }
+
+    #[derive(Default)]
+    struct FieldState {
+        text: String,
+    }
+
+    fn field_sheet(s: &mut FieldState) -> GlyphSheetView<FieldState> {
+        glyph_sheet(frust::SizedBox(None, Some(200.0)).child(frust::text_input(
+            s.text.clone(),
+            |s: &mut FieldState, v: String| s.text = v,
+        )))
+    }
+
+    fn sheet_widget(
+        root: &RenderRoot<FieldState, GlyphSheetView<FieldState>>,
+    ) -> &GlyphSheetWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<GlyphSheetWidget>()
+            .expect("the root is a GlyphSheetWidget")
+    }
+
+    /// A press on the sheet's own handle takes the session from a focused field
+    /// without routing to it, so the field's link is stranded with its raw flag
+    /// still set. That flag must not read as "content holds the focus path":
+    /// Escape belongs to the sheet now.
+    #[test]
+    fn escape_after_a_handle_press_takes_the_session_from_a_focused_field() {
+        let area = Size::new(400.0, 600.0);
+        let mut root: RenderRoot<FieldState, GlyphSheetView<FieldState>> = RenderRoot::new();
+        let mut state = FieldState::default();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut field_sheet, &mut state);
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(400.0));
+        root.layout_with_text(area, &mut tcx as &mut dyn Any);
+
+        let (field, handle) = {
+            let w = sheet_widget(&root);
+            let c = &w.content;
+            (
+                Point::new(
+                    c.origin().x + c.size().width / 2.0,
+                    c.origin().y + c.size().height / 2.0,
+                ),
+                Point::new(w.handle_target.center().x, w.handle_target.center().y),
+            )
+        };
+        root.event(&mut state, &ev(PointerPhase::Down, field.x, field.y));
+        root.event(&mut state, &ev(PointerPhase::Up, field.x, field.y));
+        assert!(
+            sheet_widget(&root).content.holds_live_focus(),
+            "precondition: the field holds the session"
+        );
+
+        root.event(&mut state, &ev(PointerPhase::Down, handle.x, handle.y));
+        root.event(&mut state, &ev(PointerPhase::Up, handle.x, handle.y));
+        let w = sheet_widget(&root);
+        assert!(root.is_focus_active(), "the sheet holds the session");
+        assert!(
+            !w.content.holds_live_focus(),
+            "the handle press stranded the field's link"
+        );
+
+        root.event(&mut state, &escape_event());
+        assert_eq!(
+            sheet_widget(&root).phase,
+            Phase::Exit,
+            "Escape begins the exit"
+        );
     }
 
     #[test]

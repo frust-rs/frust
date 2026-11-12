@@ -3,6 +3,8 @@
 
 use std::rc::Weak;
 
+use kurbo::Rect;
+
 use super::{RenderRoot, advance_focus_epoch};
 use crate::event::{CursorIcon, ImeState, PointerId};
 use crate::overlay::{OverlayHit, OverlayInput, OverlayKey, OverlayKeys};
@@ -103,6 +105,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// crosses fields that publish alike. Never `0`: a safe sentinel.
     pub fn focus_epoch(&self) -> u64 {
         self.focus_epoch
+    }
+
+    /// The stored surface's caret with the generation it stands at, lent to a paint pass as
+    /// [`PaintCtx::focused_caret`](crate::widget::PaintCtx::focused_caret); no session reads `None`.
+    pub(super) fn stored_caret(&self) -> (Option<Rect>, u64) {
+        let caret = self.ime_state.as_ref().and_then(|ime| ime.caret);
+        (caret, self.focus_ime_gen)
     }
 
     /// Set the focus flag, bumping the generation only on change (in practice it only sets).
