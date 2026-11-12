@@ -829,6 +829,64 @@ const PERMISSIONS_PHOTOS: &[Contribution] = &[
     Contribution::IosFramework { name: "Photos" },
 ];
 
+/// `permissions`' `photos-images` feature: `photos` without the video media
+/// line. It writes READ_MEDIA_IMAGES, the two Android permissions every
+/// photo read also needs (READ_MEDIA_VISUAL_USER_SELECTED and
+/// READ_EXTERNAL_STORAGE) and the iOS usage string and Photos framework that
+/// `photos` writes. An app that only reads images declares no video access.
+const PERMISSIONS_PHOTOS_IMAGES: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-permissions",
+        feature: "photos",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_IMAGES",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_EXTERNAL_STORAGE",
+    },
+    Contribution::PlistEntry {
+        key: "NSPhotoLibraryUsageDescription",
+        value: "Choose photos from your library.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Photo library usage description, required by Apple in the \
+                  app's own Info.plist. Edit the text to match your app.",
+    },
+    Contribution::IosFramework { name: "Photos" },
+];
+
+/// `permissions`' `photos-videos` feature: `photos` without the image media
+/// line. It writes READ_MEDIA_VIDEO, READ_MEDIA_VISUAL_USER_SELECTED and
+/// READ_EXTERNAL_STORAGE, and the same iOS usage string and Photos framework
+/// as `photos`. The shared lines are the ones `photos-images` writes, so
+/// applying both features writes each once.
+const PERMISSIONS_PHOTOS_VIDEOS: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-permissions",
+        feature: "photos",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VIDEO",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_EXTERNAL_STORAGE",
+    },
+    Contribution::PlistEntry {
+        key: "NSPhotoLibraryUsageDescription",
+        value: "Choose photos from your library.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Photo library usage description, required by Apple in the \
+                  app's own Info.plist. Edit the text to match your app.",
+    },
+    Contribution::IosFramework { name: "Photos" },
+];
+
 const PERMISSIONS_PHOTOS_ADD: &[Contribution] = &[
     Contribution::CargoFeature {
         name: "frust-permissions",
@@ -923,6 +981,22 @@ const PERMISSIONS_FEATURES: &[FeatureSpec] = &[
         contributions: PERMISSIONS_PHOTOS,
     },
     FeatureSpec {
+        id: "photos-images",
+        summary: "Photo image read access only (READ_MEDIA_IMAGES, \
+                  READ_MEDIA_VISUAL_USER_SELECTED, READ_EXTERNAL_STORAGE, \
+                  NSPhotoLibraryUsageDescription, Photos framework). No video \
+                  permission; use `photos` for both.",
+        contributions: PERMISSIONS_PHOTOS_IMAGES,
+    },
+    FeatureSpec {
+        id: "photos-videos",
+        summary: "Photo video read access only (READ_MEDIA_VIDEO, \
+                  READ_MEDIA_VISUAL_USER_SELECTED, READ_EXTERNAL_STORAGE, \
+                  NSPhotoLibraryUsageDescription, Photos framework). No image \
+                  permission; use `photos` for both.",
+        contributions: PERMISSIONS_PHOTOS_VIDEOS,
+    },
+    FeatureSpec {
         id: "photos-add",
         summary: "Photo library add-only access (NSPhotoLibraryAddUsageDescription, \
                   Photos framework).",
@@ -953,7 +1027,8 @@ const PERMISSIONS_FEATURES: &[FeatureSpec] = &[
 const PERMISSIONS: PluginSpec = PluginSpec {
     id: "permissions",
     summary: "Permission status, request and open_settings; features: photos, \
-              photos-add, camera, microphone, media-location.",
+              photos-images, photos-videos, photos-add, camera, microphone, \
+              media-location.",
     crate_dir: "permissions",
     base: &[
         Contribution::CargoDep {
@@ -989,6 +1064,65 @@ const PHOTO_LIBRARY_LIBRARY: &[Contribution] = &[
     },
     Contribution::ManifestPermission {
         permission: "android.permission.READ_MEDIA_IMAGES",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VIDEO",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_EXTERNAL_STORAGE",
+    },
+    Contribution::PlistEntry {
+        key: "NSPhotoLibraryUsageDescription",
+        value: "Choose photos from your library.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Photo library usage description, required by Apple in the \
+                  app's own Info.plist. Edit the text to match your app.",
+    },
+    Contribution::IosFramework { name: "Photos" },
+    Contribution::IosFramework { name: "ImageIO" },
+];
+
+/// `photo-library`'s `library-images` feature contributions: `library` for an
+/// app that browses only images. It writes READ_MEDIA_IMAGES in place of
+/// READ_MEDIA_VIDEO and otherwise the same lines as [`PHOTO_LIBRARY_LIBRARY`]:
+/// the Cargo feature, READ_MEDIA_VISUAL_USER_SELECTED, READ_EXTERNAL_STORAGE,
+/// the usage string and the Photos and ImageIO frameworks.
+const PHOTO_LIBRARY_LIBRARY_IMAGES: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-photo-library",
+        feature: "library",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_IMAGES",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+    },
+    Contribution::ManifestPermission {
+        permission: "android.permission.READ_EXTERNAL_STORAGE",
+    },
+    Contribution::PlistEntry {
+        key: "NSPhotoLibraryUsageDescription",
+        value: "Choose photos from your library.",
+        // No `--` here: an XML comment may not contain a double hyphen.
+        comment: "Photo library usage description, required by Apple in the \
+                  app's own Info.plist. Edit the text to match your app.",
+    },
+    Contribution::IosFramework { name: "Photos" },
+    Contribution::IosFramework { name: "ImageIO" },
+];
+
+/// `photo-library`'s `library-videos` feature contributions: `library` for an
+/// app that browses only videos. It writes READ_MEDIA_VIDEO in place of
+/// READ_MEDIA_IMAGES; the other lines are the same as
+/// [`PHOTO_LIBRARY_LIBRARY_IMAGES`], so applying both writes each once.
+const PHOTO_LIBRARY_LIBRARY_VIDEOS: &[Contribution] = &[
+    Contribution::CargoFeature {
+        name: "frust-photo-library",
+        feature: "library",
     },
     Contribution::ManifestPermission {
         permission: "android.permission.READ_MEDIA_VIDEO",
@@ -1064,6 +1198,24 @@ const PHOTO_LIBRARY_FEATURES: &[FeatureSpec] = &[
         contributions: PHOTO_LIBRARY_LIBRARY,
     },
     FeatureSpec {
+        id: "library-images",
+        summary: "Album and asset browsing of images only: enables the Cargo \
+                  feature and adds READ_MEDIA_IMAGES, READ_MEDIA_VISUAL_USER_SELECTED, \
+                  READ_EXTERNAL_STORAGE, NSPhotoLibraryUsageDescription and the \
+                  Photos and ImageIO frameworks. Add `permissions` with its \
+                  `photos-images` feature to request access.",
+        contributions: PHOTO_LIBRARY_LIBRARY_IMAGES,
+    },
+    FeatureSpec {
+        id: "library-videos",
+        summary: "Album and asset browsing of videos only: enables the Cargo \
+                  feature and adds READ_MEDIA_VIDEO, READ_MEDIA_VISUAL_USER_SELECTED, \
+                  READ_EXTERNAL_STORAGE, NSPhotoLibraryUsageDescription and the \
+                  Photos and ImageIO frameworks. Add `permissions` with its \
+                  `photos-videos` feature to request access.",
+        contributions: PHOTO_LIBRARY_LIBRARY_VIDEOS,
+    },
+    FeatureSpec {
         id: "save",
         summary: "Saving originals into the library: enables the Cargo feature \
                   and adds NSPhotoLibraryAddUsageDescription and the Photos \
@@ -1091,7 +1243,9 @@ const PHOTO_LIBRARY_FEATURES: &[FeatureSpec] = &[
 /// [`PHOTO_LIBRARY_FEATURES`].
 const PHOTO_LIBRARY: PluginSpec = PluginSpec {
     id: "photo-library",
-    summary: "Pick photos and videos with the system picker (Android, iOS; file dialog on desktop)",
+    summary: "Pick photos and videos with the system picker (Android, iOS; \
+              file dialog on desktop); features: library, library-images, \
+              library-videos, save, decode.",
     crate_dir: "photo-library",
     base: &[
         Contribution::CargoDep {
@@ -1628,14 +1782,23 @@ mod tests {
 
     /// The `photo-library` entry's base contributions: Cargo dependency,
     /// Android library module, `PhotosUI` framework; no permission or plist
-    /// entry in the base. Its optional features are `library`, `save` and
-    /// `decode`.
+    /// entry in the base. Its optional features are `library`,
+    /// `library-images`, `library-videos`, `save` and `decode`.
     #[test]
     fn photo_library_base_contributions_match_the_final_accounting() {
         let spec = find_plugin("photo-library").unwrap();
         assert_eq!(spec.crate_dir, "photo-library");
         let ids: Vec<&str> = spec.optional_features.iter().map(|f| f.id).collect();
-        assert_eq!(ids, vec!["library", "save", "decode"]);
+        assert_eq!(
+            ids,
+            vec![
+                "library",
+                "library-images",
+                "library-videos",
+                "save",
+                "decode"
+            ]
+        );
         assert_eq!(spec.requires_sibling, None);
         assert_eq!(spec.base.len(), 3);
         assert!(matches!(
@@ -2975,6 +3138,8 @@ mod tests {
             ids,
             vec![
                 "photos",
+                "photos-images",
+                "photos-videos",
                 "photos-add",
                 "camera",
                 "microphone",
@@ -3021,9 +3186,12 @@ mod tests {
         assert_eq!(feature("media-location").len(), 3);
 
         // Every feature starts with the cargo feature of the same name
-        // (photos-add shares `photos`).
+        // (photos-add, photos-images and photos-videos share `photos`).
         for f in spec.optional_features {
-            let want = if f.id == "photos-add" { "photos" } else { f.id };
+            let want = match f.id {
+                "photos-add" | "photos-images" | "photos-videos" => "photos",
+                id => id,
+            };
             assert!(
                 matches!(
                     f.contributions[0],
@@ -3047,6 +3215,166 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    /// How many times each Android media permission line appears in the
+    /// project's manifest, in the order READ_MEDIA_IMAGES, READ_MEDIA_VIDEO,
+    /// READ_MEDIA_VISUAL_USER_SELECTED, READ_EXTERNAL_STORAGE.
+    fn media_permission_counts(root: &Path) -> [usize; 4] {
+        let manifest =
+            fs::read_to_string(root.join("android/app/src/main/AndroidManifest.xml")).unwrap();
+        [
+            "READ_MEDIA_IMAGES",
+            "READ_MEDIA_VIDEO",
+            "READ_MEDIA_VISUAL_USER_SELECTED",
+            "READ_EXTERNAL_STORAGE",
+        ]
+        .map(|p| {
+            manifest
+                .matches(&format!("android.permission.{p}\""))
+                .count()
+        })
+    }
+
+    /// `permissions` with `photos-images` writes READ_MEDIA_IMAGES and not
+    /// READ_MEDIA_VIDEO, plus the two shared media lines; the Cargo feature
+    /// is `photos` and the iOS usage string is the one `photos` writes.
+    #[test]
+    fn permissions_photos_images_writes_only_the_image_media_line() {
+        let root = scaffold_project("permissions-photos-images");
+        add_plugin(&root, "permissions", &["photos-images"]).unwrap();
+
+        assert_eq!(media_permission_counts(&root), [1, 0, 1, 1]);
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("features = [\"photos\"]"), "{cargo}");
+        let plist = fs::read_to_string(root.join("ios/Runner/Info.plist")).unwrap();
+        assert_eq!(
+            plist.matches("NSPhotoLibraryUsageDescription").count(),
+            1,
+            "{plist}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `permissions` with `photos-videos` writes READ_MEDIA_VIDEO and not
+    /// READ_MEDIA_IMAGES, plus the two shared media lines.
+    #[test]
+    fn permissions_photos_videos_writes_only_the_video_media_line() {
+        let root = scaffold_project("permissions-photos-videos");
+        add_plugin(&root, "permissions", &["photos-videos"]).unwrap();
+
+        assert_eq!(media_permission_counts(&root), [0, 1, 1, 1]);
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("features = [\"photos\"]"), "{cargo}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `permissions` with `photos` still writes both media lines beside the
+    /// shared ones.
+    #[test]
+    fn permissions_photos_writes_both_media_lines() {
+        let root = scaffold_project("permissions-photos-both");
+        add_plugin(&root, "permissions", &["photos"]).unwrap();
+
+        assert_eq!(media_permission_counts(&root), [1, 1, 1, 1]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `photos-images` then `photos-videos` in one project: each media line
+    /// lands once, the Cargo feature is listed once, and re-applying both
+    /// leaves a byte-identical tree.
+    #[test]
+    fn permissions_photos_images_then_videos_compose_without_duplicates() {
+        let root = scaffold_project("permissions-photos-compose");
+        add_plugin(&root, "permissions", &["photos-images"]).unwrap();
+        let second = add_plugin(&root, "permissions", &["photos-videos"]).unwrap();
+
+        assert_eq!(media_permission_counts(&root), [1, 1, 1, 1]);
+        let video_line = second
+            .items
+            .iter()
+            .filter(|i| i.description.contains("READ_MEDIA_VIDEO"))
+            .collect::<Vec<_>>();
+        assert_eq!(video_line.len(), 1, "{second:?}");
+        assert_eq!(video_line[0].outcome, AddOutcome::Applied, "{second:?}");
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("features = [\"photos\"]"), "{cargo}");
+
+        let after_both = snapshot_tree(&root);
+        add_plugin(&root, "permissions", &["photos-images", "photos-videos"]).unwrap();
+        assert_eq!(
+            after_both,
+            snapshot_tree(&root),
+            "a re-apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `photo-library` with `library-images` writes READ_MEDIA_IMAGES and not
+    /// READ_MEDIA_VIDEO, and its Cargo feature is `library`.
+    #[test]
+    fn photo_library_library_images_writes_only_the_image_media_line() {
+        let root = scaffold_project("photo-library-library-images");
+        add_plugin(&root, "photo-library", &["library-images"]).unwrap();
+
+        assert_eq!(media_permission_counts(&root), [1, 0, 1, 1]);
+        let cargo = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+        assert!(cargo.contains("\"library\""), "{cargo}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `photo-library` with `library-videos` writes READ_MEDIA_VIDEO and not
+    /// READ_MEDIA_IMAGES.
+    #[test]
+    fn photo_library_library_videos_writes_only_the_video_media_line() {
+        let root = scaffold_project("photo-library-library-videos");
+        add_plugin(&root, "photo-library", &["library-videos"]).unwrap();
+
+        assert_eq!(media_permission_counts(&root), [0, 1, 1, 1]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `photo-library` with `library` still writes both media lines.
+    #[test]
+    fn photo_library_library_writes_both_media_lines() {
+        let root = scaffold_project("photo-library-library-both");
+        add_plugin(&root, "photo-library", &["library"]).unwrap();
+
+        assert_eq!(media_permission_counts(&root), [1, 1, 1, 1]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// `photo-library` with `library-images` then `library-videos` writes
+    /// each media line once and re-applying both leaves a byte-identical
+    /// tree.
+    #[test]
+    fn photo_library_library_images_then_videos_compose_without_duplicates() {
+        let root = scaffold_project("photo-library-images-videos-compose");
+        add_plugin(&root, "photo-library", &["library-images"]).unwrap();
+        add_plugin(&root, "photo-library", &["library-videos"]).unwrap();
+
+        assert_eq!(media_permission_counts(&root), [1, 1, 1, 1]);
+        let after_both = snapshot_tree(&root);
+        add_plugin(
+            &root,
+            "photo-library",
+            &["library-images", "library-videos"],
+        )
+        .unwrap();
+        assert_eq!(
+            after_both,
+            snapshot_tree(&root),
+            "a re-apply must leave a byte-identical tree"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// The `permissions` module path must exist in this checkout.
