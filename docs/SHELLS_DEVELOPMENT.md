@@ -133,6 +133,21 @@ is a person-driven check:
   Responsive: in a windowed scene the corner-insets line shows a non-zero TL (TR under RTL) and the
   home bar's brand slot sits clear of the window control; full screen reads zeros.
 
+**Android: run 2026-11-12** on a Pixel 4a (Android 16), `adb`-driven with screenshots read by
+eye, against `examples/playground` built from `0f55c1af`. iOS: not yet recorded.
+
+| Check | Result | Observed |
+|---|---|---|
+| Safe-area | pass | portrait and both landscape rotations: content clears the status bar and the display cutout on whichever side it sits; the tab bar sits above the gesture bar |
+| Keyboard | partial | the keyboard shows on focus, soft-key typing inserts at the caret, the layout returns on dismiss; **not checked:** content shifting clear of the keyboard, since no playground page has a text field near the bottom |
+| Back | pass | Tabs page pushed to depth 3: back pops 3 → 2 → 1, then leaves to the launcher at the root (back key event, not the edge gesture) |
+| Density refresh | pass | `wm density 330` then reset on the running app: the layout rescales in the same process (not a second display) |
+| Bar region | pass | no black band behind the status bar or the gesture bar in either orientation |
+
+Defects seen on this run (open): after the keyboard is dismissed with back, a tap on the same
+still-focused field does not reopen it until focus has moved away; `adb shell input text` inserts
+nothing into a focused field; the density change put the playground back on its first page.
+
 ## Clipboard manual test (Android + iOS)
 
 A device gate for the two mobile clipboard routes, against an installed app (`frust run -d

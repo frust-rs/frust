@@ -4,6 +4,13 @@ All notable changes to Frust are recorded here, newest first, in the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) shape. GitHub release notes are copied
 from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 
+**Versioning.** Frust is pre-1.0 and in alpha. A 0.x.y patch may contain source-breaking and
+behaviour-changing entries. Every such entry is listed under Breaking in that release's section,
+with its migration, and named in the release summary. To avoid surprises, pin an exact version
+(`version = "=0.6.6"`, the version you tested) on the facade and on every frust plugin crate, which
+share one version. Or commit `Cargo.lock` and read the Breaking block before running
+`cargo update`. The full rule is in [docs/RELEASING.md](docs/RELEASING.md) § Versioning.
+
 ## Unreleased
 
 ### Breaking
@@ -25,6 +32,19 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
   `provide_context` called from a handler inside a component now lands on that component's owner
   (visible to that component's subtree only, gone when it is disposed), where before it landed on the
   app's root owner; to provide app-wide from a handler, enter a longer-lived owner first.
+- `NavigatorController::pop_with_result` is now single-shot per page: a second call for the same top
+  page before the first is applied (a double click on a dialog button, say) is dropped and its result
+  discarded, so the `push_for_result` callback receives the first result once and no second page is
+  popped. Only an immediate repeat is recognised: once another op is queued between the two calls the
+  second is queued as usual. `pop()` is unchanged, and `pop_with_result` followed by `pop()` still pops
+  two pages. Migration: remove app-side latches that guarded against a double pop. An app that meant
+  to pop two pages with results calls it once per page across frames, or uses `pop()`.
+- A generated Android app now needs the pinned NDK installed under the Android SDK
+  (`<sdk>/ndk/28.2.13676358`): `cargoNdkBuild` resolves that directory and exports it as
+  `ANDROID_NDK_HOME`, so `frust run` / `frust build` no longer consult the caller's
+  `ANDROID_NDK_HOME` for Android, and the build fails when the directory is missing. Migration:
+  `sdkmanager --install "ndk;28.2.13676358"`, or set `FRUST_ANDROID_NDK_VERSION` to an installed r28+
+  version.
 
 ### Added
 
@@ -116,9 +136,39 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 - `AssetId` documents its stability: best-effort the same across launches on one device, so an app may
   store it; not portable to another device or platform, and a restore or reinstall may change it.
 - The playground's Photos page gains a Changes panel and a cursor-paging toggle.
+- `semantics(child)`: a view that wraps a child with its own accessibility node, with builders
+  `label`, `role`, `heading(level)` and `hidden(bool)` (omits the subtree from the semantics tree).
+  `semantics_label(text)` is a zero-size leaf that only announces its text. Both are re-exported from
+  `frust`.
+- `TextInputView::on_caret_change(|state, CaretInfo| ..)` and `CaretInfo { rect, line, offset,
+  selection }` (non-exhaustive): where the caret is, fired when the field gains focus through an event
+  it handles and whenever the rect, line, offset or selection then differs from the last report.
+  When an event also changes the text, `on_change` runs first. Not reported: a controlled-value
+  rebuild that moves the caret, a relayout that reflows it onto another line, and focus granted
+  programmatically (the first report then comes with the next handled event). `TextEditor::caret_line()`
+  in `frust-text` gives the visual line of the caret.
+- `frust doctor` checks the NDK the generated build uses: `<sdk>/ndk/<version>` under
+  `ANDROID_HOME` (else `ANDROID_SDK_ROOT`), where the version is `FRUST_ANDROID_NDK_VERSION` or
+  28.2.13676358. It is ok when that directory holds r28 or later, a warning when it is missing (with
+  the `sdkmanager --install "ndk;<version>"` fix), below r28 (its libraries are not 16 KB aligned),
+  or has no readable revision ("version not verified"). It cannot read a project's
+  `android/local.properties` `sdk.dir`. When `ANDROID_NDK_HOME` is set to another directory, an
+  informational line says `frust run` / `frust build` use the SDK copy and only the hot-patch path
+  uses `ANDROID_NDK_HOME`.
+- The app template's `app/build.gradle.kts` pins `ndkVersion` to 28.2.13676358; set
+  `FRUST_ANDROID_NDK_VERSION` in the environment to build with another NDK installed under the SDK.
+  `cargoNdkBuild` exports that directory as `ANDROID_NDK_HOME` (replacing the caller's value) and
+  fails with an `sdkmanager --install "ndk;<version>"` hint when it is not installed.
+- `scripts/ci/page-size-check.sh`: fails when any `PT_LOAD` segment of an Android `.so` is aligned
+  below 0x4000, rejects a non-numeric alignment field, and skips 32-bit objects. The `android-relr-guard` CI job runs it on the one debug arm64
+  library that job builds.
+- `deny.toml` (advisories only, each ignore with its reason) and an `advisories` CI job that runs a
+  pinned `cargo-deny` on pull requests and weekly. It is not a merge gate.
 
 ### Changed
 
+- New apps build with NDK 28.2.13676358, and `frust doctor` recommends r28 (earlier NDKs produce
+  libraries that are not 16 KB aligned).
 - accesskit 0.25, `accesskit_winit` 0.34, `accesskit_android` 0.9, `accesskit_ios` 0.2.2.
 - The plugin registry's `photo-library` `library` option now also links `ImageIO` on iOS, which
   `asset_metadata` reads through; a project that also enables `decode` links it once.

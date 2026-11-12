@@ -62,6 +62,54 @@ Debug/profile/hot builds enable `<key>/perf-trace`, `<key>/devtools` and `<key>/
 `<key>` is the app's dependency key for `frust-ui`, resolved by `frust-drive::facade_key` from
 cargo metadata (fallback: manifest read; default `frust`).
 
+## Adding android/ and ios/ to an existing crate
+
+No command does this. The CLI commands are `create`, `doctor`, `devices`, `clean`, `plugin`,
+`tui`, `run` and `build`, and `frust create` refuses a non-empty directory unless `--overwrite`
+is passed. This procedure was run on 2026-11-12 on a Linux host (Manjaro) against a
+checkout, with `--frust-path` and no network. Run from the crate directory; `<name>` is the
+crate name and `<org>` its reverse-DNS prefix:
+
+```
+frust create /tmp/scaffold --project-name <name> --org <org> --frust-path <checkout>
+cp -r /tmp/scaffold/android /tmp/scaffold/ios /tmp/scaffold/frust.toml /tmp/scaffold/assets .
+cp -r /tmp/scaffold/.cargo .             # optional: Android link flags, build/rust target dir
+rm -f android/local.properties ios/FrustEmbedding   # machine-local, rewritten below
+frust build apk       # first step writes the wiring; stops at the signing gate until keys exist
+frust doctor          # "Platform packages" lists the resolved embedding directories
+```
+
+1. Scaffold a throwaway app with the same `--project-name` and `--org` as the crate (the
+   Kotlin package, `applicationId`, bundle id and `-l<name>` link flag are derived from them).
+   Omit `--frust-path` for a registry release.
+2. Copy `android/`, `ios/`, `frust.toml` and `assets/` (the icon named in `frust.toml`). Copy
+   `.cargo/config.toml` and the `.gitignore` entries from the scaffold if you want the same
+   Android link flags, `build/rust` target dir and ignored machine-local files.
+3. In the crate's `Cargo.toml`, set `[lib] crate-type = ["cdylib", "staticlib", "rlib"]`: the
+   `cdylib` is the Android library, the `staticlib` is what Xcode links. The library name must
+   equal the name in `android/app/src/main/AndroidManifest.xml`
+   (`dev.frust.nativeLibrary`) and the iOS `-l<name>` flag. Depend on `frust-ui` as the
+   generated manifest does (`frust = { package = "frust-ui", .. }`).
+4. End `src/lib.rs` with `frust::app!(RootComponent, setup = { .. })`. It generates the Android
+   JNI exports and the iOS C-ABI exports. Desktop preview also needs the scaffold's `src/main.rs`
+   (not tested here).
+5. Wire the machine-local paths: `frust run -d <android|ios>` and `frust build` refresh
+   `android/local.properties` and the `ios/FrustEmbedding` symlink from `cargo metadata`, as
+   `frust create` does. `frust build apk` was used here: it printed the two wiring lines and then
+   stopped at the release-signing gate, before Gradle.
+
+If the crate is a member of a workspace with path dependencies, the generated app needs no
+`[workspace]` table of its own and none is added. The same steps worked from a member crate
+(`app`, depending on a sibling `core` crate by path). Two differences: cargo ignores
+`[profile.*]` tables in a member's manifest (and warns), so keep them in the workspace root, and
+`Cargo.lock` lives at the workspace root. The wiring reads `cargo metadata`, so it does not
+depend on where the target directory is.
+
+What ran: `cargo check` on the host and `cargo check --target aarch64-linux-android --lib`
+passed in both layouts (offline, from a warm cache); the wiring wrote `android/local.properties`
+and the symlink, and `frust doctor` resolved both embeddings. What did not run: the Gradle
+build, `cargo ndk` packaging, any Xcode build, and any device run.
+
 ## Version Pins
 
 The pins this unit owns, under [DEVELOPMENT.md](DEVELOPMENT.md)'s Version-Pin Policy (pins are

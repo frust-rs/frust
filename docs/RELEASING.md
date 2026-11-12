@@ -13,7 +13,8 @@ aggregate `ci-ok`).
   — only when the CHANGELOG's Changed list marks each one with its migration and the release
   summary names them; a change that removes or reshapes an API waits for the next minor version, except
   that while the project is in its alpha a patch may reshape an API when the CHANGELOG lists it
-  under Breaking with its migration and the release summary names it. A
+  under Breaking with its migration and the release summary names it. The alpha ends with 0.7.0, and
+  this exception ends with it. A
   surface that exists only for embedders (shell glue such as `frust-shell-ios`'s `ffi_glue` or
   `frust-shell-common`'s `gpu` feature) may be reshaped in a patch, and a behaviour change to a
   published API may ship in a patch, when the CHANGELOG lists each under Breaking with its migration
@@ -66,6 +67,7 @@ Members with `publish = false` (`frust-testing`, the demo and gallery packages) 
    (see "First release and Trusted Publishing"). Watch the run; re-run a failed `publish` job.
    If it ends with exit 3 naming new crates, do "New crates" below, then re-run the job.
 7. Edit the GitHub release's generated notes into a summary of the changes since the previous tag.
+   The summary names every entry under the section's Breaking heading.
    Copy the notes from `CHANGELOG.md`'s section for the tag; the bump commit (step 3) moves the
    Unreleased heading to the version.
 

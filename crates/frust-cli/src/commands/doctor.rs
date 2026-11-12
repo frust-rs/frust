@@ -324,16 +324,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// An env lookup with a scripted map, for the one test that runs the
-    /// *real* validator set and therefore needs the Android variables set.
-    struct MapEnv(&'static [(&'static str, &'static str)]);
+    /// An env lookup for the tests that run the *real* validator set and
+    /// therefore need the Android variables set: a temporary Android SDK holding
+    /// the pinned NDK, removed on drop (also when an assertion fails), with
+    /// `ANDROID_HOME` pointing at it.
+    struct SdkEnv {
+        dir: PathBuf,
+        home: String,
+    }
 
-    impl EnvLookup for MapEnv {
+    impl SdkEnv {
+        fn new(tag: &str) -> Self {
+            let dir = empty_dir(tag);
+            let ndk = dir.join("ndk").join("28.2.13676358");
+            std::fs::create_dir_all(&ndk).unwrap();
+            std::fs::write(
+                ndk.join("source.properties"),
+                "Pkg.Desc = Android NDK\nPkg.Revision = 28.2.13676358\n",
+            )
+            .unwrap();
+            let home = dir.to_str().unwrap().to_string();
+            Self { dir, home }
+        }
+    }
+
+    impl Drop for SdkEnv {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl EnvLookup for SdkEnv {
         fn get(&self, key: &str) -> Option<String> {
-            self.0
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.to_string())
+            (key == "ANDROID_HOME").then(|| self.home.clone())
         }
     }
 
@@ -362,10 +385,7 @@ mod tests {
             .with("cargo packager --version", ok("cargo-packager 0.11.8\n"))
             .missing("wasm-bindgen --version")
             .missing("wasm-opt --version");
-        let env = MapEnv(&[
-            ("ANDROID_HOME", "/sdk"),
-            ("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125"),
-        ]);
+        let env = SdkEnv::new("sdk-env");
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,
@@ -417,10 +437,7 @@ mod tests {
             .with("cargo packager --version", ok("cargo-packager 0.11.8\n"))
             .missing("wasm-bindgen --version")
             .missing("wasm-opt --version");
-        let env = MapEnv(&[
-            ("ANDROID_HOME", "/sdk"),
-            ("ANDROID_NDK_HOME", "/sdk/ndk/26.1.10909125"),
-        ]);
+        let env = SdkEnv::new("sdk-env");
         let ctx = DoctorCtx {
             runner: &runner,
             env: &env,

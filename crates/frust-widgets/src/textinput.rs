@@ -624,6 +624,28 @@ fn masked_to_real(text: &str, masked_byte: usize) -> usize {
     text.len()
 }
 
+/// Where the caret is, as reported to
+/// [`TextInputView::on_caret_change`].
+///
+/// All coordinates are of the field's own text, in the widget's local space
+/// (the same space the field paints in, padding included).
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct CaretInfo {
+    /// The caret rectangle in the widget's local coordinates, as the field
+    /// would publish it to the platform IME. A caret the IME asked to hide
+    /// reports [`Rect::ZERO`].
+    pub rect: Rect,
+    /// The zero-based visual line the caret is on. A soft-wrapped line counts
+    /// as several.
+    pub line: usize,
+    /// The caret's byte offset in the text (the selection's focus end).
+    pub offset: usize,
+    /// The selected byte range, in ascending order, when the selection is not
+    /// collapsed.
+    pub selection: Option<std::ops::Range<usize>>,
+}
+
 /// A view-held, typed text callback (erased on build).
 type OnText<State> = Rc<dyn Fn(&mut State, String)>;
 
@@ -681,6 +703,7 @@ pub struct TextInputView<State: 'static> {
     focus_ring_width: Option<f64>,
     on_change: OnText<State>,
     on_submit: Option<OnText<State>>,
+    on_caret_change: Option<crate::authoring::TypedArgCallback<State, CaretInfo>>,
 }
 
 /// Create a controlled text field showing `value` that fires
@@ -714,6 +737,7 @@ pub fn text_input<State: 'static, F: Fn(&mut State, String) + 'static>(
         focus_ring_width: None,
         on_change: Rc::new(on_change),
         on_submit: None,
+        on_caret_change: None,
     }
 }
 
@@ -737,6 +761,28 @@ impl<State: 'static> TextInputView<State> {
     /// kept.
     pub fn on_submit<F: Fn(&mut State, String) + 'static>(mut self, on_submit: F) -> Self {
         self.on_submit = Some(Rc::new(on_submit));
+        self
+    }
+
+    /// Be told where the caret is.
+    ///
+    /// `on_caret_change(state, info)` fires once when the field gains focus
+    /// through an event it handles, and afterwards whenever the caret rect,
+    /// line, byte offset or selection differs from the last report, as the
+    /// result of an event the field handles (typing, pointer placement, arrow
+    /// keys, an IME commit, a selection change). It never fires when nothing
+    /// changed, nor while the field is unfocused. When an event also changes
+    /// the text, [`on_change`](text_input) runs first, so the callback may
+    /// safely mutate app state.
+    ///
+    /// Changes that happen without an event the field handles are **not**
+    /// reported: a controlled-value rebuild that moves the caret, a relayout
+    /// that reflows it onto another line, and focus granted programmatically
+    /// (the first report then comes with the next handled event). The field
+    /// has no deferred path that may call an app callback with state, so
+    /// those stay silent.
+    pub fn on_caret_change<F: Fn(&mut State, CaretInfo) + 'static>(mut self, f: F) -> Self {
+        self.on_caret_change = Some(Rc::new(f));
         self
     }
 
@@ -1176,6 +1222,10 @@ pub struct TextInputWidget {
     last_input_time: FrameTime,
     on_change: crate::authoring::ErasedArgCallback<String>,
     on_submit: Option<crate::authoring::ErasedArgCallback<String>>,
+    on_caret_change: Option<crate::authoring::ErasedArgCallback<CaretInfo>>,
+    /// The last [`CaretInfo`] handed to `on_caret_change` in this focus
+    /// session; `None` until the first report and again once focus is lost.
+    caret_reported: Option<CaretInfo>,
 }
 
 /// A closed portal slot configured the way a selection toolbar wants it.
@@ -1934,6 +1984,7 @@ impl TextInputWidget {
                     NamedKey::Escape => {
                         ctx.release_focus();
                         self.focused = false;
+                        self.caret_reported = None;
                         // Escape dismisses the session, and the toolbar with it
                         // — it is the field's, not a surface of its own.
                         self.hide_toolbar(ctx);
@@ -2292,6 +2343,11 @@ impl<State: 'static> View<State> for TextInputView<State> {
                 .on_submit
                 .as_ref()
                 .map(crate::authoring::erase_callback_arg::<State, String>),
+            on_caret_change: self
+                .on_caret_change
+                .as_ref()
+                .map(crate::authoring::erase_callback_arg::<State, CaretInfo>),
+            caret_reported: None,
         };
         // Seeds the masked mirror when built obscured (a no-op otherwise).
         widget.rebuild_mask_editor();
@@ -2310,6 +2366,10 @@ impl<State: 'static> View<State> for TextInputView<State> {
             .on_submit
             .as_ref()
             .map(crate::authoring::erase_callback_arg::<State, String>);
+        element.on_caret_change = self
+            .on_caret_change
+            .as_ref()
+            .map(crate::authoring::erase_callback_arg::<State, CaretInfo>);
 
         let mut flags = ChangeFlags::NONE;
         if prev.placeholder != self.placeholder {
@@ -2336,6 +2396,7 @@ impl<State: 'static> View<State> for TextInputView<State> {
             if !self.enabled {
                 element.release_focus_pending = element.focused;
                 element.focused = false;
+                element.caret_reported = None;
                 element.captured = false;
                 // A field that stops being interactive mid-press keeps no
                 // gesture in flight either: the hold timer is capture-gated, so
@@ -2611,6 +2672,7 @@ impl Widget for TextInputWidget {
         let focused = ctx.has_focus() && self.focusable();
         if self.focused && !focused {
             self.focused = false;
+            self.caret_reported = None;
             // The toolbar belongs to the session that was just blurred out from
             // under us, so it goes with it: the pod is dropped on the next
             // rebuild, and nothing is registered from this paint on. The
@@ -2807,6 +2869,68 @@ impl Widget for TextInputWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        let result = self.dispatch_event(ctx, event);
+        self.report_caret(ctx);
+        result
+    }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        self.semantics_impl(ctx);
+    }
+
+    /// A Tab stop exactly when it may take focus at all (enabled; read-only passes).
+    fn is_focusable(&self) -> bool {
+        self.focusable()
+    }
+}
+
+impl TextInputWidget {
+    /// The caret as `on_caret_change` reports it. Always builds the value;
+    /// `report_caret` is what skips the report when no listener is set.
+    fn caret_info(&self, size: Size) -> CaretInfo {
+        let offset = Vec2::new(self.pad_x, self.content_origin_y(size.height));
+        let rect = self
+            .display()
+            .cursor_rect(self.caret_width)
+            .map_or(Rect::ZERO, |c| {
+                Rect::new(
+                    c.x0 + offset.x,
+                    c.y0 + offset.y,
+                    c.x1 + offset.x,
+                    c.y1 + offset.y,
+                )
+            });
+        let es = self.editor.editing_state_bytes();
+        CaretInfo {
+            rect,
+            line: self.display().caret_line(),
+            offset: es.extent,
+            selection: (es.base != es.extent)
+                .then(|| es.base.min(es.extent)..es.base.max(es.extent)),
+        }
+    }
+
+    /// Hand `on_caret_change` the caret when it differs from the last report.
+    /// Runs once at the end of every event, so it follows `on_change`.
+    fn report_caret(&mut self, ctx: &mut EventCtx) {
+        if self.on_caret_change.is_none() {
+            return;
+        }
+        if !self.focused || !self.focusable() {
+            self.caret_reported = None;
+            return;
+        }
+        let info = self.caret_info(ctx.size());
+        if self.caret_reported.as_ref() == Some(&info) {
+            return;
+        }
+        self.caret_reported = Some(info.clone());
+        if let Some(cb) = &mut self.on_caret_change {
+            cb(ctx, info);
+        }
+    }
+
+    fn dispatch_event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         // The focus gate IS the disabled gate: refusing focus here is what
         // makes `Key`/`Ime` (focus-routed, never hit-tested) unreachable, and a
         // disabled field consumes nothing on the way — it is inert, not a
@@ -2818,6 +2942,7 @@ impl Widget for TextInputWidget {
                 ctx.release_focus();
                 self.release_focus_pending = false;
                 self.focused = false;
+                self.caret_reported = None;
                 self.captured = false;
                 ctx.request_redraw();
             }
@@ -2945,6 +3070,7 @@ impl Widget for TextInputWidget {
                         if self.focused {
                             ctx.release_focus();
                             self.focused = false;
+                            self.caret_reported = None;
                             self.hide_toolbar(ctx);
                             ctx.request_redraw();
                         }
@@ -3119,8 +3245,10 @@ impl Widget for TextInputWidget {
             _ => EventResult::Ignored,
         }
     }
+}
 
-    fn semantics(&self, ctx: &mut SemanticsCtx) {
+impl TextInputWidget {
+    fn semantics_impl(&self, ctx: &mut SemanticsCtx) {
         // A single-line TextInput node exposing its current text as `value`.
         // accesskit tracks focus at the tree level, so a focused field records
         // itself as the pass's focus node rather than carrying a per-node flag.
@@ -3202,11 +3330,6 @@ impl Widget for TextInputWidget {
             ctx.set_focused(id);
         }
     }
-
-    /// A Tab stop exactly when it may take focus at all (enabled; read-only passes).
-    fn is_focusable(&self) -> bool {
-        self.focusable()
-    }
 }
 
 #[cfg(test)]
@@ -3226,6 +3349,8 @@ mod tests {
         submits: u32,
         last_submit: String,
         reject: bool,
+        carets: Vec<CaretInfo>,
+        order: Vec<&'static str>,
     }
 
     fn build(state: &mut AppState) -> TextInputView<AppState> {
@@ -3571,6 +3696,128 @@ mod tests {
         assert!(root.is_focus_active(), "the typing session survives it");
         assert!(widget(&root).focused);
         assert!(widget(&root).toolbar_open, "and it opens the toolbar");
+    }
+
+    fn caret_logic(state: &mut AppState) -> TextInputView<AppState> {
+        text_input(state.value.clone(), |s: &mut AppState, v: String| {
+            s.order.push("change");
+            s.value = v;
+        })
+        .multiline(3)
+        .on_caret_change(|s: &mut AppState, info| {
+            s.order.push("caret");
+            s.carets.push(info);
+        })
+    }
+
+    fn caret_harness(state: &mut AppState) -> RenderRoot<AppState, TextInputView<AppState>> {
+        let mut root = RenderRoot::new();
+        root.rebuild(&mut caret_logic, state);
+        root.layout(Size::new(300.0, 200.0));
+        root
+    }
+
+    #[test]
+    fn caret_callback_fires_once_on_focus_and_not_while_unfocused() {
+        let mut state = AppState::default();
+        let mut root = caret_harness(&mut state);
+        root.event(&mut state, &ch("x"));
+        assert!(state.carets.is_empty(), "unfocused field reports nothing");
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        assert_eq!(state.carets.len(), 1, "one call on focus");
+        let first = &state.carets[0];
+        assert_eq!(
+            (first.line, first.offset, first.selection.clone()),
+            (0, 0, None)
+        );
+        assert!(first.rect.height() > 0.0);
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(state.carets.len(), 1, "a release changes nothing");
+    }
+
+    #[test]
+    fn caret_callback_follows_typing_after_on_change() {
+        let mut state = AppState::default();
+        let mut root = caret_harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        state.order.clear();
+        let before = state.carets.len();
+
+        root.event(&mut state, &ch("a"));
+
+        assert_eq!(state.carets.len(), before + 1, "fires once");
+        let info = state.carets.last().unwrap();
+        assert_eq!(info.offset, 1, "the offset advanced");
+        assert_eq!(state.order, ["change", "caret"], "after on_change");
+        assert!(info.rect.x0 > state.carets[0].rect.x0, "the rect advanced");
+    }
+
+    #[test]
+    fn caret_callback_counts_lines_and_ignores_unhandled_keys() {
+        let mut state = AppState::default();
+        let mut root = caret_harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        let info = state.carets.last().unwrap().clone();
+        assert_eq!((info.line, info.offset), (1, 2), "a newline starts line 1");
+
+        let calls = state.carets.len();
+        root.event(&mut state, &named(NamedKey::F5, Modifiers::default()));
+        assert_eq!(state.carets.len(), calls, "an ignored key fires nothing");
+        // Moving the caret to where it already is changes nothing either.
+        root.event(&mut state, &named(NamedKey::End, Modifiers::default()));
+        assert_eq!(state.carets.len(), calls, "End at the end is a no-op");
+    }
+
+    #[test]
+    fn caret_callback_reports_pointer_placement_on_another_line() {
+        let mut state = AppState::default();
+        let mut root = caret_harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        root.event(&mut state, &ch("a"));
+        root.event(&mut state, &named(NamedKey::Enter, Modifiers::default()));
+        root.event(&mut state, &ch("b"));
+        assert_eq!(state.carets.last().unwrap().line, 1);
+        root.layout(Size::new(300.0, 200.0));
+        root.event(&mut state, &named(NamedKey::ArrowUp, Modifiers::default()));
+        let top = state.carets.last().unwrap().clone();
+        assert_eq!(top.line, 0);
+        let top_y = top.rect.center().y;
+        root.event(
+            &mut state,
+            &named(NamedKey::ArrowDown, Modifiers::default()),
+        );
+        assert_eq!(state.carets.last().unwrap().line, 1);
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, top_y));
+        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, top_y));
+
+        let info = state.carets.last().unwrap();
+        assert_eq!(info.line, 0, "placed on the first line");
+        assert!(info.offset <= 1);
+    }
+
+    #[test]
+    fn caret_callback_reports_a_dragged_selection() {
+        let mut state = AppState {
+            value: "hello world".into(),
+            ..AppState::default()
+        };
+        let mut root = caret_harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 6.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Move, 250.0, 10.0));
+        root.event(&mut state, &pointer(PointerPhase::Up, 250.0, 10.0));
+
+        let info = state.carets.last().unwrap();
+        let range = info.selection.clone().expect("a selection is reported");
+        assert!(range.start < range.end);
+        assert_eq!(range.end, 11, "dragged to the end of the text");
+        assert_eq!(info.offset, 11, "the offset is the focus end");
     }
 
     #[test]
