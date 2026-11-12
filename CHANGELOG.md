@@ -60,8 +60,10 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 - The `semantics(child)` wrapper's default role changed: with a label, value or hint set and no
   explicit `role`, it is now a group (`Role::Group`), where it was a generic container; it stays a
   generic container only when none of the three is set. A caller that set a label and relied on the
-  container role calls `.role(Role::GenericContainer)` explicitly. `heading(level)` on the wrapper now also merges the
-  subtree into one node.
+  container role calls `.role(Role::GenericContainer)` explicitly. `heading(level)`, `image()` and
+  `button()` on the wrapper now also merge the subtree into one node when the wrapper has a label or
+  value, and stay a container over the child's nodes otherwise. An explicit `merged(bool)` wins in
+  either call order.
 
 ### Added
 
@@ -156,8 +158,9 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 - `semantics(child)`: a view that wraps a child with its own accessibility node, with builders
   `label`, `value`, `hint`, `role`, `heading(level)`, `merged(bool)` (folds the subtree into this one
   node), `tappable(bool)` (exposes a click action), `image()`, `button()` and `hidden(bool)` (omits
-  the subtree from the semantics tree). The default role is a group once a label, value or hint is
-  set. A click action lands positionally, at the centre of the node's bounds.
+  the subtree from the semantics tree). A heading, image or button wrapper becomes one node when it
+  has a label or value, and stays a container over the child otherwise. The default role is a group
+  once a label, value or hint is set. A click action lands positionally, at the centre of the node's bounds.
   `semantics_label(text)` is a zero-size leaf that only announces its text. Both are re-exported from
   `frust`.
 - `TextView::heading(level)` (the `text(..)` builder) publishes a text view as a heading, and `ImageView::label(text)` gives an
