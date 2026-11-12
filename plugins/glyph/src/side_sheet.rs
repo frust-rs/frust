@@ -889,6 +889,17 @@ impl<State: 'static> View<State> for GlyphSideSheetView<State> {
     }
 }
 
+/// [`frust::authoring::route_event_single`] into one content pod, also
+/// reporting whether the dispatch recorded a focus claim through it.
+fn route_single_reporting_claim(
+    pod: &mut ChildPod,
+    ctx: &mut EventCtx,
+    event: &InputEvent,
+) -> (EventResult, bool) {
+    // A one-pod `route_event` is `route_event_single` with the claim reported.
+    frust::authoring::route_event_reporting_claim(std::slice::from_mut(pod), ctx, event)
+}
+
 impl GlyphSideSheetWidget {
     /// Begin the exit animation, from wherever the panel currently sits —
     /// mid-enter, never snapped back to rest first.
@@ -992,23 +1003,37 @@ impl GlyphSideSheetWidget {
         (1.0 - self.offset_frac) as f32 > BARRIER_EPSILON
     }
 
-    /// Whether the focus path runs into this sheet's own content — the guard
-    /// `Escape` consults, so content holding the deeper focus path gets first
-    /// crack at the key.
+    /// Whether the live focus path runs into this sheet's own content — the
+    /// guard `Escape` consults, so content holding the deeper focus path gets
+    /// first crack at the key. The live link, never the raw flag: a press on
+    /// the sheet's own chrome takes the session from a focused field without
+    /// routing to it, so the field's flag stays set, stranded, and must not
+    /// swallow the sheet's Escape.
     fn content_is_focused(&self) -> bool {
-        self.body.is_focused() || self.footer.as_ref().is_some_and(|p| p.is_focused())
+        self.body.holds_live_focus() || self.footer.as_ref().is_some_and(ChildPod::holds_live_focus)
     }
 
-    /// Route a non-barrier event to the body, then the footer.
+    /// Route a non-barrier event to the body, then the footer, under
+    /// [`frust::authoring::route_event`]'s focus-link rule: a dispatch that
+    /// records a focus claim through one of the two ends the other's link in
+    /// the same pass, and one that claims nothing through either leaves both
+    /// links to the root's session.
     fn route_to_content(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
-        if frust::authoring::route_event_single(&mut self.body, ctx, event) == EventResult::Handled
-        {
+        let (result, body_claimed) = route_single_reporting_claim(&mut self.body, ctx, event);
+        if body_claimed && let Some(footer) = self.footer.as_mut() {
+            footer.set_focused(false);
+        }
+        if result == EventResult::Handled {
             return EventResult::Handled;
         }
-        match self.footer.as_mut() {
-            Some(pod) => frust::authoring::route_event_single(pod, ctx, event),
-            None => EventResult::Ignored,
+        let Some(footer) = self.footer.as_mut() else {
+            return EventResult::Ignored;
+        };
+        let (result, footer_claimed) = route_single_reporting_claim(footer, ctx, event);
+        if footer_claimed && !body_claimed {
+            self.body.set_focused(false);
         }
+        result
     }
 
     /// Paint the close affordance: a filled chip holding a two-stroke `×`
@@ -1564,6 +1589,93 @@ mod tests {
 
     fn sheet() -> GlyphSideSheetView<()> {
         glyph_side_sheet("Filters", leaf_any(300.0, 200.0))
+    }
+
+    #[derive(Default)]
+    struct Fields {
+        body: String,
+        footer: String,
+    }
+
+    fn fields_sheet(s: &mut Fields) -> GlyphSideSheetView<Fields> {
+        glyph_side_sheet(
+            "Filters",
+            frust::text_input(s.body.clone(), |s: &mut Fields, v: String| s.body = v),
+        )
+        .footer(frust::text_input(
+            s.footer.clone(),
+            |s: &mut Fields, v: String| s.footer = v,
+        ))
+    }
+
+    fn fields_widget(
+        root: &RenderRoot<Fields, GlyphSideSheetView<Fields>>,
+    ) -> &GlyphSideSheetWidget {
+        let id = root.root_id().expect("root built");
+        (root.tree().pod(id).expect("root pod").widget() as &dyn Any)
+            .downcast_ref::<GlyphSideSheetWidget>()
+            .expect("the root is a GlyphSideSheetWidget")
+    }
+
+    /// The body and the footer follow `route_event`'s focus-link rule between
+    /// them: a press that moves focus to the footer field ends the body
+    /// field's link in the same pass. A press on the sheet's own chrome claims
+    /// nothing through either, so neither link is ended there; the sheet's own
+    /// claim strands the footer's, and Escape then belongs to the sheet.
+    #[test]
+    fn body_and_footer_links_end_only_on_a_claim_through_the_other() {
+        let mut root: RenderRoot<Fields, GlyphSideSheetView<Fields>> = RenderRoot::new();
+        let mut state = Fields::default();
+        let mut tcx = TextContext::new();
+        root.rebuild(&mut fields_sheet, &mut state);
+        root.layout_with_text(area(), &mut tcx as &mut dyn Any);
+        root.paint(&mut Recorder::default(), ft_ms(0.0));
+        root.paint(&mut Recorder::default(), ft_ms(ENTER_SETTLED_MS));
+        root.layout_with_text(area(), &mut tcx as &mut dyn Any);
+
+        let (body, footer, title) = {
+            let w = fields_widget(&root);
+            let inside = |p: &ChildPod| Point::new(p.origin().x + 10.0, p.origin().y + 10.0);
+            (
+                inside(&w.body),
+                inside(w.footer.as_ref().expect("footer")),
+                inside(&w.title),
+            )
+        };
+        root.event(&mut state, &ev(PointerPhase::Down, body.x, body.y));
+        root.event(&mut state, &ev(PointerPhase::Up, body.x, body.y));
+        assert!(
+            fields_widget(&root).body.holds_live_focus(),
+            "the body field is focused"
+        );
+
+        root.event(&mut state, &ev(PointerPhase::Down, footer.x, footer.y));
+        let w = fields_widget(&root);
+        assert!(
+            w.footer.as_ref().expect("footer").is_focused(),
+            "the press moved focus to the footer field"
+        );
+        assert!(
+            !w.body.is_focused(),
+            "and ended the body field's link in the same pass"
+        );
+        root.event(&mut state, &ev(PointerPhase::Up, footer.x, footer.y));
+
+        root.event(&mut state, &ev(PointerPhase::Down, title.x, title.y));
+        root.event(&mut state, &ev(PointerPhase::Up, title.x, title.y));
+        let w = fields_widget(&root);
+        let footer_pod = w.footer.as_ref().expect("footer");
+        assert!(root.is_focus_active(), "the sheet holds the session");
+        assert!(
+            footer_pod.is_focused() && !footer_pod.holds_live_focus(),
+            "a chrome press ends no content link; the sheet's claim strands it"
+        );
+        root.event(&mut state, &escape_event());
+        assert_eq!(
+            fields_widget(&root).phase,
+            Phase::Exit,
+            "Escape begins the exit"
+        );
     }
 
     /// A body that fills its slot and consumes **every** event routed to it —

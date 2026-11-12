@@ -435,15 +435,6 @@ fn releases_capture(event: &InputEvent) -> bool {
     )
 }
 
-/// Whether `event` is a pointer `Down` — the phase that opens a capture and
-/// triggers blur-on-outside-tap below.
-fn is_pointer_down(event: &InputEvent) -> bool {
-    matches!(
-        event,
-        InputEvent::Pointer(p) if matches!(p.phase, PointerPhase::Down)
-    )
-}
-
 /// Route an event across the scaffold's four fixed named slots, in `slots`'
 /// z-order (last = topmost) — the same broadcast/focus-routed/capture/
 /// hit-test contract as [`crate::authoring::route_event`], adapted to a
@@ -455,6 +446,7 @@ fn route_slots(
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
+    crate::authoring::retire_stale_focus_links(slots.iter_mut().flatten().map(|pod| &mut **pod));
     if event.is_broadcast() {
         for slot in slots.iter_mut() {
             if let Some(pod) = slot.as_deref_mut() {
@@ -464,9 +456,11 @@ fn route_slots(
         return EventResult::Ignored;
     }
     if event.is_focus_routed() {
+        // The live link, never the raw flag: a link the root's session moved
+        // away from (or ended) names no session this event belongs to.
         for slot in slots.iter_mut() {
             if let Some(pod) = slot.as_deref_mut()
-                && pod.is_focused()
+                && pod.holds_live_focus()
             {
                 return pod.event_child(ctx, event);
             }
@@ -485,24 +479,30 @@ fn route_slots(
         }
     }
 
+    // `route_event`'s focus-link rule: a claim recorded through one slot ends
+    // the others' links; a dispatch that claims nothing (an outside press the
+    // root may yet turn into a drag) leaves every link to the root's session.
     let position = event.position();
     let mut handled = EventResult::Ignored;
-    let mut kept_focus: Option<usize> = None;
+    let mut claimants = [false; 4];
     for (i, slot) in slots.iter_mut().enumerate().rev() {
-        if let Some(pod) = slot.as_deref_mut()
-            && pod.contains(position)
-            && pod.event_child(ctx, event) == EventResult::Handled
-        {
-            if pod.is_focused() {
-                kept_focus = Some(i);
-            }
+        let Some(pod) = slot.as_deref_mut() else {
+            continue;
+        };
+        if !pod.contains(position) {
+            continue;
+        }
+        let mark = crate::authoring::FocusMark::of(pod);
+        let result = pod.event_child(ctx, event);
+        claimants[i] = mark.claimed(pod);
+        if result == EventResult::Handled {
             handled = EventResult::Handled;
             break;
         }
     }
-    if is_pointer_down(event) {
+    if claimants.contains(&true) {
         for (i, slot) in slots.iter_mut().enumerate() {
-            if Some(i) != kept_focus
+            if !claimants[i]
                 && let Some(pod) = slot.as_deref_mut()
                 && pod.is_focused()
             {

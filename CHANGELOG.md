@@ -64,9 +64,26 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   `button()` on the wrapper now also merge the subtree into one node when the wrapper has a label or
   value, and stay a container over the child's nodes otherwise. An explicit `merged(bool)` wins in
   either call order.
+- A press outside the focused widget now blurs it when the gesture ends as a tap, not when the press
+  lands. A tap is an `Up` within the slop of its `Down` (18 px for touch, 3 px for the mouse), with one
+  contact and no cancel; a drag, a cancel or a second contact does not blur, so scrolling a page under a
+  focused text field keeps the keyboard up. A press on a focusable widget still moves focus at `Down`.
+  Migration: code or tests that expect the blur right after a pointer `Down` must wait for the `Up`;
+  an app that relied on a drag outside a field to dismiss the keyboard must dismiss it explicitly, or
+  opt in to `ScrollView::dismiss_keyboard_on_drag(true)` on its vertical scroll view.
+  A custom container that routes pointer events by hand must follow the same rule: it ends a
+  child's focus link only when the same dispatch records a focus claim through another child, never
+  on a press that claims nothing, and it reads `holds_live_focus` where it read `is_focused`. The
+  routers in `frust-widgets` and the first-party design systems do. `frust::authoring` gains
+  `retire_stale_focus_links`, `event_child_reporting_claim` and `route_event_reporting_claim` for
+  this.
 
 ### Added
 
+- `ScrollView::dismiss_keyboard_on_drag(bool)` (default off): when the vertical scroll view contains
+  the focused field, a user drag whose first movement past the slop is downward ends the focus session
+  (the soft keyboard goes away) and keeps scrolling; an upward drag, a wheel, a fling, a controller
+  move and the caret reveal never dismiss. `ListView` and `CustomScrollView` do not have it.
 - `frust::Owner`: the reactive owner, re-exported so an app can hold a child owner
   (`Owner::current()` then `.child()`) and arm timers under it with `owner.with(..)`. Keep ONE child
   owner in state and call `cleanup()` on it before re-arming under it, because each new child adds an
@@ -204,6 +221,16 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   library that job builds.
 - `deny.toml` (advisories only, each ignore with its reason) and an `advisories` CI job that runs a
   pinned `cargo-deny` on pull requests and weekly. It is not a merge gate.
+- `safe_area(..).keyboard(bool)` (default `false`): with the bottom edge enabled, the bottom padding is
+  the larger of the system bottom inset and the soft keyboard's inset, so the subtree ends at the top
+  of the keyboard; both bottom insets are consumed from the subtree.
+- A vertical `ScrollView` that contains the focused widget scrolls the minimal distance that brings the
+  text caret, plus a 16 px margin, into view when the caret or the viewport size changes; a scroll by
+  the user is never undone. `ScrollView::reveal_focused_caret(bool)` switches it (default `true`).
+  `ListView`, `CustomScrollView` and horizontal scrolling do not reveal. `PaintCtx::focused_caret()`
+  exposes the stored caret to widgets that paint.
+- `TextInput::label(text)` names a field for accessibility without drawing anything. The placeholder
+  is now published as the node's placeholder, and as its label when no label is set.
 
 ### Changed
 
@@ -223,6 +250,10 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 - On Android, a tap on a text field that still has focus shows the soft keyboard again after the
   user dismissed it with back; before, the keyboard stayed down until focus had moved away. A
   composition in progress is kept. Checked on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15).
+- On iOS, the shell's text-input view no longer reports the focused field's text to accessibility.
+  Before, a screen reader or UI automation could read the text of the focused field, a password
+  included, from that view even though the field's own accessibility node was masked. This is a
+  privacy fix. An app has nothing to change: update to this version.
 
 ## 0.6.6 — 2026-11-11
 

@@ -1142,8 +1142,11 @@ fn a_declined_arrow_from_a_focused_editable_reaches_the_forwarded_pod() {
     assert_eq!(h.overlay_keys(), vec![DOWN]);
     assert!(h.shortcuts().is_empty(), "consumed before the registry");
 
+    // The blur is decided at the end of the gesture: a tap is a Down and an Up.
     h.down(40.0, 140.0);
-    assert!(!h.root.is_focus_active(), "a press on the nav leaf blurs");
+    h.root
+        .event(&mut (), &pointer(PointerPhase::Up, 40.0, 140.0));
+    assert!(!h.root.is_focus_active(), "a tap on the nav leaf blurs");
     h.press(DOWN, false);
     assert_eq!(
         h.overlay_keys(),

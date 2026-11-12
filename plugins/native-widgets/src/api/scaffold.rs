@@ -50,11 +50,14 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use frust::authoring::{build_child, rebuild_child, route_event_single, teardown_child};
+use frust::authoring::{
+    build_child, event_child_reporting_claim, rebuild_child, retire_stale_focus_links,
+    route_event_single, teardown_child,
+};
 use frust::{RwSignal, ScrollController, ScrollInfo, ScrollSubscription, Set, Theme, use_context};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, View, Widget, WindowInsets,
+    LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View, Widget, WindowInsets,
 };
 use kurbo::{Point, Size};
 use peniko::{Brush, Color, Gradient};
@@ -993,12 +996,17 @@ impl ScaffoldWidget {
 }
 
 /// [`frust::authoring::route_event`] over the scaffold's separately held
-/// pods, given in paint order.
+/// pods, given in paint order, under its focus-link rule: a claim recorded
+/// through one pod ends the others' links in the same pass, and a dispatch that
+/// claims nothing (an outside press the root may yet turn into a drag) leaves
+/// every link to the root's session. A link the session already stranded is
+/// retired before anything is dispatched.
 fn route_pods(
     pods: &mut [&mut ChildPod],
     ctx: &mut EventCtx<'_>,
     event: &InputEvent,
 ) -> EventResult {
+    retire_stale_focus_links(pods.iter_mut().map(|pod| &mut **pod));
     if event.is_broadcast() {
         for pod in pods.iter_mut() {
             pod.event_child(ctx, event);
@@ -1016,17 +1024,23 @@ fn route_pods(
     }
     let position = event.position();
     let mut handled = EventResult::Ignored;
-    let mut kept_focus = None;
+    let mut claimants: Vec<usize> = Vec::new();
     for (i, pod) in pods.iter_mut().enumerate().rev() {
-        if pod.contains(position) && pod.event_child(ctx, event) == EventResult::Handled {
-            kept_focus = pod.holds_live_focus().then_some(i);
+        if !pod.contains(position) {
+            continue;
+        }
+        let (result, claimed) = event_child_reporting_claim(pod, ctx, event);
+        if claimed {
+            claimants.push(i);
+        }
+        if result == EventResult::Handled {
             handled = EventResult::Handled;
             break;
         }
     }
-    if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+    if !claimants.is_empty() {
         for (i, pod) in pods.iter_mut().enumerate() {
-            if Some(i) != kept_focus && pod.is_focused() {
+            if !claimants.contains(&i) && pod.is_focused() {
                 pod.set_focused(false);
             }
         }
@@ -2337,5 +2351,74 @@ mod tests {
         let (flags, _) = second.sync::<()>(&mut element, &mut BuildCtx::new(&mut counter));
         assert!(flags.contains(ChangeFlags::PAINT));
         teardown(&second, &mut element);
+    }
+
+    /// A 100 x 50 leaf whose `Down` claims focus when `claims` is set.
+    struct PressLeaf {
+        claims: bool,
+    }
+
+    impl Widget for PressLeaf {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, _bc: &BoxConstraints) -> Size {
+            Size::new(100.0, 50.0)
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            match event {
+                InputEvent::Pointer(p) if p.phase == frust_core::PointerPhase::Down => {
+                    if self.claims {
+                        ctx.request_focus();
+                    }
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    fn press_leaf(claims: bool, y: f64) -> ChildPod {
+        let mut pod = ChildPod::new(Box::new(PressLeaf { claims }));
+        pod.layout_child(
+            &mut LayoutCtx::new(),
+            &BoxConstraints::loose(Size::new(100.0, 50.0)),
+        );
+        pod.set_origin(Point::new(0.0, y));
+        pod
+    }
+
+    fn press(pods: &mut [&mut ChildPod], y: f64) -> EventResult {
+        let mut state = ();
+        let state: &mut dyn std::any::Any = &mut state;
+        let mut ctx = EventCtx::new(state, Point::ZERO, Size::new(100.0, 150.0));
+        let down = InputEvent::Pointer(frust_core::PointerEvent {
+            phase: frust_core::PointerPhase::Down,
+            position: Point::new(10.0, y),
+            button: frust_core::PointerButton::Primary,
+        });
+        route_pods(pods, &mut ctx, &down)
+    }
+
+    /// `route_pods` follows `route_event`'s focus-link rule: a press on a pod
+    /// that claims no focus leaves the focused pod's link to the root's session
+    /// (a drag from there keeps the field typing), and a press that moves
+    /// focus to another pod ends it in the same pass.
+    #[test]
+    fn route_pods_ends_a_focus_link_only_on_a_claim_elsewhere() {
+        let mut field = press_leaf(true, 0.0);
+        let mut chrome = press_leaf(false, 50.0);
+        let mut other = press_leaf(true, 100.0);
+        press(&mut [&mut field, &mut chrome, &mut other], 10.0);
+        assert!(field.holds_live_focus(), "the field claimed focus");
+
+        press(&mut [&mut field, &mut chrome, &mut other], 60.0);
+        assert!(
+            field.holds_live_focus(),
+            "a press that claims nothing leaves the field's link"
+        );
+        assert!(!chrome.is_focused());
+
+        press(&mut [&mut field, &mut chrome, &mut other], 110.0);
+        assert!(other.is_focused(), "the press moved focus");
+        assert!(!field.is_focused(), "and ended the field's link");
     }
 }
