@@ -234,7 +234,11 @@ impl<T: Send + Sync + 'static> Component for GateHost<T> {
                 let retry = Retry(Rc::new(move || task.restart()));
                 let view = match &self.error {
                     Some(error) => error(&message, retry),
-                    None => default_error(&message, retry),
+                    // The default error view: the message, verbatim, above a Retry button.
+                    None => AnyView::new(Column((
+                        text(message.as_str()),
+                        button::<(), _>("Retry", move |_| retry.run()),
+                    ))),
                 };
                 EitherOf3::B(component(Pane(Slot::new(view))))
             }
@@ -244,15 +248,6 @@ impl<T: Send + Sync + 'static> Component for GateHost<T> {
             })),
         }
     }
-}
-
-/// The error view used without [`StartGate::error`]: the error's `Display` text, verbatim, above a
-/// Retry button.
-fn default_error(message: &str, retry: Retry) -> AnyView<()> {
-    AnyView::new(Column((
-        text(message),
-        button::<(), _>("Retry", move |_| retry.run()),
-    )))
 }
 
 /// A view that runs start-up work behind a splash, then shows the real UI. See the
