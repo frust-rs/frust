@@ -269,8 +269,8 @@ Semantics.
   registry while a field has focus; a bare Escape blurs it and is declined too, so a modal around it
   closes on the same press. A primary **mouse** press on the four controls requests focus (pointer-sourced, so
   `KeyboardOnly` paints no ring) and the next Tab continues from there; a touch tap activates
-  without claiming focus (the root still reads an unclaimed Down as a blur, so a plain sibling field
-  blurs as before; a dialog or sheet that re-claims focus on its chrome keeps the field's session).
+  without claiming focus (the root still reads an unclaimed tap as a blur at its Up, so a plain
+  sibling field blurs as before; a dialog or sheet that re-claims focus on its chrome keeps the field's session).
   A custom widget that claims focus on a press either publishes its `ImeState` in that pass or
   accepts that the root drops the standing surface, unless the widget already held a live link; a
   `TextInput` publishes on every primary press for that reason. None paints a keyboard-focus visual (`baseline-controls-no-focus-visual` in
