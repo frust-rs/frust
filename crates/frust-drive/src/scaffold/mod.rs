@@ -1624,6 +1624,23 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
+    /// A freshly scaffolded `frust.toml` states the app's version and build
+    /// number under `[app]`, and the manifest parser reads both back.
+    #[test]
+    fn generate_frust_toml_states_version_and_build_number_under_app() {
+        let dest = unique_temp_dir("toml-app-version");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
+        let parsed = crate::manifest::parse(&toml).expect("the scaffolded frust.toml must parse");
+        assert_eq!(parsed.app.version.as_deref(), Some("1.0.0"), "{toml}");
+        assert_eq!(parsed.app.build_number, Some(1), "{toml}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
     #[test]
     fn generate_rejects_org_producing_invalid_ios_bundle_id() {
         let dest = unique_temp_dir("ios-invalid-id");
