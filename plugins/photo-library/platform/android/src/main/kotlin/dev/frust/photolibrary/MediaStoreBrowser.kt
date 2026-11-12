@@ -17,6 +17,7 @@ import android.util.Log
 import android.util.Size
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AlbumsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsAfterResult
+import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsByIdResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.ThumbnailResult
 import java.io.FileNotFoundException
@@ -202,6 +203,8 @@ internal object MediaStoreBrowser {
 
     private fun assetsAfterFailed(code: Int) = AssetsAfterResult(code, assetsFailed(code), 0, 0, false)
 
+    private fun assetsByIdFailed(code: Int) = AssetsByIdResult(code, IntArray(0), assetsFailed(code))
+
     private fun thumbnailFailed(code: Int) = ThumbnailResult(code, 0, 0, 0, null)
 
     /** The `media_type` selection of a filter code, or null for an unknown code. */
@@ -386,6 +389,65 @@ internal object MediaStoreBrowser {
         }
         return resolver.query(FILES_URI, projection, queryArgs, null)
     }
+
+    /**
+     * Row ids bound by one query of [assetsById]: well under SQLite's limit on
+     * bound arguments (999 before SQLite 3.32, which API 29 and 30 ship).
+     */
+    internal const val BY_ID_CHUNK = 500
+
+    /**
+     * The `MediaStore` row id an asset id names, or null when [id] is not a
+     * `content://media` URI (the check [loadThumbnail] makes) or does not end
+     * in a row id.
+     */
+    internal fun rowIdOf(id: String): Long? {
+        val uri = Uri.parse(id)
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY) return null
+        return uri.lastPathSegment?.toLongOrNull()?.takeIf { it > 0 }
+    }
+
+    /**
+     * The rows of [ids], answered by position: [AssetsByIdResult.page] holds
+     * one row per input id that resolved, in input order (a duplicate id gives
+     * a duplicate row), and [AssetsByIdResult.positions] the input index of
+     * each. An id that is not a `content://media` URI ([rowIdOf]), a deleted
+     * row, a row that is not an image or a video, and a row outside a partial
+     * grant (class doc, "Access") have no row. The distinct row ids are
+     * queried from [FILES_URI] in chunks of at most [BY_ID_CHUNK] bound
+     * arguments, with the listing's projection and [readRows], so a row reads
+     * exactly as it does in [assets]; [details] adds the same columns.
+     */
+    fun assetsById(ctx: Context?, ids: Array<String>, details: Boolean): AssetsByIdResult =
+        browse(ctx, "assetsById", ::assetsByIdFailed) { context ->
+            val mediaType = mediaSelection(FrustPhotoLibraryHost.FILTER_IMAGES_AND_VIDEOS)
+                ?: return@browse assetsByIdFailed(FrustPhotoLibraryHost.QUERY_FAILED)
+            val rowIds = Array(ids.size) { rowIdOf(ids[it]) }
+            val wanted = LinkedHashSet<Long>()
+            rowIds.forEach { rowId -> if (rowId != null) wanted.add(rowId) }
+            val projection = projection(details)
+            val resolver = context.contentResolver
+            val found = HashMap<Long, Row>()
+            for (chunk in wanted.chunked(BY_ID_CHUNK)) {
+                val placeholders = chunk.joinToString(",") { "?" }
+                val selection = "$mediaType AND ${BaseColumns._ID} IN ($placeholders)"
+                val args = Array(chunk.size) { chunk[it].toString() }
+                val cursor = resolver.query(FILES_URI, projection, selection, args, null)
+                    ?: return@browse assetsByIdFailed(FrustPhotoLibraryHost.QUERY_FAILED)
+                // The ids are distinct, so a chunk has at most one row per id.
+                cursor.use { c -> readRows(c, 0, chunk.size, details) }.forEach { found[it.rowId] = it }
+            }
+            val positions = ArrayList<Int>()
+            val rows = ArrayList<Row>()
+            rowIds.forEachIndexed { index, rowId ->
+                val row = rowId?.let { found[it] }
+                if (row != null) {
+                    positions.add(index)
+                    rows.add(row)
+                }
+            }
+            AssetsByIdResult(FrustPhotoLibraryHost.OK, positions.toIntArray(), assetsPage(rows, 0))
+        }
 
     /** At most [limit] rows of [cursor]; on API 29 the cursor is unpaged, so it seeks [offset]. */
     private fun readRows(cursor: Cursor, offset: Int, limit: Int, details: Boolean): List<Row> {

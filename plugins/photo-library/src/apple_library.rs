@@ -434,6 +434,15 @@ fn asset_of(asset: &PHAsset, details: bool) -> Asset {
     }
 }
 
+/// The crate root's `assets_by_id` arm; the crate root has already answered an empty slice.
+pub(crate) fn assets_by_id(
+    _ids: &[AssetId],
+    _details: bool,
+) -> Result<Vec<Option<Asset>>, PhotoError> {
+    // implemented in the next change
+    Err(PhotoError::Unsupported)
+}
+
 pub(crate) fn thumbnail(
     id: &AssetId,
     request: &ThumbnailRequest,

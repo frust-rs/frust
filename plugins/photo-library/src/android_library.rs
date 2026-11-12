@@ -2,7 +2,7 @@
 //! contract in [`super`]. Declared from `android.rs` so the crate root stays
 //! platform-agnostic.
 //!
-//! `albums`, `assets`, `assets_after` and `thumbnail` call
+//! `albums`, `assets`, `assets_after`, `assets_by_id` and `thumbnail` call
 //! `FrustPhotoLibraryHost`'s statics on the caller's thread, inside one scoped
 //! JNI attachment, and read a result object
 //! (`FrustPhotoLibraryHost$AlbumsResult` and siblings) field by field.
@@ -251,6 +251,70 @@ pub(crate) fn assets_after(
                 .map(|page| keyset_page(query, page.items, more, last_key, last_id)))
         })?
     })
+}
+
+/// The crate root's `assets_by_id` arm; the crate root has already answered
+/// an empty slice. The host's `assetsById` answers the rows it found as one
+/// `AssetsResult` in input order, with the input index of each row in
+/// `positions`; the rows decode as a listing's do, and `crate::in_input_order`
+/// puts them back at their indices.
+pub(crate) fn assets_by_id(
+    ids: &[AssetId],
+    details: bool,
+) -> Result<Vec<Option<Asset>>, PhotoError> {
+    let len = jint::try_from(ids.len()).map_err(|_| PhotoError::InvalidRequest {
+        reason: "too many asset ids for one call",
+    })?;
+    with_host(|env, class| {
+        ensure_off_ui_thread(env)?;
+        run_jni(env, "FrustPhotoLibraryHost.assetsById", |env| {
+            let raw_ids = id_array(env, len, ids)?;
+            let result = env
+                .call_static_method(
+                    class,
+                    jni_str!("assetsById"),
+                    jni_sig!(
+                        "([Ljava/lang/String;Z)Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsByIdResult;"
+                    ),
+                    &[JValue::Object(&raw_ids), JValue::Bool(details)],
+                )?
+                .l()?;
+            let code = int_field(env, &result, jni_str!("code"))?;
+            if code != OK {
+                return Ok(Err(browse_error(code)));
+            }
+            let positions = int_array_field(env, &result, jni_str!("positions"))?;
+            let page = env
+                .get_field(
+                    &result,
+                    jni_str!("page"),
+                    jni_sig!("Ldev/frust/photolibrary/FrustPhotoLibraryHost$AssetsResult;"),
+                )?
+                .l()?;
+            let columns = asset_columns(env, page)?;
+            Ok(assets_from(columns, 0, details).and_then(|page| {
+                crate::in_input_order(ids.len(), &positions, page.items)
+                    .ok_or_else(mismatched_arrays)
+            }))
+        })?
+    })
+}
+
+/// A `String[]` of the `len` ids in `ids`, each element's local reference
+/// released once it is stored.
+fn id_array<'local>(
+    env: &mut Env<'local>,
+    len: jint,
+    ids: &[AssetId],
+) -> Result<JObject<'local>, jni::errors::Error> {
+    let empty = JObject::null();
+    let array = env.new_object_array(len, jni_str!("java/lang/String"), &empty)?;
+    for (index, id) in ids.iter().enumerate() {
+        let element = env.new_string(id.as_str())?;
+        array.set_element(env, index, &element)?;
+        env.delete_local_ref(element);
+    }
+    Ok(array.into())
 }
 
 /// The parallel arrays of `AssetsResult`.
