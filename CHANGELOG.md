@@ -46,7 +46,8 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   `sdkmanager --install "ndk;28.2.13676358"`, or set `FRUST_ANDROID_NDK_VERSION` to an installed r28+
   version.
 - `FolderEntry::read_to_vec` (`frust-file-dialogs`) now returns `FileDialogError::TooLarge { limit,
-  size }` for a file longer than `max_bytes`, where it returned `Io`. `size` is `None` on Android.
+  size }` for a file longer than `max_bytes`, where it returned `Io`. On Android `size` is the entry's
+  listed size, or `None` when the entry has none.
   `TooLarge` is a new variant of the enum. Migration: a caller that matched `Io` to detect an
   over-limit file matches `TooLarge` too; any other failure is still `Io` or `AccessLost`.
 - On Android 13+ the photo permission (`frust-permissions`' `Photos(ReadWrite)`, and so
