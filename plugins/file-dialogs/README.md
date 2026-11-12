@@ -94,6 +94,20 @@ the system's denial can be told apart, otherwise `Io`. On Android,
 for any other grant on the same folder. `copy_to` and `read_to_vec` refuse the UI
 thread with `UiThread` on Android and iOS, like the rest of the plugin.
 
+`read_to_vec(max_bytes)` reads the whole file and fails with
+`FileDialogError::TooLarge { limit, size }` when it is longer than `max_bytes`
+(`size` is the file's length when the platform reports it, else `None`); other
+failures stay `Io` or `AccessLost`. `read_prefix(max_bytes)` returns only the
+first `max_bytes` bytes, or the whole file when it is shorter, and is never
+`TooLarge`; `0` gives an empty `Vec`. Both refuse the UI thread on Android and
+iOS. On Android `read_prefix` copies at most `max_bytes` of the document.
+
+```rust
+// Sniff a file's type from its first 16 bytes without loading the rest.
+let head = entry.read_prefix(16)?;
+let is_png = head.starts_with(b"\x89PNG\r\n\x1a\n");
+```
+
 ```rust
 use frust_file_dialogs::{FileDialog, ListOptions};
 

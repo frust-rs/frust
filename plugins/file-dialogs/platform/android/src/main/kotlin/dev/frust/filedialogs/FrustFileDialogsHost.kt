@@ -365,6 +365,22 @@ object FrustFileDialogsHost {
         return PENDING
     }
 
+    /**
+     * Like [copyDocument], but stops after [maxBytes] bytes and reports success with the
+     * partial file kept: a longer document is cut short, never [TOO_LARGE]. [maxBytes] must
+     * not be negative. Answered through [nativeOnCode].
+     */
+    @JvmStatic
+    fun copyDocumentPrefix(requestId: Long, uri: String, destPath: String, maxBytes: Long): Int {
+        val ctx = appContext ?: return NOT_INITIALIZED
+        val job = Job()
+        jobs[requestId] = job
+        val document = Uri.parse(uri)
+        val dest = File(destPath)
+        workExecutor.execute { runCopy(ctx, requestId, document, dest, maxBytes.coerceAtLeast(0L), job, true) }
+        return PENDING
+    }
+
     /** Drop the persisted grant on [uri]. Any thread. */
     @JvmStatic
     fun releaseTree(uri: String) {
@@ -745,7 +761,7 @@ object FrustFileDialogsHost {
     /**
      * Copies [source] to [sink] in [COPY_CHUNK_BYTES] chunks, checking
      * [isCancelled] before each. [SAVED], [CANCELLED], or [TOO_LARGE] past a
-     * non-negative [maxBytes].
+     * non-negative [maxBytes]. With [truncate], stops with [SAVED] after [maxBytes] bytes.
      */
     private fun streamChunks(
         source: InputStream,
@@ -753,22 +769,25 @@ object FrustFileDialogsHost {
         isCancelled: () -> Boolean,
         maxBytes: Long,
         onBytes: (Long) -> Unit,
+        truncate: Boolean = false,
     ): Int {
         val buffer = ByteArray(COPY_CHUNK_BYTES)
         var total = 0L
         while (true) {
             if (isCancelled()) return CANCELLED
+            if (truncate && total >= maxBytes) return SAVED
             val read = source.read(buffer)
             if (read < 0) return SAVED
-            total += read
-            if (maxBytes >= 0 && total > maxBytes) return TOO_LARGE
-            sink.write(buffer, 0, read)
-            onBytes(read.toLong())
+            val keep = if (truncate) minOf(read.toLong(), maxBytes - total).toInt() else read
+            total += keep
+            if (!truncate && maxBytes >= 0 && total > maxBytes) return TOO_LARGE
+            sink.write(buffer, 0, keep)
+            onBytes(keep.toLong())
         }
     }
 
     /** One [copyDocument]: writes a temporary sibling and renames it into place. Work thread. */
-    private fun runCopy(ctx: Context, requestId: Long, uri: Uri, dest: File, maxBytes: Long, job: Job) {
+    private fun runCopy(ctx: Context, requestId: Long, uri: Uri, dest: File, maxBytes: Long, job: Job, truncate: Boolean = false) {
         val partial = File(dest.parentFile, PARTIAL_PREFIX + requestId)
         var code = try {
             val progress = Progress(requestId, 1)
@@ -777,7 +796,7 @@ object FrustFileDialogsHost {
             val input = ctx.contentResolver.openInputStream(uri) ?: throw IOException("no input stream")
             val copied = input.use { source ->
                 FileOutputStream(partial).use { sink ->
-                    streamChunks(source, sink, { job.cancelled }, maxBytes, progress::copied)
+                    streamChunks(source, sink, { job.cancelled }, maxBytes, progress::copied, truncate)
                 }
             }
             if (copied == SAVED) progress.itemDone()

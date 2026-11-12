@@ -52,6 +52,13 @@ pub(crate) fn read_content_uri(_uri: &str, _max_bytes: u64) -> Result<Vec<u8>, F
     Err(FileDialogError::Unsupported)
 }
 
+pub(crate) fn read_prefix_content_uri(
+    _uri: &str,
+    _max_bytes: u64,
+) -> Result<Vec<u8>, FileDialogError> {
+    Err(FileDialogError::Unsupported)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{ExportOutcome, FileDialog, FileDialogError, FolderGrant};
