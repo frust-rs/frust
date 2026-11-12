@@ -542,21 +542,24 @@ above have not been done as written: the playground lacks the two-field and pass
 the soft keyboard. The mechanism is in: a `safe_area(..).keyboard(true)`
 holds the subtree's bottom edge at the top of the keyboard, and a vertical
 `ScrollView` containing the focused field scrolls its caret into view
-(`reveal_focused_caret`, on by default). Its device verification is
-pending: the only phone runs (2026-11-12, Android 16 on a Pixel 4a and iOS
-27.2 on an iPhone 13 mini) predate it and recorded the failure, a field at
-the bottom of a scrolling page left under the keyboard.
+(`reveal_focused_caret`, on by default). On Android it is verified on a
+device (2026-11-12, Android 16 on a Pixel 4a: the bottom field of a
+scrolling page stays above the keyboard). On iOS its device verification
+is pending: the only iPhone run (2026-11-12, iOS 27.2 on an iPhone 13 mini)
+predates it and recorded the failure, a field at the bottom of a scrolling
+page left under the keyboard.
 
 **Applies to**: Android and iOS. Not covered: a `ListView`, a
 `CustomScrollView`, horizontal scrolling, and an app that does not opt in
 with `keyboard(true)` (without it the keyboard overlaps the page and the
 reveal has no shrunken viewport to react to).
 
-**Why not closed**: the mechanism has not been run on a device since it
-merged. A field in an uncovered container needs the app to scroll it
+**Why not closed**: the mechanism has not been run on an iPhone since it
+merged, and it is opt-in. A field in an uncovered container needs the app to scroll it
 explicitly (a `ScrollController`).
 
-**Evidence**: the two 2026-11-12 device runs above; the `Caret reveal` module
+**Evidence**: the 2026-11-12 device runs above, recorded in
+`docs/SHELLS_DEVELOPMENT.md`; the `Caret reveal` module
 docs in `scroll.rs` and the `Keyboard edge` docs in `safe_area.rs`.
 
 ---

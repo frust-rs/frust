@@ -162,6 +162,17 @@ Not run on this pass: moving focus with the keyboard's Return or Next key (the F
 way to move focus from app code, so Return only counts a press) and typing with a composing
 keyboard.
 
+**Android: re-run 2026-11-12 after the keyboard edge and the caret reveal** on the same Pixel 4a
+(Android 16), against `examples/playground` built from `ae10e573`, Forms page.
+
+| Check | Result | Observed |
+|---|---|---|
+| Keyboard over the bottom field | pass | field D scrolled to the end and tapped: the keyboard shows, the page body ends at the top of the tab bar, which sits directly above the keyboard, and D with its caption and caret is visible above it; the content moves up, not down. Text typed on the on-screen keyboard appears in D. Dismissing returns the layout, still scrolled to the end |
+| Scroll while typing | pass | with D focused and the keyboard up, a drag scrolls the page, the keyboard stays up, and D is not pulled back into view afterwards |
+| Keyboard reopen | pass | field A: tap, back, tap again shows the keyboard; a tap on a caption does not |
+| Back | pass | depth 3: the back key pops 3 → 2 and the back gesture 2 → 1 |
+| Password field in the accessibility tree | pass | three characters typed in field C: the node's text is three bullets, `password="true"`, named "Field C"; the typed text is not in the dump |
+
 **iOS: run 2026-11-12, does not pass** on an iPhone 13 mini (iOS 27.2), XCUITest-driven with the
 hand-run legs noted, against `examples/playground` built from `355d6f1a` with Xcode 27.0. The
 active keyboard was a third-party one, not the system keyboard.
