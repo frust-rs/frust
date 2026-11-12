@@ -2250,8 +2250,8 @@ fn the_change_snapshot_refuses_the_ui_thread_and_checks_access() {
     assert!(guard.contains("failed(FrustPhotoLibraryHost.QUERY_FAILED)"));
     let access = function(&changes, "private fun hasAccess(");
     assert!(
-        access.contains("MediaStoreBrowser.mediaPermissions(Build.VERSION.SDK_INT)"),
-        "the change feed checks the browser's permission set"
+        access.contains("MediaStoreBrowser.mediaPermissions(ctx, Build.VERSION.SDK_INT)"),
+        "the change feed checks the browser's declared permission subset"
     );
     let start = function(&changes, "fun startObserver(");
     assert!(start.contains("if (!hasAccess(ctx)) return FrustPhotoLibraryHost.PERMISSION_DENIED"));
@@ -2633,4 +2633,44 @@ fn cursor_paging_refuses_the_ui_thread_and_checks_the_cursor_first() {
         !function(&rust, "pub(crate) fn assets(").contains("assetsAfter"),
         "the offset path makes only its own call"
     );
+}
+
+#[test]
+fn media_permissions_use_the_declared_subset() {
+    let browser = read(KOTLIN_BROWSER);
+
+    let narrow = function(&browser, "internal fun narrowPermissions(");
+    assert!(narrow.contains("if (sdk < 33) return candidates"));
+    assert!(narrow.contains("candidates.filter { it in declared }"));
+    assert!(narrow.contains("it != READ_MEDIA_VISUAL_USER_SELECTED"));
+    assert!(
+        narrow.contains("else emptyList()"),
+        "no declared media type means nothing is requested"
+    );
+
+    let media = function(&browser, "internal fun mediaPermissions(");
+    assert!(media.contains("narrowPermissions(sdk, manifestPermissions(ctx))"));
+    assert!(
+        function(&browser, "private fun manifestPermissions(").contains("GET_PERMISSIONS"),
+        "the declared set comes from the manifest"
+    );
+    assert!(browser.contains(
+        "private const val READ_MEDIA_VISUAL_USER_SELECTED = \"android.permission.READ_MEDIA_VISUAL_USER_SELECTED\""
+    ));
+
+    // The listing and by-id paths share the browse guard, which checks the subset.
+    assert!(
+        function(&browser, "private fun hasAccess(")
+            .contains("mediaPermissions(ctx, Build.VERSION.SDK_INT)")
+    );
+    assert!(
+        !browser.contains("mediaPermissions(Build.VERSION.SDK_INT)"),
+        "every caller passes the context so the declared subset applies"
+    );
+
+    // The selection prompt requests the subset only.
+    let host = read(KOTLIN_HOST);
+    assert!(host.contains(
+        "launcher.launch(MediaStoreBrowser.mediaPermissions(ctx, Build.VERSION.SDK_INT).toTypedArray())"
+    ));
 }

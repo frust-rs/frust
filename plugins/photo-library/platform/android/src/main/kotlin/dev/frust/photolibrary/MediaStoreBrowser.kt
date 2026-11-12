@@ -68,8 +68,13 @@ import kotlin.math.roundToInt
  *
  * Every call first checks [mediaPermissions] with `checkSelfPermission`. No
  * permission held answers [FrustPhotoLibraryHost.PERMISSION_DENIED]; a partial
- * grant proceeds. The sets mirror `frust-permissions`' photo table, pinned by
- * `tests/kotlin_contract.rs`.
+ * grant proceeds. The candidate sets mirror `frust-permissions`' photo table,
+ * pinned by `tests/kotlin_contract.rs`; on API 33+ only the subset the manifest
+ * declares is checked and requested ([narrowPermissions]). The by-id and
+ * listing paths share the [browse] guard, so both follow that subset. A listing
+ * for a media type whose permission is not declared (for example videos with
+ * only images declared) returns the platform's result, which is empty; it is
+ * not an error.
  *
  * ## The asked flag
  *
@@ -149,18 +154,63 @@ internal object MediaStoreBrowser {
         return columns
     }
 
-    /** The photo permissions on [sdk] (`frust-permissions`' `Photos(ReadWrite)` set). */
-    internal fun mediaPermissions(sdk: Int): List<String> = when {
+    /** The photo permissions on [sdk] (`frust-permissions`' `Photos(ReadWrite)` candidate set). */
+    private fun candidatePermissions(sdk: Int): List<String> = when {
         sdk >= 34 -> MEDIA_PERMISSIONS_SDK34
         sdk == 33 -> MEDIA_PERMISSIONS_SDK33
         else -> MEDIA_PERMISSIONS_SDK29
     }
 
+    /**
+     * The photo permissions to check and request on [sdk]: on API 33+ the
+     * subset of the candidates that [declared] holds (`READ_MEDIA_IMAGES`,
+     * `READ_MEDIA_VIDEO`, and `READ_MEDIA_VISUAL_USER_SELECTED` on 34+), so an
+     * undeclared permission is never requested. With no media type declared
+     * the subset is empty and nothing is requested or accepted. Below 33 the
+     * candidates are returned unchanged. Same rule as `frust-permissions`.
+     */
+    internal fun narrowPermissions(sdk: Int, declared: Set<String>): List<String> {
+        val candidates = candidatePermissions(sdk)
+        if (sdk < 33) return candidates
+        val subset = candidates.filter { it in declared }
+        return if (subset.any { it != READ_MEDIA_VISUAL_USER_SELECTED }) subset else emptyList()
+    }
+
+    /** [narrowPermissions] against this app's manifest on the running device. */
+    internal fun mediaPermissions(ctx: Context, sdk: Int): List<String> =
+        narrowPermissions(sdk, manifestPermissions(ctx))
+
+    /**
+     * The manifest's `<uses-permission>` names, read once: the manifest cannot
+     * change while the process lives.
+     */
+    private fun manifestPermissions(ctx: Context): Set<String> {
+        declaredManifest?.let { return it }
+        val pm = ctx.packageManager
+        val info = try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                pm.getPackageInfo(ctx.packageName, PackageManager.PackageInfoFlags.of(PackageManager.GET_PERMISSIONS.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(ctx.packageName, PackageManager.GET_PERMISSIONS)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "frust-photo-library: reading the manifest failed: ${e.javaClass.name}")
+            return emptySet()
+        }
+        val names = info.requestedPermissions?.toSet() ?: emptySet()
+        declaredManifest = names
+        return names
+    }
+
+    @Volatile
+    private var declaredManifest: Set<String>? = null
+
     private fun isGranted(ctx: Context, perm: String): Boolean =
         ctx.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
 
     private fun hasAccess(ctx: Context): Boolean =
-        mediaPermissions(Build.VERSION.SDK_INT).any { isGranted(ctx, it) }
+        mediaPermissions(ctx, Build.VERSION.SDK_INT).any { isGranted(ctx, it) }
 
     /** Whether the app holds only a user selection (API 34+ partial access). */
     internal fun isLimited(ctx: Context): Boolean =
