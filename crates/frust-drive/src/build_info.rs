@@ -296,7 +296,43 @@ pub struct ResolvedVersion {
     pub number_source: VersionSource,
 }
 
+/// The Android `versionName` used when no version is supplied.
+pub const DEFAULT_ANDROID_VERSION_NAME: &str = "1.0";
+/// The Android `versionCode` used when no build number is supplied.
+pub const DEFAULT_ANDROID_VERSION_CODE: u32 = 1;
+
+const UNSET_VERSION_HINT: &str =
+    "set [app] version and build-number in frust.toml or pass --build-name / --build-number";
+
 impl ResolvedVersion {
+    /// The Android `(versionName, versionCode)` with the defaults applied
+    /// for any unset value.
+    pub fn android_name_and_code(&self) -> (String, String) {
+        (
+            self.name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_ANDROID_VERSION_NAME.to_string()),
+            self.number
+                .unwrap_or(DEFAULT_ANDROID_VERSION_CODE)
+                .to_string(),
+        )
+    }
+
+    /// The `app version not set` warning for a lane that applies concrete
+    /// values itself (Android): names the name and code it will use.
+    pub fn android_unset_warning(&self) -> String {
+        let (name, code) = self.android_name_and_code();
+        format!("warning: app version not set: building {name} ({code}); {UNSET_VERSION_HINT}")
+    }
+
+    /// The `app version not set` warning for a lane that leaves an unset
+    /// value to the native project (iOS): it names no values it does not know.
+    pub fn native_unset_warning() -> String {
+        format!(
+            "warning: app version not set: the Xcode project's own version applies for the unset value; {UNSET_VERSION_HINT}"
+        )
+    }
+
     /// True when either value fell back to the platform default.
     pub fn is_defaulted(&self) -> bool {
         self.name_source == VersionSource::Default || self.number_source == VersionSource::Default

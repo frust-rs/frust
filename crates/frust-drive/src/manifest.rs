@@ -93,6 +93,9 @@ where
     Ok(Some(v))
 }
 
+/// Android's maximum `versionCode`.
+const MAX_BUILD_NUMBER: u32 = 2_100_000_000;
+
 fn de_build_number<'de, D>(d: D) -> Result<Option<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -101,6 +104,9 @@ where
         Some(0) => Err(serde::de::Error::custom(
             "invalid `[app] build-number` 0: must be >= 1",
         )),
+        Some(n) if n > MAX_BUILD_NUMBER => Err(serde::de::Error::custom(format!(
+            "invalid `[app] build-number` {n}: must be <= {MAX_BUILD_NUMBER}, Android's maximum versionCode"
+        ))),
         n => Ok(n),
     }
 }
@@ -440,6 +446,18 @@ mod tests {
         }
         let err = format!("{:#}", parse(&app("build-number = 0\n")).unwrap_err());
         assert!(err.contains("build-number"), "{err}");
+    }
+
+    #[test]
+    fn build_number_upper_bound_is_androids_version_code_limit() {
+        let m = parse(&app("build-number = 2100000000\n")).unwrap();
+        assert_eq!(m.app.build_number, Some(2_100_000_000));
+        let err = format!(
+            "{:#}",
+            parse(&app("build-number = 2100000001\n")).unwrap_err()
+        );
+        assert!(err.contains("build-number"), "{err}");
+        assert!(err.contains("versionCode"), "{err}");
     }
 
     #[test]

@@ -126,15 +126,9 @@ fn build_with_env(
 
     let manifest = crate::manifest::load_optional(project_dir)?;
     let resolved = resolve_version(info, manifest.as_ref());
-    let version_name = resolved.name.clone().unwrap_or_else(|| "1.0".to_string());
-    let version_code = resolved
-        .number
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "1".to_string());
+    let (version_name, version_code) = resolved.android_name_and_code();
     if info.mode == BuildMode::Release && resolved.is_defaulted() {
-        on_line(&format!(
-            "warning: app version not set: building {version_name} ({version_code}); set [app] version and build-number in frust.toml or pass --build-name / --build-number"
-        ));
+        on_line(&resolved.android_unset_warning());
     }
     local_properties::write(&android_dir, &version_name, &version_code)
         .context("writing android/local.properties")?;
@@ -540,7 +534,9 @@ mod tests {
 
     #[test]
     fn release_apk_and_appbundle_with_defaults_warn_exactly_once() {
-        const WARNING: &str = "warning: app version not set: building 1.0 (1); set [app] version and build-number in frust.toml or pass --build-name / --build-number";
+        let warning = crate::build_info::resolve_version(&info(BuildMode::Release, None), None)
+            .android_unset_warning();
+        let warning = warning.as_str();
         for (manifest, label) in [(None, "none"), (Some(MANIFEST_NO_VERSION), "empty")] {
             let (props, lines) = version_build(
                 &format!("ver-default-apk-{label}"),
@@ -552,7 +548,7 @@ mod tests {
                 APK_RELEASE_ARGS,
             );
             assert!(props.contains("frust.versionName=1.0"), "{props}");
-            assert_eq!(version_warnings(&lines), vec![WARNING], "{lines:?}");
+            assert_eq!(version_warnings(&lines), vec![warning], "{lines:?}");
         }
         let (_, lines) = version_build(
             "ver-default-aab",
@@ -563,7 +559,7 @@ mod tests {
             "app-release.aab",
             AAB_RELEASE_ARGS,
         );
-        assert_eq!(version_warnings(&lines), vec![WARNING], "{lines:?}");
+        assert_eq!(version_warnings(&lines), vec![warning], "{lines:?}");
     }
 
     #[test]

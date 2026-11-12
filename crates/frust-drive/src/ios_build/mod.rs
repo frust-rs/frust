@@ -162,12 +162,8 @@ fn build_with_env(
 
             if info.mode == BuildMode::Release && resolved.is_defaulted() {
                 // An unset value is not overridden, so the project's
-                // pbxproj applies; the generated template ships 1.0 (1).
-                let name = resolved.name.as_deref().unwrap_or("1.0");
-                let number = resolved.number.unwrap_or(1);
-                on_line(&format!(
-                    "warning: app version not set: building {name} ({number}); set [app] version and build-number in frust.toml or pass --build-name / --build-number"
-                ));
+                // pbxproj applies.
+                on_line(&crate::build_info::ResolvedVersion::native_unset_warning());
             }
 
             let inv = Invocation {
@@ -888,11 +884,10 @@ mod tests {
         let lines = ipa_lines("ipa-default-version", "", &info(BuildMode::Release), "");
         assert_eq!(
             version_warnings(&lines),
-            vec![
-                "warning: app version not set: building 1.0 (1); set [app] version and build-number in frust.toml or pass --build-name / --build-number"
-            ],
+            vec![&crate::build_info::ResolvedVersion::native_unset_warning()],
             "{lines:?}"
         );
+        assert!(!lines.iter().any(|l| l.contains("(1)")), "{lines:?}");
     }
 
     #[test]
