@@ -103,6 +103,18 @@ is exempt. `open_settings` is fire-and-forget.
 - **Android:** the manifest permissions for each enabled feature
   (`CAMERA`, `RECORD_AUDIO`, `READ_MEDIA_*` / `READ_EXTERNAL_STORAGE`,
   `ACCESS_MEDIA_LOCATION`) must be declared by your app.
+- **Android photo manifest lines (API 33+):** declare only the media types your
+  app uses. Photos read-write checks and requests the declared subset of
+  `READ_MEDIA_IMAGES` and `READ_MEDIA_VIDEO`:
+  - images only: `READ_MEDIA_IMAGES`;
+  - videos only: `READ_MEDIA_VIDEO`;
+  - both: `READ_MEDIA_IMAGES` and `READ_MEDIA_VIDEO`.
+
+  If neither line is declared, status and request return
+  `PermissionError::NotDeclared` naming `READ_MEDIA_IMAGES`. A missing line for
+  the other type is not an error: it is simply not requested, and listing that
+  type returns the platform's (empty) result. On API 29-32 the single
+  `READ_EXTERNAL_STORAGE` line is required, as before.
 - **iOS / macOS:** the matching Info.plist usage strings
   (`NSCameraUsageDescription`, `NSMicrophoneUsageDescription`,
   `NSPhotoLibraryUsageDescription`, `NSPhotoLibraryAddUsageDescription`).

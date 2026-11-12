@@ -101,6 +101,13 @@ pub fn usage_key(p: Permission) -> Option<&'static str> {
 /// The Android manifest permissions behind `p` on a device at `sdk_int`.
 /// Photos add-only needs none on API 29+. The sets were checked against
 /// developer.android.com and the Pixel 5 / Android 14 device gate.
+///
+/// For Photos read-write on API 33+ this is the full candidate set, not a
+/// requirement: the Android host uses the subset of `READ_MEDIA_IMAGES` and
+/// `READ_MEDIA_VIDEO` the app's manifest declares (plus
+/// `READ_MEDIA_VISUAL_USER_SELECTED` when declared). Only when neither media
+/// type is declared is the permission reported as not declared, naming
+/// `READ_MEDIA_IMAGES`.
 pub fn android_permissions(p: Permission, sdk_int: i32) -> &'static [&'static str] {
     match p {
         Permission::Photos(PhotoAccess::ReadWrite) => {

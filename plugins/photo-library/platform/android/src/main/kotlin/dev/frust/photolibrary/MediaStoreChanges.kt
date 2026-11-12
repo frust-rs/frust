@@ -83,7 +83,7 @@ internal object MediaStoreChanges {
     private val observerLock = Any()
 
     private fun hasAccess(ctx: Context): Boolean =
-        MediaStoreBrowser.mediaPermissions(Build.VERSION.SDK_INT).any {
+        MediaStoreBrowser.mediaPermissions(ctx, Build.VERSION.SDK_INT).any {
             ctx.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
         }
 

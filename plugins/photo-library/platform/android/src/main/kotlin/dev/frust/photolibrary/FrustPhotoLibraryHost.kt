@@ -894,7 +894,7 @@ object FrustPhotoLibraryHost {
                     notifyCancelled(requestId)
                 }
             }
-            launcher.launch(MediaStoreBrowser.mediaPermissions(Build.VERSION.SDK_INT).toTypedArray())
+            launcher.launch(MediaStoreBrowser.mediaPermissions(ctx, Build.VERSION.SDK_INT).toTypedArray())
         } catch (e: Exception) {
             launcher?.unregister()
             Log.w(TAG, "frust-photo-library: launching the selection prompt failed: ${e.javaClass.name}")
