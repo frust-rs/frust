@@ -234,6 +234,9 @@ pub struct TextView {
     /// Only meaningful alongside `max_lines`; defaults to
     /// [`TextOverflow::Clip`], a no-op with no `max_lines` set.
     overflow: TextOverflow,
+    /// The zero-based heading level, set via [`Self::heading`]. `None` (the
+    /// default) publishes a static-text [`Role::Label`] node instead.
+    heading: Option<usize>,
 }
 
 /// Create a text view rendering `content` with default styling (16px). Its glyph
@@ -250,6 +253,7 @@ pub fn text(content: impl Into<String>) -> TextView {
         family_source: None,
         max_lines: None,
         overflow: TextOverflow::default(),
+        heading: None,
     }
 }
 
@@ -405,6 +409,14 @@ impl TextView {
         self
     }
 
+    /// Publish this text as a heading at `level` (1 is the top level). Assistive
+    /// technology reads it as a heading rather than as plain static text. A
+    /// `level` of 0 is treated as 1. Visual rendering is unchanged.
+    pub fn heading(mut self, level: usize) -> Self {
+        self.heading = Some(level.max(1) - 1);
+        self
+    }
+
     /// Set the themed default color role used when no explicit color was set
     /// (e.g. [`crate::Button`] labels its text [`ThemeTextColor::OnPrimary`] so it
     /// reads against the primary-filled button).
@@ -465,6 +477,7 @@ impl<State: 'static> View<State> for TextView {
             family_source: self.family_source,
             max_lines: self.max_lines,
             overflow: self.overflow,
+            heading: self.heading,
             layout: None,
             laid_out_max_width: None,
             inspect: None,
@@ -523,6 +536,12 @@ impl<State: 'static> View<State> for TextView {
             element.layout = None;
             flags |= ChangeFlags::LAYOUT;
         }
+        // The heading level only shapes the semantics node, never the layout,
+        // so a change repaints (which republishes semantics) without relayout.
+        if prev.heading != self.heading {
+            element.heading = self.heading;
+            flags |= ChangeFlags::PAINT;
+        }
         flags
     }
 }
@@ -547,6 +566,8 @@ pub struct TextWidget {
     max_lines: Option<usize>,
     /// How content past `max_lines` is handled — see [`TextView::overflow`].
     overflow: TextOverflow,
+    /// The zero-based heading level — see [`TextView::heading`].
+    heading: Option<usize>,
     /// `None` until the first layout pass, or after a content/style change
     /// invalidates it.
     layout: Option<TextLayout>,
@@ -746,12 +767,23 @@ impl Widget for TextWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        // A static-text leaf: a Label node. accesskit guidance is that a
-        // Role::Label node carries its text in `value` (not `label`), so a
-        // screen reader announces the run's content.
-        ctx.push_node(Role::Label, |node| {
-            node.set_value(self.content.as_str());
-        });
+        match self.heading {
+            // A heading: a Heading node whose accessible name is the content.
+            Some(level) => {
+                ctx.push_node(Role::Heading, |node| {
+                    node.set_label(self.content.as_str());
+                    node.set_level(level);
+                });
+            }
+            // A static-text leaf: a Label node. accesskit guidance is that a
+            // Role::Label node carries its text in `value` (not `label`), so a
+            // screen reader announces the run's content.
+            None => {
+                ctx.push_node(Role::Label, |node| {
+                    node.set_value(self.content.as_str());
+                });
+            }
+        }
     }
 }
 
@@ -1144,6 +1176,76 @@ mod tests {
         let wide = reports(&mut root, 2000.0).remove(0);
         assert_eq!(wide.lines, 1);
         assert_ne!(first.max_width, wide.max_width);
+    }
+
+    /// The semantics nodes a bare `Text` view publishes, as `(role, label, value, level)`.
+    /// One published node as `(role, label, value, level)`.
+    type NodeRow = (Role, Option<String>, Option<String>, Option<usize>);
+
+    fn text_nodes(mut build: impl FnMut() -> TextView) -> Vec<NodeRow> {
+        let mut root: frust_core::RenderRoot<(), TextView> = frust_core::RenderRoot::new();
+        let _slot = crate::test_support::LocaleSlotGuard::hold();
+        root.rebuild(&mut |_: &mut ()| build(), &mut ());
+        let mut tcx = TextContext::new();
+        root.layout_with_text(Size::new(200.0, 100.0), &mut tcx as &mut dyn Any);
+        root.semantics()
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() != Role::Window)
+            .map(|(_, n)| {
+                (
+                    n.role(),
+                    n.label().map(str::to_owned),
+                    n.value().map(str::to_owned),
+                    n.level(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn heading_text_publishes_one_heading_node_with_zero_based_level() {
+        let nodes = text_nodes(|| text("Settings").heading(2));
+        assert_eq!(nodes.len(), 1, "{nodes:?}");
+        let (role, label, value, level) = &nodes[0];
+        assert_eq!(*role, Role::Heading);
+        assert_eq!(label.as_deref(), Some("Settings"));
+        assert_eq!(value.as_deref(), None);
+        assert_eq!(*level, Some(1));
+    }
+
+    #[test]
+    fn heading_level_zero_is_treated_as_the_top_level() {
+        let nodes = text_nodes(|| text("Top").heading(0));
+        assert_eq!(nodes[0].0, Role::Heading);
+        assert_eq!(nodes[0].3, Some(0));
+    }
+
+    #[test]
+    fn plain_text_still_publishes_a_label_value_node() {
+        let nodes = text_nodes(|| text("Body copy"));
+        assert_eq!(nodes.len(), 1, "{nodes:?}");
+        let (role, label, value, level) = &nodes[0];
+        assert_eq!(*role, Role::Label);
+        assert_eq!(label.as_deref(), None);
+        assert_eq!(value.as_deref(), Some("Body copy"));
+        assert_eq!(*level, None);
+    }
+
+    #[test]
+    fn changing_only_the_heading_level_advances_the_semantics_generation() {
+        let mut root: frust_core::RenderRoot<(), TextView> = frust_core::RenderRoot::new();
+        root.rebuild(&mut |_: &mut ()| text("Title").heading(1), &mut ());
+        let before = root.semantics_generation();
+        root.rebuild(&mut |_: &mut ()| text("Title").heading(2), &mut ());
+        assert!(root.semantics_generation() > before);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Heading)
+            .expect("the heading node");
+        assert_eq!(node.level(), Some(1));
     }
 
     #[test]

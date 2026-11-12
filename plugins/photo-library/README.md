@@ -30,7 +30,7 @@ Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibra
 `PhotoLibrary::thumbnail(&AssetId, &ThumbnailRequest)`, which returns straight-alpha RGBA8 ready for
 `ImageSource::from_rgba8`. The feature adds the Android media read permissions,
 `NSPhotoLibraryUsageDescription` and the `Photos` framework; request access with `frust-permissions`
-(the `photos` feature), browsing never prompts. Without the feature every call returns
+(the `photos` feature), browsing never prompts. An app that browses only images (or only videos) uses the registry's `library-images` (`library-videos`) option with `permissions`' `photos-images` (`photos-videos`): on Android 13+ the app then declares only that `READ_MEDIA_*` line and the other type is not requested. Without the feature every call returns
 `PhotoError::FeatureDisabled`; desktop returns `Unsupported`.
 
 - Calls block and refuse the mobile UI thread (`PhotoError::UiThread`); run them in `spawn_blocking`.
@@ -49,7 +49,8 @@ Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibra
   Android API 30 and `burst_id` is always `None` on Android (`photo-library-android-asset-fields`).
   `AssetQuery::with_details()` also fills `file_name` (untrusted, display only) and `content_type`, which is
   platform-shaped: a MIME type on Android, a uniform type identifier on iOS
-  (`photo-library-content-type-platform-shaped`). They are off by default because on iOS each row then costs
+  (`photo-library-content-type-platform-shaped`). `Asset::mime_type()` gives a MIME type on both phones: it maps the
+  iOS identifiers in a fixed table and returns `None` for an identifier it does not know rather than guessing. They are off by default because on iOS each row then costs
   one resource lookup (Android reads them in the same query). An asset has no cloud or locally-available
   flag; an iCloud-only original shows as `NetworkRequired` when you ask for it
   (`photo-library-no-local-availability`).
@@ -136,6 +137,46 @@ fn sync(saved: Option<Vec<u8>>) -> Result<Vec<u8>, PhotoError> {
   change it; use a cloud identifier to name an asset across devices.
 - The core paths ran on a Pixel 5 and an iPhone 13 mini; iOS updated and deleted deltas, `cloud_identifiers`,
   iOS 15, API 29 and large Android libraries have not run on a device (`photo-library-change-feed-not-device-tested`).
+
+### Apply a delta with `assets_by_id`
+
+`PhotoLibrary::assets_by_id(&[AssetId], details)` returns the `Asset` rows for given ids, so a delta
+needs no re-listing. The answer has one entry per input id, in input order: `None` where the id does
+not exist, was deleted, is outside a limited selection or is not a library id, and a duplicate id gives
+a duplicate entry. `details: true` fills `file_name` and `content_type` as `AssetQuery::with_details`
+does. An empty slice returns an empty `Vec` without a platform call; otherwise the call blocks, refuses
+the UI thread and needs the same access as `assets`. Android takes a whole delta in one call (it
+queries at most 500 ids at a time on its own); iOS does the same; desktop and web answer `Unsupported`.
+
+```rust
+use frust_photo_library::{Asset, AssetId, PhotoError, PhotoLibrary};
+use std::collections::HashMap;
+
+// Blocking: call off the UI thread, with the id lists of a `LibraryChanges::Delta`.
+fn apply(
+    catalogue: &mut HashMap<AssetId, Asset>,
+    inserted: Vec<AssetId>,
+    updated: Vec<AssetId>,
+    deleted: Vec<AssetId>,
+) -> Result<(), PhotoError> {
+    for id in &deleted {
+        catalogue.remove(id);
+    }
+    let ids: Vec<AssetId> = inserted.into_iter().chain(updated).collect();
+    for (id, asset) in ids.iter().zip(PhotoLibrary::assets_by_id(&ids, false)?) {
+        match asset {
+            Some(asset) => {
+                catalogue.insert(id.clone(), asset);
+            }
+            // Gone again since the delta, or outside a limited selection.
+            None => {
+                catalogue.remove(id);
+            }
+        }
+    }
+    Ok(())
+}
+```
 
 ## Export originals and save
 
@@ -437,6 +478,7 @@ frust::app!(Gallery);
 | iPhone SE 2nd gen, iOS 26.7.1 | passed (export, save, album save, location through the picker) |
 | iPhone 13 mini, iOS 27.2 | passed (pick, loading progress, cancel, swipe-down, share picked, clear cache; browsing: albums, paging, thumbnails, Limited and Manage selection) |
 | Pixel 5, Android 14 | passed, browsing, export and save included; Xiaomi 12 (Android 17) passed the picker and share legs on an earlier build |
+| Pixel 4a, Android 16 | passed: `assets_by_id` on a change-feed delta (2 inserted ids, file name and MIME type), and browsing with only `READ_MEDIA_IMAGES` declared (status `NotDetermined`, request granted, 7 of 7 images listed) |
 | macOS | passed through the file dialog; `decode` has a host test that encoded and decoded a HEIC through ImageIO |
 | `with_details`, the new `Asset` fields, `asset_metadata` and `thumbnail_shared` (including a thumbnail cancel) | not device-tested; covered by host tests and the Android contract test only |
 | `decode` on iOS and Android devices, Android 10/11 fallback picker, Linux, Windows, DNG export on a phone | not device-tested (the API 29/30 leg is owed; so are API 29 paging and a second API 31+ device for browsing) |

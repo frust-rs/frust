@@ -255,7 +255,11 @@ The sections, in order:
     change token in shared preferences (key `playground.change_token`, as hex) and
     the next launch reads it back (the panel shows only its byte length);
     **Check** shows `Delta: +inserted ~updated -deleted` or `Full rescan` since the
-    stored token and stores the token it answers with; **Watch** counts the
+    stored token and stores the token it answers with, then fetches the inserted
+    and updated assets with `PhotoLibrary::assets_by_id` (details on, off the UI
+    thread) and lists each id as file name and MIME type or `not visible`, with the
+    call's milliseconds and the count requested; **Time full listing** times a
+    full details listing of the library for comparison; **Watch** counts the
     library's change wake-ups until **Stop**, and the watch survives a switch to
     another section. A **Folders** panel below
     Originals keeps a user-chosen folder: **Pick folder** stores the grant token in
@@ -264,10 +268,30 @@ The sections, in order:
     longer honours it. **Scan** lists the folder's images and videos newest first
     (name, kind, size) in pages of 50 with **Load more** and a **Recursive** toggle,
     and decodes the first eight images (a content URI is copied into the app cache
-    first). **Release** gives the folder up and forgets the token. Pick folder shows
+    first). **Sniff stored path** reads the stored path's first 16 bytes with
+    `FolderEntry::read_prefix` and shows them as hex; **Open stored path (16-byte
+    limit)** reads it with a 16-byte `read_to_vec` limit and shows the `TooLarge`
+    limit and size. **Release** gives the folder up and forgets the token. Pick folder shows
     the picker's progress; a scan shows its phase; **Cancel** stops the running step
     (a cancelled scan discards its page). Deep link:
     `frustplay://section/photos`.
+24. **A11y** — a fixture page for the assistive-technology gates, top to bottom:
+    a level-1 heading; a labelled image; a merged cell (label, value and hint over
+    a drawn box, one node); a tappable tile (`semantics(..).button()`) that bumps
+    a visible counter; a plain labelled group around two buttons (the group and
+    both buttons are separately reachable); a `hidden(true)` text; and a
+    `Taps: N` status line. Each item has a caption naming what assistive
+    technology should announce. Deep link: `frustplay://section/a11y`.
+25. **Forms** — fixtures for the safe-area / keyboard / back gate: a status line (the
+    field whose caret reported last, the full-width navigator's depth, Return presses); two
+    normal fields A and B; an obscured field C (password-classified); a **Push full-width
+    route** button over a navigator with no horizontal padding (pushed pages show their depth
+    and their own Push, so depth 3 is reachable); numbered filler rows; and field D as the last
+    row of the page, above the bottom navigation bar once scrolled to the end. The framework has
+    no programmatic focus, so Return on A does not move focus to B (it counts a press), and no
+    blur callback, so the status line shows the last caret report. The shell adds no inset around
+    the page; the navigator is at the left edge in portrait at phone width (with the wide-width
+    side rail it starts at the rail's right edge). Deep link: `frustplay://section/forms`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
@@ -448,6 +472,24 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Folders panel Open stored path / Open missing path (`FolderGrant::entry`), cold relaunch, a vanished folder, Release | OnePlus 9 (LE2115), Android 15 (API 35), 2026-11-11 | PASS (profile build of feature/folder-grant-entry a7cde823 merged with the accesskit bump, driven over adb: with a top-level and a nested PNG the first stored path read `found b-top.png 1288 bytes`, and with only the nested one `found nested.png 3698 bytes`, both equal to the pushed files' sizes; Open missing path read `not found`; after a force-stop and relaunch the panel read `Restored folder. Scan to list it.` and Open stored path found the nested file again with no re-pick, and the same after a device reboot; with the folder renamed away it read `AccessLost`, and `found` again once it was back; after Release it read `No stored path. Scan a folder first.`. One provider only (primary shared storage); duplicate display names NOT RUN) |
 | Photos: Folders panel Open stored path / Open missing path, cold relaunch, Release | iPhone SE (iPhone12,8), iOS 26.7.1, 2026-11-11 | PASS (feature/folder-grant-entry f66e02dc, debug build, XCUITest-driven: a file in a nested folder whose name ends in a space read `found <name> 53554 bytes`, the listing's own size; `not found` for the missing path; after a cold relaunch the grant was restored and the file found with no re-pick; after Release `No stored path. Scan a folder first.`. The size was not checked against an independent source, and `AccessLost` is not reachable from the panel) |
 | Photos: Folders panel Open stored path / Open missing path, quit and relaunch, Release | macOS (MacBook, Apple M4), 2026-11-11 | PASS (feature/folder-grant-entry f66e02dc, debug build, human-run with one nested image: every step passed, the stored path was found after the relaunch with no re-pick, and after Release the panel read `No stored path`. The status strings and the byte count were not recorded) |
+| A11y: heading, labelled image, merged cell, tappable tile (counter), unmerged group, hidden text announce as their captions say | TalkBack (Android device) | PARTIAL: the accessibility tree dump (`uiautomator`) on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15), `7dc3a780` and `bc46fc9b`, 2026-11-12, has one node per fixture (heading, `ImageView` "Sample gradient", one merged node "Battery" / "80 percent", `Button` "Increment tile", the group and both buttons) and no node for the hidden text; a screen tap on the tile raises the counter. NOT RUN: TalkBack speech, the hint, and activating the tile through the accessibility action |
+| A11y: heading, labelled image, merged cell, tappable tile (counter), unmerged group, hidden text announce as their captions say | VoiceOver (iPhone) | NOT YET RUN |
+| Forms: field D at the bottom of the page; content shifts clear of the open keyboard | Android device | FAIL (Pixel 4a, Android 16, `bc46fc9b`, 2026-11-12): D stays under the keyboard and the page does not scroll to it |
+| Forms: field D at the bottom of the page; content shifts clear of the open keyboard | iPhone | NOT YET RUN |
+| Forms: password field C (obscured, password-classified; keyboard type and autofill behaviour) | Android device | PARTIAL (Pixel 4a, Android 16, `bc46fc9b`, 2026-11-12): the keyboard shows and reopens on the obscured field; keyboard type and autofill not inspected |
+| Forms: password field C (obscured, password-classified; keyboard type and autofill behaviour) | iPhone | NOT YET RUN |
+| Forms: focus moves from field A to field B by tap, and by the keyboard's Return or Next key (Return only counts a press) | Android device | PARTIAL (Pixel 4a, Android 16, `bc46fc9b`, 2026-11-12): by tap only; Return not run |
+| Forms: focus moves from field A to field B by tap, and by the keyboard's Return or Next key (Return only counts a press) | iPhone | NOT YET RUN |
+| Forms: Push full-width route to depth 3, then the back edge swipe from the screen's left edge pops one level per swipe | Android device | PASS (Pixel 4a, Android 16, `bc46fc9b`, 2026-11-12): back key and back gesture each pop one level from depth 3; the root leaves to the launcher |
+| Forms: Push full-width route to depth 3, then the back edge swipe from the screen's left edge pops one level per swipe | iPhone | NOT YET RUN |
+| Photos: Changes panel Check fetches inserted and updated ids by id (file name, MIME type or `not visible`, milliseconds, count) | Android device | PASS (Pixel 4a, Android 16, `7dc3a780`, 2026-11-12): two pushed PNGs give `Delta: +2 ~0 -0`, 2 ids fetched in 9 ms, each row with its file name and `image/png` |
+| Photos: Changes panel Check fetches inserted and updated ids by id | iPhone | NOT YET RUN |
+| Photos: Changes panel Time full listing (asset count, milliseconds) beside the by-id time | Android device | PASS (Pixel 4a, Android 16, `7dc3a780`, 2026-11-12): 7 assets with details in 19 ms |
+| Photos: Changes panel Time full listing (asset count, milliseconds) beside the by-id time | iPhone | NOT YET RUN |
+| Photos: Folders panel Sniff stored path shows the first 16 bytes as hex | Android device | PASS (Pixel 4a, Android 16, `7dc3a780`, 2026-11-12): the 16 bytes are the PNG signature and the start of `IHDR` |
+| Photos: Folders panel Sniff stored path shows the first 16 bytes as hex | iPhone | NOT YET RUN |
+| Photos: Folders panel Open stored path (16-byte limit) shows the TooLarge limit and size | Android device | PASS (Pixel 4a, Android 16, `7dc3a780`, 2026-11-12): `too large: limit 16 bytes, size 67365 bytes` |
+| Photos: Folders panel Open stored path (16-byte limit) shows the TooLarge limit and size | iPhone | NOT YET RUN |
 
 ### Drag gate notes
 

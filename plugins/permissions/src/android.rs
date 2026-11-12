@@ -20,7 +20,7 @@
 //! |---|---|---|
 //! | `status` | `(int kind) -> int` | a status code; [`codes::NOT_DECLARED`]; [`codes::NO_ACTIVITY`] when the host has no application context (→ [`PermissionError::PlatformNotInitialized`]) |
 //! | `request` | `(long requestId, int kind) -> int` | a final status code; [`codes::PENDING`] after launching the prompt (the answer arrives via [`Java_dev_frust_permissions_FrustPermissionsHost_nativeOnPermissionResult`] with the same `requestId`); [`codes::NO_ACTIVITY`] (→ [`PermissionError::NoActivity`]); [`codes::NOT_DECLARED`] |
-//! | `undeclaredPermission` | `(int kind) -> String` | the first required permission missing from the manifest, or `null` — read only to name it in [`PermissionError::NotDeclared`] |
+//! | `undeclaredPermission` | `(int kind) -> String` | the first required permission missing from the manifest (for photos on API 33+, `READ_MEDIA_IMAGES` when neither media type is declared), or `null` — read only to name it in [`PermissionError::NotDeclared`] |
 //! | `openSettings` | `() -> int` | [`SETTINGS_OPENED`]; [`SETTINGS_FAILED`]; [`codes::NO_ACTIVITY`] when the host has no application context (→ [`PermissionError::PlatformNotInitialized`]) |
 //!
 //! ## Kotlin → Rust (this crate's own `#[unsafe(no_mangle)]` export)

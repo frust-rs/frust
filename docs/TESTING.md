@@ -139,7 +139,7 @@ follows.
 
 An integration test file that uses `frust::testing` must start with `#![cfg(feature =
 "test-support")]` and be run with `--features test-support`; without the feature the module does
-not exist. `tester.semantics().focus_id()` reports focus only for widgets that publish it
+not exist. Under `test-support` a lifecycle or memory-pressure push reaches only the listeners created on the pushing thread, so parallel tests do not see each other's pushes. `tester.semantics().focus_id()` reports focus only for widgets that publish it
 (`TextInput` today); for anything else it returns the root node.
 
 ### Host-dependent tests

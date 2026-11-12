@@ -612,3 +612,48 @@ fn scanners_read_the_shapes_they_claim() {
     assert_eq!(sets["L"], ["p.a", "p.b"]);
     assert!(sets["E"].is_empty());
 }
+
+#[test]
+fn photos_use_the_declared_media_subset() {
+    let kotlin = read(KOTLIN_HOST);
+    let strings = kotlin_string_consts(&kotlin);
+    assert_eq!(
+        strings.get("READ_MEDIA_VIDEO").map(String::as_str),
+        Some("android.permission.READ_MEDIA_VIDEO")
+    );
+
+    // Status, request and the naming read all go through the narrowed set.
+    for entry in ["status", "request", "undeclaredPermission"] {
+        let body = kotlin_fn(&kotlin, entry);
+        assert!(
+            body.contains("declaredPermissionsFor(ctx, kind, Build.VERSION.SDK_INT)"),
+            "`{entry}` must use the declared media subset"
+        );
+        assert!(
+            !body.contains("permissionsFor(kind, Build.VERSION.SDK_INT)"),
+            "`{entry}` must not read the full candidate set"
+        );
+    }
+
+    // Only API 33+ narrows, and only Photos read-write.
+    let narrowed = kotlin_fn(&kotlin, "declaredPermissionsFor");
+    assert!(narrowed.contains("kind != PHOTOS_READ_WRITE || sdk < 33"));
+    assert!(narrowed.contains("narrowMediaPermissions(perms, declaredPermissions(ctx))"));
+
+    // With a media type declared the subset is used; with neither, the full
+    // set comes back so `firstUndeclared` names READ_MEDIA_IMAGES.
+    let narrow = kotlin_fn(&kotlin, "narrowMediaPermissions");
+    assert!(narrow.contains("perms.filter { it in declared }"));
+    assert!(narrow.contains("it != READ_MEDIA_VISUAL_USER_SELECTED"));
+    assert!(narrow.contains("if (hasMediaType) subset else perms"));
+    assert!(
+        kotlin.contains("PHOTOS_READ_WRITE_SDK33 = listOf(\"android.permission.READ_MEDIA_IMAGES\", \"android.permission.READ_MEDIA_VIDEO\")"),
+        "READ_MEDIA_IMAGES must stay first so it is the name reported"
+    );
+
+    // Either declared media type granted is full read access.
+    let photos = kotlin_fn(&kotlin, "photosCode");
+    assert!(
+        photos.contains("isGranted(ctx, READ_MEDIA_IMAGES) || isGranted(ctx, READ_MEDIA_VIDEO)")
+    );
+}

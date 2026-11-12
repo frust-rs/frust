@@ -25,6 +25,7 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -1141,6 +1142,14 @@ class FrustSurfaceView(
         }
     }
 
+    // Tap tracking for the keyboard re-show in [pollImeAfterDispatch]: the
+    // primary pointer's down position and time, and whether the gesture is
+    // still a tap (see [onTouchEvent]).
+    private var tapDownX = 0f
+    private var tapDownY = 0f
+    private var tapDownTime = 0L
+    private var gestureIsTap = false
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (handle == 0L) {
             return false
@@ -1154,6 +1163,28 @@ class FrustSurfaceView(
             platformViewForwardTarget = platformViewHost?.interactiveTargetAt(event.x, event.y)
         }
         val forwardTarget = platformViewForwardTarget
+        if (forwardTarget == null) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    tapDownX = event.x
+                    tapDownY = event.y
+                    tapDownTime = event.eventTime
+                    gestureIsTap = true
+                }
+                MotionEvent.ACTION_POINTER_DOWN, MotionEvent.ACTION_CANCEL -> gestureIsTap = false
+                MotionEvent.ACTION_MOVE -> if (gestureIsTap) {
+                    val slop = ViewConfiguration.get(context).scaledTouchSlop
+                    for (i in 0 until event.pointerCount) {
+                        val dx = event.getX(i) - tapDownX
+                        val dy = event.getY(i) - tapDownY
+                        if (dx * dx + dy * dy > slop.toFloat() * slop) {
+                            gestureIsTap = false
+                            break
+                        }
+                    }
+                }
+            }
+        }
         if (forwardTarget != null) {
             val copy = MotionEvent.obtain(event)
             // Sibling views are positioned via translationX/Y in the shared
@@ -1201,7 +1232,16 @@ class FrustSurfaceView(
         // The tree may have taken/dropped focus in response to this contact; poll
         // the IME surface and show/hide the keyboard accordingly. Polling after
         // the dispatch keeps the JNI ABI one-directional (no native up-calls).
-        pollImeAfterDispatch()
+        // Only the final pointer Up of a TAP may re-show a keyboard the user
+        // dismissed: the gesture never moved farther than the touch slop from
+        // its down position, never had a second pointer, was not cancelled, and
+        // lasted less than the long-press timeout. A scroll, drag, long press
+        // or multi-touch gesture never does.
+        val isTap = event.actionMasked == MotionEvent.ACTION_UP &&
+            gestureIsTap &&
+            event.eventTime - tapDownTime < ViewConfiguration.getLongPressTimeout()
+        if (event.actionMasked == MotionEvent.ACTION_UP) gestureIsTap = false
+        pollImeAfterDispatch(touchUp = isTap)
         return true
     }
 
@@ -1399,8 +1439,21 @@ class FrustSurfaceView(
      * focus moved onto a suppressed field without an intervening inactive
      * edge) hides a keyboard that is already up — the `InputConnection` itself
      * is untouched, since nothing about which field is focused changed.
+     *
+     * When [touchUp] is true (the pointer Up that ends a tap: no movement beyond
+     * the touch slop, no second pointer, no cancel, shorter than the long-press
+     * timeout; see [onTouchEvent]) and
+     * the field is steady-active and does not suppress the soft keyboard, the
+     * keyboard is shown again with [InputMethodManager.showSoftInput]. Back hides
+     * the keyboard without changing Rust's active state, so no edge would
+     * otherwise re-show it. This is a no-op when the keyboard is already up, and
+     * it never calls `restartInput`, which would drop an active composition.
+     *
+     * The polled IME state carries no field or caret rectangle, so the tap is
+     * not hit-tested against the focused field: a tap elsewhere on the surface,
+     * on content that does not take focus, also re-shows the keyboard.
      */
-    private fun pollImeAfterDispatch() {
+    private fun pollImeAfterDispatch(touchUp: Boolean = false) {
         if (handle == 0L) return
         val state = parseImeState(nativeImeState(handle)) ?: return
         val previous = lastKnownState
@@ -1449,6 +1502,9 @@ class FrustSurfaceView(
             // `lastKnownState`), so a pre-advanced snapshot can't hide a
             // change.
             activeConnection?.reconcileTo(state)
+            if (touchUp && !state.suppressSoftKeyboard) {
+                imm.showSoftInput(this, 0)
+            }
         }
     }
 

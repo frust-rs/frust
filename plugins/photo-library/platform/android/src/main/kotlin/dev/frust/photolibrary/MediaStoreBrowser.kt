@@ -17,6 +17,7 @@ import android.util.Log
 import android.util.Size
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AlbumsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsAfterResult
+import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsByIdResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.AssetsResult
 import dev.frust.photolibrary.FrustPhotoLibraryHost.ThumbnailResult
 import java.io.FileNotFoundException
@@ -67,8 +68,13 @@ import kotlin.math.roundToInt
  *
  * Every call first checks [mediaPermissions] with `checkSelfPermission`. No
  * permission held answers [FrustPhotoLibraryHost.PERMISSION_DENIED]; a partial
- * grant proceeds. The sets mirror `frust-permissions`' photo table, pinned by
- * `tests/kotlin_contract.rs`.
+ * grant proceeds. The candidate sets mirror `frust-permissions`' photo table,
+ * pinned by `tests/kotlin_contract.rs`; on API 33+ only the subset the manifest
+ * declares is checked and requested ([narrowPermissions]). The by-id and
+ * listing paths share the [browse] guard, so both follow that subset. A listing
+ * for a media type whose permission is not declared (for example videos with
+ * only images declared) returns the platform's result, which is empty; it is
+ * not an error.
  *
  * ## The asked flag
  *
@@ -148,18 +154,63 @@ internal object MediaStoreBrowser {
         return columns
     }
 
-    /** The photo permissions on [sdk] (`frust-permissions`' `Photos(ReadWrite)` set). */
-    internal fun mediaPermissions(sdk: Int): List<String> = when {
+    /** The photo permissions on [sdk] (`frust-permissions`' `Photos(ReadWrite)` candidate set). */
+    private fun candidatePermissions(sdk: Int): List<String> = when {
         sdk >= 34 -> MEDIA_PERMISSIONS_SDK34
         sdk == 33 -> MEDIA_PERMISSIONS_SDK33
         else -> MEDIA_PERMISSIONS_SDK29
     }
 
+    /**
+     * The photo permissions to check and request on [sdk]: on API 33+ the
+     * subset of the candidates that [declared] holds (`READ_MEDIA_IMAGES`,
+     * `READ_MEDIA_VIDEO`, and `READ_MEDIA_VISUAL_USER_SELECTED` on 34+), so an
+     * undeclared permission is never requested. With no media type declared
+     * the subset is empty and nothing is requested or accepted. Below 33 the
+     * candidates are returned unchanged. Same rule as `frust-permissions`.
+     */
+    internal fun narrowPermissions(sdk: Int, declared: Set<String>): List<String> {
+        val candidates = candidatePermissions(sdk)
+        if (sdk < 33) return candidates
+        val subset = candidates.filter { it in declared }
+        return if (subset.any { it != READ_MEDIA_VISUAL_USER_SELECTED }) subset else emptyList()
+    }
+
+    /** [narrowPermissions] against this app's manifest on the running device. */
+    internal fun mediaPermissions(ctx: Context, sdk: Int): List<String> =
+        narrowPermissions(sdk, manifestPermissions(ctx))
+
+    /**
+     * The manifest's `<uses-permission>` names, read once: the manifest cannot
+     * change while the process lives.
+     */
+    private fun manifestPermissions(ctx: Context): Set<String> {
+        declaredManifest?.let { return it }
+        val pm = ctx.packageManager
+        val info = try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                pm.getPackageInfo(ctx.packageName, PackageManager.PackageInfoFlags.of(PackageManager.GET_PERMISSIONS.toLong()))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(ctx.packageName, PackageManager.GET_PERMISSIONS)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "frust-photo-library: reading the manifest failed: ${e.javaClass.name}")
+            return emptySet()
+        }
+        val names = info.requestedPermissions?.toSet() ?: emptySet()
+        declaredManifest = names
+        return names
+    }
+
+    @Volatile
+    private var declaredManifest: Set<String>? = null
+
     private fun isGranted(ctx: Context, perm: String): Boolean =
         ctx.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED
 
     private fun hasAccess(ctx: Context): Boolean =
-        mediaPermissions(Build.VERSION.SDK_INT).any { isGranted(ctx, it) }
+        mediaPermissions(ctx, Build.VERSION.SDK_INT).any { isGranted(ctx, it) }
 
     /** Whether the app holds only a user selection (API 34+ partial access). */
     internal fun isLimited(ctx: Context): Boolean =
@@ -201,6 +252,8 @@ internal object MediaStoreBrowser {
         )
 
     private fun assetsAfterFailed(code: Int) = AssetsAfterResult(code, assetsFailed(code), 0, 0, false)
+
+    private fun assetsByIdFailed(code: Int) = AssetsByIdResult(code, IntArray(0), assetsFailed(code))
 
     private fun thumbnailFailed(code: Int) = ThumbnailResult(code, 0, 0, 0, null)
 
@@ -386,6 +439,65 @@ internal object MediaStoreBrowser {
         }
         return resolver.query(FILES_URI, projection, queryArgs, null)
     }
+
+    /**
+     * Row ids bound by one query of [assetsById]: well under SQLite's limit on
+     * bound arguments (999 before SQLite 3.32, which API 29 and 30 ship).
+     */
+    internal const val BY_ID_CHUNK = 500
+
+    /**
+     * The `MediaStore` row id an asset id names, or null when [id] is not a
+     * `content://media` URI (the check [loadThumbnail] makes) or does not end
+     * in a row id.
+     */
+    internal fun rowIdOf(id: String): Long? {
+        val uri = Uri.parse(id)
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority != MediaStore.AUTHORITY) return null
+        return uri.lastPathSegment?.toLongOrNull()?.takeIf { it > 0 }
+    }
+
+    /**
+     * The rows of [ids], answered by position: [AssetsByIdResult.page] holds
+     * one row per input id that resolved, in input order (a duplicate id gives
+     * a duplicate row), and [AssetsByIdResult.positions] the input index of
+     * each. An id that is not a `content://media` URI ([rowIdOf]), a deleted
+     * row, a row that is not an image or a video, and a row outside a partial
+     * grant (class doc, "Access") have no row. The distinct row ids are
+     * queried from [FILES_URI] in chunks of at most [BY_ID_CHUNK] bound
+     * arguments, with the listing's projection and [readRows], so a row reads
+     * exactly as it does in [assets]; [details] adds the same columns.
+     */
+    fun assetsById(ctx: Context?, ids: Array<String>, details: Boolean): AssetsByIdResult =
+        browse(ctx, "assetsById", ::assetsByIdFailed) { context ->
+            val mediaType = mediaSelection(FrustPhotoLibraryHost.FILTER_IMAGES_AND_VIDEOS)
+                ?: return@browse assetsByIdFailed(FrustPhotoLibraryHost.QUERY_FAILED)
+            val rowIds = Array(ids.size) { rowIdOf(ids[it]) }
+            val wanted = LinkedHashSet<Long>()
+            rowIds.forEach { rowId -> if (rowId != null) wanted.add(rowId) }
+            val projection = projection(details)
+            val resolver = context.contentResolver
+            val found = HashMap<Long, Row>()
+            for (chunk in wanted.chunked(BY_ID_CHUNK)) {
+                val placeholders = chunk.joinToString(",") { "?" }
+                val selection = "$mediaType AND ${BaseColumns._ID} IN ($placeholders)"
+                val args = Array(chunk.size) { chunk[it].toString() }
+                val cursor = resolver.query(FILES_URI, projection, selection, args, null)
+                    ?: return@browse assetsByIdFailed(FrustPhotoLibraryHost.QUERY_FAILED)
+                // The ids are distinct, so a chunk has at most one row per id.
+                cursor.use { c -> readRows(c, 0, chunk.size, details) }.forEach { found[it.rowId] = it }
+            }
+            val positions = ArrayList<Int>()
+            val rows = ArrayList<Row>()
+            rowIds.forEachIndexed { index, rowId ->
+                val row = rowId?.let { found[it] }
+                if (row != null) {
+                    positions.add(index)
+                    rows.add(row)
+                }
+            }
+            AssetsByIdResult(FrustPhotoLibraryHost.OK, positions.toIntArray(), assetsPage(rows, 0))
+        }
 
     /** At most [limit] rows of [cursor]; on API 29 the cursor is unpaged, so it seeks [offset]. */
     private fun readRows(cursor: Cursor, offset: Int, limit: Int, details: Boolean): List<Row> {

@@ -8354,15 +8354,15 @@ Media location has no user-facing switch on Android 14: it is granted along with
 
 ### `photo-library-content-type-platform-shaped` — `Asset::content_type` is a MIME type on Android and a type identifier on iOS
 
-**Observed**: with `AssetQuery::with_details`, `content_type` is a MIME type such as `image/jpeg` on Android and a uniform type identifier such as `public.heic` on iOS. The two are not interchangeable, and the plugin does not convert between them. `file_name` is the platform's original name and is untrusted.
+**Observed**: with `AssetQuery::with_details`, `content_type` is a MIME type such as `image/jpeg` on Android and a uniform type identifier such as `public.heic` on iOS. The raw field is not interchangeable between the two; `Asset::mime_type()` converts through a fixed table and gives `None` for an identifier it does not list. `file_name` is the platform's original name and is untrusted.
 
 **Applies to**: apps that branch on the type of an asset on both platforms.
 
-**Workaround**: normalise per platform in app code, or classify by `Asset::kind` and the file extension.
+**Workaround**: call `Asset::mime_type()`, which returns a MIME type on both phones (an iOS identifier outside its fixed table gives `None`, as does a missing `content_type`), or classify by `Asset::kind` and the file extension.
 
-**Why accepted**: each platform's own identifier is lossless; a mapping table would drop types it did not list.
+**Why accepted**: each platform's own identifier is lossless, so the raw field stays as is; the mapping table is a convenience that answers `None` rather than guess.
 
-**Evidence**: (2026-11-11) `plugins/photo-library/src/library.rs` (`Asset::content_type`); `plugins/photo-library/src/apple_originals.rs` (`primary_names`); `plugins/photo-library/src/android_library.rs` (`assets_from`). Not run on a device.
+**Evidence**: (2026-11-11) `plugins/photo-library/src/library.rs` (`Asset::content_type`, `Asset::mime_type`); `plugins/photo-library/src/apple_originals.rs` (`primary_names`); `plugins/photo-library/src/android_library.rs` (`assets_from`). Not run on a device.
 
 ---
 
@@ -8478,5 +8478,37 @@ shows the guard works, not that it was needed. Notification display was not obse
 **Why accepted**: it predates the exact-extent mode, the anchor probe only confirms rows by the first surviving window row (it cannot see a row it never materialized), and changing the probe affects all three extent modes. A removal is bounded to one row's extent, but a batch insert just above the screen moves the content by the whole batch.
 
 **Evidence**: originates from a phase review finding of the exact-extent `ListView` work (2026-11-11); established from the code path and headless tests, not from a device observation: `crates/frust-widgets/src/list_view.rs` (`apply_exact_anchor_shift`, `anchor_shift_items`) and `crates/frust-widgets/tests/list_item_extent.rs` (`a_single_row_edit_inside_the_leading_buffer_is_not_corrected`, `two_rows_inserted_in_the_leading_gap_move_the_content_by_their_sum`, `removing_the_row_holding_the_top_edge_falls_back_to_a_row_above`, `editing_the_windows_first_row_is_corrected`).
+
+---
+
+### `a11y-wrapper-phone-exposure-unverified` — the `semantics(child)` wrapper is checked in the Android accessibility tree only; TalkBack speech and iOS are not observed
+
+**Observed**: on Android the wrapper's nodes reach the platform accessibility tree: a `uiautomator` dump of the playground's A11y page shows one node each for a heading, a labelled image, a merged cell (label and value), a button tile and a labelled group with its two children, and none for a hidden subtree. What TalkBack speaks for them, the hint, and activating a tappable wrapper through the accessibility action were not run. On iOS nothing has been observed: the expectation there rests on reading the adapter's filter code (which nodes it keeps or drops), and a node the adapter drops would be silent on the phone while present in the headless semantics tree.
+
+**Applies to**: apps that rely on `semantics(child)`, `TextView::heading` or `ImageView::label` for screen-reader users, on iOS above all.
+
+**Workaround**: check the screen with VoiceOver and TalkBack before relying on it; prefer a widget's own semantics where it has one.
+
+**Why accepted**: the Android tree is verified; a spoken pass and an iOS pass have not been recorded yet, and the entry stays until they are.
+
+**Trigger for removal**: a recorded VoiceOver pass and a TalkBack spoken pass over a screen using the wrapper.
+
+**Evidence**: (2026-11-12) `uiautomator` dumps on a Pixel 4a (Android 16) and a OnePlus 9 (Android 15), recorded in `examples/playground/README.md`; code reading of the `accesskit_ios` node filter; the headless tests of `crates/frust-widgets/src/semantics.rs`.
+
+---
+
+### `a11y-click-is-positional` — an accessibility tap action lands at the centre of the node
+
+**Observed**: a click action from a screen reader (an activate on TalkBack or VoiceOver) is delivered as a pointer tap at the centre of the node's bounds, not as a call on the widget that owns the action. A tappable child that does not cover the node's centre, or a node whose centre is covered by another view, receives no tap.
+
+**Applies to**: nodes made `tappable(true)` or `button()` on the `semantics(child)` wrapper, and any node with a click action.
+
+**Workaround**: make the tappable child cover the wrapper's centre, and keep the centre of a tappable node unobstructed.
+
+**Why accepted**: actions are delivered through the same hit-testing path as a finger, which keeps one dispatch route; a direct call into the widget would need a per-widget action contract.
+
+**Trigger for removal**: a per-widget action contract that does not go through hit testing.
+
+**Evidence**: `crates/frust-core/src/app/semantics.rs` (click delivery) and `crates/frust-widgets/src/semantics.rs` (`tappable`). Code and headless tests; not run on a device.
 
 ---

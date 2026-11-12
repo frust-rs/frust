@@ -1998,7 +1998,7 @@ pub mod input {
 /// `reactive_graph` so app authors never name either crate directly. `Owner`
 /// is the scope a handler's timers and tasks bind to: hold a child of the
 /// component's owner in state to cancel a group of them together.
-pub use frust_reactive::{Owner, RwSignal, on_cleanup, provide_context, use_context};
+pub use frust_reactive::{Owner, OwnerId, RwSignal, on_cleanup, provide_context, use_context};
 
 /// The deep-link read surface (`frust-reactive`'s `app_links`-
 /// style process-wide source — see its module docs for the semantics): a

@@ -67,6 +67,7 @@
 //! The wait has no timeout of its own while the sheet is up: the user may keep
 //! it open as long as they like.
 
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -432,6 +433,66 @@ fn asset_of(asset: &PHAsset, details: bool) -> Asset {
             content_type,
         }
     }
+}
+
+/// Identifiers per `fetchAssetsWithLocalIdentifiers` call. The call takes one `NSArray` and
+/// Photos resolves it as one query, so a bound keeps a very large input from building one huge
+/// array and one long query; 500 is a few dozen KiB of identifiers per call and a handful of
+/// calls for even a large selection.
+const BY_ID_CHUNK: usize = 500;
+
+/// The crate root's `assets_by_id` arm; the crate root has already answered an empty slice.
+/// One entry per input id, in input order, `None` where Photos returned nothing for it and
+/// duplicates preserved: a fetch result neither keeps the request's order nor repeats an
+/// identifier, so the rows are keyed by identifier and put back at every index that asked.
+pub(crate) fn assets_by_id(
+    ids: &[AssetId],
+    details: bool,
+) -> Result<Vec<Option<Asset>>, PhotoError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    refuse_main_thread()?;
+    autoreleasepool(|_| {
+        ensure_readable()?;
+        // Each distinct identifier is fetched once, in first-seen order.
+        let mut seen = HashSet::new();
+        let unique: Vec<&str> = ids
+            .iter()
+            .map(AssetId::as_str)
+            .filter(|id| seen.insert(*id))
+            .collect();
+        let mut found: HashMap<String, Asset> = HashMap::with_capacity(unique.len());
+        for chunk in unique.chunks(BY_ID_CHUNK) {
+            let requested: Vec<Retained<NSString>> =
+                chunk.iter().map(|id| NSString::from_str(id)).collect();
+            let requested = NSArray::from_retained_slice(&requested);
+            // SAFETY: the fetch takes an `NSArray<NSString>` of identifiers and null options;
+            // `count` reads the immutable result and every index is below it.
+            let fetched =
+                unsafe { PHAsset::fetchAssetsWithLocalIdentifiers_options(&requested, None) };
+            let count = unsafe { fetched.count() };
+            for index in 0..count {
+                // SAFETY: `index` is below the result's count.
+                let asset = asset_of(&*unsafe { fetched.objectAtIndex(index) }, details);
+                found.insert(asset.id.as_str().to_owned(), asset);
+            }
+        }
+        let keys: Vec<&str> = ids.iter().map(AssetId::as_str).collect();
+        let (positions, rows) = found_rows(&keys, &found);
+        crate::in_input_order(ids.len(), &positions, rows)
+            .ok_or_else(|| PhotoError::Platform("photo library answered inconsistently".to_owned()))
+    })
+}
+
+/// The rows of `found` that answer `keys`, with the input index each answers: a key repeated in
+/// `keys` yields one clone per index, a key `found` lacks yields none. The pair feeds
+/// `crate::in_input_order`, which owns the `None` gaps.
+fn found_rows<T: Clone>(keys: &[&str], found: &HashMap<String, T>) -> (Vec<i32>, Vec<T>) {
+    keys.iter()
+        .enumerate()
+        .filter_map(|(index, key)| Some((i32::try_from(index).ok()?, found.get(*key)?.clone())))
+        .unzip()
 }
 
 pub(crate) fn thumbnail(

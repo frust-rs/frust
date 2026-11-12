@@ -224,6 +224,7 @@ object FrustPermissionsHost {
 
     private const val READ_EXTERNAL_STORAGE = "android.permission.READ_EXTERNAL_STORAGE"
     private const val READ_MEDIA_IMAGES = "android.permission.READ_MEDIA_IMAGES"
+    private const val READ_MEDIA_VIDEO = "android.permission.READ_MEDIA_VIDEO"
     private const val READ_MEDIA_VISUAL_USER_SELECTED = "android.permission.READ_MEDIA_VISUAL_USER_SELECTED"
 
     /**
@@ -294,7 +295,7 @@ object FrustPermissionsHost {
     @JvmStatic
     fun status(kind: Int): Int {
         val ctx = appContext ?: return NO_ACTIVITY
-        val perms = permissionsFor(kind, Build.VERSION.SDK_INT) ?: return UNKNOWN_KIND
+        val perms = declaredPermissionsFor(ctx, kind, Build.VERSION.SDK_INT) ?: return UNKNOWN_KIND
         if (firstUndeclared(ctx, perms) != null) return NOT_DECLARED
         return currentCode(ctx, kind, perms, resumedActivity)
     }
@@ -312,7 +313,7 @@ object FrustPermissionsHost {
     @JvmStatic
     fun request(requestId: Long, kind: Int): Int {
         val ctx = appContext ?: return NO_ACTIVITY
-        val perms = permissionsFor(kind, Build.VERSION.SDK_INT) ?: return UNKNOWN_KIND
+        val perms = declaredPermissionsFor(ctx, kind, Build.VERSION.SDK_INT) ?: return UNKNOWN_KIND
         if (firstUndeclared(ctx, perms) != null) return NOT_DECLARED
         if (perms.isEmpty()) return GRANTED
         if (currentCode(ctx, kind, perms, resumedActivity) == GRANTED) return GRANTED
@@ -334,7 +335,7 @@ object FrustPermissionsHost {
     @JvmStatic
     fun undeclaredPermission(kind: Int): String? {
         val ctx = appContext ?: return null
-        val perms = permissionsFor(kind, Build.VERSION.SDK_INT) ?: return null
+        val perms = declaredPermissionsFor(ctx, kind, Build.VERSION.SDK_INT) ?: return null
         return firstUndeclared(ctx, perms)
     }
 
@@ -386,6 +387,28 @@ object FrustPermissionsHost {
 
     // --- Internals ----------------------------------------------------------
 
+    /**
+     * The permissions [kind] operates on: [permissionsFor], except that Photos
+     * read-write on API 33+ narrows to the declared subset of
+     * `READ_MEDIA_IMAGES` / `READ_MEDIA_VIDEO` (plus
+     * `READ_MEDIA_VISUAL_USER_SELECTED` when declared), so an app that declares
+     * only one media type is neither reported undeclared nor asked for the other.
+     * With neither media type declared the full set comes back, so
+     * [firstUndeclared] names `READ_MEDIA_IMAGES`.
+     */
+    private fun declaredPermissionsFor(ctx: Context, kind: Int, sdk: Int): List<String>? {
+        val perms = permissionsFor(kind, sdk) ?: return null
+        if (kind != PHOTOS_READ_WRITE || sdk < 33) return perms
+        return narrowMediaPermissions(perms, declaredPermissions(ctx))
+    }
+
+    /** [perms] limited to the entries in [declared]; [perms] unchanged when no media type is declared. */
+    internal fun narrowMediaPermissions(perms: List<String>, declared: Set<String>): List<String> {
+        val subset = perms.filter { it in declared }
+        val hasMediaType = subset.any { it != READ_MEDIA_VISUAL_USER_SELECTED }
+        return if (hasMediaType) subset else perms
+    }
+
     /** The Android permissions behind [kind] on [sdk], or null for an unknown kind. */
     internal fun permissionsFor(kind: Int, sdk: Int): List<String>? = when (kind) {
         PHOTOS_READ_WRITE -> when {
@@ -414,9 +437,15 @@ object FrustPermissionsHost {
 
     /** The photo library's grant code right now, from live grants (null when none held). */
     private fun photosCode(ctx: Context, sdk: Int): Int? {
-        val full = if (sdk >= 33) READ_MEDIA_IMAGES else READ_EXTERNAL_STORAGE
+        // On 33+ either declared media type granted is full read access: an
+        // app may declare only one of them.
+        val full = if (sdk >= 33) {
+            isGranted(ctx, READ_MEDIA_IMAGES) || isGranted(ctx, READ_MEDIA_VIDEO)
+        } else {
+            isGranted(ctx, READ_EXTERNAL_STORAGE)
+        }
         val selected = sdk >= 34 && isGranted(ctx, READ_MEDIA_VISUAL_USER_SELECTED)
-        return photosGrantCode(sdk, isGranted(ctx, full), selected)
+        return photosGrantCode(sdk, full, selected)
     }
 
     /**

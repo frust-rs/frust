@@ -297,6 +297,63 @@ impl PhotoLibrary {
         }
     }
 
+    /// The assets named by `ids`, so an app that keeps its own catalogue can apply a
+    /// [`LibraryChanges::Delta`] without listing the whole library again. Blocks; see
+    /// [`albums`](Self::albums) for the rules.
+    ///
+    /// The answer has one entry per input id, in input order. An entry is `None` when its id
+    /// does not exist, was deleted, is not visible to the app (it is outside a limited
+    /// selection), or is not a library id at all; a duplicate id in the input gives a duplicate
+    /// entry. A `Some` asset is the row [`assets`](Self::assets) lists for that id, including
+    /// its [`id`](Asset::id). With `details` the call fills [`Asset::file_name`] and
+    /// [`Asset::content_type`], as [`AssetQuery::with_details`] does for a listing.
+    ///
+    /// An empty `ids` returns an empty `Vec` at once, without a platform call, so neither the
+    /// thread nor the access is checked for it. Otherwise the call refuses the mobile UI thread
+    /// with [`PhotoError::UiThread`] and needs the access `assets` needs, answering
+    /// [`PhotoError::PermissionDenied`] without it. No platform needs a maximum batch: Android
+    /// queries at most 500 ids at a time on its own, so one call can carry a whole delta.
+    ///
+    /// ```no_run
+    /// use frust_photo_library::{Asset, AssetId, ChangeToken, LibraryChanges, PhotoError, PhotoLibrary};
+    /// # fn upsert(_: Asset) {}
+    /// # fn remove(_: &AssetId) {}
+    ///
+    /// // Blocks: call inside `frust::spawn_blocking`.
+    /// fn apply(token: &ChangeToken) -> Result<(), PhotoError> {
+    ///     if let LibraryChanges::Delta { inserted, updated, .. } = PhotoLibrary::changes_since(token)? {
+    ///         let ids: Vec<AssetId> = inserted.into_iter().chain(updated).collect();
+    ///         let assets = PhotoLibrary::assets_by_id(&ids, false)?;
+    ///         for (id, asset) in ids.iter().zip(assets) {
+    ///             match asset {
+    ///                 Some(asset) => upsert(asset),
+    ///                 // Deleted again since the delta, or outside a limited selection.
+    ///                 None => remove(id),
+    ///             }
+    ///         }
+    ///     }
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// - **Android:** each id is a `content://media` item URI; any other text is `None`.
+    /// - **iOS:** each id is a Photos local identifier; one that does not resolve is `None`.
+    /// - **Desktop and web:** [`PhotoError::Unsupported`], as for [`assets`](Self::assets).
+    pub fn assets_by_id(ids: &[AssetId], details: bool) -> Result<Vec<Option<Asset>>, PhotoError> {
+        #[cfg(feature = "library")]
+        {
+            if ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            platform::assets_by_id(ids, details)
+        }
+        #[cfg(not(feature = "library"))]
+        {
+            let _ = (ids, details);
+            Err(library_disabled())
+        }
+    }
+
     /// The library's current [`ChangeToken`], to pass to [`changes_since`](Self::changes_since)
     /// later. Blocks; see [`albums`](Self::albums) for the rules. Desktop and web have no photo
     /// library and return [`PhotoError::Unsupported`].
@@ -723,6 +780,26 @@ fn library_disabled() -> PhotoError {
     PhotoError::FeatureDisabled { feature: "library" }
 }
 
+/// The answer of [`PhotoLibrary::assets_by_id`] from a platform's found rows: `rows[i]` answers
+/// input index `positions[i]`, and every index no row answers is `None`. `None` when the two
+/// lengths differ, a position is out of `0..len`, or two rows answer one index, so a broken
+/// host answer is never misattributed. The Android and iOS arms call it; the host tests cover it.
+#[cfg(feature = "library")]
+#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
+fn in_input_order<T>(len: usize, positions: &[i32], rows: Vec<T>) -> Option<Vec<Option<T>>> {
+    if positions.len() != rows.len() {
+        return None;
+    }
+    let mut answer: Vec<Option<T>> = std::iter::repeat_with(|| None).take(len).collect();
+    for (&position, row) in positions.iter().zip(rows) {
+        let slot = answer.get_mut(usize::try_from(position).ok()?)?;
+        if slot.replace(row).is_some() {
+            return None;
+        }
+    }
+    Some(answer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,6 +1109,63 @@ mod tests {
             PhotoLibrary::cloud_identifiers(&[]),
             Err(PhotoError::Unsupported)
         );
+    }
+
+    #[cfg(not(feature = "library"))]
+    #[test]
+    fn assets_by_id_is_feature_gated() {
+        let disabled = Err(PhotoError::FeatureDisabled { feature: "library" });
+        assert_eq!(
+            PhotoLibrary::assets_by_id(&[AssetId::from_raw("a")], false),
+            disabled
+        );
+        assert_eq!(PhotoLibrary::assets_by_id(&[], true), disabled);
+    }
+
+    // Desktop and web would answer `Unsupported` for any platform call, so an empty answer here
+    // shows the slice never reached the platform.
+    #[cfg(all(
+        feature = "library",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    #[test]
+    fn an_empty_id_slice_never_reaches_the_platform() {
+        assert_eq!(PhotoLibrary::assets_by_id(&[], false), Ok(Vec::new()));
+        assert_eq!(PhotoLibrary::assets_by_id(&[], true), Ok(Vec::new()));
+        assert_eq!(
+            PhotoLibrary::assets_by_id(&[AssetId::from_raw("a")], false),
+            Err(PhotoError::Unsupported)
+        );
+    }
+
+    #[cfg(feature = "library")]
+    #[test]
+    fn found_rows_land_at_their_input_positions() {
+        // Five ids: 0 and 3 found, 1 missing, 2 and 4 a duplicate of one found id.
+        let answer = in_input_order(5, &[0, 2, 3, 4], vec!["a", "b", "c", "b"]).unwrap();
+        assert_eq!(answer, [Some("a"), None, Some("b"), Some("c"), Some("b")]);
+        // Nothing found: every entry is `None`, one per input id.
+        assert_eq!(
+            in_input_order::<&str>(3, &[], Vec::new()).unwrap(),
+            [None, None, None]
+        );
+        assert!(
+            in_input_order::<&str>(0, &[], Vec::new())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[cfg(feature = "library")]
+    #[test]
+    fn a_broken_host_answer_is_refused_not_misattributed() {
+        // Lengths differ.
+        assert_eq!(in_input_order(2, &[0], vec!["a", "b"]), None);
+        // Out of range, negative.
+        assert_eq!(in_input_order(2, &[2], vec!["a"]), None);
+        assert_eq!(in_input_order(2, &[-1], vec!["a"]), None);
+        // Two rows for one input id.
+        assert_eq!(in_input_order(2, &[1, 1], vec!["a", "b"]), None);
     }
 
     #[cfg(not(feature = "library"))]

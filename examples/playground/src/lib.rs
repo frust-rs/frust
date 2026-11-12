@@ -445,6 +445,10 @@ pub struct PlaygroundState {
     /// outlives a switch to another section; clone-shares-one-handle like the
     /// controllers above.
     pub photo_watch: pages::photos::LibraryWatch,
+    /// The "A11y" section's tap counter (`pages::accessibility`).
+    pub a11y: pages::accessibility::A11yState,
+    /// The "Forms" section's fields, focus report and full-width navigator (`pages::forms`).
+    pub forms: pages::forms::FormsState,
 }
 
 impl PlaygroundState {
@@ -489,6 +493,8 @@ impl PlaygroundState {
             tabs: pages::tabs::TabsState::new(),
             shortcuts: pages::shortcuts::ShortcutsState::new(),
             photo_watch: pages::photos::LibraryWatch::default(),
+            a11y: pages::accessibility::A11yState::new(),
+            forms: pages::forms::FormsState::new(),
         }
     }
 }

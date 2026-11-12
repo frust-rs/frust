@@ -26,6 +26,14 @@ pub(crate) fn assets_after(
 }
 
 #[cfg(feature = "library")]
+pub(crate) fn assets_by_id(
+    _ids: &[crate::AssetId],
+    _details: bool,
+) -> Result<Vec<Option<crate::Asset>>, PhotoError> {
+    Err(PhotoError::Unsupported)
+}
+
+#[cfg(feature = "library")]
 pub(crate) fn thumbnail(
     _id: &crate::AssetId,
     _request: &crate::ThumbnailRequest,

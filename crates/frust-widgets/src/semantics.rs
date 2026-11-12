@@ -7,10 +7,31 @@
 //!
 //! [`SemanticsView`] lays out, paints and routes events exactly as its child
 //! does. Its only contribution is to the accessibility tree: the child's
-//! nodes are published beneath one container node whose role defaults to
-//! [`Role::GenericContainer`], optionally carrying a [`label`](SemanticsView::label),
-//! a [`role`](SemanticsView::role) or a [`heading`](SemanticsView::heading)
-//! level.
+//! nodes are published beneath one container node, optionally carrying a
+//! [`label`](SemanticsView::label), [`value`](SemanticsView::value),
+//! [`hint`](SemanticsView::hint), a [`role`](SemanticsView::role) or a
+//! [`heading`](SemanticsView::heading) level.
+//!
+//! # Default role
+//!
+//! With no explicit role the node is [`Role::Group`] as soon as a label,
+//! value or hint is set, and [`Role::GenericContainer`] only for a wrapper
+//! that sets none of them. Phone accessibility adapters filter
+//! `GenericContainer` nodes out of the tree, so a labelled wrapper left as a
+//! generic container would never become an accessibility element.
+//!
+//! # Merging
+//!
+//! [`merged(true)`](SemanticsView::merged) publishes the wrapper as ONE leaf
+//! node carrying its role, label, value, hint, level and actions, and does not
+//! descend into the child's semantics. The child's own nodes, including any
+//! control inside, are then no longer separately reachable.
+//!
+//! [`heading`](SemanticsView::heading), [`image`](SemanticsView::image) and
+//! [`button`](SemanticsView::button) only IMPLY merging, and only when the
+//! wrapper has its own label or value: without one the wrapper stays a
+//! container over the child's nodes, so the child's text is still announced.
+//! An explicit `merged(..)` always wins, whatever the call order.
 //!
 //! # Hiding
 //!
@@ -18,11 +39,6 @@
 //! wrapper simply does not descend into the child's semantics, so neither the
 //! container node nor any node of the subtree is present in the published
 //! tree. The child still lays out, paints and receives events.
-//!
-//! # Not provided
-//!
-//! There is no merge builder: collapsing a subtree's nodes into one needs
-//! support in the semantics context that does not exist yet.
 
 use frust_core::{
     BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent, LayoutCtx,
@@ -30,55 +46,202 @@ use frust_core::{
 };
 use kurbo::{Point, Size};
 
-use frust_core::accesskit::Role;
+use frust_core::accesskit::{Action, Node, Role};
+
+/// The values a [`SemanticsView`] publishes, shared by the view and its widget.
+#[derive(Clone, PartialEq)]
+struct Published {
+    label: Option<String>,
+    value: Option<String>,
+    hint: Option<String>,
+    /// `None` until set; resolved to a default at publish time.
+    role: Option<Role>,
+    level: Option<usize>,
+    hidden: bool,
+    /// The explicit request made by `merged(bool)`; wins over `merge_implied`.
+    merged: Option<bool>,
+    /// True exactly while the role is one a convenience builder set
+    /// (heading, image, button); cleared by `role`.
+    merge_implied: bool,
+    tappable: bool,
+}
+
+impl Published {
+    /// Whether the wrapper is published as one leaf. An explicit request
+    /// decides alone; an implied one also needs a label or value, so the
+    /// child's text is not lost behind a nameless leaf.
+    fn is_merged(&self) -> bool {
+        match self.merged {
+            Some(explicit) => explicit,
+            None => self.merge_implied && (self.label.is_some() || self.value.is_some()),
+        }
+    }
+
+    /// The explicit role, else [`Role::Group`] when any descriptive text is
+    /// set, else [`Role::GenericContainer`] (a pure pass-through).
+    fn resolved_role(&self) -> Role {
+        match self.role {
+            Some(role) => role,
+            None if self.label.is_some() || self.value.is_some() || self.hint.is_some() => {
+                Role::Group
+            }
+            None => Role::GenericContainer,
+        }
+    }
+
+    fn fill(&self, node: &mut Node) {
+        if let Some(label) = &self.label {
+            node.set_label(label.as_str());
+        }
+        if let Some(value) = &self.value {
+            node.set_value(value.as_str());
+        }
+        if let Some(hint) = &self.hint {
+            node.set_description(hint.as_str());
+        }
+        if let Some(level) = self.level {
+            node.set_level(level);
+        }
+        if self.tappable {
+            node.add_action(Action::Click);
+        }
+    }
+}
 
 /// A declarative semantics wrapper. See the [module docs](self).
 pub struct SemanticsView<State: 'static> {
     child: frust_core::AnyView<State>,
-    label: Option<String>,
-    role: Role,
-    level: Option<usize>,
-    hidden: bool,
+    props: Published,
 }
 
 /// Wrap `child` so its accessibility subtree sits under one container node
-/// that this view can label, re-role or omit. Layout and paint are the
+/// that this view can label, re-role, merge or omit. Layout and paint are the
 /// child's own.
 pub fn semantics<State: 'static, V: View<State>>(child: V) -> SemanticsView<State> {
     SemanticsView {
         child: any(child),
-        label: None,
-        role: Role::GenericContainer,
-        level: None,
-        hidden: false,
+        props: Published {
+            label: None,
+            value: None,
+            hint: None,
+            role: None,
+            level: None,
+            hidden: false,
+            merged: None,
+            merge_implied: false,
+            tappable: false,
+        },
     }
 }
 
 impl<State: 'static> SemanticsView<State> {
-    /// Set the accessible label of the container node.
+    /// Set the accessible label of the node.
     pub fn label(mut self, text: impl Into<String>) -> Self {
-        self.label = Some(text.into());
+        self.props.label = Some(text.into());
         self
     }
 
-    /// Set the role of the container node (default [`Role::GenericContainer`]).
+    /// Set the accessible value of the node.
+    pub fn value(mut self, text: impl Into<String>) -> Self {
+        self.props.value = Some(text.into());
+        self
+    }
+
+    /// Set the accessible hint of the node (published as the description,
+    /// which iOS reads as the hint).
+    pub fn hint(mut self, text: impl Into<String>) -> Self {
+        self.props.hint = Some(text.into());
+        self
+    }
+
+    /// Set the role of the node. Unset, the role is [`Role::Group`] when a
+    /// label, value or hint is set and [`Role::GenericContainer`] otherwise.
     /// A role other than [`Role::Heading`] drops any level set earlier by
-    /// [`heading`](Self::heading), so the last call wins.
+    /// [`heading`](Self::heading), so the last call wins. Setting a role also
+    /// drops the merging that [`heading`](Self::heading),
+    /// [`image`](Self::image) or [`button`](Self::button) implied; an
+    /// explicit [`merged`](Self::merged) is kept.
     pub fn role(mut self, role: Role) -> Self {
         if role != Role::Heading {
-            self.level = None;
+            self.props.level = None;
         }
-        self.role = role;
+        self.props.merge_implied = false;
+        self.props.role = Some(role);
         self
     }
 
-    /// Mark the container as a heading of `level` (1 is the top level, as in
+    /// Mark the node as a heading of `level` (1 is the top level, as in
     /// HTML). Sets the role to [`Role::Heading`]; the platform level is
     /// zero-based, so `level - 1` is stored. A `level` of 0 is clamped to 1,
     /// the same node as `heading(1)`.
+    ///
+    /// Implies [`merged`](Self::merged): with a [`label`](Self::label) or
+    /// [`value`](Self::value) the heading is published as ONE leaf. Without
+    /// either it stays a heading container over the child's nodes, so the
+    /// child's text is still announced; on iOS a container over an exposed
+    /// child may be dropped, so the child is then announced without the
+    /// heading level. Give the heading a `.label(..)` to get one leaf. An
+    /// explicit `merged(..)` wins in either call order, and a later
+    /// [`role`](Self::role) drops the implied merging.
     pub fn heading(mut self, level: usize) -> Self {
-        self.role = Role::Heading;
-        self.level = Some(level.saturating_sub(1));
+        self.props.role = Some(Role::Heading);
+        self.props.level = Some(level.saturating_sub(1));
+        self.props.merge_implied = true;
+        self
+    }
+
+    /// Request or refuse merging, overriding what [`heading`](Self::heading),
+    /// [`image`](Self::image) and [`button`](Self::button) imply, whatever the
+    /// call order.
+    ///
+    /// `merged(true)` publishes ONE leaf node carrying this wrapper's role,
+    /// label, value, hint, level and actions, without descending into the
+    /// child's semantics. The child's own nodes, including any control
+    /// inside, are no longer separately reachable. With no label or value
+    /// that leaf has no name. `merged(false)` always publishes a container
+    /// over the child's nodes.
+    ///
+    /// Merging that is only implied by a convenience builder applies just when
+    /// the wrapper has its own label or value; see
+    /// [`heading`](Self::heading).
+    pub fn merged(mut self, merged: bool) -> Self {
+        self.props.merged = Some(merged);
+        self
+    }
+
+    /// Add [`Action::Click`] to the node. Accessibility actions are
+    /// positional: the framework delivers a click as a tap at the centre of
+    /// the node's bounds, so the tappable child (a gesture detector or a
+    /// button) must cover the wrapper's centre.
+    pub fn tappable(mut self, tappable: bool) -> Self {
+        self.props.tappable = tappable;
+        self
+    }
+
+    /// An image: [`Role::Image`], implying [`merged`](Self::merged). It
+    /// becomes one leaf only with a [`label`](Self::label) or
+    /// [`value`](Self::value); without either it stays a container whose
+    /// child is announced (on iOS a container over an exposed child may be
+    /// dropped, so the child is announced without the image role).
+    pub fn image(mut self) -> Self {
+        self.props.role = Some(Role::Image);
+        self.props.level = None;
+        self.props.merge_implied = true;
+        self
+    }
+
+    /// A button: [`Role::Button`], implying [`merged`](Self::merged), and
+    /// [`tappable`](Self::tappable). It becomes one leaf, whose child nodes
+    /// are not separately reachable, only with a [`label`](Self::label) or
+    /// [`value`](Self::value); without either it stays a button container
+    /// whose child is announced (on iOS a container over an exposed child may
+    /// be dropped, so the child is announced without the button role). See
+    /// [`tappable`](Self::tappable) for how the tap lands.
+    pub fn button(mut self) -> Self {
+        self.props.role = Some(Role::Button);
+        self.props.level = None;
+        self.props.merge_implied = true;
+        self.props.tappable = true;
         self
     }
 
@@ -86,7 +249,7 @@ impl<State: 'static> SemanticsView<State> {
     /// tree. The subtree is omitted, not marked hidden: no node of it is
     /// published. The child still lays out, paints and handles events.
     pub fn hidden(mut self, hidden: bool) -> Self {
-        self.hidden = hidden;
+        self.props.hidden = hidden;
         self
     }
 }
@@ -94,10 +257,7 @@ impl<State: 'static> SemanticsView<State> {
 /// The retained widget for a [`SemanticsView`].
 pub struct SemanticsWidget {
     child: ChildPod,
-    label: Option<String>,
-    role: Role,
-    level: Option<usize>,
-    hidden: bool,
+    props: Published,
 }
 
 impl<State: 'static> View<State> for SemanticsView<State> {
@@ -106,10 +266,7 @@ impl<State: 'static> View<State> for SemanticsView<State> {
     fn build(&self, ctx: &mut BuildCtx<'_>) -> SemanticsWidget {
         SemanticsWidget {
             child: crate::authoring::build_child(&self.child, ctx),
-            label: self.label.clone(),
-            role: self.role,
-            level: self.level,
-            hidden: self.hidden,
+            props: self.props.clone(),
         }
     }
 
@@ -123,15 +280,9 @@ impl<State: 'static> View<State> for SemanticsView<State> {
         // published, and the semantics generation advances only on a non-empty
         // rebuild. A change to any published value therefore raises PAINT, as
         // `IconButtonWidget::rebuild` does for its label.
-        let published_changed = prev.label != self.label
-            || prev.role != self.role
-            || prev.level != self.level
-            || prev.hidden != self.hidden;
+        let published_changed = prev.props != self.props;
         if published_changed {
-            element.label = self.label.clone();
-            element.role = self.role;
-            element.level = self.level;
-            element.hidden = self.hidden;
+            element.props = self.props.clone();
         }
         let mut flags =
             crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
@@ -162,20 +313,18 @@ impl Widget for SemanticsWidget {
     }
 
     fn semantics(&self, ctx: &mut SemanticsCtx) {
-        if self.hidden {
+        if self.props.hidden {
+            return;
+        }
+        let role = self.props.resolved_role();
+        if self.props.is_merged() {
+            ctx.push_node(role, |node| self.props.fill(node));
             return;
         }
         let child = &self.child;
         ctx.push_container(
-            self.role,
-            |node| {
-                if let Some(label) = &self.label {
-                    node.set_label(label.as_str());
-                }
-                if let Some(level) = self.level {
-                    node.set_level(level);
-                }
-            },
+            role,
+            |node| self.props.fill(node),
             |ctx| child.semantics_child(ctx),
         );
     }
@@ -254,6 +403,7 @@ mod tests {
     use super::*;
     use crate::test_support::{RecordingScene, leaf};
     use frust_core::RenderRoot;
+    use frust_core::accesskit::Action;
     use std::any::Any;
 
     fn semantics_of<V: View<()>>(
@@ -402,6 +552,10 @@ mod tests {
         heading: Option<usize>,
         hidden: bool,
         text: &'static str,
+        value: Option<&'static str>,
+        hint: Option<&'static str>,
+        merged: bool,
+        tappable: bool,
     }
 
     fn base() -> Knobs {
@@ -411,6 +565,10 @@ mod tests {
             heading: None,
             hidden: false,
             text: "3 unread",
+            value: None,
+            hint: None,
+            merged: false,
+            tappable: false,
         }
     }
 
@@ -523,5 +681,268 @@ mod tests {
     fn unchanged_rebuild_does_not_advance_the_gate() {
         assert!(gated_update(wrapper, &base(), &base()).is_none());
         assert!(gated_update(announce, &base(), &base()).is_none());
+    }
+
+    #[test]
+    fn default_role_is_group_with_text_and_generic_without() {
+        let labelled = semantics_of(|_| semantics(leaf(10.0, 10.0)).label("x"));
+        assert_eq!(count(&labelled, Role::Group), 1);
+        assert_eq!(count(&labelled, Role::GenericContainer), 0);
+        let valued = semantics_of(|_| semantics(leaf(10.0, 10.0)).value("x"));
+        assert_eq!(count(&valued, Role::Group), 1);
+        let hinted = semantics_of(|_| semantics(leaf(10.0, 10.0)).hint("x"));
+        assert_eq!(count(&hinted, Role::Group), 1);
+        let bare = semantics_of(|_| semantics(leaf(10.0, 10.0)));
+        assert_eq!(count(&bare, Role::GenericContainer), 1);
+        assert_eq!(count(&bare, Role::Group), 0);
+    }
+
+    #[test]
+    fn value_and_hint_are_published() {
+        let update = semantics_of(|_| semantics(leaf(10.0, 10.0)).value("3").hint("opens it"));
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Group)
+            .expect("group");
+        assert_eq!(node.value(), Some("3"));
+        assert_eq!(node.description(), Some("opens it"));
+    }
+
+    #[test]
+    fn merged_publishes_one_node_and_none_of_the_child() {
+        let update = semantics_of(|_| {
+            semantics(crate::button("go", |_: &mut ()| {}))
+                .label("tile")
+                .merged(true)
+        });
+        assert_eq!(count(&update, Role::Button), 0);
+        let (gid, group) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Group)
+            .expect("merged node");
+        assert_eq!(group.label(), Some("tile"));
+        assert!(group.children().is_empty());
+        // The window root plus exactly one wrapper node.
+        assert_eq!(update.nodes.len(), 2);
+        let (_, root) = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == update.root)
+            .expect("root");
+        assert!(root.children().contains(gid));
+    }
+
+    #[test]
+    fn tappable_adds_click() {
+        let plain = semantics_of(|_| semantics(leaf(10.0, 10.0)).label("x"));
+        let (_, node) = plain
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Group)
+            .expect("group");
+        assert!(!node.supports_action(Action::Click));
+        let tap = semantics_of(|_| semantics(leaf(10.0, 10.0)).label("x").tappable(true));
+        let (_, node) = tap
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Group)
+            .expect("group");
+        assert!(node.supports_action(Action::Click));
+    }
+
+    #[test]
+    fn image_and_button_publish_leaves_with_their_role() {
+        let image = semantics_of(|_| {
+            semantics(crate::button("go", |_: &mut ()| {}))
+                .image()
+                .label("photo")
+        });
+        assert_eq!(count(&image, Role::Image), 1);
+        assert_eq!(count(&image, Role::Button), 0);
+        let button = semantics_of(|_| {
+            semantics(crate::button("go", |_: &mut ()| {}))
+                .button()
+                .label("Open")
+        });
+        let (_, node) = button
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Button)
+            .expect("button");
+        assert_eq!(node.label(), Some("Open"));
+        assert!(node.supports_action(Action::Click));
+        assert!(node.children().is_empty());
+        assert_eq!(button.nodes.len(), 2);
+    }
+
+    #[test]
+    fn heading_is_a_leaf() {
+        let update = semantics_of(|_| {
+            semantics(crate::button("go", |_: &mut ()| {}))
+                .heading(3)
+                .label("Title")
+        });
+        assert_eq!(count(&update, Role::Button), 0);
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Heading)
+            .expect("heading");
+        assert_eq!(node.level(), Some(2));
+        assert!(node.children().is_empty());
+        assert_eq!(update.nodes.len(), 2);
+    }
+
+    fn knob_wrapper(k: &Knobs) -> SemanticsView<Knobs> {
+        let mut view = semantics(crate::button("go", |_: &mut Knobs| {})).label("group");
+        if let Some(v) = k.value {
+            view = view.value(v);
+        }
+        if let Some(h) = k.hint {
+            view = view.hint(h);
+        }
+        view.merged(k.merged).tappable(k.tappable)
+    }
+
+    #[test]
+    fn value_hint_merged_tappable_each_advance_the_generation() {
+        let cases = [
+            Knobs {
+                value: Some("v"),
+                ..base()
+            },
+            Knobs {
+                hint: Some("h"),
+                ..base()
+            },
+            Knobs {
+                merged: true,
+                ..base()
+            },
+            Knobs {
+                tappable: true,
+                ..base()
+            },
+        ];
+        for second in cases {
+            assert!(
+                gated_update(knob_wrapper, &base(), &second).is_some(),
+                "a single changed value must be published"
+            );
+        }
+        assert!(gated_update(knob_wrapper, &base(), &base()).is_none());
+    }
+
+    fn child_text() -> impl View<()> {
+        crate::text("X")
+    }
+
+    fn find_role(update: &frust_core::SemanticsUpdate, role: Role) -> Vec<&Node> {
+        update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == role)
+            .map(|(_, n)| n)
+            .collect()
+    }
+
+    #[test]
+    fn unlabelled_heading_stays_a_container_over_the_child_text() {
+        let update = semantics_of(|_| semantics(child_text()).heading(1));
+        let headings = find_role(&update, Role::Heading);
+        assert_eq!(headings.len(), 1);
+        assert_eq!(headings[0].level(), Some(0));
+        assert_eq!(headings[0].children().len(), 1);
+        let labels = find_role(&update, Role::Label);
+        assert_eq!(labels.len(), 1);
+        assert_eq!(labels[0].value(), Some("X"));
+    }
+
+    #[test]
+    fn labelled_heading_is_one_leaf() {
+        let update = semantics_of(|_| semantics(child_text()).heading(1).label("X"));
+        let headings = find_role(&update, Role::Heading);
+        assert_eq!(headings.len(), 1);
+        assert!(headings[0].children().is_empty());
+        assert_eq!(headings[0].label(), Some("X"));
+        assert_eq!(count(&update, Role::Label), 0);
+    }
+
+    #[test]
+    fn unlabelled_button_stays_a_container_and_labelled_is_one_leaf() {
+        let bare = semantics_of(|_| semantics(child_text()).button());
+        let buttons = find_role(&bare, Role::Button);
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].children().len(), 1);
+        assert!(buttons[0].supports_action(Action::Click));
+        assert_eq!(find_role(&bare, Role::Label)[0].value(), Some("X"));
+        let named = semantics_of(|_| semantics(child_text()).button().label("X"));
+        let buttons = find_role(&named, Role::Button);
+        assert_eq!(buttons.len(), 1);
+        assert!(buttons[0].children().is_empty());
+        assert_eq!(count(&named, Role::Label), 0);
+    }
+
+    #[test]
+    fn role_after_heading_drops_the_implied_merge() {
+        let update = semantics_of(|_| {
+            semantics(child_text())
+                .heading(2)
+                .label("X")
+                .role(Role::Group)
+        });
+        let groups = find_role(&update, Role::Group);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].children().len(), 1);
+        assert_eq!(count(&update, Role::Label), 1);
+    }
+
+    #[test]
+    fn explicit_merged_false_wins_in_either_order() {
+        for update in [
+            semantics_of(|_| semantics(child_text()).merged(false).heading(1).label("X")),
+            semantics_of(|_| semantics(child_text()).heading(1).label("X").merged(false)),
+        ] {
+            let headings = find_role(&update, Role::Heading);
+            assert_eq!(headings.len(), 1);
+            assert_eq!(headings[0].children().len(), 1);
+            assert_eq!(count(&update, Role::Label), 1);
+        }
+    }
+
+    #[test]
+    fn explicit_merged_true_without_a_label_is_one_unnamed_leaf() {
+        let update = semantics_of(|_| semantics(child_text()).merged(true));
+        assert_eq!(count(&update, Role::Label), 0);
+        let nodes = find_role(&update, Role::GenericContainer);
+        assert_eq!(nodes.len(), 1);
+        assert!(nodes[0].children().is_empty());
+        assert_eq!(nodes[0].label(), None);
+        assert_eq!(update.nodes.len(), 2);
+    }
+
+    fn implied(k: &Knobs) -> SemanticsView<Knobs> {
+        let view = semantics(crate::button("go", |_: &mut Knobs| {})).heading(1);
+        if k.label.is_empty() {
+            view
+        } else {
+            view.label(k.label)
+        }
+    }
+
+    #[test]
+    fn adding_a_label_to_an_implied_merge_advances_the_generation() {
+        let bare = Knobs {
+            label: "",
+            ..base()
+        };
+        let update = gated_update(implied, &bare, &base()).expect("shape change is published");
+        let headings = find_role(&update, Role::Heading);
+        assert_eq!(headings.len(), 1);
+        assert!(headings[0].children().is_empty());
+        let update = gated_update(implied, &base(), &bare).expect("shape change is published");
+        assert_eq!(find_role(&update, Role::Heading)[0].children().len(), 1);
     }
 }

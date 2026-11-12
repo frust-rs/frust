@@ -1002,6 +1002,13 @@ impl<State: 'static> ListView<State> {
     /// [`ListView::on_near_end`], so it is one event late, like them: the range
     /// laid out in one frame reaches the handler on the next event.
     ///
+    /// A list covered by another navigator page is not laid out, so it reports
+    /// no range while covered and gets no final empty range. Once shown again,
+    /// the range is delivered only if it differs from the last one delivered.
+    /// An app that needs to know when its page is covered or shown again uses
+    /// [`crate::PushOptions::on_visibility`], or
+    /// [`crate::NavigatorView::on_root_visibility`] for the root page.
+    ///
     /// ```
     /// use frust_core::{Component, View, component};
     /// use frust_widgets::{ListView, text};

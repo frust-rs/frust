@@ -274,7 +274,11 @@ impl FolderEntry {
     }
 
     /// Reads the whole file. Blocks. A file larger than `max_bytes` is refused
-    /// with [`FileDialogError::Io`] rather than returned truncated.
+    /// with [`FileDialogError::TooLarge`] rather than returned truncated; its `size` is the
+    /// entry's [`size`](Self::size) when known, else the file's length when the platform
+    /// gives it cheaply (a path entry), else `None`. Any other failure is
+    /// [`FileDialogError::Io`] (or `AccessLost`), so a caller that matched `Io` for an
+    /// over-limit file must now match `TooLarge` too.
     ///
     /// On Android and iOS this refuses the UI thread with
     /// [`FileDialogError::UiThread`]. On iOS the [`FolderGrant`] that listed the
@@ -284,7 +288,33 @@ impl FolderEntry {
         refuse_ui_thread()?;
         match &self.location {
             EntryLocation::Path(path) => read_capped(path, max_bytes),
-            EntryLocation::ContentUri(uri) => backend::read_content_uri(uri, max_bytes),
+            EntryLocation::ContentUri(uri) => {
+                backend::read_content_uri(uri, max_bytes).map_err(|err| match err {
+                    FileDialogError::TooLarge { limit, size: None } => FileDialogError::TooLarge {
+                        limit,
+                        size: self.size,
+                    },
+                    other => other,
+                })
+            }
+        }
+    }
+
+    /// Reads the first `max_bytes` bytes of the file, or all of it when it is shorter.
+    /// Blocks. Never [`FileDialogError::TooLarge`]; `max_bytes == 0` returns an empty `Vec`.
+    /// Suits sniffing a file's header without loading the rest.
+    ///
+    /// Refuses the UI thread and fails otherwise like [`read_to_vec`](Self::read_to_vec).
+    /// On Android a read still copies up to `max_bytes` of the document to a temporary
+    /// file before reading it.
+    pub fn read_prefix(&self, max_bytes: u64) -> Result<Vec<u8>, FileDialogError> {
+        refuse_ui_thread()?;
+        if max_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        match &self.location {
+            EntryLocation::Path(path) => read_prefix_of(path, max_bytes),
+            EntryLocation::ContentUri(uri) => backend::read_prefix_content_uri(uri, max_bytes),
         }
     }
 }
@@ -390,8 +420,26 @@ fn read_capped(path: &Path, max_bytes: u64) -> Result<Vec<u8>, FileDialogError> 
         .map_err(io_error)?;
     if bytes.len() as u64 > max_bytes {
         log::warn!("frust-file-dialogs: file exceeds the {max_bytes} byte read limit");
-        return Err(FileDialogError::Io);
+        let size = file_len(path);
+        return Err(FileDialogError::TooLarge {
+            limit: max_bytes,
+            size,
+        });
     }
+    Ok(bytes)
+}
+
+fn file_len(path: &Path) -> Option<u64> {
+    fs::metadata(path).ok().map(|meta| meta.len())
+}
+
+fn read_prefix_of(path: &Path, max_bytes: u64) -> Result<Vec<u8>, FileDialogError> {
+    probe_access(path)?;
+    let file = File::open(path).map_err(io_error)?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
     Ok(bytes)
 }
 
@@ -545,6 +593,30 @@ mod tests {
         let e = entry("a", dir.write("a", b"12345"));
         assert_eq!(e.read_to_vec(5).unwrap(), b"12345");
         assert_eq!(e.read_to_vec(u64::MAX).unwrap(), b"12345");
+        assert_eq!(
+            e.read_to_vec(4),
+            Err(FileDialogError::TooLarge {
+                limit: 4,
+                size: Some(5)
+            })
+        );
+    }
+
+    #[test]
+    fn read_prefix_truncates_without_failing() {
+        let dir = TestDir::new();
+        let e = entry("a", dir.write("a", b"0123456789"));
+        assert_eq!(e.read_prefix(4).unwrap(), b"0123");
+        assert_eq!(e.read_prefix(10).unwrap(), b"0123456789");
+        assert_eq!(e.read_prefix(100).unwrap(), b"0123456789");
+        assert_eq!(e.read_prefix(0).unwrap(), b"");
+    }
+
+    #[test]
+    fn unreadable_path_is_still_io() {
+        let dir = TestDir::new();
+        let e = entry("gone", dir.path().join("gone"));
         assert_eq!(e.read_to_vec(4), Err(FileDialogError::Io));
+        assert_eq!(e.read_prefix(4), Err(FileDialogError::Io));
     }
 }
