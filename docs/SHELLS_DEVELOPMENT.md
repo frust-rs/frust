@@ -154,7 +154,7 @@ state is read from `dumpsys input_method` (`mInputShown`).
 
 | Check | Result | Observed |
 |---|---|---|
-| Keyboard reopen | pass | field A: tap shows the keyboard, back hides it, a second tap on the still-focused field shows it again (twice in a row); the same on the obscured field C; a tap on a caption does not raise it. The reopen leg alone also passes on a OnePlus 9 (Android 15) |
+| Keyboard reopen | pass | field A: tap shows the keyboard, back hides it, a second tap on the still-focused field shows it again (twice in a row); the same on the obscured field C; a tap on a caption does not raise it, and (re-checked on the build from `b9f2e896`) a scroll after back leaves it hidden. The reopen leg alone also passes on a OnePlus 9 (Android 15) |
 | Keyboard over the bottom field | **fail** | field D, the last row, scrolled to the end and tapped: the keyboard shows and the tab bar hides, but the page does not scroll and D stays under the keyboard; a scroll drag with the keyboard up hides the keyboard instead of revealing D. The layout returns on dismiss |
 | Back | pass | full-width navigator pushed to depth 3: the back key pops 3 → 2, the back gesture from the left edge pops 2 → 1, and back at the root leaves to the launcher |
 
