@@ -1201,7 +1201,9 @@ class FrustSurfaceView(
         // The tree may have taken/dropped focus in response to this contact; poll
         // the IME surface and show/hide the keyboard accordingly. Polling after
         // the dispatch keeps the JNI ABI one-directional (no native up-calls).
-        pollImeAfterDispatch()
+        // Only the final pointer Up of a gesture counts as a tap that may
+        // re-show a keyboard the user dismissed; a move or cancel never does.
+        pollImeAfterDispatch(touchUp = event.actionMasked == MotionEvent.ACTION_UP)
         return true
     }
 
@@ -1399,8 +1401,15 @@ class FrustSurfaceView(
      * focus moved onto a suppressed field without an intervening inactive
      * edge) hides a keyboard that is already up — the `InputConnection` itself
      * is untouched, since nothing about which field is focused changed.
+     *
+     * When [touchUp] is true (the pointer Up that ends a tap on the surface) and
+     * the field is steady-active and does not suppress the soft keyboard, the
+     * keyboard is shown again with [InputMethodManager.showSoftInput]. Back hides
+     * the keyboard without changing Rust's active state, so no edge would
+     * otherwise re-show it. This is a no-op when the keyboard is already up, and
+     * it never calls `restartInput`, which would drop an active composition.
      */
-    private fun pollImeAfterDispatch() {
+    private fun pollImeAfterDispatch(touchUp: Boolean = false) {
         if (handle == 0L) return
         val state = parseImeState(nativeImeState(handle)) ?: return
         val previous = lastKnownState
@@ -1449,6 +1458,9 @@ class FrustSurfaceView(
             // `lastKnownState`), so a pre-advanced snapshot can't hide a
             // change.
             activeConnection?.reconcileTo(state)
+            if (touchUp && !state.suppressSoftKeyboard) {
+                imm.showSoftInput(this, 0)
+            }
         }
     }
 
