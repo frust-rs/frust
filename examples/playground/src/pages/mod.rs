@@ -1,7 +1,7 @@
 //! The playground sections listed in [`SECTION_LABELS`], one module per section: `platform_views`,
 //! `camera`, `responsive`, `terminal`, `keys`, `i18n`, `video_player`,
 //! `url_launcher`, `auth_session`, `database`, `graph_canvas`,
-//! `scroll_control`, `drag_drop`, `tabs`, `images`, `slivers`, `desktop_services`, `shortcuts`, `network`, `glass`, `gpu_pass`, `device_memory`, `photos`, `accessibility` (the assistive-technology fixture page), and `forms` (the keyboard / back-swipe fixture page) — each one an
+//! `scroll_control`, `drag_drop`, `tabs`, `images`, `slivers`, `desktop_services`, `shortcuts`, `network`, `glass`, `gpu_pass`, `device_memory`, `photos`, `accessibility` (the assistive-technology fixture page), and `forms` (the keyboard / back-swipe fixture page), and `start_gate` (the `StartGate` splash / error / ready page) — each one an
 //! OS-facing capability (or, for `graph_canvas`/`scroll_control`/`drag_drop`/
 //! `slivers`, a widget demo: `CanvasView`/`PanZoomView` for the first, a keyed
 //! `ListView` bound to a `ScrollController` for the second,
@@ -61,6 +61,7 @@ pub mod responsive;
 pub mod scroll_control;
 pub mod shortcuts;
 pub mod slivers;
+pub mod start_gate;
 pub mod tabs;
 pub mod terminal;
 pub mod url_launcher;
@@ -84,7 +85,7 @@ use crate::PlaygroundState;
 /// single line at that width. A page wanting a longer heading for itself
 /// (e.g. `platform_views`'s own on-page title) uses its own string literal
 /// rather than this array — see `pages/platform_views.rs`.
-pub const SECTION_LABELS: [&str; 25] = [
+pub const SECTION_LABELS: [&str; 26] = [
     "Platform",
     "Camera",
     "Layout",
@@ -110,6 +111,7 @@ pub const SECTION_LABELS: [&str; 25] = [
     "Photos",
     "A11y",
     "Forms",
+    "Gate",
 ];
 
 /// How many of [`SECTION_LABELS`], in order, count as "primary" — shown
@@ -153,6 +155,7 @@ pub fn current(section: usize, state: &PlaygroundState) -> AnyView<PlaygroundSta
         22 => any(photos::page(state)),
         23 => any(accessibility::page(state)),
         24 => any(forms::page(state)),
+        25 => any(start_gate::page(state)),
         _ => any(platform_views::page(state)),
     }
 }
