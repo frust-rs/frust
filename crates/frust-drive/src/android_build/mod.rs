@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::android_run::preflight::{self, PreflightCtx};
-use crate::build_info::{BuildInfo, BuildMode};
+use crate::build_info::{BuildInfo, BuildMode, resolve_version};
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::facade_key::FacadeKey;
 use crate::process::{ProcessRunner, tail_lines};
@@ -124,11 +124,18 @@ fn build_with_env(
     let outcome =
         preflight::run_without_device_checks(&preflight_ctx).map_err(|err| anyhow::anyhow!(err))?;
 
-    let version_name = info.build_name.clone().unwrap_or_else(|| "1.0".to_string());
-    let version_code = info
-        .build_number
+    let manifest = crate::manifest::load_optional(project_dir)?;
+    let resolved = resolve_version(info, manifest.as_ref());
+    let version_name = resolved.name.clone().unwrap_or_else(|| "1.0".to_string());
+    let version_code = resolved
+        .number
         .map(|n| n.to_string())
         .unwrap_or_else(|| "1".to_string());
+    if info.mode == BuildMode::Release && resolved.is_defaulted() {
+        on_line(&format!(
+            "warning: app version not set: building {version_name} ({version_code}); set [app] version and build-number in frust.toml or pass --build-name / --build-number"
+        ));
+    }
     local_properties::write(&android_dir, &version_name, &version_code)
         .context("writing android/local.properties")?;
 
@@ -428,6 +435,165 @@ mod tests {
         assert!(local_props.contains("frust.versionCode=1"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Runs an Android build in a project with `frust.toml` body `toml`
+    /// (`None` writes no manifest) and returns the `local.properties` text and
+    /// every `on_line` line.
+    fn version_build(
+        tag: &str,
+        toml: Option<&str>,
+        build_info: &BuildInfo,
+        target: &AndroidArtifact,
+        output_subdir: &str,
+        artifact: &str,
+        gradle_args: &str,
+    ) -> (String, Vec<String>) {
+        let dir = unique_project_dir(tag);
+        if let Some(toml) = toml {
+            fs::write(dir.join("frust.toml"), toml).unwrap();
+        }
+        if build_info.mode == BuildMode::Release {
+            write_release_signing(&dir.join("android"));
+        }
+        let out_dir = dir.join(output_subdir);
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join(artifact), b"fake").unwrap();
+        let runner = preflight_ok_runner().with(
+            gradlew_key(&dir, gradle_args),
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let mut lines = Vec::new();
+        build_with_env(
+            &runner,
+            &dir,
+            build_info,
+            target,
+            NO_EXTRA,
+            &fake_env(),
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap();
+        let props = fs::read_to_string(dir.join("android/local.properties")).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        (props, lines)
+    }
+
+    const APK_RELEASE_ARGS: &str =
+        "assembleRelease -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false";
+    const AAB_RELEASE_ARGS: &str = "bundleRelease -Pfrust.targetPlatforms=arm64-v8a";
+    const MANIFEST_VERSION: &str =
+        "[app]\nname = \"a\"\norg = \"o\"\nversion = \"3.4.5\"\nbuild-number = 12\n";
+    const MANIFEST_NO_VERSION: &str = "[app]\nname = \"a\"\norg = \"o\"\n";
+
+    fn version_warnings(lines: &[String]) -> Vec<&String> {
+        lines
+            .iter()
+            .filter(|l| l.starts_with("warning: app version not set"))
+            .collect()
+    }
+
+    #[test]
+    fn manifest_version_reaches_local_properties_without_a_warning() {
+        let (props, lines) = version_build(
+            "ver-manifest",
+            Some(MANIFEST_VERSION),
+            &info(BuildMode::Release, None),
+            &arm64_apk(),
+            "build/android/app/outputs/apk/release",
+            "app-release.apk",
+            APK_RELEASE_ARGS,
+        );
+        assert!(props.contains("frust.versionName=3.4.5"), "{props}");
+        assert!(props.contains("frust.versionCode=12"), "{props}");
+        assert!(version_warnings(&lines).is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn flag_version_beats_the_manifest_in_local_properties() {
+        let flagged = BuildInfo::from_args(
+            BuildArgs {
+                build_name: Some("9.9.9".to_string()),
+                build_number: Some(99),
+                ..BuildArgs::default()
+            },
+            BuildMode::Release,
+        )
+        .unwrap();
+        let (props, lines) = version_build(
+            "ver-flag",
+            Some(MANIFEST_VERSION),
+            &flagged,
+            &arm64_apk(),
+            "build/android/app/outputs/apk/release",
+            "app-release.apk",
+            APK_RELEASE_ARGS,
+        );
+        assert!(props.contains("frust.versionName=9.9.9"), "{props}");
+        assert!(props.contains("frust.versionCode=99"), "{props}");
+        assert!(version_warnings(&lines).is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn release_apk_and_appbundle_with_defaults_warn_exactly_once() {
+        const WARNING: &str = "warning: app version not set: building 1.0 (1); set [app] version and build-number in frust.toml or pass --build-name / --build-number";
+        for (manifest, label) in [(None, "none"), (Some(MANIFEST_NO_VERSION), "empty")] {
+            let (props, lines) = version_build(
+                &format!("ver-default-apk-{label}"),
+                manifest,
+                &info(BuildMode::Release, None),
+                &arm64_apk(),
+                "build/android/app/outputs/apk/release",
+                "app-release.apk",
+                APK_RELEASE_ARGS,
+            );
+            assert!(props.contains("frust.versionName=1.0"), "{props}");
+            assert_eq!(version_warnings(&lines), vec![WARNING], "{lines:?}");
+        }
+        let (_, lines) = version_build(
+            "ver-default-aab",
+            Some(MANIFEST_NO_VERSION),
+            &info(BuildMode::Release, None),
+            &AndroidArtifact::Appbundle,
+            "build/android/app/outputs/bundle/release",
+            "app-release.aab",
+            AAB_RELEASE_ARGS,
+        );
+        assert_eq!(version_warnings(&lines), vec![WARNING], "{lines:?}");
+    }
+
+    #[test]
+    fn a_partly_defaulted_release_build_warns_with_the_values_used() {
+        let (_, lines) = version_build(
+            "ver-partial",
+            Some("[app]\nname = \"a\"\norg = \"o\"\nversion = \"3.4.5\"\n"),
+            &info(BuildMode::Release, None),
+            &arm64_apk(),
+            "build/android/app/outputs/apk/release",
+            "app-release.apk",
+            APK_RELEASE_ARGS,
+        );
+        let warnings = version_warnings(&lines);
+        assert_eq!(warnings.len(), 1, "{lines:?}");
+        assert!(warnings[0].contains("building 3.4.5 (1)"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_debug_build_with_defaults_does_not_warn() {
+        let (_, lines) = version_build(
+            "ver-debug",
+            Some(MANIFEST_NO_VERSION),
+            &info(BuildMode::Debug, None),
+            &arm64_apk(),
+            "build/android/app/outputs/apk/debug",
+            "app-debug.apk",
+            "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+        );
+        assert!(version_warnings(&lines).is_empty(), "{lines:?}");
     }
 
     /// The legacy fixture for the `frust build` lane: a project whose
