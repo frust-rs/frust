@@ -168,7 +168,8 @@ keyboard.
 | Check | Result | Observed |
 |---|---|---|
 | Keyboard over the bottom field | pass | field D scrolled to the end and tapped: the keyboard shows, the page body ends at the top of the tab bar, which sits directly above the keyboard, and D with its caption and caret is visible above it; the content moves up, not down. Text typed on the on-screen keyboard appears in D. Dismissing returns the layout, still scrolled to the end |
-| Scroll while typing | pass | with D focused and the keyboard up, a drag scrolls the page, the keyboard stays up, and D is not pulled back into view afterwards |
+| Scroll while typing | pass | with D focused and the keyboard up, a drag scrolls the page, the keyboard stays up, and D is not pulled back into view afterwards. On that build keys typed after the drag did not reach the field; re-checked on the build from `82c88a60`: after an upward drag that starts on a caption the field keeps focus and the next keys land in it |
+| Drag to dismiss | pass | build from `82c88a60`, where the page scroll view opts in: a downward drag that starts on a caption hides the keyboard and ends the field's focus; an upward drag does not |
 | Keyboard reopen | pass | field A: tap, back, tap again shows the keyboard; a tap on a caption does not |
 | Back | pass | depth 3: the back key pops 3 → 2 and the back gesture 2 → 1 |
 | Password field in the accessibility tree | pass | three characters typed in field C: the node's text is three bullets, `password="true"`, named "Field C"; the typed text is not in the dump |
