@@ -783,9 +783,9 @@ fn library_disabled() -> PhotoError {
 /// The answer of [`PhotoLibrary::assets_by_id`] from a platform's found rows: `rows[i]` answers
 /// input index `positions[i]`, and every index no row answers is `None`. `None` when the two
 /// lengths differ, a position is out of `0..len`, or two rows answer one index, so a broken
-/// host answer is never misattributed. Only the Android arm calls it; the host tests cover it.
+/// host answer is never misattributed. The Android and iOS arms call it; the host tests cover it.
 #[cfg(feature = "library")]
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
 fn in_input_order<T>(len: usize, positions: &[i32], rows: Vec<T>) -> Option<Vec<Option<T>>> {
     if positions.len() != rows.len() {
         return None;
