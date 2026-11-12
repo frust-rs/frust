@@ -11,8 +11,9 @@ use super::{OverlayRoute, RenderRoot, advance_focus_epoch};
 use crate::event::{
     ContactFrame, ContactPass, EventCtx, EventOutcome, EventResult, FileDropEvent, FileDropPhase,
     ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, OverlayEvent, OverlayEventKind,
-    PointerButton, PointerId, PointerPhase, RequestPass,
+    PointerButton, PointerId, PointerPhase, PointerSource, RequestPass,
 };
+use crate::input::{MOUSE_SLOP, TOUCH_SLOP};
 use crate::overlay::{OutsideTap, OverlayHit, OverlayInput, OverlayKey, OverlayPod};
 use crate::shortcuts::{DeliveryProbe, KeyForwardPass};
 use crate::tree::WidgetPod;
@@ -179,6 +180,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if is_pointer_down(event) {
             self.set_keyboard_focus(false);
         }
+        // Decided before the gate, so a contact the gate drops still ends a tap.
+        let blur_on_up = self.advance_pending_blur(event, pointer_id);
         let Some(secondary) = self.gate_contact(event, pointer_id) else {
             return (EventOutcome::default(), false);
         };
@@ -209,6 +212,9 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         root.ime_published = root.ime.is_some();
         self.publish_ime(event, root.focus_req, root.ime.take());
         let focus_claim_honoured = self.commit_event(event, &frame, &root, &contact_pass);
+        if blur_on_up && !focus_claim_honoured {
+            self.release_focus_session();
+        }
         self.resolve_focus_session(&frame, focus_claim_honoured);
         self.record_key_forward(forward_slot.take());
         drop(forward_slot);
@@ -388,8 +394,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             // Unreachable: the contact gate unwrapped every contact.
             InputEvent::PointerContact { .. } => {}
             InputEvent::Pointer(pointer) => {
-                focus_claim_honoured =
-                    self.commit_pointer(pointer.phase, frame.pointer_id, root, contact_pass);
+                focus_claim_honoured = self.commit_pointer(
+                    pointer.phase,
+                    pointer.position,
+                    frame.pointer_id,
+                    root,
+                    contact_pass,
+                );
             }
             // Hit-tested and focus-routed input, the file-drop `Ended` broadcast, and a
             // shortcut (a key press: its declarer may move focus, e.g. to a search field).
@@ -432,13 +443,14 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     }
 
     /// Commit a claimant (or uncaptured) pointer: a `Down` latches a capture and claims focus or
-    /// blurs; an `Up`/`Cancel` (only the claimant's reaches here) clears the latch. A claim whose
+    /// arms a pending blur (see below); an `Up`/`Cancel` (only the claimant's reaches here) clears the latch. A claim whose
     /// pass published no `ImeState` drops the previous holder's surface, unless the claimant
     /// already held a live link (a chrome re-claim). Returns
     /// whether a claim was honoured; writes the capture latch, `focus_surface` and focus session.
     fn commit_pointer(
         &mut self,
         phase: PointerPhase,
+        position: Point,
         pointer_id: PointerId,
         root: &RootDispatch,
         contact_pass: &ContactPass,
@@ -450,6 +462,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     self.latch_capture(pointer_id, contact_pass, root.root_opted_in);
                 }
                 if root.focus_req {
+                    self.pending_blur = None;
                     self.set_focus_active(true);
                     // A hit-tested claim belongs to the main tree (see `focus_surface`).
                     self.focus_surface = None;
@@ -458,8 +471,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                     }
                     true
                 } else {
-                    // Blur: no widget on the tapped path took focus.
-                    self.release_focus_session();
+                    // No widget on the pressed path took focus. Whether this is a blur is
+                    // decided at the end of the gesture (`advance_pending_blur`): a press
+                    // outside the focused widget blurs only if it ends as a tap, so a scroll
+                    // drag that starts outside a focused text field keeps the keyboard up.
+                    // The pointer's own travel decides (past its slop it is a drag), a second
+                    // contact or a `Cancel` drops the blur, and a wheel scroll never blurred.
+                    self.pending_blur = Some((pointer_id, position));
                     false
                 }
             }
@@ -468,6 +486,46 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 false
             }
             PointerPhase::Move => false,
+        }
+    }
+
+    /// Advance the pending blur for a bare pointer event, before the contact gate. A `Move` of
+    /// the pending pointer past its slop (`TOUCH_SLOP`, or `MOUSE_SLOP` for the mouse) or a
+    /// `Down` of another contact drops it; a `Cancel` drops it; an `Up` of the pending pointer
+    /// consumes it and returns `true`, meaning the gesture was a tap and the caller blurs.
+    fn advance_pending_blur(&mut self, event: &InputEvent, pointer_id: PointerId) -> bool {
+        let InputEvent::Pointer(pointer) = event else {
+            return false;
+        };
+        let Some((pending_id, down_at)) = self.pending_blur else {
+            return false;
+        };
+        if pending_id != pointer_id {
+            if pointer.phase == PointerPhase::Down {
+                self.pending_blur = None;
+            }
+            return false;
+        }
+        match pointer.phase {
+            PointerPhase::Move => {
+                let slop = match pointer_id.source {
+                    PointerSource::Mouse => MOUSE_SLOP,
+                    PointerSource::Touch => TOUCH_SLOP,
+                };
+                if (pointer.position - down_at).hypot() > slop {
+                    self.pending_blur = None;
+                }
+                false
+            }
+            PointerPhase::Up => {
+                self.pending_blur = None;
+                true
+            }
+            PointerPhase::Cancel => {
+                self.pending_blur = None;
+                false
+            }
+            PointerPhase::Down => false,
         }
     }
 
