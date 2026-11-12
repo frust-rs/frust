@@ -71,8 +71,10 @@ readelf_bin="$(find_readelf)"
 status=0
 checked=0
 
+# awk reads the reader's whole output: closing the pipe early makes llvm-readelf exit non-zero
+# (an output-stream error), which under `set -o pipefail` would end the script with no message.
 readelf_class() {
-  "$readelf_bin" -hW "$1" 2>/dev/null | awk '$1 == "Class:" { print $2; exit }'
+  "$readelf_bin" -hW "$1" 2>/dev/null | awk '$1 == "Class:" && !seen { print $2; seen = 1 }'
 }
 
 for so in "${objects[@]}"; do
@@ -84,7 +86,11 @@ for so in "${objects[@]}"; do
     continue
   fi
   # The ELF header block carries "Class:  ELF32" or "Class:  ELF64".
-  class="$(readelf_class "$so")"
+  if ! class="$(readelf_class "$so")" || [ -z "$class" ]; then
+    echo "FAIL $so: could not read the ELF class"
+    status=1
+    continue
+  fi
   if [ "$class" = "ELF32" ]; then
     echo "SKIP $so: 32-bit ABI, not subject to the 16 KB rule"
     continue
