@@ -13,8 +13,10 @@
 //! time (`Fill` stretches, `Contain` letterboxes, `Cover` center-crops via
 //! [`PaintScene::push_clip`]).
 
+use frust_core::accesskit::Role;
 use frust_core::{
-    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, View, Widget,
+    BoxConstraints, BuildCtx, ChangeFlags, LayoutCtx, PaintCtx, PaintScene, SemanticsCtx, View,
+    Widget,
 };
 use kurbo::{Rect, Size};
 use peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
@@ -169,6 +171,7 @@ fn centered_scaled_rect(natural: Size, dest: Size, scale: f64) -> Rect {
 pub struct ImageView {
     source: ImageSource,
     fit: ImageFit,
+    label: Option<String>,
 }
 
 /// Create an image view over a decoded [`ImageSource`], defaulting to
@@ -178,6 +181,7 @@ pub fn Image(source: ImageSource) -> ImageView {
     ImageView {
         source,
         fit: ImageFit::default(),
+        label: None,
     }
 }
 
@@ -186,6 +190,14 @@ impl ImageView {
     /// time.
     pub fn fit(mut self, fit: ImageFit) -> Self {
         self.fit = fit;
+        self
+    }
+
+    /// Give the image an accessible label, publishing one [`Role::Image`]
+    /// semantics node carrying it. Without a label the image is decorative and
+    /// publishes no semantics node.
+    pub fn label(mut self, label: impl Into<String>) -> Self {
+        self.label = Some(label.into());
         self
     }
 }
@@ -197,6 +209,7 @@ impl<State: 'static> View<State> for ImageView {
         ImageWidget {
             source: self.source.clone(),
             fit: self.fit,
+            label: self.label.clone(),
         }
     }
 
@@ -219,6 +232,12 @@ impl<State: 'static> View<State> for ImageView {
             element.fit = self.fit;
             flags |= ChangeFlags::PAINT;
         }
+        // The label feeds only the semantics pass, so a change repaints (which
+        // republishes semantics) without relayout.
+        if prev.label != self.label {
+            element.label = self.label.clone();
+            flags |= ChangeFlags::PAINT;
+        }
         flags
     }
 }
@@ -227,6 +246,7 @@ impl<State: 'static> View<State> for ImageView {
 pub struct ImageWidget {
     source: ImageSource,
     fit: ImageFit,
+    label: Option<String>,
 }
 
 /// Constrain a natural size to fit within the given constraints while preserving
@@ -302,6 +322,16 @@ impl Widget for ImageWidget {
             scene.pop_clip();
         }
     }
+
+    fn semantics(&self, ctx: &mut SemanticsCtx) {
+        // An unlabelled image is decorative and contributes nothing; a labelled
+        // one is a single Image node carrying its accessible name.
+        if let Some(label) = &self.label {
+            ctx.push_node(Role::Image, |node| {
+                node.set_label(label.as_str());
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -309,6 +339,56 @@ mod tests {
     use super::*;
     use frust_core::BuildCtx;
     use kurbo::Point;
+
+    /// The semantics nodes a bare `Image` view publishes, as `(role, label)`.
+    fn image_nodes(mut build: impl FnMut() -> ImageView) -> Vec<(Role, Option<String>)> {
+        let mut root: frust_core::RenderRoot<(), ImageView> = frust_core::RenderRoot::new();
+        root.rebuild(&mut |_: &mut ()| build(), &mut ());
+        root.layout(Size::new(200.0, 200.0));
+        root.semantics()
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() != Role::Window)
+            .map(|(_, n)| (n.role(), n.label().map(str::to_owned)))
+            .collect()
+    }
+
+    #[test]
+    fn labelled_image_publishes_one_image_node_with_the_label() {
+        let nodes = image_nodes(|| Image(rgba(4, 4)).label("Company logo"));
+        assert_eq!(nodes.len(), 1, "{nodes:?}");
+        assert_eq!(nodes[0].0, Role::Image);
+        assert_eq!(nodes[0].1.as_deref(), Some("Company logo"));
+    }
+
+    #[test]
+    fn unlabelled_image_publishes_no_semantics_node() {
+        let nodes = image_nodes(|| Image(rgba(4, 4)));
+        assert!(nodes.is_empty(), "{nodes:?}");
+    }
+
+    #[test]
+    fn changing_only_the_image_label_advances_the_semantics_generation() {
+        let mut root: frust_core::RenderRoot<(), ImageView> = frust_core::RenderRoot::new();
+        let source = rgba(4, 4);
+        root.rebuild(
+            &mut |_: &mut ()| Image(source.clone()).label("Before"),
+            &mut (),
+        );
+        let before = root.semantics_generation();
+        root.rebuild(
+            &mut |_: &mut ()| Image(source.clone()).label("After"),
+            &mut (),
+        );
+        assert!(root.semantics_generation() > before);
+        let update = root.semantics();
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(_, n)| n.role() == Role::Image)
+            .expect("the labelled image node");
+        assert_eq!(node.label(), Some("After"));
+    }
 
     fn rgba(width: u32, height: u32) -> ImageSource {
         ImageSource::from_rgba8(vec![0u8; (width * height * 4) as usize], width, height)
