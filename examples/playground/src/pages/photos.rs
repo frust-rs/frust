@@ -104,7 +104,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use frust::authoring::Rect;
 use frust::{
@@ -112,7 +112,7 @@ use frust::{
     Get, GetUntracked, Image, ImageFit, ImageSource, ListView, Padding, RwSignal, ScrollbarStyle,
     Set, SizedBox, Theme, Update, UseTask, View, button, colored_box, column, component,
     decode_image_async, either, on_cleanup, row, spawn_blocking, stack, text, use_context,
-    use_task, wrap,
+    use_task, views, wrap,
 };
 use frust_file_dialogs::{
     CancelToken as FolderCancel, FileDialog, FileDialogError, FileProgress, FolderGrant,
@@ -2924,8 +2924,11 @@ enum ChangesAction {
     Load,
     /// Store the library's current token.
     Save,
-    /// Ask what changed since the stored token, then store the token the answer carries.
+    /// Ask what changed since the stored token, then store the token the answer carries, and
+    /// fetch the inserted and updated assets by id.
     Check,
+    /// Time a full details listing of the library, for comparison with the by-id fetch.
+    TimeListing,
 }
 
 /// One Changes step's result, carried in the task's value.
@@ -2935,18 +2938,95 @@ struct ChangesOutcome {
     stored: Option<usize>,
     /// The step's result line; empty for the mount-time load.
     line: String,
+    /// Per-id lines of a Check's by-id fetch (the timing line first); empty otherwise.
+    detail: Vec<String>,
 }
 
-/// Runs `action` against `prefs`, with `current` and `since` as the token and change calls (call
-/// inside `spawn_blocking` with the plugin's calls; tests pass stand-ins).
+/// The by-id fetch of a delta's inserted and updated ids: a timing line, then one line per id
+/// (the file name and MIME type, or `not visible`). `fetch` is `assets_by_id` with details (call
+/// inside `spawn_blocking`; tests pass stand-ins).
+fn fetch_lines(
+    ids: &[AssetId],
+    fetch: impl FnOnce(&[AssetId]) -> Result<Vec<Option<Asset>>, PhotoError>,
+) -> Vec<String> {
+    if ids.is_empty() {
+        return Vec::new();
+    }
+    let started = Instant::now();
+    let result = fetch(ids);
+    let elapsed = started.elapsed().as_millis();
+    match result {
+        Ok(found) => {
+            let mut lines = vec![format!("Fetched {} id(s) by id in {elapsed} ms", ids.len())];
+            lines.extend(ids.iter().enumerate().map(|(at, id)| {
+                match found.get(at).and_then(Option::as_ref) {
+                    Some(asset) => format!(
+                        "{}: {} | {}",
+                        id.as_str(),
+                        asset.file_name.as_deref().unwrap_or("no name"),
+                        asset.mime_type().as_deref().unwrap_or("no mime type"),
+                    ),
+                    None => format!("{}: not visible", id.as_str()),
+                }
+            }));
+            lines
+        }
+        Err(err) => vec![format!(
+            "Fetching {} id(s) by id failed after {elapsed} ms: error: {err}",
+            ids.len()
+        )],
+    }
+}
+
+/// Lists the whole library with details, page by page, and reports the asset count and the
+/// elapsed milliseconds (call inside `spawn_blocking`).
+fn time_full_listing() -> String {
+    let started = Instant::now();
+    let mut count = 0u64;
+    loop {
+        let query = AssetQuery::new().limit(500).offset(count).with_details();
+        match PhotoLibrary::assets(&query) {
+            Ok(page) => {
+                count += page.items.len() as u64;
+                if page.items.is_empty() || count >= page.total {
+                    break;
+                }
+            }
+            Err(err) => return format!("Full listing: error: {err}"),
+        }
+    }
+    format!(
+        "Full listing: {count} asset(s) with details in {} ms",
+        started.elapsed().as_millis()
+    )
+}
+
+/// Runs `action` against `prefs`, with `current`, `since` and `fetch` as the token, change and
+/// by-id calls (call inside `spawn_blocking` with the plugin's calls; tests pass stand-ins).
+#[cfg(test)]
 fn changes_step(
     prefs: &SharedPreferences,
     action: ChangesAction,
     current: impl FnOnce() -> Result<ChangeToken, PhotoError>,
     since: impl FnOnce(&ChangeToken) -> Result<LibraryChanges, PhotoError>,
 ) -> ChangesOutcome {
+    changes_step_fetching(prefs, action, current, since, |_| {
+        Err(PhotoError::Unsupported)
+    })
+}
+
+/// [`changes_step`] with the by-id call supplied.
+fn changes_step_fetching(
+    prefs: &SharedPreferences,
+    action: ChangesAction,
+    current: impl FnOnce() -> Result<ChangeToken, PhotoError>,
+    since: impl FnOnce(&ChangeToken) -> Result<LibraryChanges, PhotoError>,
+    fetch: impl FnOnce(&[AssetId]) -> Result<Vec<Option<Asset>>, PhotoError>,
+) -> ChangesOutcome {
+    let mut detail = Vec::new();
     let line = match action {
-        ChangesAction::Load => String::new(),
+        // The listing is timed by `run_changes`, which has no token work to do.
+        ChangesAction::Load | ChangesAction::TimeListing => String::new(),
         ChangesAction::Save => match current() {
             Ok(token) => match store_token(prefs, &token) {
                 Ok(()) => "Saved the current token.".to_string(),
@@ -2959,6 +3039,14 @@ fn changes_step(
             Some(token) => match since(&token) {
                 Ok(changes) => {
                     let (summary, next) = changes_summary(&changes);
+                    if let LibraryChanges::Delta {
+                        inserted, updated, ..
+                    } = &changes
+                    {
+                        let ids: Vec<AssetId> =
+                            inserted.iter().chain(updated.iter()).cloned().collect();
+                        detail = fetch_lines(&ids, fetch);
+                    }
                     match next.map(|next| store_token(prefs, next)) {
                         Some(Err(text)) => format!("{summary}, but {text}"),
                         _ => summary,
@@ -2971,21 +3059,30 @@ fn changes_step(
     ChangesOutcome {
         stored: stored_token(prefs).map(|token| token.as_bytes().len()),
         line,
+        detail,
     }
 }
 
 /// Runs one Changes action against the app's preferences (call inside `spawn_blocking`).
 fn run_changes(action: ChangesAction) -> ChangesOutcome {
     match SharedPreferences::standard() {
-        Ok(prefs) => changes_step(
-            &prefs,
-            action,
-            PhotoLibrary::current_change_token,
-            PhotoLibrary::changes_since,
-        ),
+        Ok(prefs) => {
+            let mut outcome = changes_step_fetching(
+                &prefs,
+                action,
+                PhotoLibrary::current_change_token,
+                PhotoLibrary::changes_since,
+                |ids| PhotoLibrary::assets_by_id(ids, true),
+            );
+            if action == ChangesAction::TimeListing {
+                outcome.line = time_full_listing();
+            }
+            outcome
+        }
         Err(err) => ChangesOutcome {
             stored: None,
             line: format!("preferences unavailable: {err}"),
+            detail: Vec::new(),
         },
     }
 }
@@ -3137,15 +3234,26 @@ impl Component for ChangesPanel {
 
         let outcome = state.outcome.signal().get();
         let busy = matches!(outcome, AsyncValue::Loading(_));
-        let (token_text, result_text) = match &outcome {
-            AsyncValue::Ready(done) => (token_line(done.stored), done.line.clone()),
-            AsyncValue::Loading(Some(previous)) => {
-                (token_line(previous.stored), "Working\u{2026}".to_string())
-            }
-            AsyncValue::Error(err) => ("Stored token: unknown".to_string(), err.to_string()),
+        let (token_text, result_text, detail_lines) = match &outcome {
+            AsyncValue::Ready(done) => (
+                token_line(done.stored),
+                done.line.clone(),
+                done.detail.clone(),
+            ),
+            AsyncValue::Loading(Some(previous)) => (
+                token_line(previous.stored),
+                "Working\u{2026}".to_string(),
+                Vec::new(),
+            ),
+            AsyncValue::Error(err) => (
+                "Stored token: unknown".to_string(),
+                err.to_string(),
+                Vec::new(),
+            ),
             _ => (
                 "Reading the stored token\u{2026}".to_string(),
                 String::new(),
+                Vec::new(),
             ),
         };
 
@@ -3190,7 +3298,10 @@ impl Component for ChangesPanel {
                     "Save token stores the library's current change token in shared \
                      preferences, so the next launch reads it back. Check asks what changed \
                      since the stored token (a delta of inserted, updated and deleted assets, \
-                     or a full rescan) and stores the token it answers with. Watch counts the \
+                     or a full rescan), stores the token it answers with, and fetches the inserted and \
+                     updated assets by id, showing each file name and MIME type (or not \
+                     visible) with the call's time. Time full listing lists the whole library \
+                     with details for comparison. Watch counts the \
                      library's change wake-ups until Stop.",
                 )
                 .size(11.0)
@@ -3204,9 +3315,15 @@ impl Component for ChangesPanel {
                     .spacing(8.0)
                     .run_spacing(8.0)
                     .child(press("Save token", ChangesAction::Save))
-                    .child(press("Check", ChangesAction::Check)),
+                    .child(press("Check", ChangesAction::Check))
+                    .child(press("Time full listing", ChangesAction::TimeListing)),
             )
             .child(text(result_text).size(12.0).color(muted))
+            .children(views::<ChangesPanelState, _>(
+                detail_lines
+                    .into_iter()
+                    .map(|line| text(line).size(11.0).color(muted)),
+            ))
             .child(SizedBox(None, Some(8.0)))
             .child(
                 wrap()
@@ -3264,6 +3381,10 @@ enum FoldersAction {
     Release,
     /// Look up the stored first-file path through `FolderGrant::entry`.
     OpenStored,
+    /// Read the stored path's first 16 bytes and show them as hex.
+    SniffStored,
+    /// Read the stored path with a 16-byte limit, to show the too-large report.
+    OpenStoredSmall,
     /// Look up a path that cannot exist through `FolderGrant::entry`.
     OpenMissing,
 }
@@ -3425,10 +3546,69 @@ fn remember_first_path(prefs: &SharedPreferences, step: &FoldersStep) {
     }
 }
 
+/// The bytes a sniff reads from the start of the stored path.
+const SNIFF_BYTES: u64 = 16;
+
+/// The deliberately small `read_to_vec` limit of the over-limit control.
+const SMALL_LIMIT_BYTES: u64 = 16;
+
+/// How an entry found by path is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathRead {
+    /// `read_to_vec` with this limit.
+    Whole(u64),
+    /// `read_prefix` of this many bytes.
+    Prefix(u64),
+}
+
+/// Bytes as space-separated lowercase hex pairs.
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A read failure as one line: a refused over-limit read shows its limit and the file's size.
+fn read_error_text(err: &FileDialogError) -> String {
+    match err {
+        FileDialogError::TooLarge { limit, size } => format!(
+            "too large: limit {limit} bytes, size {}",
+            size.map_or_else(|| "unknown".to_string(), |size| format!("{size} bytes"))
+        ),
+        other => format!("{other:?}"),
+    }
+}
+
+/// The result line of reading `entry` as `read` asks.
+fn read_entry_line(entry: &FolderEntry, read: PathRead) -> String {
+    match read {
+        PathRead::Whole(limit) => match entry.read_to_vec(limit) {
+            Ok(bytes) => format!("found {} {} bytes", entry.name, bytes.len()),
+            Err(err) => read_error_text(&err),
+        },
+        PathRead::Prefix(count) => match entry.read_prefix(count) {
+            Ok(bytes) => format!(
+                "sniffed {} ({} bytes): {}",
+                entry.name,
+                bytes.len(),
+                hex_bytes(&bytes)
+            ),
+            Err(err) => read_error_text(&err),
+        },
+    }
+}
+
 /// Looks `path` up in the held grant, restoring the stored one first when none is held
 /// (call inside `spawn_blocking`): `found <name> <n> bytes`, `not found`, or the error's
 /// Debug name.
-fn open_path_step(prefs: &SharedPreferences, grants: &GrantCell, path: &str) -> FoldersStep {
+fn open_path_step(
+    prefs: &SharedPreferences,
+    grants: &GrantCell,
+    path: &str,
+    read: PathRead,
+) -> FoldersStep {
     let held = grants.lock().expect("grant cell poisoned").is_some();
     if !held {
         let restored = restore_step(prefs, grants);
@@ -3441,19 +3621,16 @@ fn open_path_step(prefs: &SharedPreferences, grants: &GrantCell, path: &str) -> 
         return FoldersStep::message("Pick a folder first.");
     };
     FoldersStep::message(match grant.entry(path) {
-        Ok(Some(entry)) => match entry.read_to_vec(MAX_PREVIEW_BYTES) {
-            Ok(bytes) => format!("found {} {} bytes", entry.name, bytes.len()),
-            Err(err) => format!("{err:?}"),
-        },
+        Ok(Some(entry)) => read_entry_line(&entry, read),
         Ok(None) => "not found".to_string(),
         Err(err) => format!("{err:?}"),
     })
 }
 
 /// The stored path's lookup, or a hint when nothing was scanned yet.
-fn open_stored_step(prefs: &SharedPreferences, grants: &GrantCell) -> FoldersStep {
+fn open_stored_step(prefs: &SharedPreferences, grants: &GrantCell, read: PathRead) -> FoldersStep {
     match prefs.get_string(FOLDER_ENTRY_PATH_KEY) {
-        Some(path) => open_path_step(prefs, grants, &path),
+        Some(path) => open_path_step(prefs, grants, &path, read),
         None => FoldersStep::message("No stored path. Scan a folder first."),
     }
 }
@@ -3478,8 +3655,21 @@ fn run_folders_action(
             step
         }
         FoldersAction::Release => release_step(&prefs, grants),
-        FoldersAction::OpenStored => open_stored_step(&prefs, grants),
-        FoldersAction::OpenMissing => open_path_step(&prefs, grants, MISSING_ENTRY_PATH),
+        FoldersAction::OpenStored => {
+            open_stored_step(&prefs, grants, PathRead::Whole(MAX_PREVIEW_BYTES))
+        }
+        FoldersAction::SniffStored => {
+            open_stored_step(&prefs, grants, PathRead::Prefix(SNIFF_BYTES))
+        }
+        FoldersAction::OpenStoredSmall => {
+            open_stored_step(&prefs, grants, PathRead::Whole(SMALL_LIMIT_BYTES))
+        }
+        FoldersAction::OpenMissing => open_path_step(
+            &prefs,
+            grants,
+            MISSING_ENTRY_PATH,
+            PathRead::Whole(MAX_PREVIEW_BYTES),
+        ),
     }
 }
 
@@ -3633,7 +3823,10 @@ fn start_phase(action: FoldersAction) -> &'static str {
         FoldersAction::Pick => "Waiting for the picker\u{2026}",
         FoldersAction::Scan { .. } => "Scanning the folder\u{2026}",
         FoldersAction::Release => "Releasing the folder\u{2026}",
-        FoldersAction::OpenStored | FoldersAction::OpenMissing => "Looking up the path\u{2026}",
+        FoldersAction::OpenStored
+        | FoldersAction::SniffStored
+        | FoldersAction::OpenStoredSmall
+        | FoldersAction::OpenMissing => "Looking up the path\u{2026}",
     }
 }
 
@@ -3804,6 +3997,20 @@ impl Component for FoldersPanel {
                     .child(press_button(
                         "Open stored path",
                         FoldersAction::OpenStored,
+                        state,
+                        busy,
+                        false,
+                    ))
+                    .child(press_button(
+                        "Sniff stored path",
+                        FoldersAction::SniffStored,
+                        state,
+                        busy,
+                        false,
+                    ))
+                    .child(press_button(
+                        "Open stored path (16-byte limit)",
+                        FoldersAction::OpenStoredSmall,
                         state,
                         busy,
                         false,
@@ -4542,7 +4749,7 @@ mod tests {
             Some("a.png")
         );
         // A fresh cell: the grant is restored from the token first.
-        let step = open_stored_step(&prefs, &no_grants());
+        let step = open_stored_step(&prefs, &no_grants(), PathRead::Whole(MAX_PREVIEW_BYTES));
         assert_eq!(message_of(&step), "found a.png 3 bytes");
     }
 
@@ -4554,11 +4761,11 @@ mod tests {
             .set_string(FOLDER_TOKEN_KEY, dir.0.to_str().unwrap())
             .unwrap();
         let grants = no_grants();
-        let step = open_path_step(&prefs, &grants, MISSING_ENTRY_PATH);
+        let step = open_path_step(&prefs, &grants, MISSING_ENTRY_PATH, PathRead::Whole(1));
         assert_eq!(message_of(&step), "not found");
-        let step = open_stored_step(&prefs, &grants);
+        let step = open_stored_step(&prefs, &grants, PathRead::Whole(1));
         assert!(message_of(&step).starts_with("No stored path"));
-        let step = open_path_step(&prefs, &grants, "../up");
+        let step = open_path_step(&prefs, &grants, "../up", PathRead::Whole(1));
         assert!(message_of(&step).starts_with("Io"), "{}", message_of(&step));
     }
 
@@ -4735,6 +4942,59 @@ mod tests {
             .set_string(CHANGE_TOKEN_KEY, "not hex")
             .expect("in-memory store");
         assert_eq!(stored_token(&prefs), None);
+    }
+
+    #[test]
+    fn check_fetches_inserted_and_updated_ids_by_id() {
+        let prefs = SharedPreferences::in_memory();
+        store_token(&prefs, &token(&[1])).expect("in-memory store");
+        let checked = changes_step_fetching(
+            &prefs,
+            ChangesAction::Check,
+            no_current,
+            |_| {
+                Ok(LibraryChanges::Delta {
+                    inserted: vec![AssetId::from_raw("new")],
+                    updated: vec![AssetId::from_raw("edited")],
+                    deleted: Vec::new(),
+                    next: token(&[2]),
+                })
+            },
+            |ids| {
+                assert_eq!(ids.len(), 2);
+                Ok(vec![None, None])
+            },
+        );
+        assert_eq!(checked.detail.len(), 3);
+        assert!(checked.detail[0].starts_with("Fetched 2 id(s) by id in "));
+        assert_eq!(checked.detail[1], "new: not visible");
+        assert_eq!(checked.detail[2], "edited: not visible");
+    }
+
+    #[test]
+    fn an_empty_delta_fetches_nothing() {
+        let lines = fetch_lines(&[], |_| panic!("no ids, no call"));
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn hex_bytes_and_read_errors() {
+        assert_eq!(hex_bytes(&[0x89, 0x50, 0x0a]), "89 50 0a");
+        assert_eq!(hex_bytes(&[]), "");
+        assert_eq!(
+            read_error_text(&FileDialogError::TooLarge {
+                limit: 16,
+                size: Some(99)
+            }),
+            "too large: limit 16 bytes, size 99 bytes"
+        );
+        assert_eq!(
+            read_error_text(&FileDialogError::TooLarge {
+                limit: 16,
+                size: None
+            }),
+            "too large: limit 16 bytes, size unknown"
+        );
     }
 
     #[test]
