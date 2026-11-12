@@ -45,6 +45,22 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   `ANDROID_NDK_HOME` for Android, and the build fails when the directory is missing. Migration:
   `sdkmanager --install "ndk;28.2.13676358"`, or set `FRUST_ANDROID_NDK_VERSION` to an installed r28+
   version.
+- `FolderEntry::read_to_vec` (`frust-file-dialogs`) now returns `FileDialogError::TooLarge { limit,
+  size }` for a file longer than `max_bytes`, where it returned `Io`. `size` is `None` on Android.
+  `TooLarge` is a new variant of the enum. Migration: a caller that matched `Io` to detect an
+  over-limit file matches `TooLarge` too; any other failure is still `Io` or `AccessLost`.
+- On Android 13+ the photo permission (`frust-permissions`' `Photos(ReadWrite)`, and so
+  `frust-photo-library`'s browsing) now checks and requests the subset of `READ_MEDIA_IMAGES` and
+  `READ_MEDIA_VIDEO` that the app manifest declares, where it needed both and answered `NotDeclared`
+  when either was missing. `NotDeclared` is now answered only when neither is declared. Migration:
+  an app that uses one media type declares only that line (the new `photos-images` / `photos-videos`
+  registry options write it); an app that uses both declares both. The type whose line is missing is
+  not requested, and listing it returns the platform's empty result.
+- The `semantics(child)` wrapper's default role changed: with a label, value or hint set and no
+  explicit `role`, it is now a group (`Role::Group`), where it was a generic container; it stays a
+  generic container only when none of the three is set. A caller that set a label and relied on the
+  container role calls `.role(Role::GenericContainer)` explicitly. `heading(level)` on the wrapper now also merges the
+  subtree into one node.
 
 ### Added
 
@@ -137,9 +153,29 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   store it; not portable to another device or platform, and a restore or reinstall may change it.
 - The playground's Photos page gains a Changes panel and a cursor-paging toggle.
 - `semantics(child)`: a view that wraps a child with its own accessibility node, with builders
-  `label`, `role`, `heading(level)` and `hidden(bool)` (omits the subtree from the semantics tree).
+  `label`, `value`, `hint`, `role`, `heading(level)`, `merged(bool)` (folds the subtree into this one
+  node), `tappable(bool)` (exposes a click action), `image()`, `button()` and `hidden(bool)` (omits
+  the subtree from the semantics tree). The default role is a group once a label, value or hint is
+  set. A click action lands positionally, at the centre of the node's bounds.
   `semantics_label(text)` is a zero-size leaf that only announces its text. Both are re-exported from
   `frust`.
+- `TextView::heading(level)` (the `text(..)` builder) publishes a text view as a heading, and `ImageView::label(text)` gives an
+  image an accessible name.
+- `PhotoLibrary::assets_by_id(&[AssetId], details)` (`library` feature): the `Asset` rows for given
+  ids, one entry per id in order and `None` where an id is missing, so a change-feed delta needs no
+  re-listing. Android and iOS implement it; desktop answers `Unsupported`.
+- `Asset::mime_type()`: the asset's MIME type on both phones. An iOS uniform type identifier is mapped
+  through a fixed table, and `None` stands for an identifier it does not know or a `content_type`
+  that was not filled (it needs `AssetQuery::with_details`).
+- The plugin registry gains image-only and video-only media options: `photos-images` and
+  `photos-videos` for `permissions`, `library-images` and `library-videos` for `photo-library`.
+  Each declares only its own `READ_MEDIA_*` line.
+- `FolderEntry::read_prefix(max_bytes)` (`frust-file-dialogs`): reads at most the first `max_bytes` of
+  a file, never `TooLarge`, so an app can sniff a file's type without reading all of it.
+- `frust::OwnerId`: a stable identity for a reactive owner (`OwnerId::of(&owner)`,
+  `OwnerId::current()`).
+- Under the `test-support` feature, a lifecycle or memory-pressure push reaches only the listeners
+  created on the pushing thread, so parallel tests no longer see each other's pushes.
 - `TextInputView::on_caret_change(|state, CaretInfo| ..)` and `CaretInfo { rect, line, offset,
   selection }` (non-exhaustive): where the caret is, fired when the field gains focus through an event
   it handles and whenever the rect, line, offset or selection then differs from the last report.

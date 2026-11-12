@@ -30,7 +30,7 @@ Add Plugin `library` option) the crate also lists the user's photos: `PhotoLibra
 `PhotoLibrary::thumbnail(&AssetId, &ThumbnailRequest)`, which returns straight-alpha RGBA8 ready for
 `ImageSource::from_rgba8`. The feature adds the Android media read permissions,
 `NSPhotoLibraryUsageDescription` and the `Photos` framework; request access with `frust-permissions`
-(the `photos` feature), browsing never prompts. Without the feature every call returns
+(the `photos` feature), browsing never prompts. An app that browses only images (or only videos) uses the registry's `library-images` (`library-videos`) option with `permissions`' `photos-images` (`photos-videos`): on Android 13+ the app then declares only that `READ_MEDIA_*` line and the other type is not requested. Without the feature every call returns
 `PhotoError::FeatureDisabled`; desktop returns `Unsupported`.
 
 - Calls block and refuse the mobile UI thread (`PhotoError::UiThread`); run them in `spawn_blocking`.
@@ -146,7 +146,7 @@ not exist, was deleted, is outside a limited selection or is not a library id, a
 a duplicate entry. `details: true` fills `file_name` and `content_type` as `AssetQuery::with_details`
 does. An empty slice returns an empty `Vec` without a platform call; otherwise the call blocks, refuses
 the UI thread and needs the same access as `assets`. Android takes a whole delta in one call (it
-queries at most 500 ids at a time on its own); iOS, desktop and web answer `Unsupported` for now.
+queries at most 500 ids at a time on its own); iOS does the same; desktop and web answer `Unsupported`.
 
 ```rust
 use frust_photo_library::{Asset, AssetId, PhotoError, PhotoLibrary};
