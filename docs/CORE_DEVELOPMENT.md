@@ -112,13 +112,22 @@ synchronous. The secure-storage store's `open(name)` (`frust-secure-storage`) is
 - `StartGate::new` takes a closure returning a future of `Result<T, E>`, where `E` is a
   `std::error::Error + Send + Sync`. The task starts when the gate is mounted and is aborted when
   the gate is dropped.
+- The start closure is called on the UI thread, on mount and on every Retry, so the code before it
+  returns the future must not block. The future is polled on the background runtime; blocking work
+  inside it belongs in `spawn_blocking`. A panic while the future is polled shows the error view
+  with Retry (the message begins `start-up task panicked`). A panic in the start closure's own
+  code, which runs on the UI thread, is not caught.
 - `.splash(view)`, `.error(|message: &str, retry: Retry| view)` and `.ready(|value: &T| view)`
   each produce a `View<()>`, so they have no app state of their own. A nested `component(..)`
   carries state.
-  Without `.error`, the gate shows the message and a Retry button. `retry.run()` restarts the task
-  and returns to the splash.
-- The `ready` closure runs once per success, and the subtree it returns is retained across
-  unrelated rebuilds. State created inside it is disposed when the gate swaps arm or is dropped.
+  Without `.error`, the gate shows the error's `Display` text verbatim above a Retry button; pass
+  `.error(..)` for user-facing wording. `retry.run()` restarts the task and returns to the splash.
+- Fixed at mount: the start closure (every Retry re-runs it) and, once the ready view mounts, the
+  ready closure, so it should read signals inside its subtree rather than capture changing parent
+  state. The splash and error views follow the latest parent rebuild.
+- The `ready` closure runs once per success and is not called again, and its subtree keeps its
+  state. The subtree is still rebuilt and diffed on every gate rebuild, and nested components
+  re-run `build`. State created inside it is disposed when the gate swaps arm or is dropped.
 - The gate does not hold the system launch screen. The splash is the app's first frame, so give it
   the launch screen's background colour to avoid a visible flash.
 - Create the `Router` inside the ready view, in the `init` of a nested component, with
