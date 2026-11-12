@@ -113,7 +113,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::build_info::BuildInfo;
+use crate::build_info::{BuildInfo, resolve_version};
 use crate::manifest;
 use crate::process::{ProcessRunner, tail_lines};
 
@@ -445,9 +445,10 @@ pub fn build_installer(
     prepare_out_dir(&out_dir)?;
 
     let mut notes = Vec::new();
+    let resolved = resolve_version(info, Some(&manifest));
     let mut packager_config = PackagerConfig::new(
         &config,
-        info,
+        resolved.name.as_deref(),
         bundle,
         format,
         &out_dir,
@@ -766,7 +767,7 @@ fn generated_icns<'a>(bundle: &'a BundleReport, config: &DesktopConfig) -> Optio
 impl PackagerConfig {
     fn new(
         config: &DesktopConfig,
-        info: &BuildInfo,
+        version: Option<&str>,
         bundle: &BundleReport,
         format: InstallerFormat,
         out_dir: &Path,
@@ -815,9 +816,8 @@ impl PackagerConfig {
         PackagerConfig {
             name: config.binary_name.clone(),
             product_name: config.display_name.clone(),
-            version: info
-                .build_name
-                .clone()
+            version: version
+                .map(str::to_string)
                 .unwrap_or_else(|| DEFAULT_INSTALLER_VERSION.to_string()),
             identifier: config.identifier.clone(),
             out_dir: out_dir.to_string_lossy().into_owned(),

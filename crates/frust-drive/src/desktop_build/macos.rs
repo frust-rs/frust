@@ -35,7 +35,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::build_info::BuildInfo;
+use crate::build_info::{ResolvedVersion, VersionSource};
 use crate::icons;
 use crate::process::{ProcessRunner, tail_lines};
 
@@ -78,6 +78,8 @@ const PLUTIL: &str = "plutil";
 const KEY_EXECUTABLE: &str = "CFBundleExecutable";
 const KEY_IDENTIFIER: &str = "CFBundleIdentifier";
 const KEY_ICON_FILE: &str = "CFBundleIconFile";
+const KEY_SHORT_VERSION: &str = "CFBundleShortVersionString";
+const KEY_BUNDLE_VERSION: &str = "CFBundleVersion";
 
 /// Where an icon-name mismatch was declared, for
 /// [`BundleNote::IconIdentityMismatch`]'s message.
@@ -99,7 +101,7 @@ const DEFAULT_SHORT_VERSION: &str = "0.1.0";
 pub(super) fn assemble(
     runner: &dyn ProcessRunner,
     project_dir: &Path,
-    info: &BuildInfo,
+    version: &ResolvedVersion,
     config: &DesktopConfig,
     binary: &Path,
     notes: &mut Vec<BundleNote>,
@@ -141,10 +143,17 @@ pub(super) fn assemble(
         copy_file(&project_plist, &plist)?;
         // A generated plist is built from `config` by construction and has
         // nothing to reconcile; only the copied one can disagree.
-        reconcile(runner, &plist, config, generated_icon.as_deref(), notes)?;
+        reconcile(
+            runner,
+            &plist,
+            config,
+            generated_icon.as_deref(),
+            version,
+            notes,
+        )?;
     } else {
         notes.push(BundleNote::GeneratedInfoPlist);
-        write_file(&plist, &info_plist(config, info))?;
+        write_file(&plist, &info_plist(config, version))?;
     }
     artifacts.push(plist);
 
@@ -182,6 +191,7 @@ fn reconcile(
     plist: &Path,
     config: &DesktopConfig,
     generated_icon: Option<&str>,
+    version: &ResolvedVersion,
     notes: &mut Vec<BundleNote>,
 ) -> Result<(), DesktopBuildError> {
     let mut unverified: Option<String> = None;
@@ -194,6 +204,16 @@ fn reconcile(
     };
     let executable = read(KEY_EXECUTABLE);
     let identifier = read(KEY_IDENTIFIER);
+    // Compared only when the resolved value came from a flag or the manifest:
+    // a defaulted value is a placeholder the project's own plist should win.
+    let short_version = match (&version.name, version.name_source) {
+        (Some(_), VersionSource::Flag | VersionSource::Manifest) => read(KEY_SHORT_VERSION),
+        _ => None,
+    };
+    let bundle_version = match (version.number, version.number_source) {
+        (Some(_), VersionSource::Flag | VersionSource::Manifest) => read(KEY_BUNDLE_VERSION),
+        _ => None,
+    };
     // Read only when there is something to compare against — a project with no
     // usable icon source has a note for that already, and a plist carrying no
     // `CFBundleIconFile` at all must not read as "unverified" because of it.
@@ -216,6 +236,24 @@ fn reconcile(
         notes.push(BundleNote::IdentifierIdentityMismatch {
             plist: declared,
             manifest: config.identifier.clone(),
+        });
+    }
+    if let (Some(declared), Some(resolved)) = (short_version, version.name.as_ref())
+        && declared != *resolved
+    {
+        notes.push(BundleNote::VersionIdentityMismatch {
+            key: KEY_SHORT_VERSION,
+            plist: declared,
+            resolved: resolved.clone(),
+        });
+    }
+    if let (Some(declared), Some(number)) = (bundle_version, version.number)
+        && declared != number.to_string()
+    {
+        notes.push(BundleNote::VersionIdentityMismatch {
+            key: KEY_BUNDLE_VERSION,
+            plist: declared,
+            resolved: number.to_string(),
         });
     }
     if let (Some(declared), Some(generated)) = (icon, generated_icon)
@@ -362,13 +400,13 @@ fn path_arg(path: &Path) -> String {
 /// The minimal `Info.plist` generated for a project with no `macos/Info.plist`
 /// of its own: the keys macOS needs to launch, name and identify the bundle,
 /// in the same key order and tab indentation the scaffolded template uses.
-fn info_plist(config: &DesktopConfig, info: &BuildInfo) -> String {
-    let short_version = info
-        .build_name
+fn info_plist(config: &DesktopConfig, version: &ResolvedVersion) -> String {
+    let short_version = version
+        .name
         .clone()
         .unwrap_or_else(|| DEFAULT_SHORT_VERSION.to_string());
-    let version = info
-        .build_number
+    let version = version
+        .number
         .map(|n| n.to_string())
         .unwrap_or_else(|| "1".to_string());
 
@@ -445,7 +483,6 @@ pub(super) fn app_path(project_dir: &Path, display_name: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_info::{BuildArgs, BuildMode};
     use crate::manifest;
     use crate::process::{FakeProcessRunner, Output};
 
@@ -457,16 +494,22 @@ mod tests {
         .unwrap()
     }
 
-    fn info() -> BuildInfo {
-        BuildInfo::from_args(
-            BuildArgs {
-                build_name: Some("2.1.0".to_string()),
-                build_number: Some(42),
-                ..BuildArgs::default()
-            },
-            BuildMode::Release,
-        )
-        .unwrap()
+    fn info() -> ResolvedVersion {
+        ResolvedVersion {
+            name: Some("2.1.0".to_string()),
+            number: Some(42),
+            name_source: VersionSource::Flag,
+            number_source: VersionSource::Manifest,
+        }
+    }
+
+    fn defaulted() -> ResolvedVersion {
+        ResolvedVersion {
+            name: None,
+            number: None,
+            name_source: VersionSource::Default,
+            number_source: VersionSource::Default,
+        }
     }
 
     #[test]
@@ -553,9 +596,64 @@ mod tests {
         config: &DesktopConfig,
         generated_icon: Option<&str>,
     ) -> Result<Vec<BundleNote>, DesktopBuildError> {
+        reconcile_notes_for(runner, config, generated_icon, &defaulted())
+    }
+
+    fn reconcile_notes_for(
+        runner: &FakeProcessRunner,
+        config: &DesktopConfig,
+        generated_icon: Option<&str>,
+        version: &ResolvedVersion,
+    ) -> Result<Vec<BundleNote>, DesktopBuildError> {
         let mut notes = Vec::new();
-        reconcile(runner, Path::new(PLIST), config, generated_icon, &mut notes)?;
+        reconcile(
+            runner,
+            Path::new(PLIST),
+            config,
+            generated_icon,
+            version,
+            &mut notes,
+        )?;
         Ok(notes)
+    }
+
+    /// A project plist whose version keys differ from a flag/manifest-sourced
+    /// resolution yields one note per key; a defaulted resolution reads and
+    /// compares nothing (the runner has no registration for the keys).
+    #[test]
+    fn a_mismatching_project_plist_version_is_a_note_only_for_a_supplied_version() {
+        let runner = plutil_runner(&[
+            (KEY_EXECUTABLE, "my_app"),
+            (KEY_IDENTIFIER, "dev.f0x.my_app"),
+            (KEY_SHORT_VERSION, "0.1.0"),
+            (KEY_BUNDLE_VERSION, "1"),
+        ]);
+        let notes = reconcile_notes_for(&runner, &default_config(), None, &info()).unwrap();
+        assert_eq!(
+            notes,
+            vec![
+                BundleNote::VersionIdentityMismatch {
+                    key: KEY_SHORT_VERSION,
+                    plist: "0.1.0".to_string(),
+                    resolved: "2.1.0".to_string(),
+                },
+                BundleNote::VersionIdentityMismatch {
+                    key: KEY_BUNDLE_VERSION,
+                    plist: "1".to_string(),
+                    resolved: "42".to_string(),
+                },
+            ]
+        );
+        let matching = plutil_runner(&[
+            (KEY_EXECUTABLE, "my_app"),
+            (KEY_IDENTIFIER, "dev.f0x.my_app"),
+            (KEY_SHORT_VERSION, "2.1.0"),
+            (KEY_BUNDLE_VERSION, "42"),
+        ]);
+        let notes = reconcile_notes_for(&matching, &default_config(), None, &info()).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        let notes = reconcile_notes(&runner, &default_config(), None).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     #[test]

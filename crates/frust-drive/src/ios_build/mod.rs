@@ -110,6 +110,9 @@ fn build_with_env(
     preflight(runner, simulator).map_err(|err| anyhow::anyhow!(err))?;
     schemes::verify(runner, project_dir, &sc)?;
 
+    let manifest = crate::manifest::load_optional(project_dir)?;
+    let resolved = crate::build_info::resolve_version(info, manifest.as_ref());
+
     let defines_b64 = encode_defines(&info.defines);
     let features_b64 =
         resolve_features_b64_preflighted(runner, project_dir, info.mode, extra_features, on_line)?;
@@ -136,8 +139,8 @@ fn build_with_env(
                 configuration: &sc.configuration,
                 simulator: *simulator,
                 signing,
-                marketing_version: info.build_name.as_deref(),
-                current_project_version: info.build_number,
+                marketing_version: resolved.name.as_deref(),
+                current_project_version: resolved.number,
                 defines_b64: defines_b64.as_deref(),
                 features_b64: features_b64.as_deref(),
             };
@@ -157,6 +160,16 @@ fn build_with_env(
                 on_line(note);
             }
 
+            if info.mode == BuildMode::Release && resolved.is_defaulted() {
+                // An unset value is not overridden, so the project's
+                // pbxproj applies; the generated template ships 1.0 (1).
+                let name = resolved.name.as_deref().unwrap_or("1.0");
+                let number = resolved.number.unwrap_or(1);
+                on_line(&format!(
+                    "warning: app version not set: building {name} ({number}); set [app] version and build-number in frust.toml or pass --build-name / --build-number"
+                ));
+            }
+
             let inv = Invocation {
                 scheme: &sc.scheme,
                 configuration: &sc.configuration,
@@ -164,8 +177,8 @@ fn build_with_env(
                 signing: Signing::Automatic {
                     team: choice.team.clone(),
                 },
-                marketing_version: info.build_name.as_deref(),
-                current_project_version: info.build_number,
+                marketing_version: resolved.name.as_deref(),
+                current_project_version: resolved.number,
                 defines_b64: defines_b64.as_deref(),
                 features_b64: features_b64.as_deref(),
             };
@@ -794,6 +807,92 @@ mod tests {
             "{plist}"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Runs a release ipa build in a project whose `frust.toml` carries
+    /// `app_extra`, with `info`, expecting the archive argv to carry
+    /// `version_args`; returns every line sent through `on_line`.
+    fn ipa_lines(tag: &str, app_extra: &str, info: &BuildInfo, version_args: &str) -> Vec<String> {
+        let dir = temp_project(tag);
+        fs::write(
+            dir.join("frust.toml"),
+            format!("[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n{app_extra}"),
+        )
+        .unwrap();
+        fs::create_dir_all(dir.join("build/ios/ipa")).unwrap();
+        fs::write(dir.join("build/ios/ipa/Runner.ipa"), b"fake").unwrap();
+        let runner = base_runner()
+            .with(
+                "security find-identity -v -p codesigning",
+                ok(r#"  1) H "Apple Development: Ada (TEAMID1234)""#),
+            )
+            .with(
+                format!("xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios {version_args}FRUST_FEATURES=bGVhbg== DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration -archivePath build/ios/archive/Runner.xcarchive archive"),
+                ok("Archive succeeded"),
+            )
+            .with(
+                "xcrun xcodebuild -exportArchive -archivePath build/ios/archive/Runner.xcarchive -exportOptionsPlist build/ios/ExportOptions.plist -exportPath build/ios/ipa -allowProvisioningUpdates",
+                ok("Export succeeded"),
+            );
+        let mut lines = Vec::new();
+        build_with_env(
+            &runner,
+            &FakeEnv::new(),
+            &dir,
+            info,
+            &IosArtifact::Ipa {
+                export_method: "app-store-connect".to_string(),
+            },
+            NO_EXTRA,
+            &mut |line| lines.push(line.to_string()),
+        )
+        .unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        lines
+    }
+
+    fn version_warnings(lines: &[String]) -> Vec<&String> {
+        lines
+            .iter()
+            .filter(|l| l.starts_with("warning: app version not set"))
+            .collect()
+    }
+
+    #[test]
+    fn ipa_takes_the_manifest_version_without_a_warning() {
+        let lines = ipa_lines(
+            "ipa-manifest-version",
+            "version = \"3.4.5\"\nbuild-number = 12\n",
+            &info(BuildMode::Release),
+            "MARKETING_VERSION=3.4.5 CURRENT_PROJECT_VERSION=12 ",
+        );
+        assert!(version_warnings(&lines).is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn ipa_flag_beats_the_manifest_version() {
+        let mut flagged = info(BuildMode::Release);
+        flagged.build_name = Some("9.9.9".to_string());
+        flagged.build_number = Some(99);
+        let lines = ipa_lines(
+            "ipa-flag-version",
+            "version = \"3.4.5\"\nbuild-number = 12\n",
+            &flagged,
+            "MARKETING_VERSION=9.9.9 CURRENT_PROJECT_VERSION=99 ",
+        );
+        assert!(version_warnings(&lines).is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn ipa_with_a_defaulted_version_warns_exactly_once() {
+        let lines = ipa_lines("ipa-default-version", "", &info(BuildMode::Release), "");
+        assert_eq!(
+            version_warnings(&lines),
+            vec![
+                "warning: app version not set: building 1.0 (1); set [app] version and build-number in frust.toml or pass --build-name / --build-number"
+            ],
+            "{lines:?}"
+        );
     }
 
     #[test]

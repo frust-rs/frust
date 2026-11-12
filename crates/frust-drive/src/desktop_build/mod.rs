@@ -243,6 +243,16 @@ pub enum BundleNote {
     /// value it names — but a `[macos] signing-identity`, a notarization
     /// profile or a `defaults` domain keyed on the manifest value won't match.
     IdentifierIdentityMismatch { plist: String, manifest: String },
+    /// The project's own `macos/Info.plist` (copied verbatim) declares a
+    /// `CFBundleShortVersionString` or `CFBundleVersion` other than the
+    /// version this build resolved from a flag or `frust.toml`. Not fatal and
+    /// the plist is not rewritten: the copied plist wins.
+    VersionIdentityMismatch {
+        /// The plist key that differs.
+        key: &'static str,
+        plist: String,
+        resolved: String,
+    },
     /// A launcher file the project ships names an icon this run did not write
     /// (`macos/Info.plist`'s `CFBundleIconFile`, `linux/app.desktop`'s
     /// `Icon=`). Raised only when an icon really was generated — with the icon
@@ -335,6 +345,16 @@ impl fmt::Display for BundleNote {
                 "`macos/Info.plist` declares CFBundleIdentifier '{plist}', but frust.toml \
                  resolves '{manifest}' — the project's own plist is copied verbatim and wins; \
                  the manifest value names generated files only"
+            ),
+            BundleNote::VersionIdentityMismatch {
+                key,
+                plist,
+                resolved,
+            } => write!(
+                f,
+                "`macos/Info.plist` declares {key} '{plist}', but this build resolved \
+                 '{resolved}' from a flag or frust.toml — the project's own plist is copied \
+                 verbatim and wins; update the plist or the version setting"
             ),
             BundleNote::IconIdentityMismatch {
                 declared_in,
@@ -605,7 +625,8 @@ fn build_with_contributions(
 
     let mut report = match target {
         DesktopBundleTarget::Macos => {
-            macos::assemble(runner, project_dir, info, &config, &binary, &mut notes)?
+            let resolved = crate::build_info::resolve_version(info, Some(&manifest));
+            macos::assemble(runner, project_dir, &resolved, &config, &binary, &mut notes)?
         }
         DesktopBundleTarget::Windows => {
             // The compile above already succeeded (its `?` would have

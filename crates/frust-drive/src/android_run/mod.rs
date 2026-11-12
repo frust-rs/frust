@@ -291,9 +291,11 @@ fn prepare_session_with(
         }
     }
 
-    let version_name = info.build_name.clone().unwrap_or_else(|| "1.0".to_string());
-    let version_code = info
-        .build_number
+    let manifest = crate::manifest::load_optional(&project.root)?;
+    let resolved = crate::build_info::resolve_version(info, manifest.as_ref());
+    let version_name = resolved.name.clone().unwrap_or_else(|| "1.0".to_string());
+    let version_code = resolved
+        .number
         .map(|n| n.to_string())
         .unwrap_or_else(|| "1".to_string());
     crate::android_build::local_properties::write(&android_dir, &version_name, &version_code)
@@ -1128,6 +1130,42 @@ mod tests {
             assert!(local_props.contains("frust.versionName=1.0"));
             assert!(local_props.contains("frust.versionCode=1"));
 
+            let _ = fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn manifest_version_reaches_local_properties_on_the_run_lane() {
+            let dir = unique_project_dir("manifest-version");
+            fs::write(
+                dir.join("frust.toml"),
+                "[app]\nname = \"a\"\norg = \"o\"\nversion = \"3.4.5\"\nbuild-number = 12\n",
+            )
+            .unwrap();
+            let out_dir = output_dir(&dir, BuildMode::Debug, None);
+            fs::create_dir_all(&out_dir).unwrap();
+            fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+            let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+            let runner = stop_after_install(
+                preflight_ok_runner().with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
+                    ok("BUILD SUCCESSFUL"),
+                ),
+                &apk_path,
+            );
+            let _ = run_with_env(
+                &runner,
+                &dir,
+                &device(),
+                &info(BuildMode::Debug, None),
+                NO_EXTRA,
+                &fake_env(),
+            );
+            let props = fs::read_to_string(dir.join("android/local.properties")).unwrap();
+            assert!(props.contains("frust.versionName=3.4.5"), "{props}");
+            assert!(props.contains("frust.versionCode=12"), "{props}");
             let _ = fs::remove_dir_all(&dir);
         }
 
