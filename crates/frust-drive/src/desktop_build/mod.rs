@@ -250,7 +250,9 @@ pub enum BundleNote {
     VersionIdentityMismatch {
         /// The plist key that differs.
         key: &'static str,
+        /// The value declared in the project's `Info.plist`.
         plist: String,
+        /// The value resolved from a flag or `frust.toml`.
         resolved: String,
     },
     /// A launcher file the project ships names an icon this run did not write

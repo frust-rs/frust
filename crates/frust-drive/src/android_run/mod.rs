@@ -293,11 +293,8 @@ fn prepare_session_with(
 
     let manifest = crate::manifest::load_optional(&project.root)?;
     let resolved = crate::build_info::resolve_version(info, manifest.as_ref());
-    let version_name = resolved.name.clone().unwrap_or_else(|| "1.0".to_string());
-    let version_code = resolved
-        .number
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| "1".to_string());
+    // The run lane does not warn about a defaulted version (debug installs).
+    let (version_name, version_code) = resolved.android_name_and_code();
     crate::android_build::local_properties::write(&android_dir, &version_name, &version_code)
         .context("writing android/local.properties")?;
 
