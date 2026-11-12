@@ -114,9 +114,11 @@ synchronous. The secure-storage store's `open(name)` (`frust-secure-storage`) is
   the gate is dropped.
 - The start closure is called on the UI thread, on mount and on every Retry, so the code before it
   returns the future must not block. The future is polled on the background runtime; blocking work
-  inside it belongs in `spawn_blocking`. A panic while the future is polled shows the error view
-  with Retry (the message begins `start-up task panicked`). A panic in the start closure's own
-  code, which runs on the UI thread, is not caught.
+  inside it belongs in `spawn_blocking`. In a build where panics unwind (debug and
+  test), a panic while the future is polled shows the error view with Retry (the message begins
+  `start-up task panicked`). The release profile sets `panic = "abort"`, so there a panic still
+  ends the process. A panic in the start closure's own code, which runs on the UI thread, is not
+  caught in any build.
 - `.splash(view)`, `.error(|message: &str, retry: Retry| view)` and `.ready(|value: &T| view)`
   each produce a `View<()>`, so they have no app state of their own. A nested `component(..)`
   carries state.

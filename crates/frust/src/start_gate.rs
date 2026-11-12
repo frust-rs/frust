@@ -6,7 +6,8 @@
 //! view with a retry action when the task fails, and builds the real root from the task's value
 //! once it succeeds. Dropping the gate aborts a still-pending task, because the task lives under
 //! the gate's owner. A panic while the task's future is polled ends the attempt in the error view
-//! too, where panics unwind; the panic hook still reports it.
+//! too, where panics unwind (debug and test builds); the panic hook still reports it. Under the
+//! release profile's `panic = "abort"` a panic still ends the process.
 //!
 //! The gate does not hold the platform splash screen and does not touch `app!`: the first frame
 //! shows whatever the app's root `init`/`build` produced, which here is the splash.
