@@ -558,6 +558,10 @@ reveal has no shrunken viewport to react to).
 merged, and it is opt-in. A field in an uncovered container needs the app to scroll it
 explicitly (a `ScrollController`).
 
+Drag-to-dismiss of the keyboard (`dismiss_keyboard_on_drag`) is likewise
+opt-in on a vertical `ScrollView` and not offered by `ListView` /
+`CustomScrollView`.
+
 **Evidence**: the 2026-11-12 device runs above, recorded in
 `docs/SHELLS_DEVELOPMENT.md`; the `Caret reveal` module
 docs in `scroll.rs` and the `Keyboard edge` docs in `safe_area.rs`.

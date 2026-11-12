@@ -765,7 +765,7 @@ fn home_page(state: &PlaygroundState) -> impl View<PlaygroundState> + use<> {
     let body = pattern_switcher(
         section,
         SharedAxis::X,
-        scroll_view(pages::current(section, &handles)),
+        scroll_view(pages::current(section, &handles)).dismiss_keyboard_on_drag(true),
     )
     .reverse(reverse);
 

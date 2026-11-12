@@ -69,10 +69,15 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   contact and no cancel; a drag, a cancel or a second contact does not blur, so scrolling a page under a
   focused text field keeps the keyboard up. A press on a focusable widget still moves focus at `Down`.
   Migration: code or tests that expect the blur right after a pointer `Down` must wait for the `Up`;
-  an app that relied on a drag outside a field to dismiss the keyboard must dismiss it explicitly.
+  an app that relied on a drag outside a field to dismiss the keyboard must dismiss it explicitly, or
+  opt in to `ScrollView::dismiss_keyboard_on_drag(true)` on its vertical scroll view.
 
 ### Added
 
+- `ScrollView::dismiss_keyboard_on_drag(bool)` (default off): when the vertical scroll view contains
+  the focused field, a user drag whose first movement past the slop is downward ends the focus session
+  (the soft keyboard goes away) and keeps scrolling; an upward drag, a wheel, a fling, a controller
+  move and the caret reveal never dismiss. `ListView` and `CustomScrollView` do not have it.
 - `frust::Owner`: the reactive owner, re-exported so an app can hold a child owner
   (`Owner::current()` then `.child()`) and arm timers under it with `owner.with(..)`. Keep ONE child
   owner in state and call `cleanup()` on it before re-arming under it, because each new child adds an

@@ -209,6 +209,10 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
         .child(SizedBox(None, Some(8.0)))
         .child(inset(text("Forms").size(13.0).color(accent())))
         .child(inset(text(status).size(12.0)))
+        .child(caption(
+            "A downward drag on the page dismisses the keyboard; an upward drag \
+             scrolls the page while you type.",
+        ))
         .child(SizedBox(None, Some(8.0)))
         .child(label("A and B: two normal fields"))
         .child(inset(field("A", forms.a, focus, submits)))

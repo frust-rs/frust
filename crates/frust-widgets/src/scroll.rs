@@ -219,6 +219,21 @@
 //! `ScrollView` reveals; `ListView`, `CustomScrollView` and horizontal
 //! scrolling do not.
 //!
+//! # Keyboard dismissal
+//!
+//! A press outside the focused widget blurs it only at the end of a tap, so a
+//! page can be scrolled while typing and, by default, only a tap outside the
+//! field dismisses the soft keyboard. [`ScrollView::dismiss_keyboard_on_drag`]
+//! opts in to drag-to-dismiss: when this surface contains the focused widget
+//! and a user drag is recognised as a scroll whose first movement past the slop
+//! is downward (the finger moves toward the keyboard), the focus session ends
+//! once for that gesture and the drag keeps scrolling. An upward drag, a wheel
+//! scroll, a fling in flight, a scrollbar thumb drag, a controller move and the
+//! caret reveal's own move never dismiss, and a drag that starts on the focused
+//! field belongs to the field. With no focused caret left, the reveal has
+//! nothing to do, so the dismissal causes no jump. Only this vertical
+//! `ScrollView` offers it; `ListView` and `CustomScrollView` do not.
+//!
 //! # Shared core
 //!
 //! Everything above but the viewport geometry — the drag, takeover, claim and
@@ -232,9 +247,9 @@ use std::rc::Rc;
 
 use frust_core::accesskit::Role;
 use frust_core::{
-    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, InputEvent,
-    LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase, SemanticsCtx, View,
-    Widget, any,
+    AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, ImeState,
+    InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerButton, PointerEvent, PointerPhase,
+    SemanticsCtx, View, Widget, any,
 };
 use frust_theme::Theme;
 use kurbo::{Affine, Point, Rect, Size};
@@ -670,6 +685,9 @@ pub struct ScrollView<State: 'static> {
     /// Whether the surface keeps the focused caret in view. See
     /// [`ScrollView::reveal_focused_caret`].
     reveal_focused_caret: bool,
+    /// Whether a downward drag ends the focus session. See
+    /// [`ScrollView::dismiss_keyboard_on_drag`].
+    dismiss_keyboard_on_drag: bool,
 }
 
 impl<State: 'static> ScrollView<State> {
@@ -684,6 +702,7 @@ impl<State: 'static> ScrollView<State> {
             controller: None,
             scrollbar: None,
             reveal_focused_caret: true,
+            dismiss_keyboard_on_drag: false,
         }
     }
 
@@ -830,6 +849,31 @@ impl<State: 'static> ScrollView<State> {
         self.reveal_focused_caret = reveal;
         self
     }
+
+    /// Dismiss the soft keyboard on a downward drag (off by default). When
+    /// `true` and this scroll view contains the focused widget, a user drag
+    /// recognised as a scroll whose first movement past the slop is downward
+    /// ends the focus session once for that gesture, and the drag keeps
+    /// scrolling normally. An upward drag never dismisses; neither does a
+    /// wheel scroll, a fling already in flight, a scrollbar thumb drag, a
+    /// [`ScrollController`] move or the caret reveal's own move. A drag that
+    /// starts on the focused field belongs to the field and never reaches
+    /// this rule. With `false` the behaviour is unchanged: only a tap outside
+    /// the field dismisses the keyboard.
+    ///
+    /// ```
+    /// use frust_widgets::{ScrollView, scroll_view, text};
+    /// let view: ScrollView<()> = scroll_view(text("hi")).dismiss_keyboard_on_drag(true);
+    /// # let _ = view;
+    /// ```
+    ///
+    /// Only this vertical `ScrollView` has it: `ListView` and
+    /// `CustomScrollView` do not. Plain view-owned data, carried down on every
+    /// build and rebuild.
+    pub fn dismiss_keyboard_on_drag(mut self, dismiss: bool) -> Self {
+        self.dismiss_keyboard_on_drag = dismiss;
+        self
+    }
 }
 
 /// The vertical room kept above and below a revealed caret (logical px), so a
@@ -897,6 +941,9 @@ pub struct ScrollWidget {
     core: ScrollSurfaceCore,
     /// The focused-caret reveal's switch and baselines.
     reveal: CaretReveal,
+    /// Whether a downward drag ends the focus session
+    /// ([`ScrollView::dismiss_keyboard_on_drag`]).
+    dismiss_keyboard_on_drag: bool,
 }
 
 /// The in-file tests predate the core and name its state as this widget's own
@@ -927,6 +974,7 @@ impl ScrollWidget {
             viewport: Size::ZERO,
             content: Size::ZERO,
             core: ScrollSurfaceCore::default(),
+            dismiss_keyboard_on_drag: false,
             reveal: CaretReveal {
                 enabled: true,
                 ..CaretReveal::default()
@@ -1204,6 +1252,20 @@ impl ScrollSurface for ScrollWidget {
     }
 
     fn take_over_from_content(&mut self, ctx: &mut EventCtx, position: Point) {
+        // The only place a user drag turns into a scroll (the core calls this
+        // once, on the first move past the slop), so the direction of that
+        // first movement is `position` against the press point.
+        if self.dismiss_keyboard_on_drag
+            && position.y > self.core.down_start.y
+            && self.child.holds_live_focus()
+        {
+            // `release_focus` alone is not honoured on a pointer pass (the
+            // root commits it for key, IME, wheel and overlay passes only);
+            // an inactive IME publish ends the session on any pass, and is
+            // what a field publishes when it blurs.
+            ctx.release_focus();
+            ctx.publish_ime_state(ImeState::default());
+        }
         let cancel = InputEvent::Pointer(PointerEvent {
             phase: PointerPhase::Cancel,
             position,
@@ -1238,6 +1300,7 @@ impl<State: 'static> View<State> for ScrollView<State> {
         widget.core.install_scrollbar(self.scrollbar);
         widget.core.attach_controller(self.controller.as_ref());
         widget.set_reveal_focused_caret(self.reveal_focused_caret);
+        widget.dismiss_keyboard_on_drag = self.dismiss_keyboard_on_drag;
         widget
     }
 
@@ -1262,6 +1325,7 @@ impl<State: 'static> View<State> for ScrollView<State> {
         // `ScrollView::physics`'s doc for the full contract. The visual effect
         // is plain data the view owns and is always carried down.
         element.core.install(self.physics.as_ref(), self.effect);
+        element.dismiss_keyboard_on_drag = self.dismiss_keyboard_on_drag;
         let mut flags =
             crate::authoring::rebuild_child(&prev.child, &self.child, &mut element.child, ctx);
         if element.reveal.enabled != self.reveal_focused_caret {
@@ -5966,6 +6030,8 @@ mod outside_press_focus_tests {
         second: String,
         layout: Layout,
         clock_ms: f64,
+        dismiss: bool,
+        controller: Option<ScrollController>,
     }
 
     type Root = RenderRoot<Form, ScrollView<Form>>;
@@ -5994,7 +6060,12 @@ mod outside_press_focus_tests {
             Layout::Padded => body.child(Padding(EdgeInsets::all(20.0), first)),
             Layout::TwoFields => body.child(first).child(second),
         };
-        scroll_view(body.child(SizedBox(Some(W), Some(1000.0))))
+        let view = scroll_view(body.child(SizedBox(Some(W), Some(1000.0))))
+            .dismiss_keyboard_on_drag(state.dismiss);
+        match state.controller.clone() {
+            Some(controller) => view.controller(controller),
+            None => view,
+        }
     }
 
     fn frame<V: View<Form>>(
@@ -6200,5 +6271,184 @@ mod outside_press_focus_tests {
         frame(&mut root, &mut logic, &mut state);
         assert!(!root.is_focus_active(), "a tap on the inset blurs");
         assert_eq!(field_links(&root), vec![false]);
+    }
+
+    /// Down at `from`, four 10 px moves of `dy` each (a frame after each) and
+    /// the lift. Returns the controller offset after every frame of the drag.
+    fn drag_by(
+        root: &mut Root,
+        logic: &mut Logic,
+        state: &mut Form,
+        from: (f64, f64),
+        dy: f64,
+    ) -> Vec<f64> {
+        let controller = state.controller.clone();
+        let offset = |c: &Option<ScrollController>| c.as_ref().map_or(0.0, |c| c.offset());
+        let mut seen = Vec::new();
+        root.event(state, &touch(PointerPhase::Down, from));
+        for step in 1..=4 {
+            let y = from.1 + dy * f64::from(step);
+            root.event(state, &touch(PointerPhase::Move, (from.0, y)));
+            frame(root, logic, state);
+            seen.push(offset(&controller));
+        }
+        root.event(state, &touch(PointerPhase::Up, (from.0, from.1 + 4.0 * dy)));
+        frame(root, logic, state);
+        seen
+    }
+
+    /// Mount the page with the flag (and a controller) and focus the field by
+    /// a tap, typing one character.
+    fn mount(dismiss: bool, controller: bool) -> (Root, Logic, Form) {
+        let mut logic: Logic = page;
+        let mut state = Form {
+            dismiss,
+            controller: controller.then(ScrollController::new),
+            ..Form::default()
+        };
+        let mut root = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state);
+        let at = field_centre(&root, 0);
+        root.event(&mut state, &touch(PointerPhase::Down, at));
+        root.event(&mut state, &touch(PointerPhase::Up, at));
+        frame(&mut root, &mut logic, &mut state);
+        root.event(&mut state, &commit("a"));
+        frame(&mut root, &mut logic, &mut state);
+        assert_eq!(state.first, "a", "the focused field types");
+        (root, logic, state)
+    }
+
+    fn assert_dismissed(root: &Root) {
+        assert!(!root.is_focus_active(), "the session ended");
+        assert_eq!(root.ime_state(), None, "the keyboard went away");
+    }
+
+    /// Far enough down the page that the caption is off screen and a downward
+    /// drag scrolls in range instead of overscrolling.
+    const BELOW: (f64, f64) = (10.0, 150.0);
+
+    #[test]
+    fn a_downward_drag_dismisses_the_keyboard_and_still_scrolls() {
+        let (mut root, mut logic, mut state) = mount(true, true);
+        let controller = state.controller.clone().unwrap();
+        controller.jump_to(100.0);
+        frame(&mut root, &mut logic, &mut state);
+        assert!(root.is_focus_active(), "a controller move does not dismiss");
+        let seen = drag_by(&mut root, &mut logic, &mut state, BELOW, 10.0);
+        assert_dismissed(&root);
+        assert!(seen[3] < 100.0, "the drag kept scrolling: {seen:?}");
+        assert!(seen.windows(2).all(|w| w[1] <= w[0]), "monotonic: {seen:?}");
+    }
+
+    #[test]
+    fn a_downward_drag_from_the_caption_dismisses_too() {
+        let (mut root, mut logic, mut state) = mount(true, false);
+        let before = field_centre(&root, 0).1;
+        drag_by(&mut root, &mut logic, &mut state, CAPTION, 10.0);
+        assert_dismissed(&root);
+        assert!(field_centre(&root, 0).1 > before, "and the page moved");
+    }
+
+    #[test]
+    fn an_upward_drag_keeps_the_session_with_the_flag_on() {
+        let (mut root, mut logic, mut state) = mount(true, false);
+        drag_by(&mut root, &mut logic, &mut state, (10.0, 150.0), -10.0);
+        assert_still_typing(&mut root, &mut logic, &mut state, "abc");
+    }
+
+    #[test]
+    fn a_downward_drag_keeps_the_session_with_the_flag_off() {
+        let (mut root, mut logic, mut state) = mount(false, false);
+        drag_by(&mut root, &mut logic, &mut state, CAPTION, 10.0);
+        assert_still_typing(&mut root, &mut logic, &mut state, "abc");
+    }
+
+    #[test]
+    fn a_wheel_scroll_and_a_jump_never_dismiss() {
+        let (mut root, mut logic, mut state) = mount(true, true);
+        let controller = state.controller.clone().unwrap();
+        for dy in [40.0, -20.0] {
+            root.event(
+                &mut state,
+                &InputEvent::Scroll {
+                    position: Point::new(10.0, 150.0),
+                    delta: ScrollDelta::Pixels(0.0, dy),
+                },
+            );
+            frame(&mut root, &mut logic, &mut state);
+        }
+        assert!(controller.offset() > 0.0, "the wheel scrolled");
+        controller.jump_to(0.0);
+        frame(&mut root, &mut logic, &mut state);
+        controller.jump_to(120.0);
+        frame(&mut root, &mut logic, &mut state);
+        assert_still_typing(&mut root, &mut logic, &mut state, "abc");
+    }
+
+    #[test]
+    fn a_downward_drag_on_a_scroll_view_without_the_focus_leaves_it() {
+        // The focused field sits outside the scroll view.
+        let mut logic = |_: &mut Form| {
+            column()
+                .child(
+                    SizedBox(Some(W), Some(100.0)).child(
+                        scroll_view(
+                            column()
+                                .child(SizedBox(Some(W), Some(40.0)).child(text("Caption")))
+                                .child(SizedBox(Some(W), Some(1000.0))),
+                        )
+                        .dismiss_keyboard_on_drag(true),
+                    ),
+                )
+                .child(text_input(String::new(), |s: &mut Form, v: String| {
+                    s.first = v
+                }))
+        };
+        let mut state = Form::default();
+        let mut root = RenderRoot::new();
+        frame(&mut root, &mut logic, &mut state);
+        let at = field_centre(&root, 0);
+        root.event(&mut state, &touch(PointerPhase::Down, at));
+        root.event(&mut state, &touch(PointerPhase::Up, at));
+        frame(&mut root, &mut logic, &mut state);
+        assert!(root.is_focus_active(), "the tap focused the field");
+        root.event(&mut state, &touch(PointerPhase::Down, (10.0, 20.0)));
+        for step in 1..=4 {
+            let y = 20.0 + 10.0 * f64::from(step);
+            root.event(&mut state, &touch(PointerPhase::Move, (10.0, y)));
+            frame(&mut root, &mut logic, &mut state);
+        }
+        assert!(root.is_focus_active(), "a drag elsewhere keeps the session");
+        assert!(root.ime_state().is_some());
+    }
+
+    #[test]
+    fn dismissal_does_not_trigger_a_reveal_jump() {
+        let (mut on_root, mut on_logic, mut on) = mount(true, true);
+        let (mut off_root, mut off_logic, mut off) = mount(false, true);
+        for (root, logic, state) in [
+            (&mut on_root, &mut on_logic, &mut on),
+            (&mut off_root, &mut off_logic, &mut off),
+        ] {
+            state.controller.clone().unwrap().jump_to(100.0);
+            frame(root, logic, state);
+        }
+        let with = drag_by(&mut on_root, &mut on_logic, &mut on, BELOW, 10.0);
+        let without = drag_by(&mut off_root, &mut off_logic, &mut off, BELOW, 10.0);
+        assert_dismissed(&on_root);
+        assert_eq!(
+            with, without,
+            "no frame of the drag differs from the undismissed one"
+        );
+        let controller = on.controller.clone().unwrap();
+        let mut last = controller.offset();
+        for _ in 0..30 {
+            frame(&mut on_root, &mut on_logic, &mut on);
+            assert!(
+                controller.offset() <= last + 1e-6,
+                "no jump back after the dismissal"
+            );
+            last = controller.offset();
+        }
     }
 }

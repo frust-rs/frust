@@ -549,7 +549,7 @@ the sliver protocol (`frust_core::sliver`, see CORE_ARCHITECTURE.md). The layout
 
 Paint runs last to first, hit-testing first to last, within `hit_test_extent`; the semantics node is
 `Role::ScrollView` with `scroll_x`/`scroll_y` per axis. An unbounded main axis shrink-wraps; a
-horizontal viewport builds its core on its own axis (only the stretch overscroll transform is transposed). A vertical `ScrollView` holding the focused widget scrolls its caret into view (`reveal_focused_caret(bool)`, default on; `ListView`/`CustomScrollView` do not).
+horizontal viewport builds its core on its own axis (only the stretch overscroll transform is transposed). A vertical `ScrollView` holding the focused widget scrolls its caret into view (`reveal_focused_caret(bool)`, default on) and can end the focus session on a downward drag (`dismiss_keyboard_on_drag(bool)`, default off); `ListView`/`CustomScrollView` do neither.
 
 | Sliver | Behavior |
 |--------|----------|
