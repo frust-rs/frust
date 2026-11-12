@@ -9,9 +9,12 @@
 //! 3. an obscured field, C, classified as a password input;
 //! 4. a "Push full-width route" button and a navigator that spans the page edge to edge, with no
 //!    horizontal padding of its own (the pushed pages show their depth and their own Push);
-//! 5. numbered filler rows, so the last field sits where the on-screen keyboard will cover it;
+//! 5. numbered filler rows, so the last field sits near the bottom of the page, where the
+//!    on-screen keyboard opens;
 //! 6. field D at the very end of the page, just above the shell's bottom navigation bar once
-//!    the page is scrolled to its end.
+//!    the page is scrolled to its end. At phone width the shell holds the page and that bar above
+//!    the keyboard (a keyboard-aware safe area), so with the keyboard open the page body ends at
+//!    the keyboard's top edge and the focused field scrolls into view above it.
 //!
 //! # What the framework cannot do here
 //!
@@ -242,7 +245,8 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
         .child(SizedBox::<PlaygroundState>(None, Some(NAV_H)).child(full_width_navigator(forms)))
         .child(SizedBox(None, Some(8.0)))
         .child(caption(
-            "Filler rows: scroll down to field D, where the keyboard covers it.",
+            "Filler rows: scroll down to field D, then focus it; the page should end at the \
+             top of the keyboard and keep D in view.",
         ))
         .children(views(
             (1..=FILLER_ROWS).map(|n| inset(text(format!("Filler row {n}")).size(13.0))),
@@ -252,8 +256,9 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
         .child(inset(field("D", forms.d, focus, submits)))
         .child(caption(
             "D is the last row of the page: it sits just above the bottom navigation bar \
-             when scrolled to the end. With the keyboard open the content should shift \
-             clear of the keyboard.",
+             when scrolled to the end. With the keyboard open the navigation bar sits \
+             directly above the keyboard, the page ends at its top edge, and the content \
+             does not move down.",
         ))
         .child(SizedBox(None, Some(8.0)))
 }
