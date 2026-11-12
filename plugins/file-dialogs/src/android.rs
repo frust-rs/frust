@@ -472,7 +472,7 @@ pub(crate) fn export_file(
 /// Copies the document at `uri` over `destination`.
 pub(crate) fn copy_content_uri(uri: &str, destination: &Path) -> Result<(), FileDialogError> {
     refuse_ui_thread()?;
-    copy_document(uri, destination, NO_LIMIT)
+    copy_document(uri, destination, NO_LIMIT, false)
 }
 
 /// Reads the document at `uri`, refusing one larger than `max_bytes`.
@@ -481,7 +481,30 @@ pub(crate) fn read_content_uri(uri: &str, max_bytes: u64) -> Result<Vec<u8>, Fil
     let dir = new_call_dir()?;
     let file = dir.join("read");
     let limit = jlong::try_from(max_bytes).unwrap_or(jlong::MAX);
-    let result = copy_document(uri, &file, limit).and_then(|()| fs::read(&file).map_err(io_error));
+    let result = copy_document(uri, &file, limit, false)
+        .and_then(|()| fs::read(&file).map_err(io_error))
+        .map_err(|err| match err {
+            FileDialogError::TooLarge { .. } => FileDialogError::TooLarge {
+                limit: max_bytes,
+                size: None,
+            },
+            other => other,
+        });
+    remove_call_dir(&dir);
+    result
+}
+
+/// Reads the first `max_bytes` bytes of the document at `uri`; a longer one is cut short.
+pub(crate) fn read_prefix_content_uri(
+    uri: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>, FileDialogError> {
+    refuse_ui_thread()?;
+    let dir = new_call_dir()?;
+    let file = dir.join("read");
+    let limit = jlong::try_from(max_bytes).unwrap_or(jlong::MAX);
+    let result =
+        copy_document(uri, &file, limit, true).and_then(|()| fs::read(&file).map_err(io_error));
     remove_call_dir(&dir);
     result
 }
@@ -493,27 +516,53 @@ fn note_ignored_hints(request: &Request) {
     }
 }
 
-/// One `copyDocument` request and its wait.
-fn copy_document(uri: &str, destination: &Path, limit: jlong) -> Result<(), FileDialogError> {
+/// One `copyDocument` request (or `copyDocumentPrefix` when `truncate`) and its wait.
+fn copy_document(
+    uri: &str,
+    destination: &Path,
+    limit: jlong,
+    truncate: bool,
+) -> Result<(), FileDialogError> {
     let dest = utf8(destination)?;
-    let answer = run_request(None, None, |env, class, id| {
-        run_jni(env, "FrustFileDialogsHost.copyDocument", |env| {
-            let uri = env.new_string(uri)?;
-            let dest = env.new_string(dest)?;
-            env.call_static_method(
-                class,
-                jni_str!("copyDocument"),
-                jni_sig!("(JLjava/lang/String;Ljava/lang/String;J)I"),
-                &[
-                    JValue::Long(id),
-                    JValue::Object(&uri),
-                    JValue::Object(&dest),
-                    JValue::Long(limit),
-                ],
-            )?
-            .i()
-        })
-    })?;
+    let answer = if truncate {
+        run_request(None, None, |env, class, id| {
+            run_jni(env, "FrustFileDialogsHost.copyDocumentPrefix", |env| {
+                let uri = env.new_string(uri)?;
+                let dest = env.new_string(dest)?;
+                env.call_static_method(
+                    class,
+                    jni_str!("copyDocumentPrefix"),
+                    jni_sig!("(JLjava/lang/String;Ljava/lang/String;J)I"),
+                    &[
+                        JValue::Long(id),
+                        JValue::Object(&uri),
+                        JValue::Object(&dest),
+                        JValue::Long(limit),
+                    ],
+                )?
+                .i()
+            })
+        })?
+    } else {
+        run_request(None, None, |env, class, id| {
+            run_jni(env, "FrustFileDialogsHost.copyDocument", |env| {
+                let uri = env.new_string(uri)?;
+                let dest = env.new_string(dest)?;
+                env.call_static_method(
+                    class,
+                    jni_str!("copyDocument"),
+                    jni_sig!("(JLjava/lang/String;Ljava/lang/String;J)I"),
+                    &[
+                        JValue::Long(id),
+                        JValue::Object(&uri),
+                        JValue::Object(&dest),
+                        JValue::Long(limit),
+                    ],
+                )?
+                .i()
+            })
+        })?
+    };
     match answer {
         Answer::Code(SAVED) => Ok(()),
         other => Err(failure(other)),
@@ -692,7 +741,11 @@ fn error_for(code: jint) -> FileDialogError {
         ERROR => FileDialogError::Io,
         TOO_LARGE => {
             log::warn!("frust-file-dialogs: the document exceeds the read limit");
-            FileDialogError::Io
+            // The caller fills in the limit and any size it knows.
+            FileDialogError::TooLarge {
+                limit: 0,
+                size: None,
+            }
         }
         GRANT_FAILED => {
             log::warn!("frust-file-dialogs: the system refused to persist the folder grant");

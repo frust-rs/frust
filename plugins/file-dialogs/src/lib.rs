@@ -107,6 +107,15 @@ pub enum FileDialogError {
     /// Reading, writing or copying a file failed.
     #[error("a file operation failed")]
     Io,
+    /// A file is longer than the byte limit given to a read. `size` is the file's length when
+    /// the platform reported it.
+    #[error("{}", too_large_message(*.limit, *.size))]
+    TooLarge {
+        /// The byte limit the read was given.
+        limit: u64,
+        /// The file's length in bytes, when known.
+        size: Option<u64>,
+    },
     /// The platform dialog or storage API reported a failure.
     #[error("the platform file dialog failed")]
     Platform,
@@ -114,6 +123,13 @@ pub enum FileDialogError {
     /// its own result (`Ok(None)`, an empty `Vec` or [`ExportOutcome::Cancelled`]).
     #[error("the file dialog call was cancelled")]
     Cancelled,
+}
+
+fn too_large_message(limit: u64, size: Option<u64>) -> String {
+    match size {
+        Some(size) => format!("the file is {size} bytes, over the {limit} byte read limit"),
+        None => format!("the file is over the {limit} byte read limit"),
+    }
 }
 
 /// Loading progress of a call, delivered to [`FileDialog::on_progress`].

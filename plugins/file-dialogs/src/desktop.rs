@@ -114,6 +114,13 @@ pub(crate) fn read_content_uri(_uri: &str, _max_bytes: u64) -> Result<Vec<u8>, F
     Err(FileDialogError::Unsupported)
 }
 
+pub(crate) fn read_prefix_content_uri(
+    _uri: &str,
+    _max_bytes: u64,
+) -> Result<Vec<u8>, FileDialogError> {
+    Err(FileDialogError::Unsupported)
+}
+
 /// A token is a `&str`, so a path that is not valid UTF-8 cannot be persisted.
 fn grant_for(path: PathBuf) -> Result<FolderGrant, FileDialogError> {
     let Some(token) = path.to_str().map(str::to_owned) else {
