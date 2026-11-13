@@ -135,7 +135,7 @@ jobs:
       # slow doctests; the named integration tests need the
       # feature and compile to nothing without it.
       - name: Facade test-support tests
-        run: cargo test -p frust-ui --features test-support --locked --lib --test handler_owner --test semantics_wrapper --test lifecycle_isolation --test caret_reveal --test keyboard_dismiss
+        run: cargo test -p frust-ui --features test-support --locked --lib --test handler_owner --test semantics_wrapper --test lifecycle_isolation --test caret_reveal --test keyboard_dismiss --test start_gate --test start_gate_deep_link_before --test start_gate_deep_link_during --test start_gate_deep_link_none
       # The `gpu` feature arms are not compiled by the workspace run above;
       # `crates/frust/tests/gpu_seam.rs` only exists with the feature on.
       - name: Shell-common gpu tests

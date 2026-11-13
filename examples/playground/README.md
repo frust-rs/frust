@@ -292,6 +292,12 @@ The sections, in order:
     blur callback, so the status line shows the last caret report. The shell adds no inset around
     the page; the navigator is at the left edge in portrait at phone width (with the wide-width
     side rail it starts at the rail's right edge). Deep link: `frustplay://section/forms`.
+26. **Gate** — a `frust::StartGate` over a task that waits about two seconds. A **Fail next
+    run** checkbox (read when a run starts) makes the task fail instead of succeed; **Run
+    again** remounts the gate so the task runs again. Expect a splash line, then a ready line
+    with the run number and elapsed milliseconds; with the toggle on, the default error view
+    (message and **Retry**), where Retry shows the splash and runs the task again. Deep link:
+    `frustplay://section/gate`.
 
 The Terminal fixtures live in [`fixtures/terminal/`](fixtures/terminal/README.md)
 (bytes + the deterministic generator that produced them, embedded with
