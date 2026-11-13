@@ -922,6 +922,12 @@ mod tests {
             build_gradle.contains(&format!("\"{}\"", ctx.android_identifier())),
             "{build_gradle}"
         );
+        for identity_key in ["frust.applicationId", "frust.appLabel", "frustAppLabel"] {
+            assert!(
+                build_gradle.contains(identity_key),
+                "{identity_key}: {build_gradle}"
+            );
+        }
 
         // `androidIdentifier` path segment expands to nested package
         // directories from the dotted `android_identifier` value.
@@ -1439,7 +1445,7 @@ mod tests {
              \x20\x20\x20\x20<application\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:allowBackup=\"true\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:icon=\"@mipmap/ic_launcher\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"{title}\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"${{frustAppLabel}}\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:roundIcon=\"@mipmap/ic_launcher_round\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.Material.NoActionBar\">\n\
              \n\
@@ -1460,7 +1466,6 @@ mod tests {
              \x20\x20\x20\x20</application>\n\
              \n\
              </manifest>\n",
-            title = ctx.title_case_name,
             project = ctx.project_name,
         );
         assert_eq!(manifest, expected);

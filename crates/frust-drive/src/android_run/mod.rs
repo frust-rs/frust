@@ -267,7 +267,7 @@ fn prepare_session_with(
     native: NativeLib<'_, '_>,
     launched: &mut Option<String>,
 ) -> Result<Option<PreparedSession>> {
-    let project = project::detect(root)?;
+    let project = project::detect_flavor(root, info.flavor.as_deref())?;
     let android_dir = project::require_android_dir(&project.root)?;
 
     // r1-04 replaced AGP's default jniLibs source set with the `build/`
@@ -295,8 +295,21 @@ fn prepare_session_with(
     let resolved = crate::build_info::resolve_version(info, manifest.as_ref());
     // The run lane does not warn about a defaulted version (debug installs).
     let (version_name, version_code) = resolved.android_name_and_code();
-    crate::android_build::local_properties::write(&android_dir, &version_name, &version_code)
-        .context("writing android/local.properties")?;
+    // The resolved identity rides `local.properties` (set when explicit,
+    // removed otherwise) and decides whether a `--flavor` is a Gradle product
+    // flavor, exactly as on the `frust build` lane.
+    crate::android_build::local_properties::write(
+        &android_dir,
+        &version_name,
+        &version_code,
+        Some(&project.identity),
+    )
+    .context("writing android/local.properties")?;
+    let route = crate::android_build::tasks::FlavorRoute::for_project(
+        &android_dir,
+        info.flavor.as_deref(),
+        project.identity.flavor_declared,
+    );
 
     // One source of truth for signing (see `android_build::signing`): the gate
     // resolves `[signing]` and the material it verified is handed to Gradle as
@@ -354,7 +367,7 @@ fn prepare_session_with(
             .map_err(|err| anyhow::anyhow!(err))?;
     }
 
-    let task = crate::android_build::tasks::task_name(&target, info.mode, info.flavor.as_deref());
+    let task = crate::android_build::tasks::task_name(&target, info.mode, route.gradle_flavor());
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
     let props =
         crate::android_build::tasks::gradle_properties(&target, &info.defines, &feature_refs);
@@ -441,11 +454,36 @@ fn prepare_session_with(
     let apk_path = crate::android_build::artifacts::discover_single_apk_since(
         &project.root,
         info.mode,
-        info.flavor.as_deref(),
+        route.gradle_flavor(),
         Some(build_start_time),
         on_line,
     )?;
     let apk_path = apk_path.to_string_lossy().into_owned();
+
+    // The *installed* identity, read back out of the APK just built rather
+    // than derived from `frust.toml`: a Gradle flavor's `applicationIdSuffix`
+    // moves the package, and AGP roots the launchable activity's class at the
+    // module namespace instead, so both halves of the `am start -n` component
+    // (and the `pidof` package) can differ from the frust.toml-derived id.
+    // Read before install, so an explicit identity the APK does not carry
+    // fails here rather than on the device. Unreadable badging is a warning,
+    // not an error — the launch fallback is right for a project with no
+    // flavor.
+    let badging = badging::read(runner, env, &apk_path);
+    if let Err(reason) = &badging {
+        on_line(&badging::fallback_warning(reason));
+    }
+    if project.identity.explicit
+        && let Some((_, base)) = crate::android_build::resolve_identity(manifest.as_ref(), None)?
+    {
+        crate::android_build::check_built_identity(
+            badging.as_ref().map_err(String::as_str),
+            &project.identity,
+            &base,
+            &route,
+            on_line,
+        )?;
+    }
 
     on_line(&format!("Installing on {}…", device.name));
     let install_start = Instant::now();
@@ -462,20 +500,9 @@ fn prepare_session_with(
         return Ok(None);
     }
 
-    // The *installed* identity, read back out of the APK just built and
-    // installed rather than derived from `frust.toml`: a Gradle flavor's
-    // `applicationIdSuffix` moves the package, and AGP roots the launchable
-    // activity's class at the module namespace instead, so both halves of the
-    // `am start -n` component (and the `pidof` package) differ from the
-    // frust.toml-derived id. Unreadable badging is a warning, not an error —
-    // the fallback below is exactly right for a project with no flavor.
-    let (identity, badging_warning) = badging::resolve(runner, env, &apk_path);
-    if let Some(badging_warning) = badging_warning {
-        on_line(&badging_warning);
-    }
-    let (component, package) = match identity {
-        Some(identity) => (identity.component(), identity.package),
-        None => (
+    let (component, package) = match badging {
+        Ok(identity) => (identity.component(), identity.package),
+        Err(_) => (
             adb::default_component(&project.app_id),
             project.app_id.clone(),
         ),
@@ -1898,6 +1925,78 @@ mod tests {
             );
 
             let _ = fs::remove_dir_all(&dir);
+        }
+
+        /// A flavor declared only in frust.toml: the run lane assembles the
+        /// plain variant, installs its unflavored APK and stamps the
+        /// suffixed identity into local.properties; a built package that
+        /// does not carry it fails before `adb install` (none is registered).
+        #[test]
+        fn a_frust_toml_flavor_runs_the_plain_variant_and_checks_before_install() {
+            for (tag, package) in [
+                ("toml-flavor-ok", "dev.f0x.myapp.dev"),
+                ("toml-flavor-stale", "dev.f0x.myapp"),
+            ] {
+                let dir = unique_project_dir(tag);
+                fs::write(
+                    dir.join("frust.toml"),
+                    "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[flavors.dev]\napp-id-suffix = \".dev\"\n",
+                )
+                .unwrap();
+                let out_dir = output_dir(&dir, BuildMode::Debug, None);
+                fs::create_dir_all(&out_dir).unwrap();
+                fs::write(out_dir.join("app-debug.apk"), b"fake").unwrap();
+                let apk_path = out_dir.join("app-debug.apk").to_string_lossy().into_owned();
+                let (aapt2, android_home) = plant_aapt2(&dir);
+                let base = preflight_ok_runner()
+                    .with(
+                        gradlew_key(
+                            &dir,
+                            "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                        ),
+                        ok("BUILD SUCCESSFUL"),
+                    )
+                    .with(
+                        format!("{aapt2} dump badging {apk_path}"),
+                        ok(&format!(
+                            "package: name='{package}'\napplication-label:'Myapp'\n\
+                             launchable-activity: name='dev.f0x.myapp.MainActivity'\n"
+                        )),
+                    );
+                let stale = package == "dev.f0x.myapp";
+                let runner = if stale {
+                    base
+                } else {
+                    stop_after_install(base, &apk_path)
+                };
+
+                let never = AtomicBool::new(false);
+                let err = prepare_session(
+                    &runner,
+                    &dir,
+                    &device(),
+                    &info(BuildMode::Debug, Some("dev")),
+                    NO_EXTRA,
+                    &fake_env().set("ANDROID_HOME", &android_home),
+                    &mut |_| {},
+                    &never,
+                )
+                .err()
+                .expect("both fixtures stop the run");
+                let message = err.to_string();
+                if stale {
+                    assert!(message.contains("`dev.f0x.myapp.dev`"), "{message}");
+                    assert!(!message.contains("adb install"), "{message}");
+                } else {
+                    assert!(message.contains("adb install"), "{message}");
+                }
+                let props = fs::read_to_string(dir.join("android/local.properties")).unwrap();
+                assert!(
+                    props.contains("frust.applicationId=dev.f0x.myapp.dev\n"),
+                    "{props}"
+                );
+                let _ = fs::remove_dir_all(&dir);
+            }
         }
 
         /// The TUI streaming seam drives the same build→install→launch core and
