@@ -96,6 +96,77 @@ A project that ships its own `macos/Info.plist` has it copied verbatim and never
 
 `frust run` on an iOS simulator passes no version, so the Xcode project's values apply there.
 
+## Identifiers and flavors
+
+`frust-drive::identity::resolve` gives each Android or iOS build one identity: an application id /
+bundle identifier and a display name. The identifier is `[android] identifier` / `[ios] identifier`
+when set (checked by the same rules as a derived one), else derived from `[app] org` and `name`
+(`dev.f0x.my_app` on Android, `dev.f0x.myApp` on iOS). The display name is `[app] name` in title
+case. A flavor declared as `[flavors.<name>]` appends its suffixes to both:
+
+```toml
+[flavors.dev]               # name: lowercase letters and digits, starting with a letter
+app-id-suffix = ".dev"      # starts with `.`; each segment starts with a letter, then letters/digits
+app-name-suffix = " Dev"    # appended verbatim to the display name
+```
+
+An invalid name or suffix, or another key, is rejected when `frust.toml` is read, naming the flavor.
+An identity is *explicit* when `frust.toml` pins it (an `identifier` or a declared flavor); only an
+explicit identity is applied or checked, otherwise the project's own values stand. `frust create`
+writes both `identifier` keys and a commented `[flavors.dev]`.
+
+Android gets `frust.applicationId` and `frust.appLabel` in the gitignored `android/local.properties`
+(removed again when the identity is not explicit), read by `app/build.gradle.kts`. iOS gets
+`PRODUCT_BUNDLE_IDENTIFIER` and `FRUST_DISPLAY_NAME` on the `xcodebuild` command line. `frust run`
+and `frust build` edit no tracked file. Not applied: the Android `namespace`, deep links, icons,
+other native config files and the `[desktop]` identifiers; `frust create` renders those once.
+
+### Flavors
+
+| `--flavor <name>` | Android | iOS |
+|---|---|---|
+| Only in `[flavors]` | Plain `assemble<Mode>`/`bundle<Mode>` with the suffixed identity | `Runner` scheme, plain `<Mode>` configuration, suffixed identity |
+| Native flavor / scheme exists | Flavored task; wins over `[flavors]` | Scheme `<Flavor>`, configuration `<Mode>-<Flavor>`; wins over `[flavors]` |
+| Neither | Error naming `[flavors.<name>]` | Error listing the schemes, naming `[flavors.<name>]` |
+
+The native Gradle flavor is found by a text scan of `android/app/build.gradle.kts` for a
+`productFlavors` block with `create("x")`, `register("x")` or `"x" {` (comments ignored); one added
+any other way is not seen. A native flavor that `frust.toml` does not declare keeps its own
+identity. On Android `[android] identifier`, if set, still reaches `local.properties` as the base,
+the application id comparison is skipped with a note (the flavor may add an
+`applicationIdSuffix`) and the label check runs. On iOS nothing is passed and nothing is checked.
+The iOS simulator run is fixed to `Runner`: a declared flavor applies its suffixes, a native-scheme
+flavor is not built and the base identity is used.
+
+### Post-build check
+
+`frust build` and `frust run` (before install) compare the built APK (`aapt2 dump badging`) or
+`.app` (`plutil`; the archive for `ipa`) with an explicit identity. A different application id /
+`CFBundleIdentifier` is an error; a different app label / `CFBundleDisplayName` is a warning with the
+migration lines below. It is skipped with a note when `aapt2` cannot read the APK, the Android
+flavor is native (id only) or the target is an `.aab`; silently for an unreadable plist key, a
+derived identity, an undeclared native iOS flavor or an `ipa` archive with no `.app`.
+
+### Migrating an existing project
+
+A project created before this reads neither setting; the check above reports it.
+`examples/playground` is the worked example, and the lines come from the templates under
+`crates/frust-drive/templates/app/`. Android (the literals are the project's own id and name):
+
+```kotlin
+// android/app/build.gradle.kts, beside the frust.versionName read
+val applicationIdValue = localProperties.getProperty("frust.applicationId", "it.f0x.playground")
+val appLabelValue = localProperties.getProperty("frust.appLabel", "Playground")
+// in defaultConfig
+applicationId = applicationIdValue
+manifestPlaceholders["frustAppLabel"] = appLabelValue
+```
+
+In `AndroidManifest.xml`, `<application>` takes `android:label="${frustAppLabel}"`. On iOS,
+`Info.plist` takes `CFBundleDisplayName` = `$(FRUST_DISPLAY_NAME)` and `CFBundleIdentifier` =
+`$(PRODUCT_BUNDLE_IDENTIFIER)`; `project.pbxproj` gets `FRUST_DISPLAY_NAME = "<current name>";`
+beside `PRODUCT_BUNDLE_IDENTIFIER` in each Runner build configuration.
+
 ## Adding android/ and ios/ to an existing crate
 
 No command does this. The CLI commands are `create`, `doctor`, `devices`, `clean`, `plugin`,
