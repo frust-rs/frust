@@ -1,11 +1,13 @@
 //! Android release build pipeline: preflight (reusing `android_run`'s
-//! checks, minus the device-only `adb` one) → merge-write
+//! checks, minus the device-only `adb` one) → resolve the app identity
+//! (`crate::identity`) and merge-write it with the version into
 //! `android/local.properties` → gate release builds on a keystore and hand
 //! the resolved material to Gradle as a short-lived
 //! `android/.frust-signing.properties` → compute
-//! the `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>` Gradle task and its
-//! `-P` properties → run `./gradlew` → glob-verify and report the produced
-//! artifact(s).
+//! the `assemble<Flavor><Mode>`/`bundle<Flavor><Mode>` Gradle task (see
+//! [`tasks::FlavorRoute`]) and its `-P` properties → run `./gradlew` →
+//! glob-verify and report the produced artifact(s) → check an explicit
+//! identity against the built APK ([`check_built_identity`]).
 
 // `pub(crate)`, not private: `android_run::run` reuses these helpers
 // directly (task-name/`-P`-property computation, the local.properties
@@ -20,11 +22,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::android_run::badging::LaunchIdentity;
 use crate::android_run::preflight::{self, PreflightCtx};
 use crate::build_info::{BuildInfo, BuildMode, resolve_version};
 use crate::doctor::{EnvLookup, RealEnv};
 use crate::facade_key::FacadeKey;
+use crate::identity::{self, AppIdentity, IdentityPlatform};
+use crate::manifest::Manifest;
 use crate::process::{ProcessRunner, tail_lines};
+use tasks::FlavorRoute;
 
 /// The artifact `frust build apk`/`appbundle` requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,8 +136,23 @@ fn build_with_env(
     if info.mode == BuildMode::Release && resolved.is_defaulted() {
         on_line(&resolved.android_unset_warning());
     }
-    local_properties::write(&android_dir, &version_name, &version_code)
-        .context("writing android/local.properties")?;
+    // The identity rides `local.properties` (set when explicit, removed
+    // otherwise), and decides whether a `--flavor` is a Gradle product flavor.
+    let app_identity = resolve_identity(manifest.as_ref(), info.flavor.as_deref())?;
+    local_properties::write(
+        &android_dir,
+        &version_name,
+        &version_code,
+        app_identity.as_ref().map(|(expected, _)| expected),
+    )
+    .context("writing android/local.properties")?;
+    let route = FlavorRoute::for_project(
+        &android_dir,
+        info.flavor.as_deref(),
+        app_identity
+            .as_ref()
+            .is_some_and(|(expected, _)| expected.flavor_declared),
+    );
 
     // One source of truth for signing: the gate resolves `[signing]`, and the
     // material it verified is handed to Gradle as
@@ -177,7 +198,7 @@ fn build_with_env(
             .map_err(|err| anyhow::anyhow!(err))?;
     }
 
-    let task = tasks::task_name(target, info.mode, info.flavor.as_deref());
+    let task = tasks::task_name(target, info.mode, route.gradle_flavor());
     let feature_refs: Vec<&str> = features.iter().map(String::as_str).collect();
     let props = tasks::gradle_properties(target, &info.defines, &feature_refs);
 
@@ -226,7 +247,8 @@ fn build_with_env(
         {
             bail!(
                 "flavor '{flavor}' has no Gradle product flavor — declare it in \
-                 android/app/build.gradle.kts (see the commented example)"
+                 android/app/build.gradle.kts (see the commented example), or declare \
+                 `[flavors.{flavor}]` in frust.toml"
             );
         }
         let tail = tail_lines(&out.stderr, 50);
@@ -252,7 +274,7 @@ fn build_with_env(
         project_dir,
         target,
         info.mode,
-        info.flavor.as_deref(),
+        route.gradle_flavor(),
         on_line,
     )?;
     for path in &paths {
@@ -260,7 +282,130 @@ fn build_with_env(
         on_line(&format!("{} ({size} bytes)", path.display()));
     }
 
+    if let Some((expected, base)) = app_identity.as_ref().filter(|(id, _)| id.explicit) {
+        match (target, paths.first()) {
+            (AndroidArtifact::Apk { .. }, Some(apk)) => {
+                let apk = apk.to_string_lossy();
+                let badging = crate::android_run::badging::read(runner, env, &apk);
+                check_built_identity(
+                    badging.as_ref().map_err(String::as_str),
+                    expected,
+                    base,
+                    &route,
+                    on_line,
+                )?;
+            }
+            (AndroidArtifact::Apk { .. }, None) => {}
+            (AndroidArtifact::Appbundle, _) => on_line(&format!(
+                "note: the application id of an .aab is not verified (frust.toml resolves `{}`).",
+                expected.identifier
+            )),
+        }
+    }
+
     Ok(BuiltArtifacts { paths })
+}
+
+/// The Android identity a build of `flavor` must produce, paired with the
+/// no-flavor identity whose values are the template defaults the guidance
+/// lines name; `None` when the project has no manifest.
+pub(crate) fn resolve_identity(
+    manifest: Option<&Manifest>,
+    flavor: Option<&str>,
+) -> Result<Option<(AppIdentity, AppIdentity)>> {
+    manifest
+        .map(|manifest| -> Result<_, identity::IdentityError> {
+            Ok((
+                identity::resolve(manifest, IdentityPlatform::Android, flavor)?,
+                identity::resolve(manifest, IdentityPlatform::Android, None)?,
+            ))
+        })
+        .transpose()
+        .context("resolving the Android application id from frust.toml")
+}
+
+/// The post-build identity check both Android lanes run on the APK they
+/// built, for an explicit `expected` identity only (a derived one writes no
+/// `local.properties` override, so the project's own values are right):
+///
+/// - an application id other than `expected`'s is an error naming both and
+///   carrying the template lines that let `frust.applicationId` reach it (a
+///   project generated before they existed has a literal there) — skipped,
+///   with a note, when `route` built a native Gradle flavor, which may add
+///   its own `applicationIdSuffix`;
+/// - a label other than `expected`'s display name is a `warning:` line with
+///   the same guidance.
+///
+/// `badging` is the APK's badging read, or why it could not be read: that
+/// skips the check with a note rather than failing the build.
+pub(crate) fn check_built_identity(
+    badging: Result<&LaunchIdentity, &str>,
+    expected: &AppIdentity,
+    base: &AppIdentity,
+    route: &FlavorRoute,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<()> {
+    let built = match badging {
+        Ok(built) => built,
+        Err(reason) => {
+            on_line(&format!(
+                "note: the built APK's application id was not verified: {reason}."
+            ));
+            return Ok(());
+        }
+    };
+    if route.is_native() {
+        on_line(&format!(
+            "note: the built APK's application id `{}` was not compared with frust.toml's `{}`: \
+             the native Gradle product flavor may add its own `applicationIdSuffix`.",
+            built.package, expected.identifier
+        ));
+    } else if built.package != expected.identifier {
+        bail!(
+            "the built APK's application id is `{}`, but frust.toml resolves `{}`: \
+             android/app/build.gradle.kts does not read `frust.applicationId`.\n{}",
+            built.package,
+            expected.identifier,
+            identity_guidance(base).join("\n")
+        );
+    }
+    if let Some(label) = built.label.as_deref()
+        && label != expected.display_name
+    {
+        on_line(&format!(
+            "warning: the built APK's label is `{label}`, but frust.toml resolves `{}`: \
+             the project does not read `frust.appLabel`.",
+            expected.display_name
+        ));
+        for line in identity_guidance(base) {
+            on_line(&line);
+        }
+    }
+    Ok(())
+}
+
+/// The lines of the generated templates that carry the resolved identity
+/// into a build, with `base`'s identifier and display name as the defaults a
+/// hand-run Gradle build uses — what an older project adds to adopt it.
+pub(crate) fn identity_guidance(base: &AppIdentity) -> Vec<String> {
+    vec![
+        "Add to android/app/build.gradle.kts, beside the frust.versionName read:".to_string(),
+        format!(
+            "    val applicationIdValue = localProperties.getProperty(\"{}\", \"{}\")",
+            local_properties::APPLICATION_ID_KEY,
+            base.identifier
+        ),
+        format!(
+            "    val appLabelValue = localProperties.getProperty(\"{}\", \"{}\")",
+            local_properties::APP_LABEL_KEY,
+            base.display_name
+        ),
+        "and in its defaultConfig block:".to_string(),
+        "        applicationId = applicationIdValue".to_string(),
+        "        manifestPlaceholders[\"frustAppLabel\"] = appLabelValue".to_string(),
+        "and on <application> in android/app/src/main/AndroidManifest.xml:".to_string(),
+        "        android:label=\"${frustAppLabel}\"".to_string(),
+    ]
 }
 
 /// Heuristically detects Gradle's "task not found" failure for `task`
@@ -1235,6 +1380,10 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("flavor 'paid'"), "{message}");
         assert!(message.contains("build.gradle.kts"), "{message}");
+        assert!(
+            message.contains("`[flavors.paid]` in frust.toml"),
+            "{message}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1422,5 +1571,310 @@ mod tests {
         assert_eq!(result.paths, vec![out_dir.join("app-release.aab")]);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn app_identity(identifier: &str, display_name: &str) -> AppIdentity {
+        AppIdentity {
+            identifier: identifier.to_string(),
+            display_name: display_name.to_string(),
+            explicit: true,
+            flavor: None,
+            flavor_declared: false,
+        }
+    }
+
+    fn launch(package: &str, label: Option<&str>) -> LaunchIdentity {
+        LaunchIdentity {
+            package: package.to_string(),
+            activity: "dev.f0x.myapp.MainActivity".to_string(),
+            label: label.map(str::to_string),
+        }
+    }
+
+    /// Runs [`check_built_identity`] for `expected` against `built`,
+    /// returning its result and every `on_line` line.
+    fn check(
+        built: Result<&LaunchIdentity, &str>,
+        expected: &AppIdentity,
+        route: &FlavorRoute,
+    ) -> (Result<()>, Vec<String>) {
+        let base = app_identity("dev.f0x.myapp", "Myapp");
+        let mut lines = Vec::new();
+        let result = check_built_identity(built, expected, &base, route, &mut |line| {
+            lines.push(line.to_string())
+        });
+        (result, lines)
+    }
+
+    /// Every guidance line is a line of the generated templates, once their
+    /// placeholders are rendered with the guidance's own defaults.
+    #[test]
+    fn identity_guidance_names_the_exact_template_lines() {
+        let gradle = include_str!("../../templates/app/android.tmpl/app/build.gradle.kts.tmpl")
+            .replace("{{ android_identifier }}", "dev.f0x.myapp")
+            .replace("{{ title_case_name }}", "Myapp");
+        let manifest =
+            include_str!("../../templates/app/android.tmpl/app/src/main/AndroidManifest.xml.tmpl");
+        let template_lines: Vec<&str> = gradle
+            .lines()
+            .chain(manifest.lines())
+            .map(str::trim)
+            .collect();
+        let guidance = identity_guidance(&app_identity("dev.f0x.myapp", "Myapp"));
+        let code: Vec<&String> = guidance
+            .iter()
+            .filter(|line| line.starts_with(' '))
+            .collect();
+        assert_eq!(code.len(), 5, "{guidance:?}");
+        for line in code {
+            assert!(
+                template_lines.contains(&line.trim()),
+                "not in the templates: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_matching_apk_passes_silently() {
+        let expected = app_identity("com.example.other", "Other");
+        let built = launch("com.example.other", Some("Other"));
+        let (result, lines) = check(Ok(&built), &expected, &FlavorRoute::Unflavored);
+        result.unwrap();
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn a_package_mismatch_names_both_ids_and_the_template_lines() {
+        let expected = app_identity("com.example.other", "Other");
+        let built = launch("dev.f0x.myapp", Some("Other"));
+        let (result, _) = check(Ok(&built), &expected, &FlavorRoute::Unflavored);
+        let message = result.unwrap_err().to_string();
+        assert!(message.contains("`dev.f0x.myapp`"), "{message}");
+        assert!(message.contains("`com.example.other`"), "{message}");
+        assert!(
+            message.contains(
+                "val applicationIdValue = localProperties.getProperty(\"frust.applicationId\", \"dev.f0x.myapp\")"
+            ),
+            "{message}"
+        );
+        assert!(
+            message.contains("applicationId = applicationIdValue"),
+            "{message}"
+        );
+        assert!(
+            message.contains("android:label=\"${frustAppLabel}\""),
+            "{message}"
+        );
+    }
+
+    /// A native product flavor may add its own suffix: the package is not
+    /// compared (one note says so), the label still is.
+    #[test]
+    fn a_native_flavor_skips_the_package_comparison_with_one_note() {
+        let expected = app_identity("com.example.other", "Other");
+        let built = launch("com.example.other.dev", Some("Other"));
+        let (result, lines) = check(Ok(&built), &expected, &FlavorRoute::Native("dev".into()));
+        result.unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("note:"), "{lines:?}");
+        assert!(lines[0].contains("applicationIdSuffix"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_label_mismatch_is_a_warning_with_the_guidance() {
+        let expected = app_identity("com.example.other", "Other Dev");
+        let built = launch("com.example.other", Some("Myapp"));
+        let (result, lines) = check(
+            Ok(&built),
+            &expected,
+            &FlavorRoute::ManifestOnly("dev".into()),
+        );
+        result.unwrap();
+        let warnings: Vec<&String> = lines.iter().filter(|l| l.starts_with("warning:")).collect();
+        assert_eq!(warnings.len(), 1, "{lines:?}");
+        assert!(warnings[0].contains("`Myapp`") && warnings[0].contains("`Other Dev`"));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.trim() == "manifestPlaceholders[\"frustAppLabel\"] = appLabelValue"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn unreadable_badging_skips_the_check_with_a_note() {
+        let expected = app_identity("com.example.other", "Other");
+        let (result, lines) = check(
+            Err("`aapt2` could not be run (not found)"),
+            &expected,
+            &FlavorRoute::Unflavored,
+        );
+        result.unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].starts_with("note:") && lines[0].contains("aapt2"),
+            "{lines:?}"
+        );
+    }
+
+    /// Plants an SDK with one build-tools `aapt2` under `dir`, returning the
+    /// `aapt2` path and the `ANDROID_HOME` value.
+    fn plant_aapt2(dir: &Path) -> (String, String) {
+        let aapt2_bin = if cfg!(windows) { "aapt2.exe" } else { "aapt2" };
+        let build_tools = dir.join("sdk").join("build-tools").join("35.0.1");
+        fs::create_dir_all(&build_tools).unwrap();
+        let aapt2 = build_tools.join(aapt2_bin);
+        fs::write(&aapt2, "#!/bin/sh\n").unwrap();
+        (
+            aapt2.to_string_lossy().into_owned(),
+            dir.join("sdk").to_string_lossy().into_owned(),
+        )
+    }
+
+    const MANIFEST_DEV_FLAVOR: &str = "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+        [flavors.dev]\napp-id-suffix = \".dev\"\napp-name-suffix = \" Dev\"\n";
+
+    /// A flavor declared only in frust.toml builds the plain variant, writes
+    /// the suffixed identity into local.properties, and the built APK is
+    /// checked against it — a stale literal `applicationId` fails the build.
+    #[test]
+    fn a_frust_toml_flavor_builds_the_plain_variant_and_checks_the_apk() {
+        for (tag, package, ok) in [
+            ("toml-flavor-ok", "dev.f0x.myapp.dev", true),
+            ("toml-flavor-stale", "dev.f0x.myapp", false),
+        ] {
+            let dir = unique_project_dir(tag);
+            fs::write(dir.join("frust.toml"), MANIFEST_DEV_FLAVOR).unwrap();
+            let out_dir = dir.join("build/android/app/outputs/apk/debug");
+            fs::create_dir_all(&out_dir).unwrap();
+            let apk = out_dir.join("app-debug.apk");
+            fs::write(&apk, b"fake").unwrap();
+            let (aapt2, android_home) = plant_aapt2(&dir);
+            let runner = preflight_ok_runner()
+                .with(
+                    gradlew_key(
+                        &dir,
+                        "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+                    ),
+                    Output {
+                        success: true,
+                        stdout: "BUILD SUCCESSFUL".to_string(),
+                        stderr: String::new(),
+                    },
+                )
+                .with(
+                    format!("{aapt2} dump badging {}", apk.display()),
+                    Output {
+                        success: true,
+                        stdout: format!(
+                            "package: name='{package}'\napplication-label:'Myapp Dev'\n\
+                             launchable-activity: name='dev.f0x.myapp.MainActivity'\n"
+                        ),
+                        stderr: String::new(),
+                    },
+                );
+            let mut lines = Vec::new();
+            let result = build_with_env(
+                &runner,
+                &dir,
+                &info(BuildMode::Debug, Some("dev")),
+                &arm64_apk(),
+                NO_EXTRA,
+                &fake_env().set("ANDROID_HOME", &android_home),
+                &mut |line| lines.push(line.to_string()),
+            );
+            let props = fs::read_to_string(dir.join("android/local.properties")).unwrap();
+            assert!(
+                props.contains("frust.applicationId=dev.f0x.myapp.dev\n"),
+                "{props}"
+            );
+            assert!(props.contains("frust.appLabel=Myapp Dev\n"), "{props}");
+            if ok {
+                assert_eq!(result.unwrap().paths, vec![apk]);
+                assert!(
+                    !lines.iter().any(|l| l.starts_with("warning:")),
+                    "{lines:?}"
+                );
+            } else {
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains("`dev.f0x.myapp.dev`"), "{message}");
+            }
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// An explicit appbundle is not verified — one note says so — and a
+    /// later derived build drops the identity keys a flavored build left.
+    #[test]
+    fn an_explicit_appbundle_notes_it_is_unverified_and_keys_do_not_leak() {
+        let dir = unique_project_dir("aab-identity");
+        fs::write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[android]\nidentifier = \"com.example.other\"\n",
+        )
+        .unwrap();
+        write_release_signing(&dir.join("android"));
+        let out_dir = dir.join("build/android/app/outputs/bundle/release");
+        fs::create_dir_all(&out_dir).unwrap();
+        fs::write(out_dir.join("app-release.aab"), b"fake").unwrap();
+        let runner = preflight_ok_runner().with(
+            gradlew_key(
+                &dir,
+                "bundleRelease -Pfrust.targetPlatforms=arm64-v8a,armeabi-v7a,x86_64",
+            ),
+            Output {
+                success: true,
+                stdout: "BUILD SUCCESSFUL".to_string(),
+                stderr: String::new(),
+            },
+        );
+        let run = |lines: &mut Vec<String>| {
+            build_with_env(
+                &runner,
+                &dir,
+                &info(BuildMode::Release, None),
+                &AndroidArtifact::Appbundle,
+                NO_EXTRA,
+                &fake_env(),
+                &mut |line| lines.push(line.to_string()),
+            )
+            .unwrap();
+        };
+        let mut lines = Vec::new();
+        run(&mut lines);
+        let notes: Vec<&String> = lines.iter().filter(|l| l.starts_with("note:")).collect();
+        assert_eq!(notes.len(), 1, "{lines:?}");
+        assert!(notes[0].contains(".aab is not verified"), "{notes:?}");
+        let props = fs::read_to_string(dir.join("android/local.properties")).unwrap();
+        assert!(
+            props.contains("frust.applicationId=com.example.other\n"),
+            "{props}"
+        );
+
+        fs::write(dir.join("frust.toml"), MANIFEST_NO_VERSION).unwrap();
+        let mut lines = Vec::new();
+        run(&mut lines);
+        assert!(!lines.iter().any(|l| l.starts_with("note:")), "{lines:?}");
+        let props = fs::read_to_string(dir.join("android/local.properties")).unwrap();
+        assert!(!props.contains("frust.applicationId"), "{props}");
+        assert!(!props.contains("frust.appLabel"), "{props}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A derived identity with no flavor writes no identity key and runs no
+    /// check: no `aapt2` is registered, and no note is sent.
+    #[test]
+    fn a_derived_identity_builds_exactly_as_before() {
+        let (props, lines) = version_build(
+            "derived-identity",
+            Some(MANIFEST_NO_VERSION),
+            &info(BuildMode::Debug, None),
+            &arm64_apk(),
+            "build/android/app/outputs/apk/debug",
+            "app-debug.apk",
+            "assembleDebug -Pfrust.targetPlatforms=arm64-v8a -Pfrust.splitPerAbi=false",
+        );
+        assert_eq!(props, "frust.versionName=1.0\nfrust.versionCode=1\n");
+        assert!(!lines.iter().any(|l| l.starts_with("note:")), "{lines:?}");
     }
 }

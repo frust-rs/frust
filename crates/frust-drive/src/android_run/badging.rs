@@ -54,6 +54,10 @@ pub struct LaunchIdentity {
     /// The fully-qualified launchable activity class, rooted at the Gradle
     /// module's `namespace` rather than at [`package`](Self::package).
     pub activity: String,
+    /// The default `application-label:` — the launcher label — when the
+    /// badging output carries one. Display text only: never validated, never
+    /// passed to a device shell.
+    pub label: Option<String>,
 }
 
 impl LaunchIdentity {
@@ -76,36 +80,39 @@ pub fn resolve(
     env: &dyn EnvLookup,
     apk_path: &str,
 ) -> (Option<LaunchIdentity>, Option<String>) {
-    let aapt2 = aapt2_command(env);
-    match runner.run(&aapt2, &["dump", "badging", apk_path]) {
-        Ok(out) if out.success => match parse(&out.stdout) {
-            Some(identity) => (Some(identity), None),
-            None => (
-                None,
-                Some(warning(
-                    "its output carried no usable `package:`/`launchable-activity:` line",
-                )),
-            ),
-        },
-        Ok(out) => (
-            None,
-            Some(warning(&format!(
-                "`{aapt2} dump badging` exited non-zero{}",
-                first_line(&out.stderr)
-            ))),
-        ),
-        Err(err) => (
-            None,
-            Some(warning(&format!("`{aapt2}` could not be run ({err})"))),
-        ),
+    match read(runner, env, apk_path) {
+        Ok(identity) => (Some(identity), None),
+        Err(reason) => (None, Some(fallback_warning(&reason))),
     }
 }
 
-/// The one-line warning shape every fallback path emits. Names the concrete
-/// consequence (a suffixed flavor won't launch) rather than only the tool
-/// failure, since on a no-flavor project the fallback is perfectly correct and
-/// the warning is pure noise otherwise.
-fn warning(reason: &str) -> String {
+/// Reads `apk_path`'s identity through `aapt2 dump badging`, or the one-line
+/// reason it could not (no `aapt2`, a non-zero exit, unrecognized output) —
+/// the shared core of [`resolve`] and the build lanes' post-build identity
+/// check, which words its own note around the reason.
+pub(crate) fn read(
+    runner: &dyn ProcessRunner,
+    env: &dyn EnvLookup,
+    apk_path: &str,
+) -> Result<LaunchIdentity, String> {
+    let aapt2 = aapt2_command(env);
+    match runner.run(&aapt2, &["dump", "badging", apk_path]) {
+        Ok(out) if out.success => parse(&out.stdout).ok_or_else(|| {
+            "its output carried no usable `package:`/`launchable-activity:` line".to_string()
+        }),
+        Ok(out) => Err(format!(
+            "`{aapt2} dump badging` exited non-zero{}",
+            first_line(&out.stderr)
+        )),
+        Err(err) => Err(format!("`{aapt2}` could not be run ({err})")),
+    }
+}
+
+/// The one-line warning shape every fallback path emits, for a [`read`]
+/// failure `reason`. Names the concrete consequence (a suffixed flavor won't
+/// launch) rather than only the tool failure, since on a no-flavor project
+/// the fallback is perfectly correct and the warning is pure noise otherwise.
+pub(crate) fn fallback_warning(reason: &str) -> String {
     format!(
         "warning: could not read the built APK's launch identity ({reason}); falling back to the \
          `frust.toml` application id + `.MainActivity`. A Gradle flavor declaring an \
@@ -129,10 +136,12 @@ fn first_line(stderr: &str) -> String {
 ///
 /// Reads the FIRST `package:`/`launchable-activity:` line each — a
 /// multi-launcher APK lists several launchable activities, and the first is
-/// the one `am start` would resolve for a bare launch.
+/// the one `am start` would resolve for a bare launch. The optional label is
+/// the first unlocalized `application-label:'…'` line.
 fn parse(stdout: &str) -> Option<LaunchIdentity> {
     let mut package: Option<&str> = None;
     let mut activity: Option<&str> = None;
+    let mut label: Option<&str> = None;
 
     for line in stdout.lines() {
         let line = line.trim_start();
@@ -144,6 +153,10 @@ fn parse(stdout: &str) -> Option<LaunchIdentity> {
             && activity.is_none()
         {
             activity = attr(rest, "name");
+        } else if let Some(rest) = line.strip_prefix("application-label:")
+            && label.is_none()
+        {
+            label = quoted(rest);
         }
     }
 
@@ -161,7 +174,14 @@ fn parse(stdout: &str) -> Option<LaunchIdentity> {
     Some(LaunchIdentity {
         package: package.to_string(),
         activity: activity.to_string(),
+        label: label.map(str::to_string),
     })
+}
+
+/// The text of a `'…'` value that is the whole of `rest` (the value itself
+/// may contain quotes: badging does not escape them).
+fn quoted(rest: &str) -> Option<&str> {
+    rest.trim_end().strip_prefix('\'')?.strip_suffix('\'')
 }
 
 /// The value of `<key>='…'` in `rest`, matched only at an attribute boundary
@@ -336,6 +356,29 @@ launchable-activity: name='com.example.app.MainActivity'  label='Example dev' ic
             identity.component(),
             "com.example.app.dev/com.example.app.MainActivity"
         );
+    }
+
+    #[test]
+    fn parse_reads_the_application_label() {
+        assert_eq!(
+            parse(BADGING_BASE).unwrap().label.as_deref(),
+            Some("Example")
+        );
+        assert_eq!(
+            parse(BADGING_SUFFIXED).unwrap().label.as_deref(),
+            Some("Example dev")
+        );
+        let stdout = "\
+package: name='com.example.app'
+application-label-fr:'Exemple'
+application-label:'Zoë's App'
+application-label:'Second'
+launchable-activity: name='com.example.app.MainActivity'
+";
+        assert_eq!(parse(stdout).unwrap().label.as_deref(), Some("Zoë's App"));
+        let unlabelled = "package: name='com.example.app'\n\
+                          launchable-activity: name='com.example.app.MainActivity'\n";
+        assert_eq!(parse(unlabelled).unwrap().label, None);
     }
 
     #[test]
