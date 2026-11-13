@@ -220,7 +220,7 @@ frust build ipa --export-method app-store-connect
 frust clean
 ```
 
-`--flavor <name>` needs a `[flavors.<name>]` in `frust.toml`, or a native Gradle flavor / Xcode scheme+configuration of that name (used when present); see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) § Identifiers and flavors.
+`--flavor <name>` needs a `[flavors.<name>]` in `frust.toml`, or a native Gradle flavor / Xcode scheme+configuration of that name, not both; see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) § Identifiers and flavors.
 R8 minification, 16KB alignment, release-lean mode and the debug-signed `frust_bench` size-matrix APK (never distribute it): [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Release artifacts.
 
 ## Test

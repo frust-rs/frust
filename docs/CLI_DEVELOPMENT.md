@@ -98,11 +98,13 @@ A project that ships its own `macos/Info.plist` has it copied verbatim and never
 
 ## Identifiers and flavors
 
-`frust-drive::identity::resolve` gives each Android or iOS build one identity: an application id /
-bundle identifier and a display name. The identifier is `[android] identifier` / `[ios] identifier`
-when set (checked by the same rules as a derived one), else derived from `[app] org` and `name`
-(`dev.f0x.my_app` on Android, `dev.f0x.myApp` on iOS). The display name is `[app] name` in title
-case. A flavor declared as `[flavors.<name>]` appends its suffixes to both:
+`frust-drive::identity::resolve` gives each Android or iOS build an identity: an application id /
+bundle identifier and, optionally, a display name. The identifier is `[android] identifier` /
+`[ios] identifier` when set (checked by the same rules as a derived one), else derived from
+`[app] org` and `name` (`dev.f0x.my_app` on Android, `dev.f0x.myApp` on iOS). The display name
+exists only when `[app] display-name` is set (an empty string is rejected) or the selected flavor
+has an `app-name-suffix`, which is appended to `display-name`, or to `[app] name` in title case
+when that key is absent. A flavor declared as `[flavors.<name>]` appends its suffixes:
 
 ```toml
 [flavors.dev]               # name: lowercase letters and digits, starting with a letter
@@ -110,46 +112,61 @@ app-id-suffix = ".dev"      # starts with `.`; each segment starts with a letter
 app-name-suffix = " Dev"    # appended verbatim to the display name
 ```
 
-An invalid name or suffix, or another key, is rejected when `frust.toml` is read, naming the flavor.
-An identity is *explicit* when `frust.toml` pins it (an `identifier` or a declared flavor); only an
-explicit identity is applied or checked, otherwise the project's own values stand. `frust create`
-writes both `identifier` keys and a commented `[flavors.dev]`.
+`[flavors]` itself must be a table; its entries are checked only for the flavor a command selects,
+which rejects an invalid name or suffix, or another key, naming the flavor. The identifier with
+`app-id-suffix` appended must pass the platform's identifier rules. Each half is applied and
+checked only when `frust.toml` states it (the identifier via `identifier` or an `app-id-suffix`,
+the display name when it resolves); otherwise the project's own value stands. `frust create` writes
+both `identifier` keys, a commented `display-name` and a commented `[flavors.dev]`.
 
-Android gets `frust.applicationId` and `frust.appLabel` in the gitignored `android/local.properties`
-(removed again when the identity is not explicit), read by `app/build.gradle.kts`. iOS gets
-`PRODUCT_BUNDLE_IDENTIFIER` and `FRUST_DISPLAY_NAME` on the `xcodebuild` command line. `frust run`
-and `frust build` edit no tracked file. Not applied: the Android `namespace`, deep links, icons,
-other native config files and the `[desktop]` identifiers; `frust create` renders those once.
+Android writes `frust.applicationId` when the identifier is stated and `frust.appLabel` when a
+display name resolves, in the gitignored `android/local.properties`, and removes whichever it does
+not write; `app/build.gradle.kts` reads them. Before Gradle runs it checks that the script reads
+each key about to be written (a text scan) and fails with the migration lines below if not. iOS
+passes `PRODUCT_BUNDLE_IDENTIFIER` and `FRUST_DISPLAY_NAME` on the `xcodebuild` command line on the
+same basis. `frust run` and `frust build` edit no tracked file. Not applied: the Android
+`namespace`, deep links, icons, other native config files and the `[desktop]` identifiers;
+`frust create` renders those once.
 
 ### Flavors
 
 | `--flavor <name>` | Android | iOS |
 |---|---|---|
 | Only in `[flavors]` | Plain `assemble<Mode>`/`bundle<Mode>` with the suffixed identity | `Runner` scheme, plain `<Mode>` configuration, suffixed identity |
-| Native flavor / scheme exists | Flavored task; wins over `[flavors]` | Scheme `<Flavor>`, configuration `<Mode>-<Flavor>`; wins over `[flavors]` |
+| Native flavor / scheme exists | Flavored task | Scheme `<Flavor>`, configuration `<Mode>-<Flavor>` |
+| Native and in `[flavors]` | Error, before Gradle runs | Error, before `xcodebuild` runs |
 | Neither | Error naming `[flavors.<name>]` | Error listing the schemes, naming `[flavors.<name>]` |
+
+The refusal reads ``flavor `<name>` is declared twice: <where>, and as `[flavors.<name>]` in
+frust.toml. Keep one of the two declarations.`` (`<where>`: "as a Gradle product flavor in
+android/app/build.gradle.kts" or "as the Xcode scheme `<Flavor>` in ios/Runner.xcodeproj").
 
 The native Gradle flavor is found by a text scan of `android/app/build.gradle.kts` for a
 `productFlavors` block with `create("x")`, `register("x")` or `"x" {` (comments ignored); one added
-any other way is not seen. A native flavor that `frust.toml` does not declare keeps its own
-identity. On Android `[android] identifier`, if set, still reaches `local.properties` as the base,
-the application id comparison is skipped with a note (the flavor may add an
-`applicationIdSuffix`) and the label check runs. On iOS nothing is passed and nothing is checked.
-The iOS simulator run is fixed to `Runner`: a declared flavor applies its suffixes, a native-scheme
-flavor is not built and the base identity is used.
+any other way is not seen, so the double declaration is not caught. A native flavor that
+`frust.toml` does not declare keeps its own identity. On Android a stated identifier and a display
+name still reach `local.properties` as the base; the application id comparison is skipped with a
+note (the flavor may add an `applicationIdSuffix`) and the label is not compared. On iOS nothing is
+passed and nothing is checked. The iOS simulator run builds `Runner` only and never lists schemes:
+a declared flavor applies its suffixes, a native-scheme flavor is not built (the base identity is
+used) and a double declaration is not refused. The `Building …` line of `frust build` names the
+identifier resolved for the flavor.
 
 ### Post-build check
 
 `frust build` and `frust run` (before install) compare the built APK (`aapt2 dump badging`) or
-`.app` (`plutil`; the archive for `ipa`) with an explicit identity. A different application id /
-`CFBundleIdentifier` is an error; a different app label / `CFBundleDisplayName` is a warning with the
-migration lines below. It is skipped with a note when `aapt2` cannot read the APK, the Android
-flavor is native (id only) or the target is an `.aab`; silently for an unreadable plist key, a
-derived identity, an undeclared native iOS flavor or an `ipa` archive with no `.app`.
+`.app` (`plutil`; the archive for `ipa`) with what `frust.toml` states. A different application id /
+`CFBundleIdentifier` is an error when the identifier is stated; a different app label /
+`CFBundleDisplayName` is a warning with the migration lines below when a display name resolves. It
+is skipped with a note when `aapt2` cannot read the APK or the target is an `.aab` (the note only
+when an identifier is stated); a native Android flavor's id is only noted and its label not judged.
+It is skipped silently for an unreadable plist key, a derived identifier with no display name, an
+undeclared native iOS flavor or an `ipa` archive with no `.app`.
 
 ### Migrating an existing project
 
-A project created before this reads neither setting; the check above reports it.
+A project created before this reads neither setting; the check before Gradle reports it on Android,
+the post-build check on iOS.
 `examples/playground` is the worked example, and the lines come from the templates under
 `crates/frust-drive/templates/app/`. Android (the literals are the project's own id and name):
 
