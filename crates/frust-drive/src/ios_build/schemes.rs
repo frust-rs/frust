@@ -3,7 +3,7 @@
 //! `Debug|Profile|Release`; `--flavor <f>` → scheme `<Capitalized f>`,
 //! configuration `<Mode>-<Scheme>` (e.g. `Release-Paid`) when the project has
 //! that native scheme, else `Runner` + `<Mode>` for a flavor declared in
-//! `frust.toml`'s `[flavors]` ([`resolve_verified`]).
+//! `frust.toml`'s `[flavors]`; both at once is an error ([`resolve_verified`]).
 
 use std::path::Path;
 
@@ -103,10 +103,13 @@ fn parse_list(json: &str) -> Result<ProjectList> {
 /// `[flavors]` (`flavor_declared`, from `identity::resolve`):
 ///
 /// - no flavor: [`resolve`]'s `Runner` + stock configuration;
-/// - a flavor with a native scheme `<Flavor>`: [`resolve`]'s scheme and
-///   `<Mode>-<Flavor>` configuration, as before `[flavors]` existed;
+/// - a flavor with a native scheme `<Flavor>` that `frust.toml` does not
+///   declare: [`resolve`]'s scheme and `<Mode>-<Flavor>` configuration, as
+///   before `[flavors]` existed;
 /// - a declared flavor with no native scheme: `Runner` + the plain `<Mode>`
 ///   configuration (the identity rides the command line instead);
+/// - both a native scheme and a declaration: an error naming the two, before
+///   anything is built;
 /// - neither: an error listing the available schemes and naming the
 ///   `[flavors.<flavor>]` declaration.
 ///
@@ -126,6 +129,18 @@ pub fn resolve_verified(
 fn select(info: &BuildInfo, flavor_declared: bool, project: &ProjectList) -> Result<SchemeConfig> {
     let sc = resolve(info);
     let native = project.schemes.iter().any(|s| s == &sc.scheme);
+    if let Some(flavor) = info.flavor.as_deref().filter(|_| native && flavor_declared) {
+        bail!(
+            "{}",
+            crate::identity::flavor_declared_twice(
+                flavor,
+                &format!(
+                    "as the Xcode scheme `{}` in ios/Runner.xcodeproj",
+                    sc.scheme
+                )
+            )
+        );
+    }
     if sc.flavored && !native && flavor_declared {
         let plain = SchemeConfig {
             scheme: "Runner".to_string(),
@@ -283,17 +298,26 @@ mod tests {
         assert!(sc.flavored);
     }
 
-    /// A native scheme wins even when `frust.toml` also declares the flavor.
+    /// A flavor with a native scheme that `frust.toml` also declares is
+    /// refused, naming the flavor and both declarations — whatever the
+    /// configuration, since the choice is made before verification.
     #[test]
-    fn a_native_scheme_is_used_for_a_declared_flavor_too() {
-        let sc = verified(BuildMode::Release, Some("paid"), true).unwrap();
-        assert_eq!(
-            (sc.scheme.as_str(), sc.configuration.as_str()),
-            ("Paid", "Release-Paid")
-        );
-        // ... and its missing configuration is still today's error.
-        let err = verified(BuildMode::Debug, Some("paid"), true).unwrap_err();
-        assert!(err.to_string().contains("Debug-Paid"), "{err}");
+    fn a_native_scheme_for_a_declared_flavor_is_refused() {
+        for mode in [BuildMode::Release, BuildMode::Debug] {
+            let message = verified(mode, Some("paid"), true).unwrap_err().to_string();
+            assert!(
+                message.contains("flavor `paid` is declared twice"),
+                "{message}"
+            );
+            assert!(
+                message.contains("the Xcode scheme `Paid` in ios/Runner.xcodeproj"),
+                "{message}"
+            );
+            assert!(
+                message.contains("`[flavors.paid]` in frust.toml"),
+                "{message}"
+            );
+        }
     }
 
     /// A flavor declared only in `frust.toml` builds `Runner` with the plain

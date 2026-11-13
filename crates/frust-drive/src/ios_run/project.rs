@@ -157,8 +157,8 @@ mod tests {
         let dev = detect_flavor(&dir, Some("dev")).unwrap();
         assert_eq!(dev.bundle_id, "dev.f0x.custom.dev");
         assert_eq!(dev.identity.identifier, dev.bundle_id);
-        assert_eq!(dev.identity.display_name, "Myapp Dev");
-        assert!(dev.identity.explicit && dev.identity.flavor_declared);
+        assert_eq!(dev.identity.display_name.as_deref(), Some("Myapp Dev"));
+        assert!(dev.identity.identifier_stated && dev.identity.flavor_declared);
 
         // A native (undeclared) flavor keeps the base identity.
         let native = detect_flavor(&dir, Some("paid")).unwrap();

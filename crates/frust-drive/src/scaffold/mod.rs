@@ -1648,7 +1648,8 @@ mod tests {
 
     /// `frust.toml` is the one place the identifiers are stated: both match
     /// what the Android Gradle script and the Xcode project render, and the
-    /// identity resolver reads them back as explicit.
+    /// identity resolver reads them back as stated — with no display name, so
+    /// the platform files' own label stands until `display-name` is set.
     #[test]
     fn generate_frust_toml_states_identifiers_matching_platform_files() {
         use crate::identity::{IdentityPlatform, resolve};
@@ -1663,10 +1664,25 @@ mod tests {
 
         let android = resolve(&parsed, IdentityPlatform::Android, None).unwrap();
         let ios = resolve(&parsed, IdentityPlatform::Ios, None).unwrap();
-        assert!(android.explicit, "{toml}");
-        assert!(ios.explicit, "{toml}");
+        assert!(android.identifier_stated, "{toml}");
+        assert!(ios.identifier_stated, "{toml}");
+        assert_eq!((&android.display_name, &ios.display_name), (&None, &None));
         assert_eq!(android.identifier, ctx.android_identifier(), "{toml}");
         assert_eq!(ios.identifier, ctx.ios_identifier(), "{toml}");
+
+        // Uncommenting the scaffold's `display-name` line states the name the
+        // platform files already render.
+        let named = toml.replacen("# display-name = ", "display-name = ", 1);
+        assert_ne!(named, toml, "the commented display-name example moved");
+        let named = crate::manifest::parse(&named).expect("the uncommented display-name parses");
+        for platform in [IdentityPlatform::Android, IdentityPlatform::Ios] {
+            let identity = resolve(&named, platform, None).unwrap();
+            assert_eq!(
+                identity.display_name.as_deref(),
+                Some(ctx.title_case_name.as_str()),
+                "{toml}"
+            );
+        }
 
         let gradle = fs::read_to_string(dest.join("android/app/build.gradle.kts")).unwrap();
         assert!(

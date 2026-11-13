@@ -28,14 +28,12 @@ use crate::process::{ProcessRunner, RealProcessRunner, StreamHandle, tail_lines}
 /// `simctl install` → `simctl launch`) on `device`, an already-discovered
 /// (and therefore already-booted) `Platform::Ios`/`Kind::Simulator` device,
 /// against the Frust project rooted at `root`. `info.mode` selects the
-/// `-configuration` xcodebuild builds and the matching
-/// `<config>-iphonesimulator` products directory the app bundle is installed
-/// from; defines/version aren't threaded here (unlike the Android pipeline)
-/// and the iOS simulator run path stays scheme-fixed (`Runner`). A flavor
-/// declared in `frust.toml`'s `[flavors]` applies its identity (bundle
-/// identifier and display name on the `xcodebuild` line); a native-scheme
-/// flavor is not built here — the run builds `Runner` with the base
-/// identity, as before `[flavors]` existed.
+/// `-configuration` and the `<config>-iphonesimulator` products directory;
+/// defines/version aren't threaded here (unlike the Android pipeline). The
+/// path is scheme-fixed (`Runner`) and never lists schemes: a `[flavors]`
+/// flavor applies what it states on the `xcodebuild` line (also when a
+/// native scheme of that name exists — not refused here), and a native-only
+/// flavor builds `Runner` with the base identity.
 pub fn run(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -109,8 +107,9 @@ pub fn run(
 /// target rewrites `PRODUCT_BUNDLE_IDENTIFIER` (the resolved identity is the
 /// fallback). The simulator path is scheme-fixed (`Runner`, stock
 /// `Debug|Profile|Release`), so its built bundle carries the resolved
-/// identity's id — passed on the `xcodebuild` line when explicit, and checked
-/// against the built bundle then ([`ios_build::check_built_identity`]).
+/// identity's id — passed on the `xcodebuild` line when frust.toml states
+/// it, and checked against the built bundle then
+/// ([`ios_build::check_built_identity`]).
 struct PreparedIosSession {
     bundle_id: String,
     udid: String,
@@ -507,7 +506,7 @@ fn prepare_physical_session(
     // may rewrite `PRODUCT_BUNDLE_IDENTIFIER`, so the id `devicectl` must
     // launch is not necessarily the resolved one. An unreadable plist is a
     // warning, not an error — the resolved identity's id is the fallback
-    // (and, for an explicit identity, what `ios_build` just checked the
+    // (and, for a stated identifier, what `ios_build` just checked the
     // bundle carries).
     let (resolved, plist_warning) = bundle_id::resolve(runner, &app_path);
     if let Some(plist_warning) = plist_warning {
@@ -1487,8 +1486,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A simulator build whose bundle does not carry the explicit identity
-    /// stops before the install, naming both identifiers.
+    /// A simulator build whose bundle does not carry the stated identifier
+    /// stops before the install, naming both identifiers; no name is stated,
+    /// so none is passed.
     #[test]
     fn a_simulator_bundle_identifier_mismatch_fails_before_install() {
         let dir = unique_project_dir("sim-mismatch");
@@ -1514,7 +1514,7 @@ mod tests {
             .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
             .with(
                 format!(
-                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw== PRODUCT_BUNDLE_IDENTIFIER=com.acme.app FRUST_DISPLAY_NAME=Myapp build",
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw== PRODUCT_BUNDLE_IDENTIFIER=com.acme.app build",
                     host_sim_arch()
                 ),
                 ok("Build succeeded"),

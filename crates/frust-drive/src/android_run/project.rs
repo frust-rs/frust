@@ -147,12 +147,30 @@ mod tests {
         .unwrap();
         let project = detect_flavor(&dir, Some("dev")).unwrap();
         assert_eq!(project.app_id, "dev.f0x.myapp.dev");
-        assert_eq!(project.identity.display_name, "Myapp Dev");
-        assert!(project.identity.explicit && project.identity.flavor_declared);
+        assert_eq!(project.identity.display_name.as_deref(), Some("Myapp Dev"));
+        assert!(project.identity.identifier_stated && project.identity.flavor_declared);
         let native = detect_flavor(&dir, Some("paid")).unwrap();
         assert_eq!(native.app_id, "dev.f0x.myapp");
-        assert!(!native.identity.explicit && !native.identity.flavor_declared);
+        assert!(!native.identity.identifier_stated && !native.identity.flavor_declared);
+        assert_eq!(native.identity.display_name, None);
         assert_eq!(detect(&dir).unwrap().app_id, "dev.f0x.myapp");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A malformed flavor the build does not select never fails detection;
+    /// selecting it fails with the manifest's message and the file path.
+    #[test]
+    fn detect_judges_only_the_selected_flavor() {
+        let dir = unique_temp_dir("bad-flavor");
+        fs::write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[flavors.Dev]\n",
+        )
+        .unwrap();
+        assert_eq!(detect(&dir).unwrap().app_id, "dev.f0x.myapp");
+        let err = detect_flavor(&dir, Some("Dev")).unwrap_err().to_string();
+        assert!(err.contains("invalid flavor name `Dev`"), "{err}");
+        assert!(err.contains("frust.toml"), "{err}");
         let _ = fs::remove_dir_all(&dir);
     }
 
