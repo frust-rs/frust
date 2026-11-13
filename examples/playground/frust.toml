@@ -3,9 +3,12 @@ name = "playground"
 org = "it.f0x"
 description = "Frust playground: plugin, native-widget, platform-view, and responsiveness testing ground"
 
-# [flavors]
-# dev = { app-id-suffix = ".dev" }
-# prod = {}
+[android]
+identifier = "it.f0x.playground"
+
+[flavors.dev]
+app-id-suffix = ".dev"
+app-name-suffix = " Dev"
 
 # Android release signing reads gitignored `android/key.properties` (keys below; create the keystore with the
 # keytool line), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
@@ -19,7 +22,6 @@ description = "Frust playground: plugin, native-widget, platform-view, and respo
 # [signing]
 # key-properties = "key.properties"
 
-# Override the derived iOS bundle identifier (defaults to
-# `org.camelCase(name)`, e.g. `it.f0x.playground`).
-# [ios]
-# identifier = "it.f0x.playground"
+# The iOS bundle identifier (the derived default is `org.camelCase(name)`).
+[ios]
+identifier = "it.f0x.playground"
