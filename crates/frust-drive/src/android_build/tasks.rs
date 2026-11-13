@@ -52,36 +52,38 @@ pub(crate) enum FlavorRoute {
     Unknown(String),
 }
 
+/// `<android_dir>/app/build.gradle.kts`'s text, `None` when unreadable.
+pub(crate) fn read_app_script(android_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(android_dir.join("app").join("build.gradle.kts")).ok()
+}
+
 impl FlavorRoute {
     /// Routes `flavor` given the app module's build script text (`None` when
     /// it could not be read) and whether `frust.toml` declares the flavor
-    /// (`AppIdentity::flavor_declared`). A native declaration wins.
+    /// (`AppIdentity::flavor_declared`). A flavor declared both as a product
+    /// flavor and in `frust.toml` is an error, before Gradle runs.
     pub(crate) fn select(
         script: Option<&str>,
         flavor: Option<&str>,
         flavor_declared: bool,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let Some(flavor) = flavor else {
-            return Self::Unflavored;
+            return Ok(Self::Unflavored);
         };
         let name = flavor.to_string();
-        if script.is_some_and(|script| declares_product_flavor(script, flavor)) {
-            Self::Native(name)
-        } else if flavor_declared {
-            Self::ManifestOnly(name)
-        } else {
-            Self::Unknown(name)
-        }
-    }
-
-    /// [`select`](Self::select) reading `<android_dir>/app/build.gradle.kts`.
-    pub(crate) fn for_project(
-        android_dir: &Path,
-        flavor: Option<&str>,
-        flavor_declared: bool,
-    ) -> Self {
-        let script = std::fs::read_to_string(android_dir.join("app").join("build.gradle.kts")).ok();
-        Self::select(script.as_deref(), flavor, flavor_declared)
+        let native = script.is_some_and(|script| declares_product_flavor(script, flavor));
+        Ok(match (native, flavor_declared) {
+            (true, true) => anyhow::bail!(
+                "{}",
+                crate::identity::flavor_declared_twice(
+                    flavor,
+                    "as a Gradle product flavor in android/app/build.gradle.kts"
+                )
+            ),
+            (true, false) => Self::Native(name),
+            (false, true) => Self::ManifestOnly(name),
+            (false, false) => Self::Unknown(name),
+        })
     }
 
     /// The flavor the Gradle task and its output directory carry.
@@ -124,6 +126,14 @@ pub(crate) fn declares_product_flavor(script: &str, flavor: &str) -> bool {
         }
     }
     false
+}
+
+/// Whether the Kotlin build script `script` names the `local.properties` key
+/// `key` as a string literal outside comments — how the generated template
+/// reads `frust.applicationId`/`frust.appLabel`. A text scan, like
+/// [`declares_product_flavor`].
+pub(crate) fn reads_property(script: &str, key: &str) -> bool {
+    strip_comments(script).contains(&format!("\"{key}\""))
 }
 
 /// Whether a `productFlavors` block body names `quoted` (`"<flavor>"`) as a
@@ -495,6 +505,38 @@ android {
         ));
     }
 
+    /// A flavor that is both a product flavor and a `[flavors]` entry is
+    /// refused, naming the flavor and both declarations.
+    #[test]
+    fn a_flavor_declared_natively_and_in_frust_toml_is_refused() {
+        let err = FlavorRoute::select(Some(SCRIPT_DECLARING), Some("dev"), true).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("flavor `dev`"), "{message}");
+        assert!(
+            message.contains("Gradle product flavor in android/app/build.gradle.kts"),
+            "{message}"
+        );
+        assert!(
+            message.contains("`[flavors.dev]` in frust.toml"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_property_scan_needs_a_read_outside_comments() {
+        let template = include_str!("../../templates/app/android.tmpl/app/build.gradle.kts.tmpl");
+        assert!(reads_property(template, "frust.applicationId"));
+        assert!(reads_property(template, "frust.appLabel"));
+        let unmigrated = "// localProperties.getProperty(\"frust.applicationId\", \"x\")\n\
+                          android { defaultConfig { applicationId = \"dev.f0x.myapp\" } }\n";
+        assert!(!reads_property(unmigrated, "frust.applicationId"));
+        assert!(!reads_property(unmigrated, "frust.appLabel"));
+        assert!(!reads_property(
+            "val x = getProperty(\"frust.applicationIdX\")",
+            "frust.applicationId"
+        ));
+    }
+
     #[test]
     fn flavor_route_prefers_native_then_frust_toml_then_unknown() {
         let release = BuildMode::Release;
@@ -526,14 +568,6 @@ android {
                 "assembleDevRelease",
             ),
             (
-                "native wins over frust.toml",
-                Some(SCRIPT_DECLARING),
-                Some("dev"),
-                true,
-                FlavorRoute::Native("dev".into()),
-                "assembleDevRelease",
-            ),
-            (
                 "frust.toml-only flavor",
                 Some(SCRIPT_DECLARING),
                 Some("staging"),
@@ -559,7 +593,7 @@ android {
             ),
         ];
         for (label, script, flavor, declared, route, task) in cases {
-            let got = FlavorRoute::select(*script, *flavor, *declared);
+            let got = FlavorRoute::select(*script, *flavor, *declared).unwrap();
             assert_eq!(&got, route, "case: {label}");
             assert_eq!(
                 &task_name(&target, release, got.gradle_flavor()),

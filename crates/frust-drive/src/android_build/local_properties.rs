@@ -4,14 +4,15 @@
 //!
 //! Two writers share it: [`write`] stamps `frust.versionName`/
 //! `frust.versionCode` (the Flutter-canonical version plumbing the Gradle
-//! template reads with defaults) plus, for an explicit app identity,
-//! `frust.applicationId`/`frust.appLabel`, and `crate::platform_wiring` keeps
+//! template reads with defaults) plus whichever of `frust.applicationId`/
+//! `frust.appLabel` `frust.toml` states, and `crate::platform_wiring` keeps
 //! the embedding and plugin module directories there. Both go through
 //! [`merge`], which sets only the keys it is given: every other line —
 //! `sdk.dir` written by Android Studio, comments, the other writer's keys,
 //! line endings — is preserved byte for byte, and a file whose keys already
-//! hold the wanted values is not rewritten at all. [`remove`] drops keys the
-//! same way, so a derived identity leaves the template's defaults in charge.
+//! hold the wanted values is not rewritten at all. [`write`] drops the
+//! identity keys it does not set in the same pass, so an identity value
+//! frust.toml does not state leaves the template's default in charge.
 //!
 //! Values are written escaped the way `java.util.Properties.store` escapes
 //! them (backslashes, the `=`/`:`/`#`/`!` specials, a leading space, control
@@ -38,10 +39,11 @@ pub(crate) const APP_LABEL_KEY: &str = "frust.appLabel";
 /// `<android_dir>/local.properties`, preserving every other line (including
 /// unrelated keys and comments) already present.
 ///
-/// An explicit `identity` (see [`AppIdentity::explicit`]) also sets
-/// [`APPLICATION_ID_KEY`] and [`APP_LABEL_KEY`]; any other identity, or none,
-/// removes both, so a key left by an earlier flavored build cannot leak into
-/// this one and the template's own defaults apply.
+/// Each identity key is decided on its own: [`APPLICATION_ID_KEY`] is set
+/// when `identity` states its identifier ([`AppIdentity::identifier_stated`])
+/// and [`APP_LABEL_KEY`] when it has a display name; a key not set is
+/// removed, so a value left by an earlier build cannot leak into this one and
+/// the template's own default applies. One read, at most one write.
 pub fn write(
     android_dir: &Path,
     version_name: &str,
@@ -53,17 +55,17 @@ pub fn write(
         ("frust.versionName", version_name),
         ("frust.versionCode", version_code),
     ];
-    let explicit = identity.filter(|identity| identity.explicit);
-    if let Some(identity) = explicit {
-        entries.push((APPLICATION_ID_KEY, identity.identifier.as_str()));
-        entries.push((APP_LABEL_KEY, identity.display_name.as_str()));
+    let mut dropped = Vec::new();
+    match identity.filter(|identity| identity.identifier_stated) {
+        Some(identity) => entries.push((APPLICATION_ID_KEY, identity.identifier.as_str())),
+        None => dropped.push(APPLICATION_ID_KEY),
     }
-    merge(&path, &entries, Missing::Append)
+    match identity.and_then(|identity| identity.display_name.as_deref()) {
+        Some(name) => entries.push((APP_LABEL_KEY, name)),
+        None => dropped.push(APP_LABEL_KEY),
+    }
+    update(&path, &entries, Missing::Append, &dropped)
         .with_context(|| format!("writing `{}`", path.display()))?;
-    if explicit.is_none() {
-        remove(&path, &[APPLICATION_ID_KEY, APP_LABEL_KEY])
-            .with_context(|| format!("writing `{}`", path.display()))?;
-    }
     Ok(())
 }
 
@@ -102,12 +104,32 @@ pub(crate) fn merge(
     entries: &[(&str, &str)],
     missing: Missing,
 ) -> io::Result<Vec<Change>> {
+    update(path, entries, missing, &[])
+}
+
+/// [`merge`] that also drops every logical line setting one of `removed`,
+/// in the same single read and write. Every other line is kept byte for
+/// byte, and a missing file with nothing to append is left missing.
+fn update(
+    path: &Path,
+    entries: &[(&str, &str)],
+    missing: Missing,
+    removed: &[&str],
+) -> io::Result<Vec<Change>> {
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
         Err(err) => return Err(err),
     };
     let mut lines = logical_lines(&existing);
+    let before = lines.len();
+    lines.retain(|line| {
+        !line
+            .entry
+            .as_ref()
+            .is_some_and(|(k, _)| removed.contains(&k.as_str()))
+    });
+    let dropped = lines.len() != before;
     let mut changes = Vec::with_capacity(entries.len());
     let mut appended = String::new();
     for (key, value) in entries {
@@ -135,7 +157,7 @@ pub(crate) fn merge(
         }
     }
 
-    if changes.iter().any(|c| matches!(c, Change::Set { .. })) {
+    if dropped || changes.iter().any(|c| matches!(c, Change::Set { .. })) {
         let mut out: String = lines.iter().map(|line| line.text.as_str()).collect();
         if !appended.is_empty() && !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
@@ -144,29 +166,6 @@ pub(crate) fn merge(
         fs::write(path, out)?;
     }
     Ok(changes)
-}
-
-/// Removes every logical line setting one of `keys` from the `.properties`
-/// file at `path`, returning how many were removed. Every other line is kept
-/// byte for byte; the file is written only when a line was removed, and a
-/// missing file is left missing.
-pub(crate) fn remove(path: &Path, keys: &[&str]) -> io::Result<usize> {
-    let existing = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(0),
-        Err(err) => return Err(err),
-    };
-    let (dropped, kept): (Vec<LogicalLine>, Vec<LogicalLine>) =
-        logical_lines(&existing).into_iter().partition(|line| {
-            line.entry
-                .as_ref()
-                .is_some_and(|(k, _)| keys.contains(&k.as_str()))
-        });
-    if !dropped.is_empty() {
-        let out: String = kept.iter().map(|line| line.text.as_str()).collect();
-        fs::write(path, out)?;
-    }
-    Ok(dropped.len())
 }
 
 /// The unescaped value of `key` in the `.properties` file at `path` (its last
@@ -530,26 +529,26 @@ mod tests {
         assert_eq!(parse_entry("ks=/a").0, "ks");
     }
 
-    fn identity(identifier: &str, display_name: &str, explicit: bool) -> AppIdentity {
+    fn identity(identifier: &str, display_name: Option<&str>, stated: bool) -> AppIdentity {
         AppIdentity {
             identifier: identifier.to_string(),
-            display_name: display_name.to_string(),
-            explicit,
+            identifier_stated: stated,
+            display_name: display_name.map(str::to_string),
             flavor: None,
             flavor_declared: false,
         }
     }
 
-    /// An explicit identity adds both identity keys after the version keys,
-    /// escaped, and keeps unrelated keys; a later derived build removes them
-    /// again and leaves everything else byte for byte.
+    /// A fully stated identity adds both identity keys after the version
+    /// keys, escaped, and keeps unrelated keys; a later derived build removes
+    /// them again and leaves everything else byte for byte.
     #[test]
-    fn an_explicit_identity_gains_and_a_derived_one_loses_the_identity_keys() {
+    fn a_stated_identity_gains_and_a_derived_one_loses_the_identity_keys() {
         let dir = unique_temp_dir("identity");
         let path = dir.join("local.properties");
         fs::write(&path, "sdk.dir=/sdk\r\nfrust.embedding.dir=/e\n").unwrap();
 
-        let pinned = identity("com.example.other", "Zoë Dev: Beta", true);
+        let pinned = identity("com.example.other", Some("Zoë Dev: Beta"), true);
         write(&dir, "1.0", "3", Some(&pinned)).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(
@@ -567,12 +566,43 @@ mod tests {
             &dir,
             "1.0",
             "3",
-            Some(&identity("dev.f0x.app", "App", false)),
+            Some(&identity("dev.f0x.app", None, false)),
         )
         .unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "sdk.dir=/sdk\r\nfrust.embedding.dir=/e\nfrust.versionName=1.0\nfrust.versionCode=3\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Each identity key is written or removed on its own, in one pass: an
+    /// identifier alone drops a stale label, a name alone drops a stale id.
+    #[test]
+    fn each_identity_key_is_written_or_removed_independently() {
+        let dir = unique_temp_dir("independent");
+        let path = dir.join("local.properties");
+        let stale = "sdk.dir=/sdk\nfrust.applicationId=old.id\nfrust.appLabel=Old\n";
+
+        fs::write(&path, stale).unwrap();
+        write(&dir, "1.0", "1", Some(&identity("com.a.b", None, true))).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "sdk.dir=/sdk\nfrust.applicationId=com.a.b\n\
+             frust.versionName=1.0\nfrust.versionCode=1\n"
+        );
+
+        fs::write(&path, stale).unwrap();
+        write(
+            &dir,
+            "1.0",
+            "1",
+            Some(&identity("dev.f0x.app", Some("Shop"), false)),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "sdk.dir=/sdk\nfrust.appLabel=Shop\nfrust.versionName=1.0\nfrust.versionCode=1\n"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -583,7 +613,7 @@ mod tests {
     fn a_derived_identity_writes_no_identity_keys() {
         for (tag, id) in [
             ("no-identity", None),
-            ("derived", Some(identity("dev.f0x.app", "App", false))),
+            ("derived", Some(identity("dev.f0x.app", None, false))),
         ] {
             let dir = unique_temp_dir(tag);
             write(&dir, "1.0", "1", id.as_ref()).unwrap();
@@ -596,22 +626,21 @@ mod tests {
     }
 
     #[test]
-    fn remove_drops_every_occurrence_and_never_creates_the_file() {
+    fn update_drops_every_occurrence_and_never_creates_the_file() {
         let dir = unique_temp_dir("remove");
         let path = dir.join("local.properties");
-        assert_eq!(remove(&path, &["k"]).unwrap(), 0);
+        update(&path, &[], Missing::Append, &["k"]).unwrap();
         assert!(!path.exists());
         fs::write(
             &path,
             "# k=commented\nk=a\nother=1\nk = /b/\\\n    c\nlast=2",
         )
         .unwrap();
-        assert_eq!(remove(&path, &["k", "absent"]).unwrap(), 2);
+        update(&path, &[], Missing::Append, &["k", "absent"]).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "# k=commented\nother=1\nlast=2"
         );
-        assert_eq!(remove(&path, &["k"]).unwrap(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 }

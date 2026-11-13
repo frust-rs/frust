@@ -49,10 +49,10 @@ pub fn app_bundle_path(root: &Path, configuration: &str) -> PathBuf {
 /// `lean` log ceiling — the same seam `frust build` threads `FRUST_FEATURES`
 /// through. Unlike user `--define`s, the feature set is mode-derived (never a
 /// per-run user value), so threading it here doesn't reintroduce the
-/// scheme-fixed run path's deliberate no-defines contract. An explicit
-/// `identity` (an `[ios] identifier` or a declared flavor) adds
-/// `PRODUCT_BUNDLE_IDENTIFIER=<id> FRUST_DISPLAY_NAME=<name>` after
-/// `FRUST_FEATURES`, the settings `ios_build`'s `Invocation` passes too.
+/// scheme-fixed run path's deliberate no-defines contract. After
+/// `FRUST_FEATURES` come whichever identity settings `identity` states —
+/// `PRODUCT_BUNDLE_IDENTIFIER=<id>`, then `FRUST_DISPLAY_NAME=<name>` — the
+/// settings `ios_build`'s `Invocation` passes too.
 pub fn build(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -349,11 +349,11 @@ mod tests {
         assert!(out.success);
     }
 
-    /// An explicit identity puts both identity settings right after
+    /// A fully stated identity puts both identity settings right after
     /// `FRUST_FEATURES`; a derived one leaves the argv exactly as it was
     /// (registered exactly, so an extra setting finds no fixture).
     #[test]
-    fn build_passes_identity_settings_only_for_an_explicit_identity() {
+    fn build_passes_identity_settings_only_for_a_stated_identity() {
         let base = format!(
             "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ==",
             host_sim_arch()
@@ -365,8 +365,8 @@ mod tests {
         };
         let mut identity = AppIdentity {
             identifier: "dev.f0x.myapp.dev".to_string(),
-            display_name: "My App Dev".to_string(),
-            explicit: true,
+            identifier_stated: true,
+            display_name: Some("My App Dev".to_string()),
             flavor: Some("dev".to_string()),
             flavor_declared: true,
         };
@@ -388,7 +388,8 @@ mod tests {
         .unwrap();
         assert!(out.success);
 
-        identity.explicit = false;
+        identity.identifier_stated = false;
+        identity.display_name = None;
         identity.flavor_declared = false;
         let derived = FakeProcessRunner::new().with(format!("{base} build"), succeeded);
         for identity in [Some(&identity), None] {

@@ -246,38 +246,36 @@ fn resolve_identity(
 }
 
 /// The post-build identity check both iOS lanes run on the `.app` they
-/// built, for an explicit `identity` only (a derived one passes no override,
-/// so the project's own values are what it should carry):
-///
-/// - a `CFBundleIdentifier` other than the resolved identifier is an error
-///   naming both (the template's `Info.plist` reads it from
-///   `PRODUCT_BUNDLE_IDENTIFIER`, which the build sets);
-/// - a `CFBundleDisplayName` other than the resolved display name is a
-///   `warning:` through `on_line` carrying the two template lines that let
-///   `FRUST_DISPLAY_NAME` reach it (a project scaffolded before the setting
-///   existed has a literal name there).
-///
-/// A key `plutil` cannot read is not checked: the physical run lane's own
-/// launch-identity read ([`crate::ios_run::bundle_id`]) warns about that.
+/// built, for what frust.toml states only — exactly the settings the build
+/// passed. A `CFBundleIdentifier` other than a stated identifier is an error
+/// naming both (the template's `Info.plist` reads it from
+/// `PRODUCT_BUNDLE_IDENTIFIER`); a `CFBundleDisplayName` other than a stated
+/// display name is a `warning:` through `on_line` carrying the two template
+/// lines that let `FRUST_DISPLAY_NAME` reach it (a project scaffolded before
+/// the setting existed has a literal name there). A key `plutil` cannot read
+/// is not checked: the physical run lane's own launch-identity read
+/// ([`crate::ios_run::bundle_id`]) warns about that.
 pub(crate) fn check_built_identity(
     runner: &dyn ProcessRunner,
     app: &Path,
     identity: Option<&AppIdentity>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<()> {
-    let Some(identity) = identity.filter(|identity| identity.explicit) else {
+    let Some(identity) = identity else {
         return Ok(());
     };
     let plist = app.join("Info.plist");
-    if let Some(built) = read_plist_string(runner, &plist, "CFBundleIdentifier")
+    if identity.identifier_stated
+        && let Some(built) = read_plist_string(runner, &plist, "CFBundleIdentifier")
         && built != identity.identifier
     {
         bail!("{}", identifier_mismatch(&built, &identity.identifier));
     }
-    if let Some(built) = read_plist_string(runner, &plist, "CFBundleDisplayName")
-        && built != identity.display_name
+    if let Some(expected) = identity.display_name.as_deref()
+        && let Some(built) = read_plist_string(runner, &plist, "CFBundleDisplayName")
+        && built != expected
     {
-        on_line(&display_name_warning(&built, &identity.display_name));
+        on_line(&display_name_warning(&built, expected));
     }
     Ok(())
 }
@@ -1075,8 +1073,29 @@ mod tests {
         plist_id: &str,
         plist_name: &str,
     ) -> (Result<BuiltArtifacts>, Vec<String>) {
+        identity_build_with(
+            IDENTITY_TOML,
+            tag,
+            info,
+            configuration,
+            argv_tail,
+            plist_id,
+            plist_name,
+        )
+    }
+
+    /// [`identity_build`] in a project whose `frust.toml` is `toml`.
+    fn identity_build_with(
+        toml: &str,
+        tag: &str,
+        info: &BuildInfo,
+        configuration: &str,
+        argv_tail: &str,
+        plist_id: &str,
+        plist_name: &str,
+    ) -> (Result<BuiltArtifacts>, Vec<String>) {
         let dir = temp_project(tag);
-        fs::write(dir.join("frust.toml"), IDENTITY_TOML).unwrap();
+        fs::write(dir.join("frust.toml"), toml).unwrap();
         plant_products(&dir, configuration, false, "Runner.app");
         let app = products_dir(&dir, configuration, false).join("Runner.app");
         let runner = base_runner()
@@ -1130,21 +1149,46 @@ mod tests {
         );
     }
 
-    /// An explicit `[ios] identifier` with no flavor passes the identity on
-    /// the plain `Runner` build.
+    /// An explicit `[ios] identifier` with no flavor passes the identifier
+    /// on the plain `Runner` build, and no name: none is stated, so the
+    /// bundle's own name is not judged (a different one warns nothing).
     #[test]
-    fn an_explicit_identifier_is_passed_without_a_flavor() {
-        let (result, _) = identity_build(
+    fn an_explicit_identifier_is_passed_without_a_flavor_or_a_name() {
+        let (result, lines) = identity_build(
             "explicit-id",
             &info(BuildMode::Release),
             "Release",
             &format!(
-                "-scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== PRODUCT_BUNDLE_IDENTIFIER=com.acme.app FRUST_DISPLAY_NAME=Myapp {NO_CODESIGN}"
+                "-scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== PRODUCT_BUNDLE_IDENTIFIER=com.acme.app {NO_CODESIGN}"
             ),
             "com.acme.app\n",
+            "Something Else\n",
+        );
+        assert_eq!(result.unwrap().paths.len(), 1);
+        assert!(
+            !lines.iter().any(|l| l.starts_with("warning:")),
+            "{lines:?}"
+        );
+    }
+
+    /// `display-name` alone passes and checks only the name; the derived
+    /// identifier is neither passed nor compared.
+    #[test]
+    fn a_stated_display_name_alone_is_passed_and_checked() {
+        let (result, lines) = identity_build_with(
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\ndisplay-name = \"Shop\"\n",
+            "name-only",
+            &info(BuildMode::Release),
+            "Release",
+            &format!(
+                "-scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== FRUST_DISPLAY_NAME=Shop {NO_CODESIGN}"
+            ),
+            "some.other.id\n",
             "Myapp\n",
         );
         assert_eq!(result.unwrap().paths.len(), 1);
+        let warnings: Vec<&String> = lines.iter().filter(|l| l.starts_with("warning:")).collect();
+        assert_eq!(warnings, vec![&display_name_warning("Myapp", "Shop")]);
     }
 
     #[test]
@@ -1154,7 +1198,7 @@ mod tests {
             &info(BuildMode::Release),
             "Release",
             &format!(
-                "-scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== PRODUCT_BUNDLE_IDENTIFIER=com.acme.app FRUST_DISPLAY_NAME=Myapp {NO_CODESIGN}"
+                "-scheme Runner -configuration Release -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== PRODUCT_BUNDLE_IDENTIFIER=com.acme.app {NO_CODESIGN}"
             ),
             "dev.f0x.myapp\n",
             "Myapp\n",
@@ -1275,27 +1319,30 @@ mod tests {
     }
 
     /// A native `Dev` scheme whose flavor `dev` is also declared in
-    /// `frust.toml` keeps the suffixed identity on the line and checks it.
+    /// `frust.toml` is refused before the build step: only the `-list`
+    /// fixture is registered, so reaching `xcodebuild build` would fail
+    /// with a different error.
     #[test]
-    fn a_declared_native_flavor_passes_and_checks_its_identity() {
+    fn a_declared_native_flavor_is_refused_before_the_build() {
         let dir = temp_project("declared-native");
         fs::write(dir.join("frust.toml"), IDENTITY_TOML).unwrap();
-        let runner = native_scheme_runner(
-            &dir,
-            "Dev",
-            "PRODUCT_BUNDLE_IDENTIFIER=com.acme.app.dev FRUST_DISPLAY_NAME=Myapp Dev ",
+        let runner = base_runner().with(
+            "xcrun xcodebuild -list -json -project ios/Runner.xcodeproj",
+            ok(r#"{"project":{"name":"Runner","schemes":["Runner","Dev"],"configurations":["Debug","Profile","Release","Release-Dev"]}}"#),
         );
-        let app = products_dir(&dir, "Release-Dev", false).join("Runner.app");
-        let runner = runner
-            .with(plutil(&app, "CFBundleIdentifier"), ok("com.acme.app.dev\n"))
-            .with(plutil(&app, "CFBundleDisplayName"), ok("Myapp Dev\n"));
         let (result, lines) = native_flavor_build(&dir, &runner, "dev");
         let _ = fs::remove_dir_all(&dir);
-        assert_eq!(result.unwrap().paths.len(), 1);
+        let message = result.unwrap_err().to_string();
         assert!(
-            !lines.iter().any(|l| l.starts_with("warning:")),
-            "{lines:?}"
+            message.contains("flavor `dev` is declared twice"),
+            "{message}"
         );
+        assert!(message.contains("the Xcode scheme `Dev`"), "{message}");
+        assert!(
+            message.contains("`[flavors.dev]` in frust.toml"),
+            "{message}"
+        );
+        assert!(lines.is_empty(), "{lines:?}");
     }
 
     /// A derived identity passes no identity settings and reads no plist:

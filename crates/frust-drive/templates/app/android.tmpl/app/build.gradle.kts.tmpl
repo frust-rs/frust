@@ -84,10 +84,10 @@ fun prop(name: String, default: String): String =
 val versionNameValue = localProperties.getProperty("frust.versionName", "1.0")
 val versionCodeValue = localProperties.getProperty("frust.versionCode", "1").toInt()
 
-// App identity: the CLI writes `frust.applicationId`/`frust.appLabel` only
-// when frust.toml pins them (`[android] identifier`, a declared `[flavors]`
-// entry) and removes them otherwise, so these defaults apply. `namespace`
-// below stays literal: it roots the Kotlin package, not the installed id.
+// App identity: the CLI writes `frust.applicationId`/`frust.appLabel` each
+// only when frust.toml states it (`[android] identifier`, `[app] display-name`,
+// a selected `[flavors]` suffix) and removes it otherwise, so these defaults
+// apply. `namespace` below stays literal: it roots the Kotlin package.
 val applicationIdValue = localProperties.getProperty("frust.applicationId", "{{ android_identifier }}")
 val appLabelValue = localProperties.getProperty("frust.appLabel", "{{ title_case_name }}")
 
@@ -264,7 +264,7 @@ android {
     // filters and the staged `.so` files, not the source set.
     sourceSets.getByName("main").jniLibs.setSrcDirs(listOf("../../build/android/jniLibs"))
 
-    // Example flavor scaffold — uncomment and mirror frust.toml's [flavors].
+    // Example flavor scaffold — a flavor declared here must not also be declared in frust.toml's [flavors].
     // flavorDimensions += "env"
     // productFlavors {
     //     create("dev")  { dimension = "env"; applicationIdSuffix = ".dev" }

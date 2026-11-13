@@ -38,11 +38,11 @@ pub struct Invocation<'a> {
     /// `cargo build` (only when non-empty).
     pub features_b64: Option<&'a str>,
     /// The resolved identity's bundle identifier → `PRODUCT_BUNDLE_IDENTIFIER`
-    /// (only for an explicit identity, see [`Invocation::with_identity`]).
+    /// (only when frust.toml states it, see [`Invocation::with_identity`]).
     pub bundle_identifier: Option<&'a str>,
     /// The resolved identity's display name → `FRUST_DISPLAY_NAME`, which the
-    /// template's `Info.plist` reads as `CFBundleDisplayName` (only for an
-    /// explicit identity).
+    /// template's `Info.plist` reads as `CFBundleDisplayName` (only when
+    /// frust.toml states one).
     pub display_name: Option<&'a str>,
 }
 
@@ -64,16 +64,23 @@ pub(crate) fn identity_settings(
     settings
 }
 
-/// [`identity_settings`] for a resolved identity: both settings when it is
-/// explicit (an `[ios] identifier` or a declared flavor), none otherwise, so
-/// a project that pins nothing keeps its pbxproj values.
+/// [`identity_settings`] for a resolved identity: `PRODUCT_BUNDLE_IDENTIFIER`
+/// when frust.toml states the identifier, `FRUST_DISPLAY_NAME` when it
+/// states a display name, each on its own, so whatever frust.toml leaves
+/// unstated keeps its pbxproj value.
 pub(crate) fn identity_settings_for(identity: Option<&AppIdentity>) -> Vec<String> {
-    match identity.filter(|identity| identity.explicit) {
-        Some(identity) => {
-            identity_settings(Some(&identity.identifier), Some(&identity.display_name))
-        }
-        None => Vec::new(),
-    }
+    let (id, name) = stated(identity);
+    identity_settings(id, name)
+}
+
+/// The bundle identifier and display name `identity` states, each `None`
+/// when frust.toml leaves it to the project.
+fn stated(identity: Option<&AppIdentity>) -> (Option<&str>, Option<&str>) {
+    let id = identity
+        .filter(|identity| identity.identifier_stated)
+        .map(|identity| identity.identifier.as_str());
+    let name = identity.and_then(|identity| identity.display_name.as_deref());
+    (id, name)
 }
 
 /// The Xcode `ARCHS` value for a simulator build on this host. A simulator
@@ -94,12 +101,10 @@ pub(crate) fn host_sim_arch() -> &'static str {
 
 impl<'a> Invocation<'a> {
     /// Fills [`bundle_identifier`](Self::bundle_identifier) and
-    /// [`display_name`](Self::display_name) from `identity` when it is
-    /// explicit; clears both otherwise.
+    /// [`display_name`](Self::display_name) from what `identity` states,
+    /// clearing each one it does not.
     pub fn with_identity(mut self, identity: Option<&'a AppIdentity>) -> Self {
-        let explicit = identity.filter(|identity| identity.explicit);
-        self.bundle_identifier = explicit.map(|identity| identity.identifier.as_str());
-        self.display_name = explicit.map(|identity| identity.display_name.as_str());
+        (self.bundle_identifier, self.display_name) = stated(identity);
         self
     }
 }
@@ -224,18 +229,43 @@ mod tests {
         }
     }
 
-    fn identity(explicit: bool) -> AppIdentity {
+    fn identity(stated: bool) -> AppIdentity {
         AppIdentity {
             identifier: "dev.f0x.myApp.dev".to_string(),
-            display_name: "My App Dev".to_string(),
-            explicit,
+            identifier_stated: stated,
+            display_name: stated.then(|| "My App Dev".to_string()),
             flavor: Some("dev".to_string()),
-            flavor_declared: explicit,
+            flavor_declared: stated,
         }
     }
 
+    /// The identifier and the name are passed independently: each only
+    /// when frust.toml states it.
     #[test]
-    fn identity_settings_are_passed_only_for_an_explicit_identity() {
+    fn each_identity_setting_is_passed_only_when_stated() {
+        let mut id_only = identity(true);
+        id_only.display_name = None;
+        let argv = signed().with_identity(Some(&id_only)).build_argv();
+        assert!(argv.contains(&"PRODUCT_BUNDLE_IDENTIFIER=dev.f0x.myApp.dev".to_string()));
+        assert!(!argv.iter().any(|a| a.starts_with("FRUST_DISPLAY_NAME=")));
+
+        let mut name_only = identity(true);
+        name_only.identifier_stated = false;
+        assert_eq!(
+            identity_settings_for(Some(&name_only)),
+            ["FRUST_DISPLAY_NAME=My App Dev"]
+        );
+        let argv = signed().with_identity(Some(&name_only)).archive_argv();
+        assert!(
+            !argv
+                .iter()
+                .any(|a| a.starts_with("PRODUCT_BUNDLE_IDENTIFIER="))
+        );
+        assert!(argv.contains(&"FRUST_DISPLAY_NAME=My App Dev".to_string()));
+    }
+
+    #[test]
+    fn identity_settings_are_passed_only_for_a_stated_identity() {
         let explicit = identity(true);
         let argv = signed().with_identity(Some(&explicit)).build_argv();
         let id = argv

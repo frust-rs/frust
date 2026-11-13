@@ -8,8 +8,9 @@
 //! modules now own only their id-resolution logic and read the manifest
 //! through [`load`].
 //!
-//! `[flavors.<name>]` is parsed and validated (see [`FlavorSection`]) and
-//! resolved by `crate::identity`. Unknown sections are ignored (`[deeplink]`
+//! `[flavors.<name>]` is kept raw and validated only when a build selects the
+//! flavor ([`Manifest::flavor`]), so a malformed flavor never breaks a command
+//! that does not use it. Unknown sections are ignored (`[deeplink]`
 //! is documentation for the platform templates, not tooling input), but
 //! `[signing]` and its
 //! `[signing.env]` subtable, the desktop-shell sections
@@ -52,10 +53,10 @@ pub struct Manifest {
     pub web: Option<WebSection>,
     #[serde(default)]
     pub hotpatch: Option<HotpatchSection>,
-    /// `[flavors.<name>]` — per-flavor identity suffixes, keyed by flavor
-    /// name. Validated at parse time.
-    #[serde(default, deserialize_with = "de_flavors")]
-    pub flavors: BTreeMap<String, FlavorSection>,
+    /// `[flavors.<name>]`, keyed by flavor name, each value kept as written:
+    /// read through [`Manifest::flavor`], which validates the one selected.
+    #[serde(default)]
+    flavors: BTreeMap<String, toml::Value>,
 }
 
 /// `[flavors.<name>]` — how a flavor's identity differs from the base app.
@@ -72,22 +73,52 @@ pub struct FlavorSection {
     pub app_name_suffix: Option<String>,
 }
 
-fn de_flavors<'de, D>(d: D) -> Result<BTreeMap<String, FlavorSection>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let flavors = BTreeMap::<String, FlavorSection>::deserialize(d)?;
-    for (name, flavor) in &flavors {
+/// Why a selected `[flavors.<name>]` is invalid.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum FlavorError {
+    #[error(
+        "invalid flavor name `{0}` in `[flavors]`: use ASCII lowercase letters and digits, \
+         starting with a letter (it is capitalised into Gradle task and Xcode scheme names)"
+    )]
+    InvalidName(String),
+    #[error(
+        "invalid `app-id-suffix` `{suffix}` in `[flavors.{name}]`: it must start with `.`, and \
+         every dot-separated segment must start with a letter and contain only ASCII letters \
+         and digits (no `_` or `-`)"
+    )]
+    InvalidAppIdSuffix { name: String, suffix: String },
+    /// An unknown key, or a value of the wrong type.
+    #[error("invalid frust.toml: `[flavors.{name}]`: {reason}")]
+    InvalidSection { name: String, reason: String },
+}
+
+impl Manifest {
+    /// Whether `[flavors.<name>]` exists, valid or not.
+    pub fn flavor_is_declared(&self, name: &str) -> bool {
+        self.flavors.contains_key(name)
+    }
+
+    /// The `[flavors.<name>]` section, validated: `Ok(None)` when it is not
+    /// declared, an error naming the flavor when its name, its
+    /// `app-id-suffix` or one of its keys is invalid. Other flavors are not
+    /// looked at.
+    pub fn flavor(&self, name: &str) -> Result<Option<FlavorSection>, FlavorError> {
+        let Some(raw) = self.flavors.get(name) else {
+            return Ok(None);
+        };
         let mut chars = name.chars();
         let name_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase())
             && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
         if !name_ok {
-            return Err(serde::de::Error::custom(format!(
-                "invalid flavor name `{name}` in `[flavors]`: use ASCII lowercase letters and \
-                 digits, starting with a letter (it is capitalised into Gradle task and Xcode \
-                 scheme names)"
-            )));
+            return Err(FlavorError::InvalidName(name.to_string()));
         }
+        let flavor: FlavorSection =
+            raw.clone()
+                .try_into()
+                .map_err(|err: toml::de::Error| FlavorError::InvalidSection {
+                    name: name.to_string(),
+                    reason: err.message().trim().to_string(),
+                })?;
         if let Some(suffix) = &flavor.app_id_suffix {
             let ok = suffix.strip_prefix('.').is_some_and(|rest| {
                 rest.split('.').all(|seg| {
@@ -97,15 +128,14 @@ where
                 })
             });
             if !ok {
-                return Err(serde::de::Error::custom(format!(
-                    "invalid `app-id-suffix` `{suffix}` in `[flavors.{name}]`: it must start \
-                     with `.`, and every dot-separated segment must start with a letter and \
-                     contain only ASCII letters and digits (no `_` or `-`)"
-                )));
+                return Err(FlavorError::InvalidAppIdSuffix {
+                    name: name.to_string(),
+                    suffix: suffix.clone(),
+                });
             }
         }
+        Ok(Some(flavor))
     }
-    Ok(flavors)
 }
 
 /// `[app]` — the project's identity and, optionally, its release version.
@@ -113,6 +143,11 @@ where
 pub struct AppSection {
     pub name: String,
     pub org: String,
+    /// `display-name` — the launcher / home-screen name frust applies at
+    /// build time. Absent: frust sets no name and the platform files' own
+    /// label stands (unless a selected flavor adds an `app-name-suffix`).
+    #[serde(default, rename = "display-name", deserialize_with = "de_display_name")]
+    pub display_name: Option<String>,
     /// `version` — the app's release version, one to three dot-separated
     /// non-negative integers (`2`, `2.3`, `2.3.4`). The same string is used
     /// as the Android `versionName` and the iOS `CFBundleShortVersionString`,
@@ -125,6 +160,19 @@ pub struct AppSection {
     /// platform's default.
     #[serde(default, rename = "build-number", deserialize_with = "de_build_number")]
     pub build_number: Option<u32>,
+}
+
+fn de_display_name<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<String>::deserialize(d)? {
+        Some(name) if name.is_empty() => Err(serde::de::Error::custom(
+            "invalid `[app] display-name`: it must not be empty (remove the key to keep the \
+             platform files' own label)",
+        )),
+        name => Ok(name),
+    }
 }
 
 fn de_version<'de, D>(d: D) -> Result<Option<String>, D::Error>
@@ -797,14 +845,55 @@ mod tests {
             "\n[flavors.dev]\napp-id-suffix = \".dev\"\napp-name-suffix = \" Dev\"\n\n[flavors.qa2]\n",
         ))
         .unwrap();
-        let dev = &m.flavors["dev"];
+        let dev = m.flavor("dev").unwrap().unwrap();
         assert_eq!(dev.app_id_suffix.as_deref(), Some(".dev"));
         assert_eq!(dev.app_name_suffix.as_deref(), Some(" Dev"));
-        assert_eq!(m.flavors["qa2"], FlavorSection::default());
+        assert_eq!(m.flavor("qa2").unwrap(), Some(FlavorSection::default()));
+        assert_eq!(m.flavor("absent").unwrap(), None);
+        assert!(m.flavor_is_declared("dev") && !m.flavor_is_declared("absent"));
+    }
+
+    /// Malformed flavors load; only the one a command selects is judged, and
+    /// a valid neighbour still resolves.
+    #[test]
+    fn malformed_flavors_load_and_fail_only_when_selected() {
+        let m = parse(&app("\n[flavors]\nbroken = 3\n\n\
+             [flavors.Dev]\n\n\
+             [flavors.prod_eu]\napp-id-suffix = \".eu\"\n\n\
+             [flavors.typo]\napp_id_suffix = \".t\"\n\n\
+             [flavors.good]\napp-id-suffix = \".good\"\n"))
+        .expect("a malformed [flavors] table must not fail the load");
+        for name in ["broken", "Dev", "prod_eu", "typo", "good"] {
+            assert!(m.flavor_is_declared(name), "{name}");
+        }
+        assert_eq!(
+            m.flavor("good").unwrap().unwrap().app_id_suffix.as_deref(),
+            Some(".good")
+        );
+        for (name, needle) in [
+            ("Dev", "invalid flavor name `Dev`"),
+            ("prod_eu", "invalid flavor name `prod_eu`"),
+            ("typo", "invalid frust.toml: `[flavors.typo]`"),
+            ("broken", "invalid frust.toml: `[flavors.broken]`"),
+        ] {
+            let err = m.flavor(name).unwrap_err().to_string();
+            assert!(err.contains(needle), "{name}: {err}");
+        }
+        let typo = m.flavor("typo").unwrap_err().to_string();
+        assert!(typo.contains("app_id_suffix"), "{typo}");
     }
 
     #[test]
-    fn invalid_flavors_are_hard_errors_naming_the_flavor() {
+    fn display_name_is_optional_and_never_empty() {
+        assert_eq!(parse(&app("")).unwrap().app.display_name, None);
+        let m = parse(&app("display-name = \"My App\"\n")).unwrap();
+        assert_eq!(m.app.display_name.as_deref(), Some("My App"));
+        let err = format!("{:#}", parse(&app("display-name = \"\"\n")).unwrap_err());
+        assert!(err.contains("`[app] display-name`"), "{err}");
+    }
+
+    #[test]
+    fn invalid_flavors_are_errors_naming_the_flavor_when_selected() {
         for (body, needle) in [
             ("[flavors.Dev]\n", "invalid flavor name `Dev`"),
             ("[flavors.1st]\n", "invalid flavor name `1st`"),
@@ -839,9 +928,14 @@ mod tests {
                 "invalid frust.toml",
             ),
         ] {
-            let err = parse(&app(&format!("\n{body}"))).unwrap_err();
-            let chain = format!("{err:#}");
-            assert!(chain.contains(needle), "{body}: {chain}");
+            let m = parse(&app(&format!("\n{body}"))).unwrap();
+            let name = body
+                .trim_start_matches("[flavors.")
+                .split(']')
+                .next()
+                .unwrap();
+            let err = m.flavor(name).unwrap_err().to_string();
+            assert!(err.contains(needle), "{body}: {err}");
         }
     }
 

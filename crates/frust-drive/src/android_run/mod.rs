@@ -295,21 +295,20 @@ fn prepare_session_with(
     let resolved = crate::build_info::resolve_version(info, manifest.as_ref());
     // The run lane does not warn about a defaulted version (debug installs).
     let (version_name, version_code) = resolved.android_name_and_code();
-    // The resolved identity rides `local.properties` (set when explicit,
-    // removed otherwise) and decides whether a `--flavor` is a Gradle product
-    // flavor, exactly as on the `frust build` lane.
-    crate::android_build::local_properties::write(
-        &android_dir,
-        &version_name,
-        &version_code,
-        Some(&project.identity),
-    )
-    .context("writing android/local.properties")?;
-    let route = crate::android_build::tasks::FlavorRoute::for_project(
+    // The resolved identity rides `local.properties` (each value set when
+    // frust.toml states it, removed otherwise) and decides whether a
+    // `--flavor` is a Gradle product flavor, exactly as on the `frust build`
+    // lane — a double-declared flavor or an app module that would ignore a
+    // stated value fails here, before Gradle.
+    let resolved =
+        crate::android_build::resolve_identity(manifest.as_ref(), info.flavor.as_deref())?;
+    let route = crate::android_build::prepare_identity(
         &android_dir,
         info.flavor.as_deref(),
-        project.identity.flavor_declared,
-    );
+        resolved.as_ref(),
+        &version_name,
+        &version_code,
+    )?;
 
     // One source of truth for signing (see `android_build::signing`): the gate
     // resolves `[signing]` and the material it verified is handed to Gradle as
@@ -465,7 +464,7 @@ fn prepare_session_with(
     // moves the package, and AGP roots the launchable activity's class at the
     // module namespace instead, so both halves of the `am start -n` component
     // (and the `pidof` package) can differ from the frust.toml-derived id.
-    // Read before install, so an explicit identity the APK does not carry
+    // Read before install, so a stated identity the APK does not carry
     // fails here rather than on the device. Unreadable badging is a warning,
     // not an error — the launch fallback is right for a project with no
     // flavor.
@@ -473,13 +472,10 @@ fn prepare_session_with(
     if let Err(reason) = &badging {
         on_line(&badging::fallback_warning(reason));
     }
-    if project.identity.explicit
-        && let Some((_, base)) = crate::android_build::resolve_identity(manifest.as_ref(), None)?
-    {
+    if let Some(resolved) = resolved.as_ref() {
         crate::android_build::check_built_identity(
             badging.as_ref().map_err(String::as_str),
-            &project.identity,
-            &base,
+            resolved,
             &route,
             on_line,
         )?;

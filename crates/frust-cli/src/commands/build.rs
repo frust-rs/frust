@@ -297,15 +297,10 @@ fn build_android(
     target: AndroidArtifact,
     extra_features: &[String],
 ) -> Result<u8> {
-    let project = android_run::project::detect(project_dir)?;
+    let project = android_run::project::detect_flavor(project_dir, info.flavor.as_deref())?;
     android_run::project::require_android_dir(&project.root)?;
     refresh_platform_wiring(runner, project_dir, &mut |line| println!("{line}"));
-    println!(
-        "Building `{}` — Gradle build type `{}`, cargo profile args {:?}…",
-        project.app_id,
-        info.mode.gradle_infix(),
-        info.mode.cargo_profile_arg()
-    );
+    println!("{}", android_banner(&project.app_id, info));
     // The drive core is print-free (its `on_line` sink was added by the
     // tty-garbling fix); the CLI restores today's behavior by `println!`ing
     // each streamed line verbatim.
@@ -328,15 +323,10 @@ fn build_ios(
     target: IosArtifact,
     extra_features: &[String],
 ) -> Result<u8> {
-    let project = ios_run::project::detect(project_dir)?;
+    let project = ios_run::project::detect_flavor(project_dir, info.flavor.as_deref())?;
     ios_run::project::require_ios_dir(&project.root)?;
     refresh_platform_wiring(runner, project_dir, &mut |line| println!("{line}"));
-    println!(
-        "Building `{}` — Xcode configuration `{}`, cargo profile args {:?}…",
-        project.bundle_id,
-        info.mode.xcode_configuration(),
-        info.mode.cargo_profile_arg()
-    );
+    println!("{}", ios_banner(&project.bundle_id, info));
     // Print-free drive core (see `build_android` above); the CLI `println!`s
     // each streamed line to keep its stdout verbatim.
     let artifacts = ios_build::build(
@@ -349,6 +339,26 @@ fn build_ios(
     )?;
     print_artifacts(&artifacts.paths);
     Ok(0)
+}
+
+/// The `Building …` line `build apk|appbundle` prints, naming `app_id` — the
+/// application id resolved for the requested flavor.
+fn android_banner(app_id: &str, info: &BuildInfo) -> String {
+    format!(
+        "Building `{app_id}` — Gradle build type `{}`, cargo profile args {:?}…",
+        info.mode.gradle_infix(),
+        info.mode.cargo_profile_arg()
+    )
+}
+
+/// The `Building …` line `build ios|ipa` prints, naming `bundle_id` — the
+/// bundle identifier resolved for the requested flavor.
+fn ios_banner(bundle_id: &str, info: &BuildInfo) -> String {
+    format!(
+        "Building `{bundle_id}` — Xcode configuration `{}`, cargo profile args {:?}…",
+        info.mode.xcode_configuration(),
+        info.mode.cargo_profile_arg()
+    )
 }
 
 /// Drives [`desktop_build::build_with_env`] (plus
@@ -536,6 +546,47 @@ mod tests {
         let dir = unique_project_dir(tag);
         fs::create_dir_all(dir.join("ios/Runner.xcodeproj")).unwrap();
         dir
+    }
+
+    /// A flavored build's banner names the identity resolved for that
+    /// flavor, not the base one; an unflavored build names the base.
+    #[test]
+    fn the_build_banner_names_the_flavored_identity() {
+        let dir = unique_project_dir("banner-flavor");
+        fs::write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n\
+             [ios]\nidentifier = \"com.acme.app\"\n\n\
+             [flavors.dev]\napp-id-suffix = \".dev\"\n",
+        )
+        .unwrap();
+        let info = |flavor: Option<&str>| {
+            BuildInfo::from_args(
+                frust_drive::build_info::BuildArgs {
+                    flavor: flavor.map(str::to_string),
+                    ..Default::default()
+                },
+                BuildMode::Debug,
+            )
+            .unwrap()
+        };
+        let dev = info(Some("dev"));
+        let android = android_run::project::detect_flavor(&dir, dev.flavor.as_deref()).unwrap();
+        assert!(
+            android_banner(&android.app_id, &dev).starts_with("Building `dev.f0x.myapp.dev` —"),
+            "{}",
+            android_banner(&android.app_id, &dev)
+        );
+        let ios = ios_run::project::detect_flavor(&dir, dev.flavor.as_deref()).unwrap();
+        assert!(
+            ios_banner(&ios.bundle_id, &dev).starts_with("Building `com.acme.app.dev` —"),
+            "{}",
+            ios_banner(&ios.bundle_id, &dev)
+        );
+        let plain = info(None);
+        let base = ios_run::project::detect_flavor(&dir, None).unwrap();
+        assert!(ios_banner(&base.bundle_id, &plain).starts_with("Building `com.acme.app` —"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

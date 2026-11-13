@@ -2,6 +2,8 @@
 name = "{{ project_name }}"
 org = "{{ org }}"
 description = "{{ description }}"
+# When set, frust applies it to the Android label and the iOS display name at build time; when absent, the platform files' own label is used.
+# display-name = "{{ title_case_name }}"
 # Release version and build number: the default for every platform build.
 # `--build-name` and `--build-number` override them for one build.
 version = "1.0.0"
@@ -55,7 +57,7 @@ scheme = "{{ deeplink_scheme }}"
 host = "{{ deeplink_host }}"
 {% endif %}
 {% endif -%}
-# Build flavors: `--flavor dev` then needs no Gradle flavor or Xcode scheme.
+# Build flavors: declare a flavor either here or natively (Gradle flavor / Xcode scheme), not both.
 # [flavors.dev]
 # app-id-suffix = ".dev"
 # app-name-suffix = " Dev"
