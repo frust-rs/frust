@@ -8,8 +8,10 @@
 //! modules now own only their id-resolution logic and read the manifest
 //! through [`load`].
 //!
-//! Unknown sections are ignored (`[deeplink]`, `[flavors]` are documentation
-//! for the platform templates, not tooling input), but `[signing]` and its
+//! `[flavors.<name>]` is parsed and validated (see [`FlavorSection`]) and
+//! resolved by `crate::identity`. Unknown sections are ignored (`[deeplink]`
+//! is documentation for the platform templates, not tooling input), but
+//! `[signing]` and its
 //! `[signing.env]` subtable, the desktop-shell sections
 //! (`[desktop]`/`[macos]`/`[windows]`/`[linux]`), `[web]` and `[hotpatch]`,
 //! are `deny_unknown_fields`: a typo in a section that decides whether a
@@ -21,6 +23,7 @@
 //! it must tolerate manifests this reader rejects (it runs before, and
 //! independently of, project detection).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -49,6 +52,60 @@ pub struct Manifest {
     pub web: Option<WebSection>,
     #[serde(default)]
     pub hotpatch: Option<HotpatchSection>,
+    /// `[flavors.<name>]` — per-flavor identity suffixes, keyed by flavor
+    /// name. Validated at parse time.
+    #[serde(default, deserialize_with = "de_flavors")]
+    pub flavors: BTreeMap<String, FlavorSection>,
+}
+
+/// `[flavors.<name>]` — how a flavor's identity differs from the base app.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct FlavorSection {
+    /// Appended to the application id / bundle identifier: starts with `.`,
+    /// and every following dot-separated segment starts with an ASCII letter
+    /// and holds only ASCII letters and digits.
+    #[serde(default)]
+    pub app_id_suffix: Option<String>,
+    /// Appended verbatim to the display name.
+    #[serde(default)]
+    pub app_name_suffix: Option<String>,
+}
+
+fn de_flavors<'de, D>(d: D) -> Result<BTreeMap<String, FlavorSection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let flavors = BTreeMap::<String, FlavorSection>::deserialize(d)?;
+    for (name, flavor) in &flavors {
+        let mut chars = name.chars();
+        let name_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase())
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+        if !name_ok {
+            return Err(serde::de::Error::custom(format!(
+                "invalid flavor name `{name}` in `[flavors]`: use ASCII lowercase letters and \
+                 digits, starting with a letter (it is capitalised into Gradle task and Xcode \
+                 scheme names)"
+            )));
+        }
+        if let Some(suffix) = &flavor.app_id_suffix {
+            let ok = suffix.strip_prefix('.').is_some_and(|rest| {
+                rest.split('.').all(|seg| {
+                    let mut c = seg.chars();
+                    c.next().is_some_and(|f| f.is_ascii_alphabetic())
+                        && c.all(|c| c.is_ascii_alphanumeric())
+                })
+            });
+            if !ok {
+                return Err(serde::de::Error::custom(format!(
+                    "invalid `app-id-suffix` `{suffix}` in `[flavors.{name}]`: it must start \
+                     with `.`, and every dot-separated segment must start with a letter and \
+                     contain only ASCII letters and digits (no `_` or `-`)"
+                )));
+            }
+        }
+    }
+    Ok(flavors)
 }
 
 /// `[app]` — the project's identity and, optionally, its release version.
@@ -727,12 +784,65 @@ mod tests {
 
     #[test]
     fn ignores_sections_the_drive_pipelines_do_not_read() {
-        let m = parse(
-            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[deeplink]\nscheme = \"myapp\"\n\n\
-             [flavors]\ndev = { app-id-suffix = \".dev\" }\n",
-        )
-        .unwrap();
+        let m =
+            parse("[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[deeplink]\nscheme = \"myapp\"\n")
+                .unwrap();
         assert_eq!(m.app.name, "myapp");
+        assert!(m.flavors.is_empty());
+    }
+
+    #[test]
+    fn parses_a_real_flavors_section() {
+        let m = parse(&app(
+            "\n[flavors.dev]\napp-id-suffix = \".dev\"\napp-name-suffix = \" Dev\"\n\n[flavors.qa2]\n",
+        ))
+        .unwrap();
+        let dev = &m.flavors["dev"];
+        assert_eq!(dev.app_id_suffix.as_deref(), Some(".dev"));
+        assert_eq!(dev.app_name_suffix.as_deref(), Some(" Dev"));
+        assert_eq!(m.flavors["qa2"], FlavorSection::default());
+    }
+
+    #[test]
+    fn invalid_flavors_are_hard_errors_naming_the_flavor() {
+        for (body, needle) in [
+            ("[flavors.Dev]\n", "invalid flavor name `Dev`"),
+            ("[flavors.1st]\n", "invalid flavor name `1st`"),
+            ("[flavors.my-flavor]\n", "invalid flavor name `my-flavor`"),
+            (
+                "[flavors.dev]\napp-id-suffix = \"dev\"\n",
+                "`[flavors.dev]`",
+            ),
+            ("[flavors.dev]\napp-id-suffix = \".\"\n", "`app-id-suffix`"),
+            (
+                "[flavors.dev]\napp-id-suffix = \".a_b\"\n",
+                "`app-id-suffix`",
+            ),
+            (
+                "[flavors.dev]\napp-id-suffix = \".a-b\"\n",
+                "`app-id-suffix`",
+            ),
+            (
+                "[flavors.dev]\napp-id-suffix = \".1a\"\n",
+                "`app-id-suffix`",
+            ),
+            (
+                "[flavors.dev]\napp-id-suffix = \".a..b\"\n",
+                "`app-id-suffix`",
+            ),
+            (
+                "[flavors.dev]\napp-id-suffix = \".a.\"\n",
+                "`app-id-suffix`",
+            ),
+            (
+                "[flavors.dev]\napp_id_suffix = \".dev\"\n",
+                "invalid frust.toml",
+            ),
+        ] {
+            let err = parse(&app(&format!("\n{body}"))).unwrap_err();
+            let chain = format!("{err:#}");
+            assert!(chain.contains(needle), "{body}: {chain}");
+        }
     }
 
     #[test]
