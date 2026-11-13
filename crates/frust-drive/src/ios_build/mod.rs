@@ -112,6 +112,10 @@ fn build_with_env(
     let manifest = crate::manifest::load_optional(project_dir)?;
     let identity = resolve_identity(manifest.as_ref(), info)?;
     let flavor_declared = identity.as_ref().is_some_and(|i| i.flavor_declared);
+    // A native flavor that frust.toml does not declare keeps the identity
+    // its own `<Mode>-<Flavor>` configuration sets: nothing is passed and
+    // nothing is checked.
+    let identity = identity.filter(|identity| !native_config_owns_identity(identity));
     let sc = schemes::resolve_verified(runner, project_dir, info, flavor_declared)?;
     let resolved = crate::build_info::resolve_version(info, manifest.as_ref());
 
@@ -222,6 +226,12 @@ fn build_with_env(
 
 /// Where an archive keeps its `.app`, relative to the project root.
 const ARCHIVED_APPS_DIR: &str = "build/ios/archive/Runner.xcarchive/Products/Applications";
+
+/// Whether the build uses a native scheme for a flavor `frust.toml` does not
+/// declare, so the native configuration owns the bundle identifier and name.
+fn native_config_owns_identity(identity: &AppIdentity) -> bool {
+    identity.flavor.is_some() && !identity.flavor_declared
+}
 
 /// The iOS identity a build of `info`'s flavor must produce, resolved from
 /// the project's `frust.toml`; `None` when the project has no manifest.
@@ -1193,6 +1203,99 @@ mod tests {
             "{warning}"
         );
         assert_eq!(warning.lines().count(), 1, "{warning}");
+    }
+
+    /// A runner for a project whose Xcode project has a native `scheme`
+    /// (configuration `Release-<scheme>`) and a no-codesign device `.app`
+    /// build expecting `settings` between `FRUST_FEATURES` and the signing
+    /// arguments. No `plutil` fixture is registered.
+    fn native_scheme_runner(dir: &Path, scheme: &str, settings: &str) -> FakeProcessRunner {
+        let configuration = format!("Release-{scheme}");
+        plant_products(dir, &configuration, false, "Runner.app");
+        let list = format!(
+            r#"{{"project":{{"name":"Runner","schemes":["Runner","{scheme}"],"configurations":["Debug","Profile","Release","{configuration}"]}}}}"#
+        );
+        FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
+            .with("xcode-select -p", ok("/Applications/Xcode.app\n"))
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios\naarch64-apple-ios-sim\n"),
+            )
+            .with(
+                "xcrun xcodebuild -list -json -project ios/Runner.xcodeproj",
+                ok(&list),
+            )
+            .with(
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme {scheme} -configuration {configuration} -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=bGVhbg== {settings}{NO_CODESIGN}"
+                ),
+                ok("Build succeeded"),
+            )
+    }
+
+    fn native_flavor_build(
+        dir: &Path,
+        runner: &FakeProcessRunner,
+        flavor: &str,
+    ) -> (Result<BuiltArtifacts>, Vec<String>) {
+        let mut flavored = info(BuildMode::Release);
+        flavored.flavor = Some(flavor.to_string());
+        let mut lines = Vec::new();
+        let result = build_with_env(
+            runner,
+            &FakeEnv::new(),
+            dir,
+            &flavored,
+            &IosArtifact::App {
+                simulator: false,
+                codesign: false,
+            },
+            NO_EXTRA,
+            &mut |line| lines.push(line.to_string()),
+        );
+        (result, lines)
+    }
+
+    /// A native scheme for a flavor `frust.toml` does not declare, with
+    /// `[ios] identifier` set: neither identity setting is passed, no plist
+    /// is read (no `plutil` fixture is registered) and nothing is warned.
+    #[test]
+    fn an_undeclared_native_flavor_passes_and_checks_no_identity() {
+        let dir = temp_project("undeclared-native");
+        fs::write(dir.join("frust.toml"), IDENTITY_TOML).unwrap();
+        let runner = native_scheme_runner(&dir, "Staging", "");
+        let (result, lines) = native_flavor_build(&dir, &runner, "staging");
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(result.unwrap().paths.len(), 1);
+        assert!(
+            !lines.iter().any(|l| l.starts_with("warning:")),
+            "{lines:?}"
+        );
+    }
+
+    /// A native `Dev` scheme whose flavor `dev` is also declared in
+    /// `frust.toml` keeps the suffixed identity on the line and checks it.
+    #[test]
+    fn a_declared_native_flavor_passes_and_checks_its_identity() {
+        let dir = temp_project("declared-native");
+        fs::write(dir.join("frust.toml"), IDENTITY_TOML).unwrap();
+        let runner = native_scheme_runner(
+            &dir,
+            "Dev",
+            "PRODUCT_BUNDLE_IDENTIFIER=com.acme.app.dev FRUST_DISPLAY_NAME=Myapp Dev ",
+        );
+        let app = products_dir(&dir, "Release-Dev", false).join("Runner.app");
+        let runner = runner
+            .with(plutil(&app, "CFBundleIdentifier"), ok("com.acme.app.dev\n"))
+            .with(plutil(&app, "CFBundleDisplayName"), ok("Myapp Dev\n"));
+        let (result, lines) = native_flavor_build(&dir, &runner, "dev");
+        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(result.unwrap().paths.len(), 1);
+        assert!(
+            !lines.iter().any(|l| l.starts_with("warning:")),
+            "{lines:?}"
+        );
     }
 
     /// A derived identity passes no identity settings and reads no plist:
