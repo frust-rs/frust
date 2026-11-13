@@ -1646,6 +1646,62 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
+    /// `frust.toml` is the one place the identifiers are stated: both match
+    /// what the Android Gradle script and the Xcode project render, and the
+    /// identity resolver reads them back as explicit.
+    #[test]
+    fn generate_frust_toml_states_identifiers_matching_platform_files() {
+        use crate::identity::{IdentityPlatform, resolve};
+
+        let dest = unique_temp_dir("toml-identifiers");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
+        let parsed = crate::manifest::parse(&toml).expect("the scaffolded frust.toml must parse");
+
+        let android = resolve(&parsed, IdentityPlatform::Android, None).unwrap();
+        let ios = resolve(&parsed, IdentityPlatform::Ios, None).unwrap();
+        assert!(android.explicit, "{toml}");
+        assert!(ios.explicit, "{toml}");
+        assert_eq!(android.identifier, ctx.android_identifier(), "{toml}");
+        assert_eq!(ios.identifier, ctx.ios_identifier(), "{toml}");
+
+        let gradle = fs::read_to_string(dest.join("android/app/build.gradle.kts")).unwrap();
+        assert!(
+            gradle.contains(&format!("namespace = \"{}\"", android.identifier)),
+            "{gradle}"
+        );
+        assert!(
+            gradle.contains(&format!(
+                "getProperty(\"frust.applicationId\", \"{}\")",
+                android.identifier
+            )),
+            "{gradle}"
+        );
+
+        let pbxproj =
+            fs::read_to_string(dest.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            pbxproj.contains(&format!(
+                "PRODUCT_BUNDLE_IDENTIFIER = \"{}\";",
+                ios.identifier
+            )),
+            "{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj.matches("FRUST_DISPLAY_NAME = ").count(),
+            3,
+            "{pbxproj}"
+        );
+
+        let plist = fs::read_to_string(dest.join("ios/Runner/Info.plist")).unwrap();
+        assert!(plist.contains("$(FRUST_DISPLAY_NAME)"), "{plist}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
     #[test]
     fn generate_rejects_org_producing_invalid_ios_bundle_id() {
         let dest = unique_temp_dir("ios-invalid-id");
