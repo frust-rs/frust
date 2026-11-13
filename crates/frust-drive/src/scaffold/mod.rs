@@ -922,6 +922,12 @@ mod tests {
             build_gradle.contains(&format!("\"{}\"", ctx.android_identifier())),
             "{build_gradle}"
         );
+        for identity_key in ["frust.applicationId", "frust.appLabel", "frustAppLabel"] {
+            assert!(
+                build_gradle.contains(identity_key),
+                "{identity_key}: {build_gradle}"
+            );
+        }
 
         // `androidIdentifier` path segment expands to nested package
         // directories from the dotted `android_identifier` value.
@@ -1439,7 +1445,7 @@ mod tests {
              \x20\x20\x20\x20<application\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:allowBackup=\"true\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:icon=\"@mipmap/ic_launcher\"\n\
-             \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"{title}\"\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20android:label=\"${{frustAppLabel}}\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:roundIcon=\"@mipmap/ic_launcher_round\"\n\
              \x20\x20\x20\x20\x20\x20\x20\x20android:theme=\"@android:style/Theme.Material.NoActionBar\">\n\
              \n\
@@ -1460,7 +1466,6 @@ mod tests {
              \x20\x20\x20\x20</application>\n\
              \n\
              </manifest>\n",
-            title = ctx.title_case_name,
             project = ctx.project_name,
         );
         assert_eq!(manifest, expected);
@@ -1637,6 +1642,78 @@ mod tests {
         let parsed = crate::manifest::parse(&toml).expect("the scaffolded frust.toml must parse");
         assert_eq!(parsed.app.version.as_deref(), Some("1.0.0"), "{toml}");
         assert_eq!(parsed.app.build_number, Some(1), "{toml}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// `frust.toml` is the one place the identifiers are stated: both match
+    /// what the Android Gradle script and the Xcode project render, and the
+    /// identity resolver reads them back as stated — with no display name, so
+    /// the platform files' own label stands until `display-name` is set.
+    #[test]
+    fn generate_frust_toml_states_identifiers_matching_platform_files() {
+        use crate::identity::{IdentityPlatform, resolve};
+
+        let dest = unique_temp_dir("toml-identifiers");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
+        let parsed = crate::manifest::parse(&toml).expect("the scaffolded frust.toml must parse");
+
+        let android = resolve(&parsed, IdentityPlatform::Android, None).unwrap();
+        let ios = resolve(&parsed, IdentityPlatform::Ios, None).unwrap();
+        assert!(android.identifier_stated, "{toml}");
+        assert!(ios.identifier_stated, "{toml}");
+        assert_eq!((&android.display_name, &ios.display_name), (&None, &None));
+        assert_eq!(android.identifier, ctx.android_identifier(), "{toml}");
+        assert_eq!(ios.identifier, ctx.ios_identifier(), "{toml}");
+
+        // Uncommenting the scaffold's `display-name` line states the name the
+        // platform files already render.
+        let named = toml.replacen("# display-name = ", "display-name = ", 1);
+        assert_ne!(named, toml, "the commented display-name example moved");
+        let named = crate::manifest::parse(&named).expect("the uncommented display-name parses");
+        for platform in [IdentityPlatform::Android, IdentityPlatform::Ios] {
+            let identity = resolve(&named, platform, None).unwrap();
+            assert_eq!(
+                identity.display_name.as_deref(),
+                Some(ctx.title_case_name.as_str()),
+                "{toml}"
+            );
+        }
+
+        let gradle = fs::read_to_string(dest.join("android/app/build.gradle.kts")).unwrap();
+        assert!(
+            gradle.contains(&format!("namespace = \"{}\"", android.identifier)),
+            "{gradle}"
+        );
+        assert!(
+            gradle.contains(&format!(
+                "getProperty(\"frust.applicationId\", \"{}\")",
+                android.identifier
+            )),
+            "{gradle}"
+        );
+
+        let pbxproj =
+            fs::read_to_string(dest.join("ios/Runner.xcodeproj/project.pbxproj")).unwrap();
+        assert!(
+            pbxproj.contains(&format!(
+                "PRODUCT_BUNDLE_IDENTIFIER = \"{}\";",
+                ios.identifier
+            )),
+            "{pbxproj}"
+        );
+        assert_eq!(
+            pbxproj.matches("FRUST_DISPLAY_NAME = ").count(),
+            3,
+            "{pbxproj}"
+        );
+
+        let plist = fs::read_to_string(dest.join("ios/Runner/Info.plist")).unwrap();
+        assert!(plist.contains("$(FRUST_DISPLAY_NAME)"), "{plist}");
 
         let _ = fs::remove_dir_all(&dest);
     }

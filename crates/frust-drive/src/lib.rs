@@ -50,6 +50,9 @@ pub mod host_path;
 /// gates that decide whether a patch may be applied.
 pub mod hotpatch;
 pub mod icons;
+/// The one function that answers what application id / bundle identifier and
+/// display name a build of a project, platform and optional flavor produces.
+pub mod identity;
 /// Process-wide termination handling (the single SIGINT/SIGTERM/SIGHUP owner
 /// and the secret-file scrub it runs). Internal: it is machinery the pipelines
 /// arm, not a surface a front-end drives.

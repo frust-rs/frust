@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::hotpatch::fat_link::LinkerFlavor;
-use crate::ios_build::xcodebuild::host_sim_arch;
+use crate::identity::AppIdentity;
+use crate::ios_build::xcodebuild::{host_sim_arch, identity_settings_for};
 use crate::process::{Output, ProcessRunner};
 
 /// The absolute path a successful [`build`] should have produced the app
@@ -48,13 +49,17 @@ pub fn app_bundle_path(root: &Path, configuration: &str) -> PathBuf {
 /// `lean` log ceiling — the same seam `frust build` threads `FRUST_FEATURES`
 /// through. Unlike user `--define`s, the feature set is mode-derived (never a
 /// per-run user value), so threading it here doesn't reintroduce the
-/// scheme-fixed run path's deliberate no-defines contract.
+/// scheme-fixed run path's deliberate no-defines contract. After
+/// `FRUST_FEATURES` come whichever identity settings `identity` states —
+/// `PRODUCT_BUNDLE_IDENTIFIER=<id>`, then `FRUST_DISPLAY_NAME=<name>` — the
+/// settings `ios_build`'s `Invocation` passes too.
 pub fn build(
     runner: &dyn ProcessRunner,
     root: &Path,
     udid: &str,
     configuration: &str,
     features_b64: Option<&str>,
+    identity: Option<&AppIdentity>,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Output> {
     build_with(
@@ -63,27 +68,33 @@ pub fn build(
         udid,
         configuration,
         features_b64,
-        &[],
+        &identity_settings_for(identity),
         on_line,
     )
 }
 
 /// [`build`] as the hot-patch fat build: `settings` (`NAME=value`, in
-/// order) go after `FRUST_FEATURES` and before the `build` action. The
-/// caller passes [`hot_link_settings`] plus the capture settings.
+/// order) go after `FRUST_FEATURES` and the identity settings, and before
+/// the `build` action. The caller passes [`hot_link_settings`] plus the
+/// capture settings.
+#[allow(clippy::too_many_arguments)] // [`build`]'s inputs plus the hot settings
 pub fn build_hot(
     runner: &dyn ProcessRunner,
     root: &Path,
     udid: &str,
     configuration: &str,
     features_b64: Option<&str>,
+    identity: Option<&AppIdentity>,
     settings: &[(String, String)],
     on_line: &mut dyn FnMut(&str),
 ) -> Result<Output> {
-    let settings: Vec<String> = settings
-        .iter()
-        .map(|(name, value)| format!("{name}={value}"))
-        .collect();
+    let mut identity_then_hot = identity_settings_for(identity);
+    identity_then_hot.extend(
+        settings
+            .iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    let settings = identity_then_hot;
     build_with(
         runner,
         root,
@@ -219,6 +230,7 @@ mod tests {
             "AAAA",
             "Debug",
             Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
+            None,
             &mut |line| lines.push(line.to_string()),
         )
         .unwrap();
@@ -245,6 +257,7 @@ mod tests {
             "AAAA",
             "Profile",
             Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -270,6 +283,7 @@ mod tests {
             "AAAA",
             "Debug",
             Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -300,6 +314,7 @@ mod tests {
             "AAAA",
             "Debug",
             Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -327,10 +342,69 @@ mod tests {
             "AAAA",
             "Debug",
             None,
+            None,
             &mut |_| {},
         )
         .unwrap();
         assert!(out.success);
+    }
+
+    /// A fully stated identity puts both identity settings right after
+    /// `FRUST_FEATURES`; a derived one leaves the argv exactly as it was
+    /// (registered exactly, so an extra setting finds no fixture).
+    #[test]
+    fn build_passes_identity_settings_only_for_a_stated_identity() {
+        let base = format!(
+            "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZQ==",
+            host_sim_arch()
+        );
+        let succeeded = Output {
+            success: true,
+            stdout: "Build succeeded".to_string(),
+            stderr: String::new(),
+        };
+        let mut identity = AppIdentity {
+            identifier: "dev.f0x.myapp.dev".to_string(),
+            identifier_stated: true,
+            display_name: Some("My App Dev".to_string()),
+            flavor: Some("dev".to_string()),
+            flavor_declared: true,
+        };
+        let explicit = FakeProcessRunner::new().with(
+            format!(
+                "{base} PRODUCT_BUNDLE_IDENTIFIER=dev.f0x.myapp.dev FRUST_DISPLAY_NAME=My App Dev build"
+            ),
+            succeeded.clone(),
+        );
+        let out = build(
+            &explicit,
+            Path::new("/tmp/myapp"),
+            "AAAA",
+            "Debug",
+            Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
+            Some(&identity),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(out.success);
+
+        identity.identifier_stated = false;
+        identity.display_name = None;
+        identity.flavor_declared = false;
+        let derived = FakeProcessRunner::new().with(format!("{base} build"), succeeded);
+        for identity in [Some(&identity), None] {
+            let out = build(
+                &derived,
+                Path::new("/tmp/myapp"),
+                "AAAA",
+                "Debug",
+                Some("ZnJ1c3QvcGVyZi10cmFjZQ=="),
+                identity,
+                &mut |_| {},
+            )
+            .unwrap();
+            assert!(out.success);
+        }
     }
 
     #[test]
@@ -354,6 +428,7 @@ mod tests {
             "AAAA",
             "Release",
             Some("bGVhbg=="),
+            None,
             &mut |_| {},
         )
         .unwrap();
@@ -389,6 +464,7 @@ mod tests {
             "AAAA",
             "Debug",
             Some("ZnJ1c3QvaG90cGF0Y2g="),
+            None,
             &settings,
             &mut |_| {},
         )

@@ -4,12 +4,15 @@
 //!
 //! Two writers share it: [`write`] stamps `frust.versionName`/
 //! `frust.versionCode` (the Flutter-canonical version plumbing the Gradle
-//! template reads with defaults), and `crate::platform_wiring` keeps the
-//! embedding and plugin module directories there. Both go through [`merge`],
-//! which sets only the keys it is given: every other line — `sdk.dir`
-//! written by Android Studio, comments, the other writer's keys, line
-//! endings — is preserved byte for byte, and a file whose keys already hold
-//! the wanted values is not rewritten at all.
+//! template reads with defaults) plus whichever of `frust.applicationId`/
+//! `frust.appLabel` `frust.toml` states, and `crate::platform_wiring` keeps
+//! the embedding and plugin module directories there. Both go through
+//! [`merge`], which sets only the keys it is given: every other line —
+//! `sdk.dir` written by Android Studio, comments, the other writer's keys,
+//! line endings — is preserved byte for byte, and a file whose keys already
+//! hold the wanted values is not rewritten at all. [`write`] drops the
+//! identity keys it does not set in the same pass, so an identity value
+//! frust.toml does not state leaves the template's default in charge.
 //!
 //! Values are written escaped the way `java.util.Properties.store` escapes
 //! them (backslashes, the `=`/`:`/`#`/`!` specials, a leading space, control
@@ -23,21 +26,46 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::identity::AppIdentity;
+
+/// The key the Gradle template reads its `applicationId` from.
+pub(crate) const APPLICATION_ID_KEY: &str = "frust.applicationId";
+/// The key the Gradle template reads its `frustAppLabel` manifest
+/// placeholder (the launcher label) from.
+pub(crate) const APP_LABEL_KEY: &str = "frust.appLabel";
+
 /// Merge-writes `frust.versionName = version_name` and
 /// `frust.versionCode = version_code` into
 /// `<android_dir>/local.properties`, preserving every other line (including
 /// unrelated keys and comments) already present.
-pub fn write(android_dir: &Path, version_name: &str, version_code: &str) -> Result<()> {
+///
+/// Each identity key is decided on its own: [`APPLICATION_ID_KEY`] is set
+/// when `identity` states its identifier ([`AppIdentity::identifier_stated`])
+/// and [`APP_LABEL_KEY`] when it has a display name; a key not set is
+/// removed, so a value left by an earlier build cannot leak into this one and
+/// the template's own default applies. One read, at most one write.
+pub fn write(
+    android_dir: &Path,
+    version_name: &str,
+    version_code: &str,
+    identity: Option<&AppIdentity>,
+) -> Result<()> {
     let path = android_dir.join("local.properties");
-    merge(
-        &path,
-        &[
-            ("frust.versionName", version_name),
-            ("frust.versionCode", version_code),
-        ],
-        Missing::Append,
-    )
-    .with_context(|| format!("writing `{}`", path.display()))?;
+    let mut entries = vec![
+        ("frust.versionName", version_name),
+        ("frust.versionCode", version_code),
+    ];
+    let mut dropped = Vec::new();
+    match identity.filter(|identity| identity.identifier_stated) {
+        Some(identity) => entries.push((APPLICATION_ID_KEY, identity.identifier.as_str())),
+        None => dropped.push(APPLICATION_ID_KEY),
+    }
+    match identity.and_then(|identity| identity.display_name.as_deref()) {
+        Some(name) => entries.push((APP_LABEL_KEY, name)),
+        None => dropped.push(APP_LABEL_KEY),
+    }
+    update(&path, &entries, Missing::Append, &dropped)
+        .with_context(|| format!("writing `{}`", path.display()))?;
     Ok(())
 }
 
@@ -76,12 +104,32 @@ pub(crate) fn merge(
     entries: &[(&str, &str)],
     missing: Missing,
 ) -> io::Result<Vec<Change>> {
+    update(path, entries, missing, &[])
+}
+
+/// [`merge`] that also drops every logical line setting one of `removed`,
+/// in the same single read and write. Every other line is kept byte for
+/// byte, and a missing file with nothing to append is left missing.
+fn update(
+    path: &Path,
+    entries: &[(&str, &str)],
+    missing: Missing,
+    removed: &[&str],
+) -> io::Result<Vec<Change>> {
     let existing = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
         Err(err) => return Err(err),
     };
     let mut lines = logical_lines(&existing);
+    let before = lines.len();
+    lines.retain(|line| {
+        !line
+            .entry
+            .as_ref()
+            .is_some_and(|(k, _)| removed.contains(&k.as_str()))
+    });
+    let dropped = lines.len() != before;
     let mut changes = Vec::with_capacity(entries.len());
     let mut appended = String::new();
     for (key, value) in entries {
@@ -109,7 +157,7 @@ pub(crate) fn merge(
         }
     }
 
-    if changes.iter().any(|c| matches!(c, Change::Set { .. })) {
+    if dropped || changes.iter().any(|c| matches!(c, Change::Set { .. })) {
         let mut out: String = lines.iter().map(|line| line.text.as_str()).collect();
         if !appended.is_empty() && !out.is_empty() && !out.ends_with('\n') {
             out.push('\n');
@@ -305,7 +353,7 @@ mod tests {
     #[test]
     fn writes_both_keys_when_file_absent() {
         let dir = unique_temp_dir("absent");
-        write(&dir, "1.2.3", "42").unwrap();
+        write(&dir, "1.2.3", "42", None).unwrap();
         let content = fs::read_to_string(dir.join("local.properties")).unwrap();
         assert!(content.contains("frust.versionName=1.2.3"), "{content}");
         assert!(content.contains("frust.versionCode=42"), "{content}");
@@ -320,7 +368,7 @@ mod tests {
             "sdk.dir=/Users/me/Library/Android/sdk\nndk.dir=/some/ndk\n",
         )
         .unwrap();
-        write(&dir, "1.0", "1").unwrap();
+        write(&dir, "1.0", "1", None).unwrap();
         let content = fs::read_to_string(dir.join("local.properties")).unwrap();
         assert!(
             content.contains("sdk.dir=/Users/me/Library/Android/sdk"),
@@ -340,7 +388,7 @@ mod tests {
             "sdk.dir=/sdk\nfrust.versionName=0.1\nfrust.versionCode=1\n",
         )
         .unwrap();
-        write(&dir, "2.0", "7").unwrap();
+        write(&dir, "2.0", "7", None).unwrap();
         let content = fs::read_to_string(dir.join("local.properties")).unwrap();
         assert_eq!(
             content
@@ -366,7 +414,7 @@ mod tests {
         let original = "## written by Android Studio\r\nsdk.dir=C\\:\\\\sdk\r\n\
                         frust.embedding.dir=/checkout/frust-embedding\n";
         fs::write(&path, original).unwrap();
-        write(&dir, "1.0", "3").unwrap();
+        write(&dir, "1.0", "3", None).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert_eq!(
             content,
@@ -479,5 +527,120 @@ mod tests {
         assert_eq!(parse_entry("k="), ("k".into(), String::new()));
         assert_eq!(parse_entry("k\\=x=v"), ("k=x".into(), "v".into()));
         assert_eq!(parse_entry("ks=/a").0, "ks");
+    }
+
+    fn identity(identifier: &str, display_name: Option<&str>, stated: bool) -> AppIdentity {
+        AppIdentity {
+            identifier: identifier.to_string(),
+            identifier_stated: stated,
+            display_name: display_name.map(str::to_string),
+            flavor: None,
+            flavor_declared: false,
+        }
+    }
+
+    /// A fully stated identity adds both identity keys after the version
+    /// keys, escaped, and keeps unrelated keys; a later derived build removes
+    /// them again and leaves everything else byte for byte.
+    #[test]
+    fn a_stated_identity_gains_and_a_derived_one_loses_the_identity_keys() {
+        let dir = unique_temp_dir("identity");
+        let path = dir.join("local.properties");
+        fs::write(&path, "sdk.dir=/sdk\r\nfrust.embedding.dir=/e\n").unwrap();
+
+        let pinned = identity("com.example.other", Some("Zoë Dev: Beta"), true);
+        write(&dir, "1.0", "3", Some(&pinned)).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            content,
+            "sdk.dir=/sdk\r\nfrust.embedding.dir=/e\nfrust.versionName=1.0\n\
+             frust.versionCode=3\nfrust.applicationId=com.example.other\n\
+             frust.appLabel=Zo\\u00EB Dev\\: Beta\n"
+        );
+        assert_eq!(
+            read_value(&path, APP_LABEL_KEY).unwrap().as_deref(),
+            Some("Zoë Dev: Beta")
+        );
+
+        write(
+            &dir,
+            "1.0",
+            "3",
+            Some(&identity("dev.f0x.app", None, false)),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "sdk.dir=/sdk\r\nfrust.embedding.dir=/e\nfrust.versionName=1.0\nfrust.versionCode=3\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Each identity key is written or removed on its own, in one pass: an
+    /// identifier alone drops a stale label, a name alone drops a stale id.
+    #[test]
+    fn each_identity_key_is_written_or_removed_independently() {
+        let dir = unique_temp_dir("independent");
+        let path = dir.join("local.properties");
+        let stale = "sdk.dir=/sdk\nfrust.applicationId=old.id\nfrust.appLabel=Old\n";
+
+        fs::write(&path, stale).unwrap();
+        write(&dir, "1.0", "1", Some(&identity("com.a.b", None, true))).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "sdk.dir=/sdk\nfrust.applicationId=com.a.b\n\
+             frust.versionName=1.0\nfrust.versionCode=1\n"
+        );
+
+        fs::write(&path, stale).unwrap();
+        write(
+            &dir,
+            "1.0",
+            "1",
+            Some(&identity("dev.f0x.app", Some("Shop"), false)),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "sdk.dir=/sdk\nfrust.appLabel=Shop\nfrust.versionName=1.0\nfrust.versionCode=1\n"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// With no identity, or a derived one, and no stale keys, the file is
+    /// exactly what the version stamp alone writes.
+    #[test]
+    fn a_derived_identity_writes_no_identity_keys() {
+        for (tag, id) in [
+            ("no-identity", None),
+            ("derived", Some(identity("dev.f0x.app", None, false))),
+        ] {
+            let dir = unique_temp_dir(tag);
+            write(&dir, "1.0", "1", id.as_ref()).unwrap();
+            assert_eq!(
+                fs::read_to_string(dir.join("local.properties")).unwrap(),
+                "frust.versionName=1.0\nfrust.versionCode=1\n"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn update_drops_every_occurrence_and_never_creates_the_file() {
+        let dir = unique_temp_dir("remove");
+        let path = dir.join("local.properties");
+        update(&path, &[], Missing::Append, &["k"]).unwrap();
+        assert!(!path.exists());
+        fs::write(
+            &path,
+            "# k=commented\nk=a\nother=1\nk = /b/\\\n    c\nlast=2",
+        )
+        .unwrap();
+        update(&path, &[], Missing::Append, &["k", "absent"]).unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# k=commented\nother=1\nlast=2"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

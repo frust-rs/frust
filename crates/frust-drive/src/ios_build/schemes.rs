@@ -1,7 +1,9 @@
 //! Scheme/configuration resolution and `xcodebuild -list -json` verification
 //! for `frust build ios|ipa`. No flavor → scheme `Runner`, configuration
 //! `Debug|Profile|Release`; `--flavor <f>` → scheme `<Capitalized f>`,
-//! configuration `<Mode>-<Scheme>` (e.g. `Release-Paid`).
+//! configuration `<Mode>-<Scheme>` (e.g. `Release-Paid`) when the project has
+//! that native scheme, else `Runner` + `<Mode>` for a flavor declared in
+//! `frust.toml`'s `[flavors]`; both at once is an error ([`resolve_verified`]).
 
 use std::path::Path;
 
@@ -96,13 +98,77 @@ fn parse_list(json: &str) -> Result<ProjectList> {
     Ok(parsed.project)
 }
 
-/// Verifies the resolved scheme (and, when flavored, configuration) exists in
-/// the project, erroring with the available names listed verbatim otherwise.
-pub fn verify(runner: &dyn ProcessRunner, root: &Path, sc: &SchemeConfig) -> Result<()> {
+/// Lists the project's schemes and picks the scheme/configuration `info`
+/// builds with, given whether its flavor is declared in `frust.toml`'s
+/// `[flavors]` (`flavor_declared`, from `identity::resolve`):
+///
+/// - no flavor: [`resolve`]'s `Runner` + stock configuration;
+/// - a flavor with a native scheme `<Flavor>` that `frust.toml` does not
+///   declare: [`resolve`]'s scheme and `<Mode>-<Flavor>` configuration, as
+///   before `[flavors]` existed;
+/// - a declared flavor with no native scheme: `Runner` + the plain `<Mode>`
+///   configuration (the identity rides the command line instead);
+/// - both a native scheme and a declaration: an error naming the two, before
+///   anything is built;
+/// - neither: an error listing the available schemes and naming the
+///   `[flavors.<flavor>]` declaration.
+///
+/// Every chosen scheme (and a flavored configuration) is verified present,
+/// erroring with the available names listed verbatim otherwise.
+pub fn resolve_verified(
+    runner: &dyn ProcessRunner,
+    root: &Path,
+    info: &BuildInfo,
+    flavor_declared: bool,
+) -> Result<SchemeConfig> {
     let project = list(runner, root)?;
-    if !project.schemes.iter().any(|s| s == &sc.scheme) {
+    select(info, flavor_declared, &project)
+}
+
+/// [`resolve_verified`]'s choice against an already-listed project.
+fn select(info: &BuildInfo, flavor_declared: bool, project: &ProjectList) -> Result<SchemeConfig> {
+    let sc = resolve(info);
+    let native = project.schemes.iter().any(|s| s == &sc.scheme);
+    if let Some(flavor) = info.flavor.as_deref().filter(|_| native && flavor_declared) {
         bail!(
-            "scheme `{}` not found in ios/Runner.xcodeproj.\nAvailable schemes: {}",
+            "{}",
+            crate::identity::flavor_declared_twice(
+                flavor,
+                &format!(
+                    "as the Xcode scheme `{}` in ios/Runner.xcodeproj",
+                    sc.scheme
+                )
+            )
+        );
+    }
+    if sc.flavored && !native && flavor_declared {
+        let plain = SchemeConfig {
+            scheme: "Runner".to_string(),
+            configuration: info.mode.xcode_configuration().to_string(),
+            flavored: false,
+        };
+        verify(project, &plain, None)?;
+        return Ok(plain);
+    }
+    verify(project, &sc, info.flavor.as_deref())?;
+    Ok(sc)
+}
+
+/// Verifies the resolved scheme (and, when flavored, configuration) exists in
+/// `project`, erroring with the available names listed verbatim otherwise.
+/// `flavor` names the requested flavor, so a missing flavor scheme also says
+/// how to declare it in `frust.toml`.
+fn verify(project: &ProjectList, sc: &SchemeConfig, flavor: Option<&str>) -> Result<()> {
+    if !project.schemes.iter().any(|s| s == &sc.scheme) {
+        let declare = match flavor {
+            Some(flavor) => format!(
+                "\nTo build flavor `{flavor}` without a native scheme, declare \
+                 `[flavors.{flavor}]` in frust.toml."
+            ),
+            None => String::new(),
+        };
+        bail!(
+            "scheme `{}` not found in ios/Runner.xcodeproj.\nAvailable schemes: {}{declare}",
             sc.scheme,
             join_or_none(&project.schemes)
         );
@@ -206,38 +272,107 @@ mod tests {
         );
     }
 
+    fn verified(mode: BuildMode, flavor: Option<&str>, declared: bool) -> Result<SchemeConfig> {
+        let runner = list_runner(LIST_JSON);
+        resolve_verified(
+            &runner,
+            Path::new("/tmp/app"),
+            &info(mode, flavor),
+            declared,
+        )
+    }
+
     #[test]
     fn verify_passes_for_a_present_scheme() {
-        let runner = list_runner(LIST_JSON);
-        let sc = resolve(&info(BuildMode::Release, None));
-        verify(&runner, Path::new("/tmp/app"), &sc).unwrap();
+        let sc = verified(BuildMode::Release, None, false).unwrap();
+        assert_eq!(sc, resolve(&info(BuildMode::Release, None)));
     }
 
     #[test]
     fn verify_passes_for_a_present_flavored_configuration() {
-        let runner = list_runner(LIST_JSON);
-        let sc = resolve(&info(BuildMode::Release, Some("paid")));
-        verify(&runner, Path::new("/tmp/app"), &sc).unwrap();
+        let sc = verified(BuildMode::Release, Some("paid"), false).unwrap();
+        assert_eq!(
+            (sc.scheme.as_str(), sc.configuration.as_str()),
+            ("Paid", "Release-Paid")
+        );
+        assert!(sc.flavored);
+    }
+
+    /// A flavor with a native scheme that `frust.toml` also declares is
+    /// refused, naming the flavor and both declarations — whatever the
+    /// configuration, since the choice is made before verification.
+    #[test]
+    fn a_native_scheme_for_a_declared_flavor_is_refused() {
+        for mode in [BuildMode::Release, BuildMode::Debug] {
+            let message = verified(mode, Some("paid"), true).unwrap_err().to_string();
+            assert!(
+                message.contains("flavor `paid` is declared twice"),
+                "{message}"
+            );
+            assert!(
+                message.contains("the Xcode scheme `Paid` in ios/Runner.xcodeproj"),
+                "{message}"
+            );
+            assert!(
+                message.contains("`[flavors.paid]` in frust.toml"),
+                "{message}"
+            );
+        }
+    }
+
+    /// A flavor declared only in `frust.toml` builds `Runner` with the plain
+    /// mode configuration.
+    #[test]
+    fn a_frust_toml_only_flavor_builds_runner_with_the_plain_configuration() {
+        for (mode, config) in [
+            (BuildMode::Debug, "Debug"),
+            (BuildMode::Profile, "Profile"),
+            (BuildMode::Release, "Release"),
+        ] {
+            let sc = verified(mode, Some("dev"), true).unwrap();
+            assert_eq!(
+                sc,
+                SchemeConfig {
+                    scheme: "Runner".to_string(),
+                    configuration: config.to_string(),
+                    flavored: false,
+                }
+            );
+        }
     }
 
     #[test]
     fn verify_errors_listing_available_schemes_when_missing() {
-        let runner = list_runner(LIST_JSON);
-        let sc = resolve(&info(BuildMode::Release, Some("free")));
-        let err = verify(&runner, Path::new("/tmp/app"), &sc).unwrap_err();
+        let err = verified(BuildMode::Release, Some("free"), false).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("Free"), "{message}");
         assert!(message.contains("Available schemes"), "{message}");
         assert!(message.contains("Runner"), "{message}");
         assert!(message.contains("Paid"), "{message}");
+        assert!(
+            message.contains("declare `[flavors.free]` in frust.toml"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_missing_runner_scheme_does_not_mention_flavors() {
+        let runner = list_runner(r#"{"project":{"schemes":["Other"],"configurations":[]}}"#);
+        let err = resolve_verified(
+            &runner,
+            Path::new("/tmp/app"),
+            &info(BuildMode::Debug, None),
+            false,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("`Runner`"), "{err}");
+        assert!(!err.to_string().contains("[flavors"), "{err}");
     }
 
     #[test]
     fn verify_errors_listing_available_configurations_when_flavored_config_missing() {
         // Scheme `Paid` exists, but the `Debug-Paid` configuration doesn't.
-        let runner = list_runner(LIST_JSON);
-        let sc = resolve(&info(BuildMode::Debug, Some("paid")));
-        let err = verify(&runner, Path::new("/tmp/app"), &sc).unwrap_err();
+        let err = verified(BuildMode::Debug, Some("paid"), false).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("Debug-Paid"), "{message}");
         assert!(message.contains("Available configurations"), "{message}");
