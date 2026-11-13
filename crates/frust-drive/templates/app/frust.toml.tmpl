@@ -2,6 +2,10 @@
 name = "{{ project_name }}"
 org = "{{ org }}"
 description = "{{ description }}"
+# Release version and build number: the default for every platform build.
+# `--build-name` and `--build-number` override them for one build.
+version = "1.0.0"
+build-number = 1
 
 # Desktop identity, rendered into `macos/Info.plist`, `windows/build.rs` and `linux/app.desktop`
 # at scaffold time; editing it here does not rewrite those files, and a build reports any disagreement.

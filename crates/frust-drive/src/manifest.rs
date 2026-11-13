@@ -51,10 +51,64 @@ pub struct Manifest {
     pub hotpatch: Option<HotpatchSection>,
 }
 
+/// `[app]` — the project's identity and, optionally, its release version.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppSection {
     pub name: String,
     pub org: String,
+    /// `version` — the app's release version, one to three dot-separated
+    /// non-negative integers (`2`, `2.3`, `2.3.4`). The same string is used
+    /// as the Android `versionName` and the iOS `CFBundleShortVersionString`,
+    /// and iOS accepts only up to three integers, so nothing longer or with a
+    /// suffix (`1.0.0-beta`) is allowed. Absent: the platform's default.
+    #[serde(default, deserialize_with = "de_version")]
+    pub version: Option<String>,
+    /// `build-number` — the monotonically increasing build number (Android
+    /// `versionCode`, iOS `CFBundleVersion`); must be `>= 1`. Absent: the
+    /// platform's default.
+    #[serde(default, rename = "build-number", deserialize_with = "de_build_number")]
+    pub build_number: Option<u32>,
+}
+
+fn de_version<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(v) = Option::<String>::deserialize(d)? else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = v.split('.').collect();
+    let ok = (1..=3).contains(&parts.len())
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    if !ok {
+        return Err(serde::de::Error::custom(format!(
+            "invalid `[app] version` '{v}': expected one to three dot-separated non-negative \
+             integers (for example `2`, `2.3`, `2.3.4`); the same string is used as the Android \
+             versionName and the iOS CFBundleShortVersionString, and iOS accepts only up to \
+             three integers"
+        )));
+    }
+    Ok(Some(v))
+}
+
+/// Android's maximum `versionCode`.
+const MAX_BUILD_NUMBER: u32 = 2_100_000_000;
+
+fn de_build_number<'de, D>(d: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u32>::deserialize(d)? {
+        Some(0) => Err(serde::de::Error::custom(
+            "invalid `[app] build-number` 0: must be >= 1",
+        )),
+        Some(n) if n > MAX_BUILD_NUMBER => Err(serde::de::Error::custom(format!(
+            "invalid `[app] build-number` {n}: must be <= {MAX_BUILD_NUMBER}, Android's maximum versionCode"
+        ))),
+        n => Ok(n),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -357,6 +411,54 @@ pub fn parse(raw: &str) -> Result<Manifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app(extra: &str) -> String {
+        format!("[app]\nname = \"a\"\norg = \"dev.f0x\"\n{extra}")
+    }
+
+    #[test]
+    fn parses_app_version_and_build_number() {
+        let m = parse(&app("version = \"2.3.4\"\nbuild-number = 7\n")).unwrap();
+        assert_eq!(m.app.version.as_deref(), Some("2.3.4"));
+        assert_eq!(m.app.build_number, Some(7));
+        for v in ["2", "2.3"] {
+            let m = parse(&app(&format!("version = \"{v}\"\n"))).unwrap();
+            assert_eq!(m.app.version.as_deref(), Some(v));
+        }
+    }
+
+    #[test]
+    fn app_without_version_keys_parses_as_before() {
+        let m = parse(&app("")).unwrap();
+        assert_eq!(m.app.version, None);
+        assert_eq!(m.app.build_number, None);
+    }
+
+    #[test]
+    fn rejects_bad_app_version_and_build_number_naming_the_key() {
+        for bad in ["1.0.0-beta", "", "1.2.3.4"] {
+            let err = format!(
+                "{:#}",
+                parse(&app(&format!("version = \"{bad}\"\n"))).unwrap_err()
+            );
+            assert!(err.contains("version"), "{bad}: {err}");
+            assert!(err.contains("CFBundleShortVersionString"), "{bad}: {err}");
+        }
+        let err = format!("{:#}", parse(&app("build-number = 0\n")).unwrap_err());
+        assert!(err.contains("build-number"), "{err}");
+    }
+
+    #[test]
+    fn build_number_upper_bound_is_androids_version_code_limit() {
+        let m = parse(&app("build-number = 2100000000\n")).unwrap();
+        assert_eq!(m.app.build_number, Some(2_100_000_000));
+        let err = format!(
+            "{:#}",
+            parse(&app("build-number = 2100000001\n")).unwrap_err()
+        );
+        assert!(err.contains("build-number"), "{err}");
+        assert!(err.contains("versionCode"), "{err}");
+    }
 
     #[test]
     fn parses_the_scaffolded_shape_without_a_signing_section() {

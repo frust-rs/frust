@@ -1624,6 +1624,23 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
+    /// A freshly scaffolded `frust.toml` states the app's version and build
+    /// number under `[app]`, and the manifest parser reads both back.
+    #[test]
+    fn generate_frust_toml_states_version_and_build_number_under_app() {
+        let dest = unique_temp_dir("toml-app-version");
+        let ctx = test_context();
+
+        generate(&dest, &ctx, None, false, None).unwrap();
+
+        let toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
+        let parsed = crate::manifest::parse(&toml).expect("the scaffolded frust.toml must parse");
+        assert_eq!(parsed.app.version.as_deref(), Some("1.0.0"), "{toml}");
+        assert_eq!(parsed.app.build_number, Some(1), "{toml}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
     #[test]
     fn generate_rejects_org_producing_invalid_ios_bundle_id() {
         let dest = unique_temp_dir("ios-invalid-id");
@@ -2072,6 +2089,43 @@ mod tests {
             "{entitlements}"
         );
         assert!(!entitlements.contains("{{"), "{entitlements}");
+
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// The `<string>` value that follows `<key>{key}</key>` in a flat XML
+    /// property list, as the scaffold's plists are.
+    fn plist_string_value<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
+        let after_key = plist.split_once(&format!("<key>{key}</key>"))?.1;
+        let after_open = after_key.split_once("<string>")?.1;
+        after_open.split_once("</string>").map(|(value, _)| value)
+    }
+
+    /// A freshly scaffolded macOS build must not disagree with `frust.toml`:
+    /// the plist's version pair is reconciled against `[app]`, so a mismatch
+    /// would print a note on every default build.
+    #[test]
+    fn generate_macos_info_plist_version_agrees_with_frust_toml_app_section() {
+        let dest = unique_temp_dir("macos-plist-version");
+        let ctx = test_context();
+
+        generate_with_platforms(&dest, &ctx, None, false, None, &[ScaffoldPlatform::Macos])
+            .unwrap();
+
+        let toml = fs::read_to_string(dest.join("frust.toml")).unwrap();
+        let parsed = crate::manifest::parse(&toml).expect("the scaffolded frust.toml must parse");
+        let plist = fs::read_to_string(dest.join("macos/Info.plist")).unwrap();
+
+        let short = plist_string_value(&plist, "CFBundleShortVersionString")
+            .unwrap_or_else(|| panic!("no CFBundleShortVersionString in:\n{plist}"));
+        let build = plist_string_value(&plist, "CFBundleVersion")
+            .unwrap_or_else(|| panic!("no CFBundleVersion in:\n{plist}"));
+        assert_eq!(parsed.app.version.as_deref(), Some(short), "{plist}");
+        assert_eq!(
+            parsed.app.build_number.map(|n| n.to_string()).as_deref(),
+            Some(build),
+            "{plist}"
+        );
 
         let _ = fs::remove_dir_all(&dest);
     }

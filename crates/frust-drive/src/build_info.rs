@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use crate::facade_key::FacadeKey;
+use crate::manifest::Manifest;
 
 /// The Rust target triple every browser build compiles to — the single
 /// spelling shared by the drive-side web build, `frust doctor`'s toolchain
@@ -271,9 +272,191 @@ impl BuildInfo {
     }
 }
 
+/// Where a resolved version value came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionSource {
+    /// An explicit `--build-name` / `--build-number` flag.
+    Flag,
+    /// The `[app] version` / `build-number` keys of `frust.toml`.
+    Manifest,
+    /// Neither supplied one; the platform applies its own default.
+    Default,
+}
+
+/// The app version and build number a build uses, with their provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedVersion {
+    /// The version name, or `None` when the platform default applies.
+    pub name: Option<String>,
+    /// The build number, or `None` when the platform default applies.
+    pub number: Option<u32>,
+    /// Where [`name`](Self::name) came from.
+    pub name_source: VersionSource,
+    /// Where [`number`](Self::number) came from.
+    pub number_source: VersionSource,
+}
+
+/// The Android `versionName` used when no version is supplied.
+pub const DEFAULT_ANDROID_VERSION_NAME: &str = "1.0";
+/// The Android `versionCode` used when no build number is supplied.
+pub const DEFAULT_ANDROID_VERSION_CODE: u32 = 1;
+
+const UNSET_VERSION_HINT: &str =
+    "set [app] version and build-number in frust.toml or pass --build-name / --build-number";
+
+impl ResolvedVersion {
+    /// The Android `(versionName, versionCode)` with the defaults applied
+    /// for any unset value.
+    pub fn android_name_and_code(&self) -> (String, String) {
+        (
+            self.name
+                .clone()
+                .unwrap_or_else(|| DEFAULT_ANDROID_VERSION_NAME.to_string()),
+            self.number
+                .unwrap_or(DEFAULT_ANDROID_VERSION_CODE)
+                .to_string(),
+        )
+    }
+
+    /// The `app version not set` warning for a lane that applies concrete
+    /// values itself (Android): names the name and code it will use.
+    pub fn android_unset_warning(&self) -> String {
+        let (name, code) = self.android_name_and_code();
+        format!("warning: app version not set: building {name} ({code}); {UNSET_VERSION_HINT}")
+    }
+
+    /// The `app version not set` warning for a lane that leaves an unset
+    /// value to the native project (iOS): it names no values it does not know.
+    pub fn native_unset_warning() -> String {
+        format!(
+            "warning: app version not set: the Xcode project's own version applies for the unset value; {UNSET_VERSION_HINT}"
+        )
+    }
+
+    /// True when either value fell back to the platform default.
+    pub fn is_defaulted(&self) -> bool {
+        self.name_source == VersionSource::Default || self.number_source == VersionSource::Default
+    }
+}
+
+/// Resolves the version for a build: each value comes from `info` (a flag)
+/// when set, else from the manifest's `[app]` keys, else is left `None` with
+/// source [`VersionSource::Default`]. A `None` manifest behaves as one with
+/// no version keys.
+pub fn resolve_version(info: &BuildInfo, manifest: Option<&Manifest>) -> ResolvedVersion {
+    let app = manifest.map(|m| &m.app);
+    let (name, name_source) = match (&info.build_name, app.and_then(|a| a.version.as_ref())) {
+        (Some(n), _) => (Some(n.clone()), VersionSource::Flag),
+        (None, Some(n)) => (Some(n.clone()), VersionSource::Manifest),
+        (None, None) => (None, VersionSource::Default),
+    };
+    let (number, number_source) = match (info.build_number, app.and_then(|a| a.build_number)) {
+        (Some(n), _) => (Some(n), VersionSource::Flag),
+        (None, Some(n)) => (Some(n), VersionSource::Manifest),
+        (None, None) => (None, VersionSource::Default),
+    };
+    ResolvedVersion {
+        name,
+        number,
+        name_source,
+        number_source,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest(extra: &str) -> Manifest {
+        crate::manifest::parse(&format!("[app]\nname = \"a\"\norg = \"o\"\n{extra}")).unwrap()
+    }
+
+    fn info(name: Option<&str>, number: Option<u32>) -> BuildInfo {
+        BuildInfo::from_args(
+            BuildArgs {
+                build_name: name.map(str::to_string),
+                build_number: number,
+                ..args()
+            },
+            BuildMode::Release,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unset_version_warnings_state_their_wording() {
+        let defaulted = ResolvedVersion {
+            name: None,
+            number: None,
+            name_source: VersionSource::Default,
+            number_source: VersionSource::Default,
+        };
+        assert_eq!(
+            defaulted.android_unset_warning(),
+            "warning: app version not set: building 1.0 (1); set [app] version and build-number \
+             in frust.toml or pass --build-name / --build-number"
+        );
+        assert_eq!(
+            ResolvedVersion::native_unset_warning(),
+            "warning: app version not set: the Xcode project's own version applies for the unset \
+             value; set [app] version and build-number in frust.toml or pass --build-name / \
+             --build-number"
+        );
+    }
+
+    #[test]
+    fn flag_beats_manifest() {
+        let m = manifest("version = \"1.0\"\nbuild-number = 5\n");
+        let r = resolve_version(&info(Some("2.0"), Some(9)), Some(&m));
+        assert_eq!(r.name.as_deref(), Some("2.0"));
+        assert_eq!(r.number, Some(9));
+        assert_eq!(r.name_source, VersionSource::Flag);
+        assert_eq!(r.number_source, VersionSource::Flag);
+        assert!(!r.is_defaulted());
+    }
+
+    #[test]
+    fn manifest_beats_default() {
+        let m = manifest("version = \"1.0\"\nbuild-number = 5\n");
+        let r = resolve_version(&info(None, None), Some(&m));
+        assert_eq!(r.name.as_deref(), Some("1.0"));
+        assert_eq!(r.number, Some(5));
+        assert_eq!(r.name_source, VersionSource::Manifest);
+        assert_eq!(r.number_source, VersionSource::Manifest);
+        assert!(!r.is_defaulted());
+    }
+
+    #[test]
+    fn neither_gives_none_with_default_source() {
+        let m = manifest("");
+        let r = resolve_version(&info(None, None), Some(&m));
+        assert_eq!(r.name, None);
+        assert_eq!(r.number, None);
+        assert_eq!(r.name_source, VersionSource::Default);
+        assert_eq!(r.number_source, VersionSource::Default);
+        assert!(r.is_defaulted());
+    }
+
+    #[test]
+    fn mixed_name_from_flag_number_from_manifest() {
+        let m = manifest("version = \"1.0\"\nbuild-number = 5\n");
+        let r = resolve_version(&info(Some("3.1"), None), Some(&m));
+        assert_eq!(r.name.as_deref(), Some("3.1"));
+        assert_eq!(r.name_source, VersionSource::Flag);
+        assert_eq!(r.number, Some(5));
+        assert_eq!(r.number_source, VersionSource::Manifest);
+        let partial = manifest("build-number = 5\n");
+        assert!(resolve_version(&info(None, None), Some(&partial)).is_defaulted());
+    }
+
+    #[test]
+    fn missing_manifest_behaves_as_no_keys() {
+        let r = resolve_version(&info(None, Some(4)), None);
+        assert_eq!(r.name_source, VersionSource::Default);
+        assert_eq!(r.number, Some(4));
+        assert_eq!(r.number_source, VersionSource::Flag);
+        assert!(r.is_defaulted());
+    }
 
     fn args() -> BuildArgs {
         BuildArgs::default()
