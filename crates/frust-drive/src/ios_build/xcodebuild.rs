@@ -3,6 +3,8 @@
 //! so the full argv is unit-testable; `ios_build::mod` streams them through
 //! the [`ProcessRunner`](crate::process::ProcessRunner).
 
+use crate::identity::AppIdentity;
+
 /// Where the archive is written, relative to the project root (given the
 /// shared `-derivedDataPath build/ios`).
 pub const ARCHIVE_PATH: &str = "build/ios/archive/Runner.xcarchive";
@@ -35,6 +37,43 @@ pub struct Invocation<'a> {
     /// run-script decodes it and appends `--features <csv>` to its
     /// `cargo build` (only when non-empty).
     pub features_b64: Option<&'a str>,
+    /// The resolved identity's bundle identifier → `PRODUCT_BUNDLE_IDENTIFIER`
+    /// (only for an explicit identity, see [`Invocation::with_identity`]).
+    pub bundle_identifier: Option<&'a str>,
+    /// The resolved identity's display name → `FRUST_DISPLAY_NAME`, which the
+    /// template's `Info.plist` reads as `CFBundleDisplayName` (only for an
+    /// explicit identity).
+    pub display_name: Option<&'a str>,
+}
+
+/// The identity build settings both argv builders (this module's
+/// [`Invocation`] and `ios_run::xcodebuild`'s simulator build) push, in
+/// order: `PRODUCT_BUNDLE_IDENTIFIER=<id>` then `FRUST_DISPLAY_NAME=<name>`,
+/// each only when given.
+pub(crate) fn identity_settings(
+    bundle_identifier: Option<&str>,
+    display_name: Option<&str>,
+) -> Vec<String> {
+    let mut settings = Vec::new();
+    if let Some(id) = bundle_identifier {
+        settings.push(format!("PRODUCT_BUNDLE_IDENTIFIER={id}"));
+    }
+    if let Some(name) = display_name {
+        settings.push(format!("FRUST_DISPLAY_NAME={name}"));
+    }
+    settings
+}
+
+/// [`identity_settings`] for a resolved identity: both settings when it is
+/// explicit (an `[ios] identifier` or a declared flavor), none otherwise, so
+/// a project that pins nothing keeps its pbxproj values.
+pub(crate) fn identity_settings_for(identity: Option<&AppIdentity>) -> Vec<String> {
+    match identity.filter(|identity| identity.explicit) {
+        Some(identity) => {
+            identity_settings(Some(&identity.identifier), Some(&identity.display_name))
+        }
+        None => Vec::new(),
+    }
 }
 
 /// The Xcode `ARCHS` value for a simulator build on this host. A simulator
@@ -50,6 +89,18 @@ pub(crate) fn host_sim_arch() -> &'static str {
         "x86_64"
     } else {
         "arm64"
+    }
+}
+
+impl<'a> Invocation<'a> {
+    /// Fills [`bundle_identifier`](Self::bundle_identifier) and
+    /// [`display_name`](Self::display_name) from `identity` when it is
+    /// explicit; clears both otherwise.
+    pub fn with_identity(mut self, identity: Option<&'a AppIdentity>) -> Self {
+        let explicit = identity.filter(|identity| identity.explicit);
+        self.bundle_identifier = explicit.map(|identity| identity.identifier.as_str());
+        self.display_name = explicit.map(|identity| identity.display_name.as_str());
+        self
     }
 }
 
@@ -106,6 +157,7 @@ impl Invocation<'_> {
         if let Some(features) = self.features_b64 {
             args.push(format!("FRUST_FEATURES={features}"));
         }
+        args.extend(identity_settings(self.bundle_identifier, self.display_name));
         args.extend(self.signing_args());
         args
     }
@@ -167,7 +219,71 @@ mod tests {
             current_project_version: None,
             defines_b64: None,
             features_b64: None,
+            bundle_identifier: None,
+            display_name: None,
         }
+    }
+
+    fn identity(explicit: bool) -> AppIdentity {
+        AppIdentity {
+            identifier: "dev.f0x.myApp.dev".to_string(),
+            display_name: "My App Dev".to_string(),
+            explicit,
+            flavor: Some("dev".to_string()),
+            flavor_declared: explicit,
+        }
+    }
+
+    #[test]
+    fn identity_settings_are_passed_only_for_an_explicit_identity() {
+        let explicit = identity(true);
+        let argv = signed().with_identity(Some(&explicit)).build_argv();
+        let id = argv
+            .iter()
+            .position(|a| a == "PRODUCT_BUNDLE_IDENTIFIER=dev.f0x.myApp.dev")
+            .expect("bundle identifier setting");
+        assert_eq!(argv[id + 1], "FRUST_DISPLAY_NAME=My App Dev");
+        // Before the signing args, which precede the verb.
+        let team = argv
+            .iter()
+            .position(|a| a == "DEVELOPMENT_TEAM=ABCDE12345")
+            .unwrap();
+        assert!(id < team);
+        assert!(
+            signed()
+                .with_identity(Some(&explicit))
+                .archive_argv()
+                .contains(&"FRUST_DISPLAY_NAME=My App Dev".to_string())
+        );
+
+        let derived = identity(false);
+        for inv in [
+            signed().with_identity(Some(&derived)),
+            signed().with_identity(None),
+        ] {
+            let argv = inv.build_argv();
+            assert!(
+                !argv
+                    .iter()
+                    .any(|a| a.starts_with("PRODUCT_BUNDLE_IDENTIFIER=")
+                        || a.starts_with("FRUST_DISPLAY_NAME=")),
+                "{argv:?}"
+            );
+            assert_eq!(argv, signed().build_argv());
+        }
+    }
+
+    #[test]
+    fn identity_settings_for_mirrors_with_identity() {
+        assert_eq!(
+            identity_settings_for(Some(&identity(true))),
+            [
+                "PRODUCT_BUNDLE_IDENTIFIER=dev.f0x.myApp.dev",
+                "FRUST_DISPLAY_NAME=My App Dev"
+            ]
+        );
+        assert!(identity_settings_for(Some(&identity(false))).is_empty());
+        assert!(identity_settings_for(None).is_empty());
     }
 
     #[test]

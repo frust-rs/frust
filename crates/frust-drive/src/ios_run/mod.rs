@@ -30,8 +30,12 @@ use crate::process::{ProcessRunner, RealProcessRunner, StreamHandle, tail_lines}
 /// against the Frust project rooted at `root`. `info.mode` selects the
 /// `-configuration` xcodebuild builds and the matching
 /// `<config>-iphonesimulator` products directory the app bundle is installed
-/// from; flavor/defines/version aren't threaded here (unlike the Android
-/// pipeline) — the iOS simulator run path stays scheme-fixed (`Runner`).
+/// from; defines/version aren't threaded here (unlike the Android pipeline)
+/// and the iOS simulator run path stays scheme-fixed (`Runner`). A flavor
+/// declared in `frust.toml`'s `[flavors]` applies its identity (bundle
+/// identifier and display name on the `xcodebuild` line); a native-scheme
+/// flavor is not built here — the run builds `Runner` with the base
+/// identity, as before `[flavors]` existed.
 pub fn run(
     runner: &dyn ProcessRunner,
     root: &Path,
@@ -101,12 +105,12 @@ pub fn run(
 ///
 /// The two pipelines resolve `bundle_id` differently on purpose. The physical
 /// path reads it back out of the bundle it just installed (see [`bundle_id`]),
-/// because a `--flavor` there builds a different scheme/configuration whose
-/// target may rewrite `PRODUCT_BUNDLE_IDENTIFIER`. The simulator path is
-/// scheme-fixed (`Runner`, stock `Debug|Profile|Release`) and threads no
-/// flavor at all, so its built bundle can only carry the `frust.toml`-derived
-/// id — it keeps using that directly rather than spending a `plutil` call to
-/// be told the same thing.
+/// because a `--flavor` there may build a native scheme/configuration whose
+/// target rewrites `PRODUCT_BUNDLE_IDENTIFIER` (the resolved identity is the
+/// fallback). The simulator path is scheme-fixed (`Runner`, stock
+/// `Debug|Profile|Release`), so its built bundle carries the resolved
+/// identity's id — passed on the `xcodebuild` line when explicit, and checked
+/// against the built bundle then ([`ios_build::check_built_identity`]).
 struct PreparedIosSession {
     bundle_id: String,
     udid: String,
@@ -166,7 +170,7 @@ fn prepare_simulator_core(
     cancel: &AtomicBool,
     mut hot: Option<&mut HotBuild<'_>>,
 ) -> Result<Option<PreparedIosSession>> {
-    let project = project::detect(root)?;
+    let project = project::detect_flavor(root, info.flavor.as_deref())?;
     project::require_ios_dir(&project.root)?;
 
     let preflight_ctx = preflight::PreflightCtx {
@@ -210,6 +214,7 @@ fn prepare_simulator_core(
             &device.id,
             configuration,
             features_b64.as_deref(),
+            Some(&project.identity),
             hot.settings,
             on_line,
         )?,
@@ -219,6 +224,7 @@ fn prepare_simulator_core(
             &device.id,
             configuration,
             features_b64.as_deref(),
+            Some(&project.identity),
             on_line,
         )?,
     };
@@ -237,6 +243,7 @@ fn prepare_simulator_core(
             app_path.display()
         );
     }
+    ios_build::check_built_identity(runner, &app_path, Some(&project.identity), on_line)?;
     if let Some(hot) = hot.as_mut() {
         if cancel.load(Ordering::SeqCst) {
             return Ok(None);
@@ -435,7 +442,7 @@ fn prepare_physical_session(
     on_line: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
 ) -> Result<Option<PreparedIosSession>> {
-    let project = project::detect(root)?;
+    let project = project::detect_flavor(root, info.flavor.as_deref())?;
     project::require_ios_dir(&project.root)?;
 
     match os_version_major(device.os_version.as_deref()) {
@@ -495,11 +502,13 @@ fn prepare_physical_session(
     }
 
     // The *installed* identity, read back out of the `.app` just built and
-    // installed rather than derived from `frust.toml`: a `--flavor` selects a
-    // different scheme/configuration, whose target conventionally rewrites
-    // `PRODUCT_BUNDLE_IDENTIFIER`, so the id `devicectl` must launch is not
-    // the one `frust.toml` derives. An unreadable plist is a warning, not an
-    // error — the fallback below is exactly right for an unflavored project.
+    // installed rather than resolved from `frust.toml`: a `--flavor` with a
+    // native scheme selects a different scheme/configuration, whose target
+    // may rewrite `PRODUCT_BUNDLE_IDENTIFIER`, so the id `devicectl` must
+    // launch is not necessarily the resolved one. An unreadable plist is a
+    // warning, not an error — the resolved identity's id is the fallback
+    // (and, for an explicit identity, what `ios_build` just checked the
+    // bundle carries).
     let (resolved, plist_warning) = bundle_id::resolve(runner, &app_path);
     if let Some(plist_warning) = plist_warning {
         on_line(&plist_warning);
@@ -1390,6 +1399,193 @@ mod tests {
             "exactly one fallback warning: {lines:?}"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- identity from `frust.toml` (`[ios] identifier`, `[flavors]`) ---
+
+    const DEV_FLAVOR_TOML: &str =
+        "\n[flavors.dev]\napp-id-suffix = \".dev\"\napp-name-suffix = \" Dev\"\n";
+
+    fn dev_flavor_info() -> BuildInfo {
+        BuildInfo::from_args(
+            BuildArgs {
+                flavor: Some("dev".to_string()),
+                ..BuildArgs::default()
+            },
+            BuildMode::Debug,
+        )
+        .unwrap()
+    }
+
+    fn plutil_name_key(app_path: &str) -> String {
+        let plist = std::path::Path::new(app_path).join("Info.plist");
+        format!(
+            "plutil -extract CFBundleDisplayName raw {}",
+            plist.display()
+        )
+    }
+
+    /// The simulator run of a declared flavor builds `Runner` (the path is
+    /// scheme-fixed) with the flavor's identity on the `xcodebuild` line,
+    /// checks the built bundle carries it, and launches it.
+    #[test]
+    fn a_declared_flavor_simulator_run_builds_and_launches_its_identity() {
+        let dir = unique_project_dir("sim-flavor");
+        fs::write(
+            dir.join("frust.toml"),
+            format!("[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n{DEV_FLAVOR_TOML}"),
+        )
+        .unwrap();
+        let app_dir = dir.join("build/ios/Build/Products/Debug-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let app_path = app_dir.to_string_lossy().into_owned();
+        let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios-sim\n"),
+            )
+            .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+            .with(
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw== PRODUCT_BUNDLE_IDENTIFIER=dev.f0x.myapp.dev FRUST_DISPLAY_NAME=Myapp Dev build",
+                    host_sim_arch()
+                ),
+                ok("Build succeeded"),
+            )
+            .with(plutil_key(&app_path), ok("dev.f0x.myapp.dev\n"))
+            .with(plutil_name_key(&app_path), ok("Myapp Dev\n"))
+            .with(format!("xcrun simctl install AAAA {app_path}"), ok(""))
+            .with_stream(
+                "xcrun simctl launch --console-pty AAAA dev.f0x.myapp.dev",
+                ["hello"],
+                true,
+            );
+        let never = AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let mut launch = spawn_session(
+            &runner,
+            &dir,
+            &device(),
+            &dev_flavor_info(),
+            &mut |l| lines.push(l.to_string()),
+            &never,
+        )
+        .unwrap()
+        .expect("launched");
+        assert_eq!(launch.bundle_id, "dev.f0x.myapp.dev");
+        assert!(launch.stream.wait());
+        assert!(
+            !lines.iter().any(|l| l.starts_with("warning:")),
+            "{lines:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A simulator build whose bundle does not carry the explicit identity
+    /// stops before the install, naming both identifiers.
+    #[test]
+    fn a_simulator_bundle_identifier_mismatch_fails_before_install() {
+        let dir = unique_project_dir("sim-mismatch");
+        fs::write(
+            dir.join("frust.toml"),
+            "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[ios]\nidentifier = \"com.acme.app\"\n",
+        )
+        .unwrap();
+        let app_dir = dir.join("build/ios/Build/Products/Debug-iphonesimulator/Runner.app");
+        fs::create_dir_all(&app_dir).unwrap();
+        let app_path = app_dir.to_string_lossy().into_owned();
+        // No `simctl install` fixture: reaching it would fail differently.
+        let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
+            .with(
+                "xcode-select -p",
+                ok("/Applications/Xcode.app/Contents/Developer\n"),
+            )
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios-sim\n"),
+            )
+            .with("xcrun simctl list devices --json", ok(BOOTED_JSON))
+            .with(
+                format!(
+                    "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphonesimulator -destination id=AAAA -derivedDataPath build/ios ARCHS={} FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw== PRODUCT_BUNDLE_IDENTIFIER=com.acme.app FRUST_DISPLAY_NAME=Myapp build",
+                    host_sim_arch()
+                ),
+                ok("Build succeeded"),
+            )
+            .with(plutil_key(&app_path), ok("dev.f0x.myapp\n"));
+        let err = run(&runner, &dir, &device(), &debug_info(), NO_EXTRA).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("`dev.f0x.myapp`"), "{message}");
+        assert!(message.contains("`com.acme.app`"), "{message}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The physical run of a declared flavor with no native scheme builds
+    /// `Runner` + `Debug` with the flavor's identity and launches the id the
+    /// built bundle carries.
+    #[test]
+    fn a_declared_flavor_physical_run_builds_runner_with_its_identity() {
+        let dir = unique_physical_project_dir("physical-flavor");
+        fs::write(
+            dir.join("frust.toml"),
+            format!(
+                "[app]\nname = \"myapp\"\norg = \"dev.f0x\"\n\n[ios]\nteam = \"TEAMID1234\"\n{DEV_FLAVOR_TOML}"
+            ),
+        )
+        .unwrap();
+        let app_path = plant_physical_app(&dir);
+        let runner = FakeProcessRunner::new()
+            .with("cargo metadata --format-version 1", ok("{}"))
+            .with("xcode-select -p", ok("/Applications/Xcode.app\n"))
+            .with(
+                "rustup target list --installed",
+                ok("aarch64-apple-ios\n"),
+            )
+            .with(
+                "xcrun xcodebuild -list -json -project ios/Runner.xcodeproj",
+                ok(PHYSICAL_LIST_JSON),
+            )
+            .with(
+                "xcrun xcodebuild -project ios/Runner.xcodeproj -scheme Runner -configuration Debug -sdk iphoneos -destination generic/platform=iOS -derivedDataPath build/ios FRUST_FEATURES=ZnJ1c3QvcGVyZi10cmFjZSxmcnVzdC9kZXZ0b29scw== PRODUCT_BUNDLE_IDENTIFIER=dev.f0x.myapp.dev FRUST_DISPLAY_NAME=Myapp Dev DEVELOPMENT_TEAM=TEAMID1234 CODE_SIGN_STYLE=Automatic CODE_SIGNING_ALLOWED=YES CODE_SIGNING_REQUIRED=YES -allowProvisioningUpdates -allowProvisioningDeviceRegistration build",
+                ok("Build succeeded"),
+            )
+            .with(plutil_key(&app_path), ok("dev.f0x.myapp.dev\n"))
+            .with(plutil_name_key(&app_path), ok("Myapp Dev\n"))
+            .with(
+                format!(
+                    "xcrun devicectl device install app --device 00008110-000A2D3A3C68801E {app_path}"
+                ),
+                ok(""),
+            );
+        let never = AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let prepared = prepare_physical_session(
+            &runner,
+            &dir,
+            &physical_device(),
+            &dev_flavor_info(),
+            NO_EXTRA,
+            &mut |l| lines.push(l.to_string()),
+            &never,
+        )
+        .unwrap()
+        .expect("prepared");
+        assert_eq!(prepared.bundle_id, "dev.f0x.myapp.dev");
+        assert!(
+            lines.iter().any(|l| l == "Building `dev.f0x.myapp.dev`…"),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.starts_with("warning:")),
+            "{lines:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
