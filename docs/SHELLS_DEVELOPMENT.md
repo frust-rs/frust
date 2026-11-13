@@ -215,11 +215,16 @@ page, XCUITest-driven; nothing by hand.
 | Check | Result | Observed |
 |---|---|---|
 | Keyboard over the bottom field | pass | field D scrolled to the end and tapped: D ends 89 pt above the top of the keyboard, the tab bar sits directly above the keyboard, and the content moves up by 245 pt. Text typed in D appears |
-| Scroll while typing | **fail on this build** | a drag with the keyboard up scrolls the page and keeps the keyboard, and D is not pulled back; but keys typed after the drag did not reach the field and it drew the unfocused border. Fixed after this build (the same defect was reproduced and re-checked on Android); the iPhone re-run is not recorded yet |
+| Scroll while typing | **fail on this build**, pass on the re-run | a drag with the keyboard up scrolls the page and keeps the keyboard, and D is not pulled back; but keys typed after the drag did not reach the field and it drew the unfocused border. Fixed after this build. Re-run on the build from `1799e148`: with `abc` typed in D, an upward drag that starts on a filler row keeps the keyboard, and the next typed character appends (`abcx`) and brings D back into view |
 | Password field in the accessibility tree | pass | with `pw1` typed in field C the full-screen text-input view has no value, `pw1` is nowhere in the snapshot, and the field's own element shows three bullets; the same view has no value with a normal field focused. The fields carry their placeholders as names. Dictate is disabled and the keyboard is left out of screenshots with C focused |
-| Dismiss | pass | a tap on a caption hides the keyboard and the layout returns. No swipe dismissed the keyboard on this build (a drag no longer blurs); drag-to-dismiss was added after it and is not yet run on an iPhone |
+| Dismiss | pass | a tap on a caption hides the keyboard and the layout returns. No swipe dismissed the keyboard on this build (a drag no longer blurs). Re-run on the build from `1799e148`, where the page scroll view opts into drag-to-dismiss: a downward drag that starts on a filler row hides the keyboard and the layout returns; a downward drag that starts on the focused field dismisses too; an upward drag from either place keeps the keyboard |
 | Back | pass | full-width navigator at depth 3: an edge drag pops 3 → 2, another 2 → 1 |
 | Text input | pass | typed in A, tapped B, typed one character: B holds only that character. **Not verified:** autocorrect (synthetic typing bypasses it), composition |
+
+The `1799e148` re-run repeated the other rows with the same results (field above the keyboard,
+the password field's accessibility value, back, two-field input). One thing it showed outside the
+checks: a scroll drag that begins on an unfocused text field focuses that field, the keyboard
+opens, and the field can end below the shrunken page body until a key is typed.
 
 ## Clipboard manual test (Android + iOS)
 
