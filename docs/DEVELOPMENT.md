@@ -120,7 +120,7 @@ development* ([CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md)) or the scaffold end-to-e
 
 In a generated project, `frust run [-d <device>] [--release|--profile] [--flavor <name>]` builds and
 launches on a connected Android device/emulator (preflight → variant-aware `gradlew
-assemble<Flavor><Mode>` via cargo-ndk → `adb install`/`launch` → streamed `logcat`; release needs
+assemble[<Flavor>]<Mode>` via cargo-ndk → `adb install`/`launch` → streamed `logcat`; release needs
 the signing keystore, see Prerequisites), a booted iOS Simulator (`xcodebuild build` → `simctl
 install`/`launch --console-pty`), or a physical iPhone (iOS 17+: a signed build → `xcrun devicectl
 device install app`/`process launch --console --terminate-existing` — failures hint at
@@ -220,7 +220,7 @@ frust build ipa --export-method app-store-connect
 frust clean
 ```
 
-`--flavor <name>` needs a matching Gradle flavor or Xcode scheme+configuration already declared in the project.
+`--flavor <name>` needs a `[flavors.<name>]` in `frust.toml`, or a native Gradle flavor / Xcode scheme+configuration of that name (used when present); see [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md) § Identifiers and flavors.
 R8 minification, 16KB alignment, release-lean mode and the debug-signed `frust_bench` size-matrix APK (never distribute it): [PERFORMANCE_BASELINES.md](PERFORMANCE_BASELINES.md) § Release artifacts.
 
 ## Test
