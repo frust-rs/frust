@@ -7,8 +7,9 @@ description = "{{ description }}"
 version = "1.0.0"
 build-number = 1
 
-# Desktop identity, rendered into `macos/Info.plist`, `windows/build.rs` and `linux/app.desktop`
-# at scaffold time; editing it here does not rewrite those files, and a build reports any disagreement.
+# Identifiers, the app name and flavor suffixes below are applied at build time. The Android
+# namespace, deep links and the desktop files are not: they are rendered once at scaffold time,
+# so editing `[desktop]` here does not rewrite them, and a build reports any disagreement.
 [desktop]
 name = "{{ title_case_name }}"
 identifier = "{{ desktop_identifier }}"
@@ -54,9 +55,10 @@ scheme = "{{ deeplink_scheme }}"
 host = "{{ deeplink_host }}"
 {% endif %}
 {% endif -%}
-# [flavors]
-# dev = { app-id-suffix = ".dev" }
-# prod = {}
+# Build flavors: `--flavor dev` then needs no Gradle flavor or Xcode scheme.
+# [flavors.dev]
+# app-id-suffix = ".dev"
+# app-name-suffix = " Dev"
 
 # Android release signing reads gitignored `android/key.properties` (keys below; create the keystore with the
 # keytool line), falling back per value to `ANDROID_*` env vars. Parsed by Frust; set only to change the defaults.
@@ -82,7 +84,9 @@ host = "{{ deeplink_host }}"
 # key-alias = "CI_KEY_ALIAS"
 # key-password = "CI_KEY_PASSWORD"
 
-# Override the derived iOS bundle identifier (defaults to
-# `org.camelCase(name)`, e.g. `{{ iosIdentifier }}`).
-# [ios]
-# identifier = "{{ iosIdentifier }}"
+# The installed application id / bundle identifier of each mobile build.
+[android]
+identifier = "{{ android_identifier }}"
+
+[ios]
+identifier = "{{ iosIdentifier }}"

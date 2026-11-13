@@ -461,7 +461,13 @@ application_id() {
   local project_dir="$1"
   local gradle="$project_dir/android/app/build.gradle.kts"
   local id
-  id="$(grep -m1 -E 'applicationId[[:space:]]*=[[:space:]]*"[^"]+"' "$gradle" | sed -E 's/.*"([^"]+)".*/\1/')"
+  # A project scaffolded with `frust.toml` identifiers defaults the id on the
+  # `frust.applicationId` local.properties lookup; an older one carries a
+  # literal `applicationId = "..."` line.
+  id="$(grep -m1 -E 'getProperty\("frust\.applicationId",[[:space:]]*"[^"]+"' "$gradle" | sed -E 's/.*getProperty\("frust\.applicationId",[[:space:]]*"([^"]+)".*/\1/')"
+  if [ -z "$id" ]; then
+    id="$(grep -m1 -E 'applicationId[[:space:]]*=[[:space:]]*"[^"]+"' "$gradle" | sed -E 's/.*"([^"]+)".*/\1/')"
+  fi
   if [ -z "$id" ]; then
     fail_build "could not read applicationId from $gradle"
   fi
