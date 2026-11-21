@@ -87,10 +87,9 @@ pub use frust_shell_common::{AppTree, new_boxed_app, new_boxed_app_with};
 /// Bind a generated app's `State`/`build` to the fixed iOS C-ABI exports
 /// (Makepad `app_main!` precedent).
 ///
-/// Stamps out the twenty-four `frust_*` symbols the generated Swift app
-/// declares
-/// (the seven lifecycle/input exports, the three text-input exports —
-/// `frust_ime_apply`, `frust_ime_state_json`, `frust_string_free` —
+/// Stamps out the `frust_*` symbols the generated Swift app declares
+/// (the lifecycle/input exports, the four text-input exports —
+/// `frust_ime_apply`, `frust_ime_action`, `frust_ime_state_json`, `frust_string_free` —
 /// the four clipboard/system-edit-menu exports — `frust_edit_command`,
 /// `frust_take_clipboard_write`, `frust_take_paste_request` and
 /// `frust_selection_toolbar_json`, the route that keeps every paste exempt
@@ -325,6 +324,22 @@ macro_rules! ios_app {
             unsafe {
                 $crate::ffi_glue::ime_apply(handle, text, sel_base, sel_ext, comp_base, comp_ext)
             }
+        }
+
+        /// `frust_ime_action`: a keyboard action (the Return/Done key) from the
+        /// Swift `UITextInput` bridge, delivered as `Enter` to the focused widget.
+        ///
+        /// # Safety
+        ///
+        /// `handle` must be null (treated as no live handle and ignored) or a pointer
+        /// returned by `frust_init` that has not been passed to `frust_destroy`. The call must be
+        /// made on the main thread, with no other export active for the same `handle`,
+        /// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+        #[cfg(target_os = "ios")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn frust_ime_action(handle: *mut ::core::ffi::c_void, action: i32) {
+            // SAFETY: forwarded unchanged under this fn's documented contract.
+            unsafe { $crate::ffi_glue::ime_action(handle, action) }
         }
 
         /// `frust_ime_state_json`: the focused field's IME surface as a

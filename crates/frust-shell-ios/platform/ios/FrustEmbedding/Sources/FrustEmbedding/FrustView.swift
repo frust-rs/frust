@@ -266,6 +266,11 @@ final class FrustView: UIView {
             -> [String: Any]?
     )?
 
+    /// Set by the view controller: sends a keyboard action to Rust
+    /// (`frust_ime_action`) and returns the editing state Rust then publishes,
+    /// or `nil` with no live handle.
+    var imeAction: ((_ action: Int32) -> [String: Any]?)?
+
     // MARK: - Clipboard / system edit menu
     //
     // iOS draws the selection toolbar itself, and that is a platform

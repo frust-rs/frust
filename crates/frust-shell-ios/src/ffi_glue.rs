@@ -1635,10 +1635,10 @@ pub unsafe fn dispatch_touch(handle: *mut c_void, phase: u32, pointer_id: u32, x
 /// `frust-text` converts them to Rust byte offsets at its own boundary.
 /// `-1` denotes "none" for the composing region.
 ///
-/// **Return-key contract:** the Swift side maps the `.done` Return key to an
-/// `insertText("\n")`, so a lone `"\n"` insertion arriving here is the submit
-/// gesture; the `TextInput` widget treats a single-line newline insert
-/// as its `on_submit` trigger.
+/// **Return-key contract:** the Return key no longer arrives on this path.
+/// The Swift side sends a lone Return to [`ime_action`] (`frust_ime_action`),
+/// which delivers `Enter` to the focused widget; only other insertions
+/// (including pasted text that contains newlines) are mirrored through here.
 ///
 /// # Safety
 ///
@@ -1671,6 +1671,27 @@ pub unsafe fn ime_apply(
                 composing_extent: comp_ext,
             };
             app.ime_apply(state);
+        }
+    });
+}
+
+/// `frust_ime_action`: a keyboard action (the Return/Done key) from the Swift
+/// `UITextInput` bridge, delivered as `Enter` down the focus path via
+/// [`IosAppHandle::ime_action`] — submit on a single-line field, a new line on
+/// a multi-line one. `action` is retained for future differentiation.
+///
+/// # Safety
+///
+/// `handle` must be null (treated as no live handle and ignored) or a pointer
+/// returned by [`init`] that has not been passed to [`destroy`]. The call must be
+/// made on the main thread, with no other export active for the same `handle`,
+/// on the stack or concurrently (it is reborrowed as a `&mut IosAppHandle`).
+pub unsafe fn ime_action(handle: *mut c_void, action: i32) {
+    guard("frust_ime_action", (), || {
+        pump_reactive();
+        // SAFETY: `handle` is a live handle for this call (see `handle_mut`).
+        if let Some(app) = unsafe { handle_mut(handle) } {
+            app.ime_action(action);
         }
     });
 }

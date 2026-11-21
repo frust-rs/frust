@@ -199,9 +199,22 @@ extension FrustView {
     var hasText: Bool { mirror.length > 0 }
 
     func insertText(_ text: String) {
-        // The `.done` Return key arrives here as a lone "\n"; forward it as a
-        // newline insert — the Rust `TextInput` widget maps a single-line newline
-        // insert to its `on_submit` trigger (contract shared with the Rust glue).
+        // A lone Return is a keyboard action: Rust turns it into Enter on the
+        // focused widget (submit on a single-line field, a new line on a
+        // multi-line one), so Swift never writes that newline into the mirror
+        // itself. Marked text keeps its path: the confirm key arrives as
+        // `unmarkText`.
+        if text == "\n" || text == "\r" || text == "\r\n",
+            markedRange.location == NSNotFound
+        {
+            // No state, or an inactive one, means the Return's handler (a submit)
+            // took focus away: nothing to reconcile, and the per-frame focus
+            // sync resigns the responder.
+            if let state = imeAction?(0) ?? nil, (state["active"] as? Bool) == true {
+                reconcileMirror(to: state)
+            }
+            return
+        }
         let target = markedRange.location != NSNotFound ? markedRange : selectedRange
         mirror.replaceCharacters(in: target, with: text)
         let caret = target.location + (text as NSString).length

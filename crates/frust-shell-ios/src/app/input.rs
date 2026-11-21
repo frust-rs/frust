@@ -4,8 +4,8 @@
 //! shell runs under.
 
 use frust_core::event::{
-    EditCommand, EditingState, ImeState, InputEvent, PointerButton, PointerEvent, PointerId,
-    PointerPhase,
+    EditCommand, EditingState, ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey,
+    PointerButton, PointerEvent, PointerId, PointerPhase,
 };
 use frust_core::selection_toolbar::SelectionToolbarRequest;
 use frust_reactive::ReactiveRuntime;
@@ -21,7 +21,7 @@ use super::IosAppHandle;
 /// touch/IME handler exactly as it does from `Component::build`.
 ///
 /// Every path that reaches [`AppTree::event`](frust_shell_common::AppTree::event)
-/// — touch dispatch (raw and frame-resampled), `ime_apply`, and a queued
+/// — touch dispatch (raw and frame-resampled), `ime_apply`, `ime_action`, and a queued
 /// accessibility action — routes through this. Without it `Owner::current()` is
 /// `None` for the whole pass (`Owner::with` restores the previous owner when the
 /// rebuild wrap returns), so a handler's `use_context::<Theme>()` silently
@@ -150,6 +150,26 @@ impl IosAppHandle {
         // Latch for the frame gate: an IME edit between frames must force the
         // next frame to run (mirror of [`Self::dispatch_touch`]).
         self.events_since_last_frame = true;
+    }
+
+    /// Forward a soft-keyboard editor action (the Return/Done key, sent by the
+    /// Swift bridge through `frust_ime_action`) as an [`NamedKey::Enter`] key
+    /// press down the focus path.
+    ///
+    /// `action` is retained for future differentiation; every action maps to
+    /// `Enter`. Reuses the same focus-routed key path a hardware Enter would, so
+    /// a widget's submit/newline handling stays in one place.
+    pub(crate) fn ime_action(&mut self, _action: i32) {
+        let event = InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Enter),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        });
+        // Frame-gate latch: a keyboard action forces the next frame to run
+        // (see `dispatch_touch`).
+        self.events_since_last_frame = true;
+        let app = &mut self.app;
+        let _ = under_root_owner(|| app.event(&event));
     }
 
     /// The IME surface the focused widget published (editing state + caret), for

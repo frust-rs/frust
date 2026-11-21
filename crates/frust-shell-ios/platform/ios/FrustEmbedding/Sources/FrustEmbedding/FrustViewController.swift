@@ -330,6 +330,14 @@ open class FrustViewController: UIViewController {
             return self.fetchImeState()
         }
 
+        // Bridge the keyboard's Return/Done action: Rust turns it into Enter on
+        // the focused widget, then publishes the editing state it ends up with.
+        forgeView.imeAction = { [weak self] action in
+            guard let self, let handle = self.handle else { return nil }
+            frust_ime_action(handle, action)
+            return self.fetchImeState()
+        }
+
         // Bridge the view's edit actions — UIKit's own edit menu and a
         // hardware keyboard's Cmd+C/X/V/A, both of which land on
         // `FrustView`'s `UIResponderStandardEditActions` methods — into the

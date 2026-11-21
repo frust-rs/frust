@@ -2480,12 +2480,12 @@ impl TextInputWidget {
                 EventResult::Handled
             }
             ImeEvent::Commit(s) => {
-                // iOS Return contract: the Return key on a
-                // UITextInput arrives as `insertText("\n")` → `Commit("\n")`. On a
-                // single-line (or submit-on-enter) widget a lone newline commit means
-                // SUBMIT, exactly like `NamedKey::Enter` — it must never insert a
-                // literal '\n'. A newline-inserting multi-line field instead lands
-                // the literal newline, matching its `NamedKey::Enter` behavior.
+                // Newline-commit rule: a lone newline commit (a keyboard whose
+                // Enter key arrives as committed text) gets the same result as
+                // `NamedKey::Enter`. On a single-line (or submit-on-enter) widget
+                // it means SUBMIT and must never insert a literal '\n'. A
+                // newline-inserting multi-line field instead lands the literal
+                // newline, matching its `NamedKey::Enter` behavior.
                 if is_newline_commit(s) {
                     // The same rule as `NamedKey::Enter`: an editor-owned
                     // preedit is confirmed by this newline (committed as it

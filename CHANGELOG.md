@@ -558,6 +558,8 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 
 ### Fixed
 
+- iOS: Return on a single-line text field now submits it (`on_submit`) instead of inserting a
+  line break; a multi-line field still gets a new line.
 - `frust-camera`: on Android the camera preview no longer stays shrunk after the device is turned
   from landscape back to portrait (a small portrait picture, as tall as the landscape slot, in the
   middle of the slot until the preview was recreated). The preview is re-fitted after the layout

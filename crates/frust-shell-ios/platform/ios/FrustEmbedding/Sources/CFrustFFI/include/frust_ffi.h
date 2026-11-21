@@ -78,7 +78,10 @@ void  frust_destroy(void *handle);
 //    "compExt":n,"caretX":f,"caretY":f,"caretW":f,"caretH":f}
 // (absent caret => the four caret fields are null). A null return is the
 // "no editing state" sentinel. frust_string_free is a no-op on null.
+// A lone Return does not go through frust_ime_apply: Swift sends it to
+// frust_ime_action, which delivers Enter to the focused widget.
 void  frust_ime_apply(void *handle, const char *text, int32_t sel_base, int32_t sel_ext, int32_t comp_base, int32_t comp_ext);
+void  frust_ime_action(void *handle, int32_t action);
 char *frust_ime_state_json(void *handle);
 // Also frees the strings frust_take_clipboard_write,
 // frust_selection_toolbar_json and frust_platform_view_commands_json return —
