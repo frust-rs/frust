@@ -207,6 +207,36 @@ fn request_for(path: &str) -> AuthSessionRequest {
     AuthSessionRequest::custom_scheme(format!("{base}{path}"), CALLBACK_SCHEME).ephemeral(ephemeral)
 }
 
+/// The host and path the `Https callback` button asks the session to catch.
+/// The playground is not associated with this domain (it serves no
+/// association file for this app), so the request is a probe of what each
+/// platform does with an https callback it cannot verify, not a sign-in.
+const HTTPS_CALLBACK_HOST: &str = "frust.dev";
+const HTTPS_CALLBACK_PATH: &str = "/gate/auth-session/done";
+
+/// `Https callback`: start a session whose callback is a claimed https
+/// redirect ([`AuthSessionRequest::https`]) against `<base>cookie.html`, a
+/// page that never redirects. Where the platform cannot catch an https
+/// redirect the status line reads `Err(HttpsCallbackUnsupported)` at once and
+/// no browser appears. Where it can, a session opens: on Android (Auth Tab)
+/// the browser refuses the unverified domain and the status line names the
+/// failed verification; on Apple the sheet stays up until it is closed
+/// (`Ok(Cancelled)`).
+fn fire_https(_state: &mut PlaygroundState) {
+    let base = base_url_sig().get_untracked();
+    let ephemeral = ephemeral_sig().get_untracked();
+    let req = AuthSessionRequest::https(
+        format!("{base}cookie.html"),
+        HTTPS_CALLBACK_HOST,
+        HTTPS_CALLBACK_PATH,
+    )
+    .ephemeral(ephemeral);
+    spawn_local(async move {
+        let result = AuthSession::start(req).await;
+        status_sig().set(format!("Https callback -> {}", render(&result)));
+    });
+}
+
 /// Render a session outcome for the status label. The plugin's `Debug` for
 /// [`AuthSessionOutcome::Callback`] deliberately hides the URL (it prints
 /// `Callback { url_len: N }`), but this page is the device gate and the gate
@@ -561,9 +591,18 @@ pub fn page(_state: &PlaygroundState) -> impl View<PlaygroundState> {
         )
         .child(SizedBox(None, Some(8.0)))
         .child(
-            button("Cancel in 5 s", fire_cancel_after_delay)
-                .style(ButtonStyle::Secondary)
-                .small(),
+            row()
+                .child(
+                    button("Cancel in 5 s", fire_cancel_after_delay)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                )
+                .push(gap_h(8.0))
+                .child(
+                    button("Https callback", fire_https)
+                        .style(ButtonStyle::Secondary)
+                        .small(),
+                ),
         )
         .child(SizedBox(None, Some(8.0)))
         .child(text(status_line).size(12.0))
