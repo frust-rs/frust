@@ -72,7 +72,8 @@ The sections, in order:
    Apple `ASWebAuthenticationSession`): four buttons exercise a successful
    callback round trip, a user-cancelled session, a busy-session rejection,
    and a cookie-persistence check against committed static pages under
-   `plugins/auth-session/gate`.
+   `plugins/auth-session/gate`; two more cancel a live session from the app
+   after five seconds and probe an https-callback request.
 10. **DB** — the `frust-database` device-gate vehicle: opens
     `<filesDir>/databases/playground.db`, inserts, counts; proves
     `frust_paths::data_dir()` resolves on Android without any HOME/XDG env
@@ -521,6 +522,15 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Folders panel Sniff stored path shows the first 16 bytes as hex | iPhone | NOT RUN (not requested on this pass) |
 | Photos: Folders panel Open stored path (16-byte limit) shows the TooLarge limit and size | Android device | PASS (Pixel 4a, Android 16, `7dc3a780`, 2026-11-12): `too large: limit 16 bytes, size 67365 bytes` |
 | Photos: Folders panel Open stored path (16-byte limit) shows the TooLarge limit and size | iPhone | NOT RUN (not requested on this pass) |
+| Sign-in: custom-scheme session completes | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (through Auth Tab: the host logs "launching in Auth Tab" and result code -1; the status line shows the callback URL with its query; the redirect is not also delivered as a deep link) |
+| Sign-in: the user dismisses the browser | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (Back on the tab: `Ok(Cancelled)` once) |
+| Sign-in: cancel from the app while the browser is up ("Cancel in 5 s") | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (`Ok(Cancelled)`, cancel called at 5.0 s; the tab stays open until dismissed; a following Callback session completes) |
+| Sign-in: leave the app mid-session and return | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (Home, then reopen: the tab is still on top and nothing resolves; closing it gives `Ok(Cancelled)` once) |
+| Sign-in: https-callback request ("Https callback", a domain the app is not associated with) | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS as a probe only (the request is accepted and an Auth Tab opens; closing it gives `Ok(Cancelled)`). NOT RUN: a redirect to the https callback, completing or failing verification; it needs a test domain |
+| Deep link: custom-scheme link with query and fragment, app not running | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (`adb shell am start -a android.intent.action.VIEW -d`; the "latest deep link" readout shows the whole URL, fragment included) |
+| Deep link: the same link, app in the background | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (readout shows the whole URL) |
+| App Links: an https link opens the app and `pm get-app-links` reports the domain verified | Android device | NOT RUN (needs a test domain serving `assetlinks.json`) |
+| Scaffold: `frust create --deeplink-https-host example.com` builds a debug APK | Linux host, 2026-11-27 | PASS (the merged manifest carries the `autoVerify` filter for `https` and the host) |
 
 ### Drag gate notes
 
