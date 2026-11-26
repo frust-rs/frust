@@ -1,7 +1,9 @@
-//! The Android backend for [`crate::AuthSession::start`] — Chrome Custom
-//! Tabs, driven from a `dev.frust.authsession.FrustAuthSessionHost` Kotlin
-//! host (`plugins/auth-session/platform/android/`) over this crate's own
-//! JNI surface.
+//! The Android backend for [`crate::AuthSession::start`] — Auth Tab
+//! (`androidx.browser.auth.AuthTabIntent`) when the chosen browser offers it,
+//! Chrome Custom Tabs otherwise, driven from a
+//! `dev.frust.authsession.FrustAuthSessionHost` Kotlin host
+//! (`plugins/auth-session/platform/android/`) over this crate's own JNI
+//! surface.
 //!
 //! # The frozen contract
 //!
@@ -14,13 +16,15 @@
 //!
 //! | Direction | Member | Notes |
 //! |---|---|---|
-//! | Rust → Kotlin | `@JvmStatic fun start(url: String, callbackScheme: String, ephemeral: Boolean, generation: Long): Int` — `(Ljava/lang/String;Ljava/lang/String;ZJ)I` | Resolved once via `context.getClassLoader().loadClass(...)` (the `FrustIapHost`/`FrustBiometric` mechanism — see [`host_class`]) and cached. |
+//! | Rust → Kotlin | `@JvmStatic fun start(url: String, callbackScheme: String, ephemeral: Boolean, generation: Long): Int` — `(Ljava/lang/String;Ljava/lang/String;ZJ)I` | A custom-scheme session. Resolved once via `context.getClassLoader().loadClass(...)` (the `FrustIapHost`/`FrustBiometric` mechanism — see [`host_class`]) and cached. |
+//! | Rust → Kotlin | `@JvmStatic fun startHttps(url: String, host: String, path: String, ephemeral: Boolean, generation: Long): Int` — `(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZJ)I` | An [`AuthCallback::Https`] session; Auth Tab only. Same return codes as `start`. |
+//! | Rust → Kotlin | `@JvmStatic fun httpsCallbackSupported(): Boolean` — `()Z` | [`https_callback_supported`]'s question: does the browser a launch would pick offer Auth Tab? |
 //! | Rust → Kotlin | `@JvmStatic fun cancel(generation: Long)` — `(J)V` | [`cancel`]'s call: a launch not yet run for `generation` opens no tab, and the pending session is forgotten only if it is still `generation`'s, on the main thread — see *Cancelling a live session*. |
 //! | Kotlin → Rust | [`Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnAuthSessionResult`]`(env, class, generation: jlong, kind: jint, url: JString)` | The host's one callback into Rust — see *Two numbering schemes* below. |
 //!
 //! # The generation round trip
 //!
-//! `start` is handed the live session's generation
+//! `start`/`startHttps` is handed the live session's generation
 //! ([`crate::SessionToken::generation`]) and the host stores it in its
 //! single `pending` slot, stamping every `nativeOnAuthSessionResult` it
 //! makes while that launch is pending with that value. [`crate::resolve`]
@@ -29,61 +33,75 @@
 //! or after it already resolved — is discarded instead of completing
 //! whichever session happens to be live by then.
 //!
-//! What the round trip does **not** do is attribute a redirect by evidence:
-//! the generation never travels through the browser or the redirect URL.
-//! The host stamps whichever callback-scheme `Intent` it observes on the
-//! next Activity resume with the generation pending *at that moment* — a
-//! late redirect from a superseded tab, or an injected `Intent` carrying
-//! the scheme, is reported under the live generation and completes it. That
-//! attribution-by-timing is why the crate doc's *Security* section makes
-//! PKCE and `state` verification mandatory
+//! What the round trip does **not** do on the Custom Tabs path is attribute
+//! a redirect by evidence: the generation never travels through the browser
+//! or the redirect URL. The host stamps whichever callback-scheme `Intent` it
+//! observes on the next Activity resume with the generation pending *at that
+//! moment* — a late redirect from a superseded tab, or an injected `Intent`
+//! carrying the scheme, is reported under the live generation and completes
+//! it. That attribution-by-timing is why the crate doc's *Security* section
+//! makes PKCE and `state` verification mandatory
 //! (`auth-session-android-callback-rides-intent-filter` in
-//! `docs/LIMITATIONS.md`).
+//! `docs/LIMITATIONS.md`). An Auth Tab session is answered by the Activity
+//! result of the tab it launched, under a registry key carrying the
+//! generation, so no other `Intent` can complete it; PKCE and `state` stay
+//! mandatory all the same.
 //!
 //! # Two numbering schemes
 //!
 //! `start`'s **return code** and `nativeOnAuthSessionResult`'s **`kind`**
 //! argument are deliberately different scales — do not conflate them:
 //!
-//! - `start`'s return `Int`: `0` the launch was accepted (either presented
-//!   synchronously, or — when `start` is called off the main thread —
-//!   posted for a later main-thread turn and *provisionally* accepted);
-//!   `1` no resumed `Activity` was available to launch the Custom Tab from;
-//!   `2` `startActivity` threw `ActivityNotFoundException` (no browser
-//!   capable of a Custom Tab); `3` some other exception.
+//! - `start`'s (and `startHttps`') return `Int`: `0` the launch was
+//!   accepted (either presented synchronously, or — when called off the
+//!   main thread — posted for a later main-thread turn and *provisionally*
+//!   accepted); `1` no resumed `Activity` was available to launch the tab
+//!   from; `2` `startActivity` threw `ActivityNotFoundException` (no
+//!   browser able to take it); `3` some other exception; `5` an https
+//!   redirect, but the chosen browser offers no Auth Tab.
 //! - `nativeOnAuthSessionResult`'s `kind`: `0` the identity provider
 //!   redirected back (`url` carries the callback); `1` the user dismissed
-//!   the tab. Every other value is a **posted-launch failure** arriving
+//!   the tab. `2`-`5` are **posted-launch failures** arriving
 //!   asynchronously because `start` already returned `0` before the launch
 //!   actually ran: `2` no browser (`ActivityNotFoundException`), `3`
 //!   another exception, `4` no resumed `Activity` (re-coded from `start`'s
 //!   own return code `1` — `kind == 1` already means Cancelled here, so the
-//!   host cannot reuse it).
+//!   host cannot reuse it), `5` no Auth Tab for an https redirect. `6`-`8`
+//!   are Auth Tab results: `6` `RESULT_VERIFICATION_FAILED` (the browser
+//!   could not verify the app's https redirect), `7`
+//!   `RESULT_VERIFICATION_TIMED_OUT`, `8` `RESULT_UNKNOWN_CODE` or a code
+//!   the host does not know.
 //!
 //! [`outcome_from_kind`] maps each posted failure onto **the same**
 //! [`crate::AuthSessionError`] its synchronous counterpart returns, so a
 //! caller cannot tell the two delivery routes apart: `kind` `2` is the
-//! [`crate::AuthSessionError::NoHandler`] return code `2` reports, and
-//! `kind` `4` carries the same message return code `1` does
-//! ([`NO_RESUMED_ACTIVITY`]). Only `3` and an unrecognized value stay
-//! generic, naming the raw `kind`.
+//! [`crate::AuthSessionError::NoHandler`] return code `2` reports, `kind`
+//! `4` carries the same message return code `1` does
+//! ([`NO_RESUMED_ACTIVITY`]), and `kind` `5` is the
+//! [`crate::AuthSessionError::HttpsCallbackUnsupported`] return code `5`
+//! reports. `6`-`8` are [`crate::AuthSessionError::Platform`] errors whose
+//! text says which; only `3` and an unrecognized value stay generic, naming
+//! the raw `kind`.
 //!
 //! # The resume-observation design
 //!
 //! This backend never blocks [`start`]'s caller: `FrustAuthSessionHost.start`
-//! either launches the Custom Tab synchronously or posts the launch and
+//! either launches the tab synchronously or posts the launch and
 //! returns `0` immediately, and the *real* answer — the redirect, a
 //! cancellation, or a posted-launch failure — always arrives later through
 //! [`Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnAuthSessionResult`],
 //! which this module maps and hands to [`crate::resolve`]. There is no
 //! Rust-side object to keep alive across that gap (unlike [`crate::apple`]'s
-//! `LIVE` thread-local): the Kotlin host owns the Custom Tab and the
+//! `LIVE` thread-local): the Kotlin host owns the tab and the
 //! Activity-result plumbing, and this module's part starts and ends inside
-//! one JNI call each way. The one Android-only limitation this design
+//! one JNI call each way. On the Custom Tabs path the redirect is read on
+//! the next Activity resume, and the one Android-only limitation this design
 //! carries is documented at the crate level — [`crate`]'s *The Android
 //! double-delivery note* — the callback URL also reaches
 //! `frust::deep_links()` as an ordinary deep link; this future is the single
-//! authoritative source for it, never that stream.
+//! authoritative source for it, never that stream. An Auth Tab session is
+//! answered only by its launcher's Activity result: a resume never reports
+//! it Cancelled, and its redirect is not a deep link.
 //!
 //! # Cancelling a live session
 //!
@@ -103,9 +121,11 @@
 //!   resume or a late redirect then finds no pending session, and a cancel
 //!   for an old generation can never clear a newer session's `pending`.
 //!
-//! Nothing closes the Custom Tab: Android has no API for that, so **the
-//! browser stays open** in front of the app until the user leaves it, and
-//! the redirect it may still deliver is dropped by the host as unsolicited.
+//! Nothing closes the tab: Android has no API for that, so **the browser
+//! stays open** in front of the app until the user leaves it. A Custom Tab's
+//! later redirect is dropped by the host as unsolicited; an Auth Tab's
+//! launcher is unregistered by the cancel, so the result it may still
+//! deliver is dropped by the Activity's result registry.
 //!
 //! A failure to reach the host (no platform handles, the Gradle module not
 //! linked, a JNI error) is not reported anywhere but a debug trace: the
@@ -176,6 +196,9 @@ const START_NO_RESUMED_ACTIVITY: jint = 1;
 /// `FrustAuthSessionHost.start`'s return code meaning `startActivity` threw
 /// `ActivityNotFoundException` (no browser capable of a Custom Tab).
 const START_ACTIVITY_NOT_FOUND: jint = 2;
+/// `FrustAuthSessionHost.startHttps`' return code meaning the chosen browser
+/// offers no Auth Tab, which an https redirect needs.
+const START_HTTPS_UNSUPPORTED: jint = 5;
 
 /// The [`AuthSessionError::Platform`] message for "no resumed `Activity`",
 /// shared by `start`'s synchronous return code
@@ -200,6 +223,30 @@ const RESULT_NO_BROWSER: jint = 2;
 /// [`START_NO_RESUMED_ACTIVITY`], re-coded because `1` already means
 /// Cancelled on this scale.
 const RESULT_NO_RESUMED_ACTIVITY: jint = 4;
+/// `nativeOnAuthSessionResult`'s `kind` meaning the posted https launch found
+/// no Auth Tab — the asynchronous twin of [`START_HTTPS_UNSUPPORTED`].
+const RESULT_HTTPS_UNSUPPORTED: jint = 5;
+/// `nativeOnAuthSessionResult`'s `kind` for Auth Tab's
+/// `RESULT_VERIFICATION_FAILED`.
+const RESULT_AUTH_TAB_VERIFICATION_FAILED: jint = 6;
+/// `nativeOnAuthSessionResult`'s `kind` for Auth Tab's
+/// `RESULT_VERIFICATION_TIMED_OUT`.
+const RESULT_AUTH_TAB_VERIFICATION_TIMED_OUT: jint = 7;
+/// `nativeOnAuthSessionResult`'s `kind` for Auth Tab's `RESULT_UNKNOWN_CODE`
+/// (or any code the host does not know).
+const RESULT_AUTH_TAB_UNKNOWN_RESULT: jint = 8;
+
+/// The [`AuthSessionError::Platform`] message for
+/// [`RESULT_AUTH_TAB_VERIFICATION_FAILED`].
+const AUTH_TAB_VERIFICATION_FAILED: &str =
+    "Auth Tab could not verify the app's https redirect (Digital Asset Links)";
+/// The [`AuthSessionError::Platform`] message for
+/// [`RESULT_AUTH_TAB_VERIFICATION_TIMED_OUT`].
+const AUTH_TAB_VERIFICATION_TIMED_OUT: &str =
+    "Auth Tab timed out verifying the app's https redirect (Digital Asset Links)";
+/// The [`AuthSessionError::Platform`] message for
+/// [`RESULT_AUTH_TAB_UNKNOWN_RESULT`].
+const AUTH_TAB_UNKNOWN_RESULT: &str = "Auth Tab returned an unknown result code";
 
 /// The cached `FrustAuthSessionHost` class, loaded once via the application
 /// classloader. A racing loser's reference is dropped immediately
@@ -207,8 +254,8 @@ const RESULT_NO_RESUMED_ACTIVITY: jint = 4;
 /// (mirrors `plugins/iap/src/android.rs`'s `HOST_CLASS`).
 static HOST_CLASS: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 
-/// Start a Chrome Custom Tabs auth session — see this module's doc's
-/// contract table and *The resume-observation design*. No Rust-side object
+/// Start an auth session in Auth Tab or a Custom Tab — see this module's
+/// doc's contract table and *The resume-observation design*. No Rust-side object
 /// is kept alive across the async gap (unlike [`crate::apple`]'s `LIVE`
 /// slot): all this backend carries forward is the token's generation, which
 /// the host echoes back on
@@ -216,35 +263,51 @@ static HOST_CLASS: OnceLock<Global<JClass<'static>>> = OnceLock::new();
 /// so [`crate::resolve`] can attribute the result (module doc's *The
 /// generation round trip*).
 pub(crate) fn start(req: AuthSessionRequest, token: SessionToken) -> Result<(), AuthSessionError> {
-    // `crate` refuses an https request before reaching here while
-    // [`https_callback_supported`] answers `false`; this arm only keeps the
-    // backend from ever launching one without that check.
-    let scheme = match &req.callback {
-        AuthCallback::CustomScheme(scheme) => scheme,
-        AuthCallback::Https { .. } => return Err(AuthSessionError::HttpsCallbackUnsupported),
-    };
+    // `u64` → `jlong` is a reinterpretation, not a truncation: the host
+    // treats the value as opaque and echoes the same 64 bits back, which
+    // `nativeOnAuthSessionResult` casts straight back to `u64`.
+    let generation = token.generation as jlong;
     with_host(|env, class| {
-        let code = run_jni(env, "FrustAuthSessionHost.start", |env| {
-            let url = env.new_string(&req.url)?;
-            let scheme = env.new_string(scheme)?;
-            env.call_static_method(
-                class,
-                jni_str!("start"),
-                jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZJ)I"),
-                &[
-                    JValue::Object(&url),
-                    JValue::Object(&scheme),
-                    JValue::Bool(req.ephemeral),
-                    // `u64` → `jlong` is a reinterpretation, not a
-                    // truncation: the host treats the value as opaque and
-                    // echoes the same 64 bits back, which
-                    // `nativeOnAuthSessionResult` casts straight back to
-                    // `u64`.
-                    JValue::Long(token.generation as jlong),
-                ],
-            )?
-            .i()
-        })?;
+        let code = match &req.callback {
+            AuthCallback::CustomScheme(scheme) => {
+                run_jni(env, "FrustAuthSessionHost.start", |env| {
+                    let url = env.new_string(&req.url)?;
+                    let scheme = env.new_string(scheme)?;
+                    env.call_static_method(
+                        class,
+                        jni_str!("start"),
+                        jni_sig!("(Ljava/lang/String;Ljava/lang/String;ZJ)I"),
+                        &[
+                            JValue::Object(&url),
+                            JValue::Object(&scheme),
+                            JValue::Bool(req.ephemeral),
+                            JValue::Long(generation),
+                        ],
+                    )?
+                    .i()
+                })?
+            }
+            AuthCallback::Https { host, path } => {
+                run_jni(env, "FrustAuthSessionHost.startHttps", |env| {
+                    let url = env.new_string(&req.url)?;
+                    let host = env.new_string(host)?;
+                    let path = env.new_string(path)?;
+                    env.call_static_method(
+                        class,
+                        jni_str!("startHttps"),
+                        jni_sig!("(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ZJ)I"),
+                        &[
+                            JValue::Object(&url),
+                            JValue::Object(&host),
+                            JValue::Object(&path),
+                            JValue::Bool(req.ephemeral),
+                            JValue::Long(generation),
+                        ],
+                    )?
+                    .i()
+                })?
+            }
+        };
 
         match code {
             START_ACCEPTED => Ok(()),
@@ -252,6 +315,7 @@ pub(crate) fn start(req: AuthSessionRequest, token: SessionToken) -> Result<(), 
                 Err(AuthSessionError::Platform(NO_RESUMED_ACTIVITY.to_string()))
             }
             START_ACTIVITY_NOT_FOUND => Err(AuthSessionError::NoHandler),
+            START_HTTPS_UNSUPPORTED => Err(AuthSessionError::HttpsCallbackUnsupported),
             other => Err(AuthSessionError::Platform(format!(
                 "host start returned {other}"
             ))),
@@ -260,12 +324,29 @@ pub(crate) fn start(req: AuthSessionRequest, token: SessionToken) -> Result<(), 
 }
 
 /// Whether this backend can start an [`crate::AuthCallback::Https`]
-/// session: not yet — the Custom Tabs host catches custom-scheme redirects
-/// only. `crate` asks this before claiming the busy slot and refuses an
-/// https request with [`AuthSessionError::HttpsCallbackUnsupported`] when it
-/// answers `false`.
+/// session right now: the host's `httpsCallbackSupported()`, which answers
+/// `true` only when the browser a launch would pick offers Auth Tab — the
+/// only Android surface that catches an https redirect. `crate` asks this
+/// before claiming the busy slot and refuses an https request with
+/// [`AuthSessionError::HttpsCallbackUnsupported`] when it answers `false`.
+/// Any failure to ask (no platform handles, the Gradle module not linked, a
+/// JNI error) answers `false`; the start itself would report those. The
+/// answer can change before the launch runs (a browser uninstalled in
+/// between): the launch re-checks and reports the same refusal through
+/// [`START_HTTPS_UNSUPPORTED`]/[`RESULT_HTTPS_UNSUPPORTED`].
 pub(crate) fn https_callback_supported() -> bool {
-    false
+    with_host(|env, class| {
+        run_jni(env, "FrustAuthSessionHost.httpsCallbackSupported", |env| {
+            env.call_static_method(
+                class,
+                jni_str!("httpsCallbackSupported"),
+                jni_sig!("()Z"),
+                &[],
+            )?
+            .z()
+        })
+    })
+    .unwrap_or(false)
 }
 
 /// The backend half of [`crate::AuthSessionCancel::cancel`] — call the
@@ -451,6 +532,16 @@ fn outcome_from_kind(kind: jint, url: String) -> Result<AuthSessionOutcome, Auth
         RESULT_NO_RESUMED_ACTIVITY => {
             Err(AuthSessionError::Platform(NO_RESUMED_ACTIVITY.to_string()))
         }
+        RESULT_HTTPS_UNSUPPORTED => Err(AuthSessionError::HttpsCallbackUnsupported),
+        RESULT_AUTH_TAB_VERIFICATION_FAILED => Err(AuthSessionError::Platform(
+            AUTH_TAB_VERIFICATION_FAILED.to_string(),
+        )),
+        RESULT_AUTH_TAB_VERIFICATION_TIMED_OUT => Err(AuthSessionError::Platform(
+            AUTH_TAB_VERIFICATION_TIMED_OUT.to_string(),
+        )),
+        RESULT_AUTH_TAB_UNKNOWN_RESULT => Err(AuthSessionError::Platform(
+            AUTH_TAB_UNKNOWN_RESULT.to_string(),
+        )),
         other => Err(AuthSessionError::Platform(format!(
             "host launch failed (kind {other})"
         ))),
@@ -572,12 +663,71 @@ mod tests {
         );
     }
 
+    /// A posted https launch that found no Auth Tab is the same
+    /// [`AuthSessionError::HttpsCallbackUnsupported`] the synchronous
+    /// [`START_HTTPS_UNSUPPORTED`] return code reports.
+    #[test]
+    fn https_unsupported_kind_matches_the_synchronous_refusal() {
+        assert_eq!(
+            outcome_from_kind(RESULT_HTTPS_UNSUPPORTED, String::new()),
+            Err(AuthSessionError::HttpsCallbackUnsupported)
+        );
+    }
+
+    /// Each Auth Tab failure result is its own platform error, saying
+    /// which, and none of them is mistaken for a callback even if the host
+    /// sent a URL along.
+    #[test]
+    fn auth_tab_failure_kinds_are_distinct_platform_errors() {
+        for (kind, message) in [
+            (
+                RESULT_AUTH_TAB_VERIFICATION_FAILED,
+                AUTH_TAB_VERIFICATION_FAILED,
+            ),
+            (
+                RESULT_AUTH_TAB_VERIFICATION_TIMED_OUT,
+                AUTH_TAB_VERIFICATION_TIMED_OUT,
+            ),
+            (RESULT_AUTH_TAB_UNKNOWN_RESULT, AUTH_TAB_UNKNOWN_RESULT),
+        ] {
+            assert_eq!(
+                outcome_from_kind(kind, "https://app.example.com/cb?code=x".to_string()),
+                Err(AuthSessionError::Platform(message.to_string()))
+            );
+        }
+        assert_ne!(
+            AUTH_TAB_VERIFICATION_FAILED,
+            AUTH_TAB_VERIFICATION_TIMED_OUT
+        );
+    }
+
+    /// The kind numbers are the Kotlin host's `KIND_*` constants
+    /// (`FrustAuthSessionHost.kt`; its `AuthTabResultTest` pins the same
+    /// list on the other side).
+    #[test]
+    fn kind_numbers_match_the_kotlin_table() {
+        assert_eq!(
+            [
+                RESULT_CALLBACK,
+                RESULT_CANCELLED,
+                RESULT_NO_BROWSER,
+                RESULT_NO_RESUMED_ACTIVITY,
+                RESULT_HTTPS_UNSUPPORTED,
+                RESULT_AUTH_TAB_VERIFICATION_FAILED,
+                RESULT_AUTH_TAB_VERIFICATION_TIMED_OUT,
+                RESULT_AUTH_TAB_UNKNOWN_RESULT,
+            ],
+            [0, 1, 2, 4, 5, 6, 7, 8]
+        );
+        assert_eq!(START_HTTPS_UNSUPPORTED, RESULT_HTTPS_UNSUPPORTED);
+    }
+
     /// `3` (the host's "some other exception") and any value this crate
     /// doesn't classify at all stay generic, naming the raw `kind` so a
     /// device log can tell them apart.
     #[test]
     fn an_unclassified_kind_is_a_platform_error_naming_the_raw_value() {
-        for kind in [3, -1, 99] {
+        for kind in [3, -1, 9, 99] {
             match outcome_from_kind(kind, String::new()) {
                 Err(AuthSessionError::Platform(message)) => {
                     assert_eq!(message, format!("host launch failed (kind {kind})"));

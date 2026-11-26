@@ -10,11 +10,15 @@
   provider — the resolved default `VIEW` handler first, then the installed
   `http`/`https` handlers intersected with a well-known-browser allow-list —
   before pinning the Custom Tab `Intent` (see `FrustAuthSessionHost.kt`'s
-  `pinCustomTabsProvider`). Android 11+'s package-visibility filtering hides
+  `customTabsProvider`). Android 11+'s package-visibility filtering hides
   both that resolution and that enumeration without the `<queries>`
   declarations below, so without them every launch would silently fall back
   to an unpinned `Intent`, never reaching an installed Custom Tabs provider
-  even when one exists.
+  even when one exists. `CustomTabsClient.isAuthTabSupported`, which decides
+  between Auth Tab and a Custom Tab, queries the same `CustomTabsService`
+  action (with the Auth Tab category) restricted to the chosen package, so
+  the first entry already makes it visible; Auth Tab needs no entry of its
+  own.
 
   The provider below is how `FrustAuthSessionHost` obtains an application
   `Context` BEFORE any Activity exists, mirroring `plugins/iap/platform/android`'s
@@ -41,7 +45,7 @@
         <intent>
             <action android:name="android.support.customtabs.action.CustomTabsService" />
         </intent>
-        <!-- `pinCustomTabsProvider` resolves the default no-host `http://` VIEW
+        <!-- `customTabsProvider` resolves the default no-host `http://` VIEW
              handler and enumerates every installed https handler as
              full-browser candidates; under Android 11+ package visibility
              both resolutions are empty without these two queries, so no
