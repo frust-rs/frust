@@ -21,7 +21,7 @@ mode just rebuild; the mechanism is in [CLI_DEVELOPMENT.md](CLI_DEVELOPMENT.md).
 
 A device/emulator gate for `nativeOnDeepLink` ([SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s
 cross-cutting host-signal flow, deep-link) on a project scaffolded with `--deeplink-scheme
-<scheme> [--deeplink-host <host>]`, installed via `frust run -d <device>`:
+<scheme> [--deeplink-host <host>] [--deeplink-https-host <host>]`, via `frust run -d <device>`:
 
 ```bash
 # Cold start (app not running; queues until the native handle exists):
@@ -33,10 +33,9 @@ adb shell am start -a android.intent.action.VIEW -d "<scheme>://<other-path>" <p
 ```
 
 Confirm the app navigates to the linked route both times. iOS (`frust_on_deep_link`) has
-a Simulator-only CLI trigger (`xcrun simctl openurl booted "<scheme>://<path>"`); a
-physical device has none — tap a registered `CFBundleURLSchemes` link instead.
-`frust.toml`'s `[deeplink]` section is informational only, so use `--overwrite` or edit
-the platform files directly to change the scheme.
+a Simulator CLI trigger (`xcrun simctl openurl booted "<scheme>://<path>"`); a
+physical device uses `devicectl ... --payload-url`. A universal link needs a hosted association
+file and is not device-verified. `[deeplink]` in `frust.toml` is informational: `--overwrite` or edit the platform files.
 
 ## Overlay and surface-mode manual test (Android)
 

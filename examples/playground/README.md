@@ -72,7 +72,8 @@ The sections, in order:
    Apple `ASWebAuthenticationSession`): four buttons exercise a successful
    callback round trip, a user-cancelled session, a busy-session rejection,
    and a cookie-persistence check against committed static pages under
-   `plugins/auth-session/gate`.
+   `plugins/auth-session/gate`; two more cancel a live session from the app
+   after five seconds and probe an https-callback request.
 10. **DB** — the `frust-database` device-gate vehicle: opens
     `<filesDir>/databases/playground.db`, inserts, counts; proves
     `frust_paths::data_dir()` resolves on Android without any HOME/XDG env
@@ -521,6 +522,26 @@ trackpad, or touchscreen. Rows marked OWED have not been run:
 | Photos: Folders panel Sniff stored path shows the first 16 bytes as hex | iPhone | NOT RUN (not requested on this pass) |
 | Photos: Folders panel Open stored path (16-byte limit) shows the TooLarge limit and size | Android device | PASS (Pixel 4a, Android 16, `7dc3a780`, 2026-11-12): `too large: limit 16 bytes, size 67365 bytes` |
 | Photos: Folders panel Open stored path (16-byte limit) shows the TooLarge limit and size | iPhone | NOT RUN (not requested on this pass) |
+| Sign-in: custom-scheme session completes | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (through Auth Tab: the host logs "launching in Auth Tab" and result code -1; the status line shows the callback URL with its query; the redirect is not also delivered as a deep link) |
+| Sign-in: the user dismisses the browser | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (Back on the tab: `Ok(Cancelled)` once) |
+| Sign-in: cancel from the app while the browser is up ("Cancel in 5 s") | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (`Ok(Cancelled)`, cancel called at 5.0 s; the tab stays open until dismissed; a following Callback session completes) |
+| Sign-in: leave the app mid-session and return | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (Home, then reopen: the tab is still on top and nothing resolves; closing it gives `Ok(Cancelled)` once) |
+| Sign-in: https-callback request ("Https callback", a domain the app is not associated with) | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS as a probe only (the request is accepted and an Auth Tab opens; closing it gives `Ok(Cancelled)`). NOT RUN: a redirect to the https callback, completing or failing verification; it needs a test domain |
+| Deep link: custom-scheme link with query and fragment, app not running | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (`adb shell am start -a android.intent.action.VIEW -d`; the "latest deep link" readout shows the whole URL, fragment included) |
+| Deep link: the same link, app in the background | OnePlus 9 (Android 15, Chrome 159), 2026-11-27 | PASS (readout shows the whole URL) |
+| App Links: an https link opens the app and `pm get-app-links` reports the domain verified | Android device | NOT RUN (needs a test domain serving `assetlinks.json`) |
+| Scaffold: `frust create --deeplink-https-host example.com` builds a debug APK | Linux host, 2026-11-27 | PASS (the merged manifest carries the `autoVerify` filter for `https` and the host) |
+| Auth: custom-scheme sign-in completes (Callback) | iPhone 13 mini (iPhone14,4), iOS 27.2, 2026-11-27 | PASS (`c5937618c`, gate pages served from frust.dev: the consent alert, then the session sheet, then `Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`; iOS 27.2 is above 17.4, so the Callback initializer path is the one taken) |
+| Auth: the user dismissing the sheet reports Cancelled once (Cancel test) | iPhone 13 mini, iOS 27.2, 2026-11-27 | PASS (closing the sheet with its own close button gives `Ok(Cancelled)`) |
+| Auth: cancel from the app while the sheet is up (Cancel in 5 s), then a new session at once | iPhone 13 mini, iOS 27.2, 2026-11-27 | PASS (the sheet is dismissed about 5 s in, the status reads `Ok(Cancelled), cancel called at 5.0 s`, and a Callback started right after completes with no platform error; Busy still answers `Err(Busy)` while a session is up) |
+| Auth: leaving the app mid-session and returning | iPhone 13 mini, iOS 27.2, 2026-11-27 | PASS (Home with the sheet up, then back: the sheet is still presented and the status is unchanged, so the session is still pending as documented; closing the sheet then gives `Ok(Cancelled)`) |
+| Auth: https-callback sign-in completes and keeps its query | iPhone 13 mini, iOS 27.2 | NOT RUN (no test domain) |
+| Auth: https-callback request for a domain the app is not associated with (Https callback) | iPhone 13 mini, iOS 27.2, 2026-11-27 | OBSERVED (no consent alert and no sheet appear; the status reads `Https callback -> Ok(Cancelled)` within 2 s of the press, with no platform error and nothing in the app log. The system's refusal is reported as a cancel) |
+| Auth: custom-scheme link with query and fragment while the app is not running | iPhone 13 mini, iOS 27.2, 2026-11-27 | PASS (opened with `devicectl ... --payload-url`, not from Notes: 'latest deep link' reads `frustplay://auth/callback?cold=1&y=two#frag` whole) |
+| Auth: the same link while the app is in the background | iPhone 13 mini, iOS 27.2, 2026-11-27 | PASS (opened with `devicectl ... --payload-url`: 'latest deep link' reads `frustplay://auth/callback?x=1&y=two#frag` whole) |
+| Auth: universal link opened from another app, app not running and in the background | iPhone 13 mini, iOS 27.2 | NOT RUN (no test domain) |
+| Auth: `frust build ios` of a fresh `frust create --deeplink-https-host example.com` project | macOS 27.2.1 (Apple M4), Xcode 27, 2026-11-26 | PASS to the signing step (run at `19e6ecc42`, not repeated: `Runner.entitlements` has the `applinks:` and `webcredentials:` entries and all three configurations set `CODE_SIGN_ENTITLEMENTS`; `--no-codesign` builds; the signed build stops at provisioning because the example bundle id has no profile with the Associated Domains capability) |
+| Auth: `cargo test -p frust-auth-session`, then Callback / Cancel test / Cancel in 5 s / Callback right after in the host playground | macOS 27.2.1 (Apple M4), 2026-11-27 | PASS (`c5937618c`: 82 tests pass; the consent alert, then a session window of the default browser; `Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`; closing the window gives `Ok(Cancelled)`; Cancel in 5 s closes the window and reads `Ok(Cancelled), cancel called at 5.0 s`; the Callback right after completes. The alert names the app `(null)` because the bare cargo binary has no bundle name. Https callback behaves as on the iPhone: `Ok(Cancelled)` at once, no alert, no window) |
 
 ### Drag gate notes
 

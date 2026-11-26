@@ -7483,15 +7483,15 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 ---
 
-### `auth-session-android-callback-rides-intent-filter` — Android cannot prove the OAuth callback scheme is bound to this app
+### `auth-session-android-callback-rides-intent-filter` — on the Android Custom Tabs fallback, nothing proves the OAuth callback scheme is bound to this app
 
-**Observed**: `FrustAuthSessionHost` observes the redirect through the same ordinary custom-scheme `<intent-filter>` (`action.VIEW` + `BROWSABLE` + `android:scheme`) every frust app registers for deep links (`examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` filter) — a plain custom scheme carries no Android App Links-style domain verification, so any other installed app that claims the same scheme string can intercept or forge the redirect before this host ever sees it. The slot is also exposed to injected intents from the same app (a compromised Activity can call `startActivity` with the callback scheme), and to tapped links in the browser or another app that claim the same scheme. The session generation does not narrow any of this: the host keeps only the latest launch's generation in its single `pending` slot and stamps whichever callback-scheme `Intent` it observes on the next Activity resume with that value — the generation never travels through the browser or the redirect URL, so a superseded tab's late redirect, or an injected `Intent`, is attributed to the live session by timing rather than evidence. The generation only lets the Rust side discard a result for a session that is no longer live (dropped future, already resolved).
+**Observed**: on the Custom Tabs fallback (a browser without Auth Tab; an Auth Tab session is answered by its own activity result and is not affected), `FrustAuthSessionHost` observes the redirect through the same ordinary custom-scheme `<intent-filter>` (`action.VIEW` + `BROWSABLE` + `android:scheme`) every frust app registers for deep links (`examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` filter) — a plain custom scheme carries no Android App Links-style domain verification, so any other installed app that claims the same scheme string can intercept or forge the redirect before this host ever sees it. The slot is also exposed to injected intents from the same app (a compromised Activity can call `startActivity` with the callback scheme), and to tapped links in the browser or another app that claim the same scheme. The session generation does not narrow any of this: the host keeps only the latest launch's generation in its single `pending` slot and stamps whichever callback-scheme `Intent` it observes on the next Activity resume with that value — the generation never travels through the browser or the redirect URL, so a superseded tab's late redirect, or an injected `Intent`, is attributed to the live session by timing rather than evidence. The generation only lets the Rust side discard a result for a session that is no longer live (dropped future, already resolved).
 
-**Applies to**: Android only; any app using this plugin whose callback scheme collides with another installed app's registered scheme, or that starts a new session while a previous tab is still open.
+**Applies to**: Android only, and only sessions that run on Custom Tabs; any app using this plugin whose callback scheme collides with another installed app's registered scheme, or that starts a new session while a previous tab is still open.
 
-**Why accepted**: this is RFC 8252's own documented risk for a custom-scheme redirect (its §8.1 recommends reverse-domain-unique scheme naming, which narrows but does not eliminate the window), not a defect this plugin introduces — callers MUST use PKCE and verify the state parameter to defend against forged/injected callbacks (see `README.md` §3.4 *Security*). HTTPS App Links (domain-verified) or Android's newer Auth Tab API would close the gap, but neither is in this plugin's v1 scope.
+**Why accepted**: this is RFC 8252's own documented risk for a custom-scheme redirect (its §8.1 recommends reverse-domain-unique scheme naming, which narrows but does not eliminate the window), not a defect this plugin introduces — callers MUST use PKCE and verify the state parameter to defend against forged/injected callbacks (see `README.md` §3.4 *Security*). Where the browser offers Auth Tab the gap does not apply; a custom scheme on the fallback has no domain verification.
 
-**Trigger for removal**: an HTTPS App Links or Auth Tab callback path exists and `AuthSessionRequest` grows a way to select it; or redirects observed after a superseded launch are refused (the host would need to remember that a tab it no longer tracks is still open).
+**Trigger for removal**: the Custom Tabs fallback is dropped, or redirects observed after a superseded launch are refused (the host would need to remember that a tab it no longer tracks is still open).
 
 **Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt`'s class doc (*Why the outcome is read from `activity.intent`*, *The double-delivery note*) and its `pending` slot; `plugins/auth-session/src/android.rs` (*The generation round trip*); `examples/playground/android/app/src/main/AndroidManifest.xml`'s `frustplay` intent filter.
 
@@ -7511,15 +7511,15 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 ---
 
-### `auth-session-android-resume-means-cancelled-v1` — Activity resume while a session is pending is reported as Cancelled
+### `auth-session-android-resume-means-cancelled-v1` — on the Android Custom Tabs fallback, an Activity resume while a session is pending is reported as Cancelled
 
-**Observed**: An unrelated Activity resuming while `AuthSession::start`'s future is still live (e.g. a permission dialog, app switch, or system event) triggers an `onActivityResumed` callback whose resumed `Intent` carries no callback-scheme data; the host clears its pending session and reports kind `1`, so the future resolves `Ok(AuthSessionOutcome::Cancelled)` — indistinguishable from the user dismissing the Custom Tab. The tab itself is not closed by this: it stays on screen until the user dismisses it, and a redirect it delivers afterwards finds no pending session and is dropped (the app's own deep-link stream still observes it — `plugins/auth-session/README.md` § 5). Error kind `4` (`Platform`, "no resumed Activity") is a different, launch-time path: `start`'s posted runnable found no resumed Activity to launch from, so no tab was ever opened.
+**Observed**: On the Custom Tabs fallback (an Auth Tab session is answered by its activity result; an unrelated resume does not cancel it), an unrelated Activity resuming while `AuthSession::start`'s future is still live (e.g. a permission dialog, app switch, or system event) triggers an `onActivityResumed` callback whose resumed `Intent` carries no callback-scheme data; the host clears its pending session and reports kind `1`, so the future resolves `Ok(AuthSessionOutcome::Cancelled)` — indistinguishable from the user dismissing the Custom Tab. The tab itself is not closed by this: it stays on screen until the user dismisses it, and a redirect it delivers afterwards finds no pending session and is dropped (the app's own deep-link stream still observes it — `plugins/auth-session/README.md` § 5). Error kind `4` (`Platform`, "no resumed Activity") is a different, launch-time path: `start`'s posted runnable found no resumed Activity to launch from, so no tab was ever opened.
 
-**Applies to**: Android only; any app using this plugin whose UI context allows or expects graceful recovery from interruption while an auth session is pending.
+**Applies to**: Android only, sessions on the Custom Tabs fallback; any app using this plugin whose UI context allows or expects graceful recovery from interruption while an auth session is pending.
 
 **Why accepted**: v1 scope — differentiating between user-dismissed tabs and system-level resume events would require tracking session state and callback origin more finely than the current host does. The one-session `Busy` guard ensures a stuck session never wedges a later one, so an app that retries the auth flow after an interruption will not deadlock.
 
-**Trigger for removal**: session lifecycle is tracked granularly, distinguishing user dismissal (Cancelled) from Activity-level interruption (a new `Interrupted` outcome or a more specific error variant).
+**Trigger for removal**: the Custom Tabs fallback is dropped, or session lifecycle is tracked granularly, distinguishing user dismissal (Cancelled) from Activity-level interruption (a new `Interrupted` outcome or a more specific error variant).
 
 **Evidence**: `plugins/auth-session/platform/android/src/main/kotlin/dev/frust/authsession/FrustAuthSessionHost.kt` (`onActivityResumed`); `plugins/auth-session/README.md` §3 (the *Attribution is by timing, not evidence* bullet).
 
@@ -7569,13 +7569,13 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 ### `auth-session-android-cancel-leaves-tab-open` — a cancelled Android session's browser tab stays open
 
-**Observed**: `AuthSessionCancel::cancel` (from `AuthSession::start_with_cancel`) resolves the live session as `AuthSessionOutcome::Cancelled` exactly once and frees the one-session slot, but on Android the Custom Tab stays open until the user leaves it: there is no platform API to close a Custom Tab, so the Kotlin host only forgets the pending session. A redirect the tab delivers afterwards finds no pending session and is dropped on the Rust side. On iOS/macOS the same call dismisses the `ASWebAuthenticationSession` sheet. A session started with plain `AuthSession::start`, or whose future is merely dropped, has no cancel at all and likewise leaves the Android tab (and the Apple sheet) up.
+**Observed**: `AuthSessionCancel::cancel` (from `AuthSession::start_with_cancel`) resolves the live session as `AuthSessionOutcome::Cancelled` exactly once and frees the one-session slot, but on Android the browser tab stays open until the user leaves it, on the Auth Tab path and the Custom Tabs path alike (OnePlus 9, Chrome 159: Cancel in 5 s resolves `Ok(Cancelled)` and the tab stays up): there is no platform API to close either, so the Kotlin host only forgets the pending session. A redirect the tab delivers afterwards finds no pending session and is dropped on the Rust side. On the Custom Tabs path a stale tab's late redirect can instead reach a NEWER pending session, because that path attributes a redirect by timing (`auth-session-android-callback-rides-intent-filter`); the caller's `state` check is mandatory there. On iOS/macOS the same call dismisses the `ASWebAuthenticationSession` sheet. A session started with plain `AuthSession::start`, or whose future is merely dropped, has no cancel at all and likewise leaves the Android tab (and the Apple sheet) up.
 
 **Applies to**: Android only, for `AuthSession::start_with_cancel`'s handle. `LoopbackSession` is unaffected (it has `LoopbackCancel::cancel` and a mandatory `LoopbackOptions::timeout`).
 
-**Workaround**: none that closes the tab. The app can treat `Cancelled` as final, show its own signed-out state, and let the user dismiss the tab. Call the handle from a non-UI thread when cancelling on a deadline: UI-thread timers do not run while the browser is in front.
+**Workaround**: none that closes the tab; verify `state` on every callback. The app can treat `Cancelled` as final, show its own signed-out state, and let the user dismiss the tab. Call the handle from a non-UI thread when cancelling on a deadline: UI-thread timers do not run while the browser is in front.
 
-**Why accepted**: Chrome Custom Tabs expose no close API; the only alternatives (relaunching the app's own Activity over the tab, or replacing the tab) are not reliable across browsers and are out of scope. The slot is freed and the outcome is delivered, so a stuck session cannot wedge a later one.
+**Why accepted**: Auth Tab and Chrome Custom Tabs expose no close API; the only alternatives (relaunching the app's own Activity over the tab, or replacing the tab) are not reliable across browsers and are out of scope. The slot is freed and the outcome is delivered, so a stuck session cannot wedge a later one.
 
 **Trigger for removal**: Custom Tabs gain a supported close or dismiss call, or the Android backend moves to a surface the host can dismiss.
 
@@ -7583,17 +7583,67 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 ---
 
-### `auth-session-ios-https-callback-not-supported-v1` — iOS 17.4's HTTPS App-Link callback form is unavailable
+### `auth-session-https-callback-unverified-v1` — the `https` callback form is not device-verified, and is refused below iOS 17.4 / macOS 14.4
 
-**Observed**: the Apple backend calls the deprecated `-initWithURL:callbackURLScheme:completionHandler:` initializer exclusively (`apple.rs`'s `make_session`), never iOS 17.4's `-initWithURL:callback:completionHandler:`, which can express an HTTPS App-Link callback (`ASWebAuthenticationSessionCallback`) as well as a custom scheme — only a custom `callback_scheme` redirect is supported, never an HTTPS callback URL.
+**Observed**: `AuthCallback::Https` starts only where a backend can catch it: Apple systems with `ASWebAuthenticationSessionCallback` (iOS 17.4, macOS 14.4; a runtime check in `apple.rs`) and Android through Auth Tab (Chrome 137+) with Digital Asset Links. Below those, a custom scheme still works through the older initializer but an `https` callback is refused with `AuthSessionError::HttpsCallbackUnsupported`. No device run has completed an `https` redirect, because no test domain exists: only the two probes in `auth-session-apple-unassociated-https-reads-as-cancelled-v1` and the Android Auth Tab probe (the request is accepted and a tab opens; no redirect was sent) were run.
 
-**Applies to**: iOS and macOS alike (both route through the same `apple.rs` module).
+**Applies to**: any app that uses `AuthSessionRequest::https`; custom-scheme requests are unaffected.
 
-**Why accepted**: this crate's deployment floor is iOS 15, where the newer initializer does not exist at all — supporting the HTTPS-callback form would need a second, floor-gated code path for a callback shape v1 does not offer. v1 is served instead by the private-use-scheme `AuthSession::start` path, or, on desktop, by `LoopbackSession`'s plain-`http` loopback redirect.
+**Workaround**: custom-scheme requests everywhere, or `LoopbackSession` on desktop; test an `https` callback against your own associated domain before shipping it.
 
-**Trigger for removal**: raising the crate's deployment floor to iOS 17.4, or adding a floor-gated second path that uses the newer initializer when available.
+**Why accepted**: the correct domain association (`apple-app-site-association`, `assetlinks.json`) is the app owner's to host, so no in-repo gate can run the end-to-end case.
 
-**Evidence**: `plugins/auth-session/src/apple.rs`'s module doc (*The iOS 15 floor and the deprecated initializer*) and its `make_session` function.
+**Trigger for removal**: a device gate completes an `https` callback with a correctly associated domain on iOS and Android.
+
+**Evidence**: `plugins/auth-session/src/apple.rs` and `src/lib.rs` (`AuthCallback::Https`, *The `https` form*); `examples/playground/README.md` Gate checklist (the `Auth: https-callback` and `Sign-in: https-callback request` rows).
+
+---
+
+### `auth-session-apple-unassociated-https-reads-as-cancelled-v1` — an `https` callback for an unassociated domain resolves `Ok(Cancelled)` with no UI on Apple
+
+**Observed**: on an iPhone 13 mini (iOS 27.2) and macOS 27.2.1, an `AuthCallback::Https` request for a domain the app is not associated with shows no consent alert and no sheet, and the future resolves `Ok(Cancelled)` within about two seconds, with no platform error. The system reports its refusal with the same error code as a user cancel, so the plugin cannot tell them apart. A correctly associated domain has not been run on any device.
+
+**Applies to**: iOS 17.4+ and macOS 14.4+, `AuthCallback::Https` only.
+
+**Workaround**: treat a `Cancelled` that arrives at once with no UI on an `https` request as a missing or wrong domain association (the app's `applinks:` / `webcredentials:` entitlement entries, or the host's `apple-app-site-association`), not as a user choice.
+
+**Why accepted**: the framework offers no distinct error for the refusal.
+
+**Trigger for removal**: the system reports the refusal with its own error code, or the plugin gains a reliable way to tell the two apart.
+
+**Evidence**: `examples/playground/README.md` Gate checklist (the `Auth: https-callback request for a domain the app is not associated with` row, and the macOS row).
+
+---
+
+### `deep-link-fragment-not-in-route` — a deep link's `#fragment` is not part of the route the router sees
+
+**Observed**: `normalize_deep_link` drops everything from the first `#` before the router parses the link, for every link form; the query is kept. The raw URL, fragment included, stays in `frust::deep_links()` (on both phones the playground's readout shows the whole link).
+
+**Applies to**: any app that routes by deep link and puts data in a fragment.
+
+**Workaround**: read the fragment from `deep_links()`.
+
+**Why accepted**: by design: the router's `Location` has no fragment, and folding it into the last segment or query value would corrupt the route.
+
+**Trigger for removal**: `Location` gains a fragment.
+
+**Evidence**: `crates/frust/src/router_glue.rs`'s `normalize_deep_link`.
+
+---
+
+### `shell-one-pending-deep-link` — each shell keeps only one pending deep link before the runtime is ready
+
+**Observed**: a link that arrives before the Rust side is ready is held in a single slot per shell (Android, iOS); a second link before then replaces the first. A link dropped before the runtime exists is logged by scheme and length only.
+
+**Applies to**: Android and iOS shells at cold start.
+
+**Workaround**: none needed for the usual single launch link.
+
+**Why accepted**: a launch carries one link; queueing more would add state for a case the OSes do not produce.
+
+**Trigger for removal**: a shell receives several links before startup completes in practice.
+
+**Evidence**: `FrustSurfaceView.kt`'s `pendingDeepLink` (Android shell) and `FrustViewController.swift`'s `pendingDeepLink` (iOS shell).
 
 ---
 

@@ -34,25 +34,14 @@ a desktop [`LoopbackSession`](../src/loopback.rs) session paired with
 
 Every page works from any `https` origin — [`AuthSession::start`](../src/lib.rs) and
 [`LoopbackSession::start`](../src/loopback.rs) both require an absolute `https` authorization URL,
-nothing about the page content is origin-specific. Two options:
-
-1. **A real https origin you control** — e.g. serve this directory under `https://frust.dev/gate/auth-session/`
-   (or any other host) and point the playground app's `Base URL` field at that origin. This is the
-   default the app ships with.
-2. **Zero-infra: httpbin.org** — no hosting needed at all, using `httpbin.org`'s own redirect/cookie
-   endpoints in place of the two files above:
-   - Callback: `https://httpbin.org/redirect-to?url=frustplay%3A%2F%2Fauth%2Fcallback%3Fcode%3Dx%26state%3Dgate`
-   - Cookie set: `https://httpbin.org/cookies/set?frustauth=1`
-   - Cookie read-back: `https://httpbin.org/cookies`
-
-   Paste the relevant URL directly into the app's `Base URL` field (with an empty trailing path) plus the
-   button's own filename, or just swap the button's target for the full httpbin URL when running the gate
-   by hand.
+nothing about the page content is origin-specific. The pages are published at
+`https://frust.dev/gate/auth-session/`, which is the playground's default `Base URL`; to use your own
+origin, serve this directory over `https` and point the app's `Base URL` field at it.
 
 ## Manual gate script
 
-Run these four steps from the playground app's "Auth" section (`Base URL` pointed at a hosted copy of
-this directory, or the httpbin equivalents above):
+Run these steps from the playground app's "Auth" section (`Base URL` pointed at a hosted copy of
+this directory; the default is the published one):
 
 1. **Callback.** Tap `Callback`. Expected: the in-app browser tab (Custom Tabs on Android,
    `ASWebAuthenticationSession` on iOS/macOS) presents `callback.html`, redirects immediately, and the
@@ -61,7 +50,9 @@ this directory, or the httpbin equivalents above):
    `Callback { url_len: 43 }`). The
    `latest deep link:` line below also updates on Android — the same callback URL additionally arrives as
    an ordinary deep link (`frust-auth-session`'s crate doc's *Android double-delivery* section); this is
-   expected, not a bug.
+   expected on the Custom Tabs fallback, not a bug. Where Android uses Auth Tab (Chrome 137+; OnePlus 9,
+   Chrome 159: the host logs "launching in Auth Tab") the redirect is delivered once and the deep-link
+   line does not update.
 2. **Cancel test.** Tap `Cancel test`, then dismiss the presented tab yourself (swipe it away / tap the
    platform close control) without letting it navigate anywhere. Expected: the status line reads
    `Cancel test -> Ok(Cancelled)`.
@@ -75,21 +66,35 @@ this directory, or the httpbin equivalents above):
    `prefersEphemeralWebBrowserSession`; Android has no first-class equivalent — see
    [`AuthSessionRequest::ephemeral`](../src/lib.rs)'s own doc for that platform's best-effort mapping, if
    any).
+5. **Cancel in 5 s.** Tap `Cancel in 5 s`, then leave the browser alone. The app cancels the session
+   from another thread after five seconds (UI-thread timers do not run while the browser is in front).
+   Expected: the status line reads `Cancel in 5 s -> Ok(Cancelled), cancel called at 5.0 s`. On iOS the
+   sheet is dismissed and on macOS the session window closes; on Android the tab stays open until you
+   dismiss it. A `Callback` started right afterwards completes with no `Busy` and no platform error.
+6. **Https callback.** Tap `Https callback`: it asks for a claimed `https` redirect on a domain the
+   app is not associated with, so it probes the platform and is not a sign-in. Expected: on iOS
+   (17.4+) and macOS (14.4+) no consent alert and no sheet appear and the status line reads
+   `Https callback -> Ok(Cancelled)` within about two seconds (the system reports its refusal as a
+   cancel); below those versions it reads `Err(HttpsCallbackUnsupported)`. On Android (Chrome 159) an
+   Auth Tab opens; closing it gives `Ok(Cancelled)`. Completing an `https` redirect needs a test domain
+   and has not been run on any device.
 
 Expected per platform:
 
 - **Android / iOS / macOS** (the only targets with a real backend — `AuthSession::is_supported()` reads
-  `true`): all four steps behave as described above.
+  `true`): the steps behave as described above.
 - **Every other target** (desktop Linux/Windows without an Apple backend): every button resolves to
   `Err(NoHandler)` immediately — no platform authentication user agent exists there
-  (`plugins/auth-session/src/unsupported.rs`'s own doc documents the recommended fallback).
+  (`plugins/auth-session/src/unsupported.rs`'s own doc documents the recommended fallback) —
+  except `Https callback`, which resolves `Err(HttpsCallbackUnsupported)`: an `https` callback is
+  refused before a backend is asked to start. An Android browser without Auth Tab gives the same
+  error for that button, before any tab opens.
 
 ## Manual gate script — Desktop loopback
 
-The playground's "Desktop loopback" block (below the four buttons above, shown only when
+The playground's "Desktop loopback" block (below the buttons above, shown only when
 [`LoopbackSession::is_supported`](../src/loopback.rs) reads `true` — desktop Linux, Windows and macOS)
-runs these five steps, `Base URL` pointed at a hosted copy of this directory (the httpbin alternative
-above has no stand-in for `loopback.html`, so this block needs a real hosted origin):
+runs these five steps, `Base URL` pointed at a hosted copy of this directory:
 
 1. **Loopback login.** Tap `Loopback login`. Expected: the system browser opens `loopback.html`,
    which redirects immediately back to the loopback listener, and the status line reads `Loopback

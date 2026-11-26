@@ -126,7 +126,15 @@ each key about to be written (a text scan) and fails with the migration lines be
 passes `PRODUCT_BUNDLE_IDENTIFIER` and `FRUST_DISPLAY_NAME` on the `xcodebuild` command line on the
 same basis. `frust run` and `frust build` edit no tracked file. Not applied: the Android
 `namespace`, deep links, icons, other native config files and the `[desktop]` identifiers;
-`frust create` renders those once.
+`frust create` renders those once. For an app that already exists, make the
+`--deeplink-https-host <HOST>` edits by hand: in `AndroidManifest.xml`, give the launcher
+`<activity>` an `<intent-filter android:autoVerify="true">` with `VIEW`, `DEFAULT` and
+`BROWSABLE` and `<data android:scheme="https" android:host="HOST" />`; for iOS, create
+`ios/Runner/Runner.entitlements` with `com.apple.developer.associated-domains` set to
+`applinks:HOST` and `webcredentials:HOST`, and set `CODE_SIGN_ENTITLEMENTS =
+Runner/Runner.entitlements` on every Runner build configuration. Hosting `assetlinks.json` and
+`apple-app-site-association` is the app owner's job, and a signed iOS build needs a profile with
+the Associated Domains capability.
 
 ### Flavors
 

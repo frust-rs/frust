@@ -135,6 +135,13 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   arm; a `ChromeEvent` handler that ignores search adds `ChromeEvent::Search(_) => {}`.
 - `frust-drive`: `Contribution` gained the variant `AndroidThemeParent` and `PluginAddError` the
   variant `AndroidAppThemeMissing`, so an exhaustive `match` on either needs the new arm.
+- `frust-auth-session`: `AuthSessionRequest` is `#[non_exhaustive]` and its public field
+  `callback_scheme` is gone, replaced by `callback: AuthCallback` (`CustomScheme(String)` or
+  `Https { host, path }`), so a struct literal no longer compiles. Migration: replace
+  `AuthSessionRequest { url, callback_scheme: "myapp".into(), ephemeral: false }` with
+  `AuthSessionRequest::custom_scheme(url, "myapp")`, and add `.ephemeral(true)` where it was set.
+  `AuthSessionError` gained the variant `HttpsCallbackUnsupported`, so an exhaustive `match` needs
+  the new arm.
 
 ### Added
 
@@ -580,6 +587,21 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   app as an activity result, so an unrelated return to the app no longer reports `Cancelled`, and an
   https callback (`AuthCallback::Https`) becomes possible on Android; the domain must serve Digital
   Asset Links.
+- `frust-auth-session`: `AuthSession::start_with_cancel` returns the future and an
+  `AuthSessionCancel` handle (`Clone + Send + Sync`) that ends the session from any thread: the
+  future resolves `Cancelled`, the session slot is freed, and the Apple sheet or window is dismissed
+  (an Android tab stays open). Call it from another thread to cancel on a deadline, since the app's
+  UI-thread timers do not run while the browser is in front.
+- `frust-auth-session`: `AuthSessionRequest::https(url, host, path)`, a claimed `https` redirect
+  (RFC 8252 section 7.2). It works on iOS 17.4 and macOS 14.4 or later when the host is a domain
+  associated with the app, and on Android through Auth Tab (Chrome 137 or later) with Digital Asset
+  Links; elsewhere it resolves `HttpsCallbackUnsupported`. Not device-verified end to end: on Apple,
+  a domain the app is not associated with resolves `Ok(Cancelled)` at once with no UI.
+- `frust-shell-ios`: a universal link (a web-browsing `NSUserActivity`) takes the same path as a
+  custom-scheme link, on cold start and while the app runs.
+- `frust create --deeplink-https-host <HOST>` adds an `autoVerify` https intent filter on Android and
+  writes `ios/Runner/Runner.entitlements` with `applinks:` and `webcredentials:` entries, setting
+  `CODE_SIGN_ENTITLEMENTS` on the Runner configurations.
 
 ### Changed
 
@@ -703,6 +725,10 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 - `frust plugin add` satisfies `ManifestPermission` and `AndroidLibcxxShared` contributions on a
   project with no `android/` directory (it skips them), where it used to fail; this fixes
   `frust plugin add haptics` on a desktop-only app.
+- A deep link's `#fragment` no longer ends up in the route the router sees, for every link form; the
+  raw URL stays in `deep_links()`. The query of a host-only https link (`https://host?x=1`) is kept.
+  The log line for a link dropped before the runtime exists no longer prints the URL, only its
+  scheme and length.
 
 ### Security
 
