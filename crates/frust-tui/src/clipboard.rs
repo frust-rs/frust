@@ -233,20 +233,35 @@ pub fn write(backend: Backend, text: &str) -> Result<CopyOutcome, String> {
 /// timeout can complete arbitrarily late and silently overwrite whatever a
 /// later, successful copy already placed on the clipboard.
 fn write_system(text: &str) -> Result<(), String> {
-    write_system_with(text, SYSTEM_CLIPBOARD_TIMEOUT, |owned, still_wanted| {
-        arboard::Clipboard::new()
-            .and_then(|mut clipboard| {
-                if still_wanted.load(Ordering::Acquire) {
-                    clipboard.set_text(owned)
-                } else {
-                    // Abandoned: the caller already timed out and fell back
-                    // to OSC 52. Applying this payload now would clobber
-                    // whatever the clipboard holds since then.
-                    Ok(())
-                }
-            })
-            .map_err(|e| e.to_string())
-    })
+    write_system_with(text, SYSTEM_CLIPBOARD_TIMEOUT, set_system_text)
+}
+
+/// The real OS-clipboard write behind [`write_system`]: construct
+/// `arboard::Clipboard` and set `text`, unless `still_wanted` was already
+/// cleared.
+#[cfg(not(target_os = "android"))]
+fn set_system_text(text: String, still_wanted: &AtomicBool) -> Result<(), String> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| {
+            if still_wanted.load(Ordering::Acquire) {
+                clipboard.set_text(text)
+            } else {
+                // Abandoned: the caller already timed out and fell back
+                // to OSC 52. Applying this payload now would clobber
+                // whatever the clipboard holds since then.
+                Ok(())
+            }
+        })
+        .map_err(|e| e.to_string())
+}
+
+/// Android has no `arboard` backend (the crate is not built there, see
+/// `Cargo.toml`), so the OS clipboard is unreachable: report that as a
+/// failure and let [`write`] fall back to OSC 52 like any other
+/// construction failure.
+#[cfg(target_os = "android")]
+fn set_system_text(_text: String, _still_wanted: &AtomicBool) -> Result<(), String> {
+    Err("no system clipboard on Android".to_string())
 }
 
 /// The cancellable-thread protocol behind [`write_system`], generic over the
