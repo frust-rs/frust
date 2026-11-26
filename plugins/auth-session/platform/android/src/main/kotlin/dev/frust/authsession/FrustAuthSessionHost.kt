@@ -214,9 +214,13 @@ internal fun authTabResultKind(resultCode: Int): Int = when (resultCode) {
  *   delivered there.
  * - **Finishing**: the result can never arrive, so the session is resolved
  *   Cancelled at once.
- * - **Process death**: nothing pending survives; a result reaching the
- *   restored Activity finds no registration and is dropped by its registry.
- *   No callback, no deep link.
+ * - **Process death**: nothing pending survives, and the restored Activity
+ *   is not resolved by anything: no callback, no deep link. Its registry
+ *   restored the key and parks the result under it, and generations restart
+ *   in the new process, so a later session with the same generation is
+ *   handed that parked result synchronously inside [bind], before it is
+ *   [pending]: [onAuthTabResult] drops it there, and the session's own
+ *   result arrives afterwards (observed on a phone).
  *
  * Only the launching instance's registry ever holds the launcher, so a
  * second Activity instance never sees or resolves the session. [pending]
@@ -395,7 +399,9 @@ object FrustAuthSessionHost {
      * launching Activity so a recreated instance can be recognised. [owner]
      * and [launcher] are the Activity whose registry currently holds the
      * registration and that registration; both are dropped when that
-     * Activity is destroyed, so nothing here outlives it.
+     * Activity is destroyed, so nothing here outlives it. [launched] turns
+     * true just before this session's tab is launched: a result handed over
+     * before that belongs to an earlier process (see [onAuthTabResult]).
      */
     private class AuthTabPending(
         override val generation: Long,
@@ -405,6 +411,7 @@ object FrustAuthSessionHost {
     ) : Pending() {
         var owner: ComponentActivity? = null
         var launcher: ActivityResultLauncher<Intent>? = null
+        var launched: Boolean = false
     }
 
     /**
@@ -652,6 +659,7 @@ object FrustAuthSessionHost {
             Log.d(TAG, "frust-auth-session: no allow-listed Custom Tabs provider found; launching unpinned")
         }
         setPending(CustomTabPending(generation, callbackScheme, act.intent))
+        Log.i(TAG, "frust-auth-session: session $generation launching in a Custom Tab (${provider ?: "unpinned"})")
         intent.launchUrl(act, Uri.parse(url))
         return START_ACCEPTED
     }
@@ -677,6 +685,8 @@ object FrustAuthSessionHost {
         val intent = builder.build()
         intent.intent.setPackage(provider)
         setPending(flight)
+        Log.i(TAG, "frust-auth-session: session $generation launching in Auth Tab ($provider)")
+        flight.launched = true
         when (redirect) {
             is Redirect.Scheme -> intent.launch(launcher, Uri.parse(url), redirect.scheme)
             is Redirect.Https -> intent.launch(launcher, Uri.parse(url), redirect.host, redirect.path)
@@ -689,13 +699,20 @@ object FrustAuthSessionHost {
      * lifecycle-free overload, so it works at any point of [act]'s life) and
      * records [act] and the launcher on [flight]. On a recreated instance the
      * registry restored the key's request code, so the result still in
-     * flight is delivered to this registration.
+     * flight is delivered to this registration — synchronously inside
+     * `register` when it arrived while no instance was registered, in which
+     * case the session is already resolved here and the registration is
+     * dropped at once.
      */
     private fun bind(flight: AuthTabPending, act: ComponentActivity): ActivityResultLauncher<Intent> {
         val launcher = act.activityResultRegistry.register(
             flight.key,
             AuthTabIntent.AuthenticateUserResultContract(),
         ) { result -> onAuthTabResult(flight, result) }
+        if (flight.launched && pending !== flight) {
+            launcher.unregister()
+            return launcher
+        }
         flight.owner = act
         flight.launcher = launcher
         return launcher
@@ -712,9 +729,20 @@ object FrustAuthSessionHost {
      * The Auth Tab launcher's callback — the only thing that resolves an Auth
      * Tab session. Main thread. A result for a session that is no longer
      * [pending] (cancelled, superseded) is dropped.
+     *
+     * A result delivered before [flight] was launched was parked by the
+     * registry for an earlier process's session under the same key (the
+     * class doc's "Process death"): it is dropped without touching [flight],
+     * whose own launch follows.
      */
     private fun onAuthTabResult(flight: AuthTabPending, result: AuthTabIntent.AuthResult) {
+        if (!flight.launched) {
+            Log.i(TAG, "frust-auth-session: session ${flight.generation} dropped a result left by an earlier process")
+            return
+        }
         unbind(flight)
+        // The result code only: the URI carries the authorization response.
+        Log.i(TAG, "frust-auth-session: session ${flight.generation} Auth Tab result code ${result.resultCode}")
         if (pending !== flight) return
         pending = null
         val kind = authTabResultKind(result.resultCode)
@@ -845,6 +873,7 @@ object FrustAuthSessionHost {
                 if (activity.taskId != p.taskId || activity.javaClass.name != p.activityClass) return
                 try {
                     bind(p, activity)
+                    Log.i(TAG, "frust-auth-session: session ${p.generation} Auth Tab launcher re-registered")
                 } catch (e: Exception) {
                     Log.e(TAG, "frust-auth-session: re-registering the Auth Tab launcher failed (${e.javaClass.name})")
                     pending = null

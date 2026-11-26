@@ -71,7 +71,8 @@ android {
 
 dependencies {
     // `androidx.browser` 1.10.0 (current stable) — `CustomTabsIntent` is
-    // what `FrustAuthSessionHost` launches a Chrome Custom Tab with; this is a Version-Pin Policy pin recorded in `docs/PLUGINS_DEVELOPMENT.md`
+    // what `FrustAuthSessionHost` launches a Chrome Custom Tab with; this is
+    // a Version-Pin Policy pin recorded in `docs/PLUGINS_DEVELOPMENT.md`
     // § Version Pins (the plugin's doc-update task adds the row).
     //
     // Deliberately NOT on `:frust-embedding`: the host talks only to the
