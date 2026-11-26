@@ -575,6 +575,11 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   `libraries = ["c++"]` under `[package.metadata.frust.plugin.ios]`, names of `[A-Za-z0-9_+.-]+`).
   It adds `-l<name>` to every `OTHER_LDFLAGS` list of the app's Xcode project, as
   `Contribution::IosFramework` adds a framework. An exhaustive `match` needs the new arm.
+- `frust-auth-session`: on Android the plugin uses Auth Tab when the browser it picks supports it
+  (Chrome 137 or later), with Custom Tabs as the fallback. With Auth Tab the redirect returns to the
+  app as an activity result, so an unrelated return to the app no longer reports `Cancelled`, and an
+  https callback (`AuthCallback::Https`) becomes possible on Android; the domain must serve Digital
+  Asset Links.
 
 ### Changed
 
@@ -642,6 +647,10 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 - `frust-native-widgets`: on Android the themed `Plain` `native_button` keeps the Material ripple; the
   theme fill and corner radius now go into the button's own Material background instead of replacing
   it.
+- `frust-auth-session`: on Android, where Auth Tab is used, the sign-in redirect is no longer also
+  delivered to the app as a deep link. An app that relied on seeing the callback URL in its
+  deep-link stream must read it from the session's outcome. On browsers without Auth Tab the
+  behaviour is unchanged.
 
 ### Fixed
 
