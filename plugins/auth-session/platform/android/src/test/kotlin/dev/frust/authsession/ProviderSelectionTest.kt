@@ -2,6 +2,7 @@ package dev.frust.authsession
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 /**
@@ -90,43 +91,52 @@ class ProviderSelectionTest {
         assertEquals("org.mozilla.firefox", chosen)
     }
 
+    /** Stands in for the launching `ComponentActivity`: the decision only carries it. */
+    private val launchingActivity = Any()
+
     @Test
     fun `provider with Auth Tab and a ComponentActivity uses Auth Tab for both redirect forms`() {
-        for (https in listOf(false, true)) {
-            val mode = chooseLaunchMode(https, "com.android.chrome", componentActivity = true) {
+        for (customScheme in listOf("frustplay", null)) {
+            val mode = chooseLaunchMode(customScheme, "com.android.chrome", launchingActivity) {
                 it == "com.android.chrome"
             }
-            assertEquals(LaunchMode.AUTH_TAB, mode)
+            assertEquals(LaunchMode.AuthTab("com.android.chrome", launchingActivity), mode)
+            // The launch reads the Activity it registers on from the answer itself.
+            assertSame(launchingActivity, (mode as LaunchMode.AuthTab).activity)
         }
     }
 
     @Test
     fun `provider without Auth Tab keeps the Custom Tabs path for a custom scheme`() {
-        val mode = chooseLaunchMode(false, "org.mozilla.fennec_fdroid", componentActivity = true) { false }
-        assertEquals(LaunchMode.CUSTOM_TABS, mode)
+        val mode = chooseLaunchMode("frustplay", "org.mozilla.fennec_fdroid", launchingActivity) { false }
+        assertEquals(LaunchMode.CustomTabs("org.mozilla.fennec_fdroid", "frustplay"), mode)
     }
 
     @Test
     fun `provider without Auth Tab cannot take an https redirect`() {
-        val mode = chooseLaunchMode(true, "org.mozilla.fennec_fdroid", componentActivity = true) { false }
-        assertEquals(LaunchMode.UNSUPPORTED, mode)
+        val mode = chooseLaunchMode(null, "org.mozilla.fennec_fdroid", launchingActivity) { false }
+        assertEquals(LaunchMode.Unsupported, mode)
     }
 
     @Test
     fun `no provider never asks about Auth Tab and never uses it`() {
-        val custom = chooseLaunchMode(false, null, componentActivity = true) {
+        val custom = chooseLaunchMode("frustplay", null, launchingActivity) {
             throw AssertionError("isAuthTabSupported asked without a provider")
         }
-        assertEquals(LaunchMode.CUSTOM_TABS, custom)
-        val https = chooseLaunchMode(true, null, componentActivity = true) {
+        assertEquals(LaunchMode.CustomTabs(null, "frustplay"), custom)
+        val https = chooseLaunchMode(null, null, launchingActivity) {
             throw AssertionError("isAuthTabSupported asked without a provider")
         }
-        assertEquals(LaunchMode.UNSUPPORTED, https)
+        assertEquals(LaunchMode.Unsupported, https)
     }
 
     @Test
     fun `an Activity with no result registry falls back even when the provider offers Auth Tab`() {
-        assertEquals(LaunchMode.CUSTOM_TABS, chooseLaunchMode(false, "com.android.chrome", componentActivity = false) { true })
-        assertEquals(LaunchMode.UNSUPPORTED, chooseLaunchMode(true, "com.android.chrome", componentActivity = false) { true })
+        val none: Any? = null
+        assertEquals(
+            LaunchMode.CustomTabs("com.android.chrome", "frustplay"),
+            chooseLaunchMode("frustplay", "com.android.chrome", none) { true },
+        )
+        assertEquals(LaunchMode.Unsupported, chooseLaunchMode(null, "com.android.chrome", none) { true })
     }
 }

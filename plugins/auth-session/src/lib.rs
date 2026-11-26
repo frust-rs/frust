@@ -197,8 +197,12 @@
 //! offers Auth Tab (Chrome 137 or later) and the app's domain serves Digital
 //! Asset Links. On Android without Auth Tab, on targets without a backend, and
 //! on older Apple systems it is refused with
-//! [`AuthSessionError::HttpsCallbackUnsupported`], before the busy slot is
-//! claimed and before any UI appears.
+//! [`AuthSessionError::HttpsCallbackUnsupported`], normally before the busy
+//! slot is claimed and before any UI appears. On Android the same error can
+//! also arrive as the session's result, after the slot was claimed, when Auth
+//! Tab support disappears between that check and the launch (the launch
+//! re-checks); the slot is released as for any other result, and still no UI
+//! appears.
 //!
 //! # The Android double-delivery note
 //!
@@ -408,10 +412,15 @@ impl fmt::Debug for AuthSessionRequest {
 /// What the future resolves to when the user switches away from the app
 /// while a custom-scheme session is live differs per platform:
 ///
-/// - **Android, Auth Tab**: the session is answered only by the activity
-///   result of the tab it launched. An unrelated Activity resume never
-///   resolves it [`Self::Cancelled`]; it resolves on the redirect, the user
-///   closing the tab, or [`AuthSessionCancel::cancel`].
+/// - **Android, Auth Tab**: the session is answered by the activity result
+///   of the tab it launched. An unrelated Activity resume never resolves it
+///   [`Self::Cancelled`], and neither does the launching Activity being
+///   recreated (a rotation, or the system destroying it in the background
+///   and restoring it): it resolves on the redirect, the user closing the
+///   tab, or [`AuthSessionCancel::cancel`]. It resolves [`Self::Cancelled`]
+///   by itself only when the result can no longer reach it — the launching
+///   Activity finished, or came back without the saved state its result
+///   needs.
 /// - **Android, Custom Tabs fallback**: nothing resolves while the app is in
 ///   the background, and
 ///   returning to a task whose top is still the Custom Tab resumes the tab,
@@ -441,8 +450,9 @@ pub enum AuthSessionOutcome {
     /// The session ended before the identity provider ever redirected: the
     /// user dismissed the in-app browser tab, the app called
     /// [`AuthSessionCancel::cancel`] (or [`LoopbackCancel::cancel`]), or — on
-    /// the Android Custom Tabs fallback — an Activity resumed without the callback (see *Leaving the
-    /// app while a session is live* above).
+    /// the Android Custom Tabs fallback — an Activity resumed without the
+    /// callback, or — on Android Auth Tab — the tab's result could no longer
+    /// reach the app (see *Leaving the app while a session is live* above).
     Cancelled,
 }
 
@@ -518,11 +528,21 @@ pub enum AuthSessionError {
 
     /// The request names an [`AuthCallback::Https`] redirect, and this
     /// target's backend cannot start a session that catches one. Answered
-    /// after validation, before the busy slot is claimed and before any UI
-    /// appears — so it never makes another request `Busy`. Answered on
-    /// Android when the browser offers no Auth Tab, on targets without a
+    /// on Android when the browser offers no Auth Tab, on targets without a
     /// backend, and on Apple systems older than iOS 17.4 / macOS 14.4; a
     /// custom-scheme request is unaffected.
+    ///
+    /// Normally answered after validation, before the busy slot is claimed
+    /// and before any UI appears — so it never makes another request
+    /// `Busy`. On Android it can also arrive as the session's result: the
+    /// launch re-checks Auth Tab support, and when that support disappeared
+    /// between the check and the launch (a browser uninstalled or disabled in
+    /// between) the session resolves with this error after the slot was
+    /// claimed. No UI has appeared then either, and the slot is released as
+    /// for any other result. An Android host that cannot be reached at all
+    /// (the plugin's Gradle module not linked, a JNI failure) also answers
+    /// an https request with this error, since the support check has no
+    /// other way to report it.
     #[error("auth session: https callbacks are not supported on this platform")]
     HttpsCallbackUnsupported,
 }
@@ -1117,8 +1137,11 @@ impl AuthSession {
     /// deferred. [`AuthSessionError::HttpsCallbackUnsupported`] for a valid
     /// [`AuthCallback::Https`] request on a backend that cannot catch one
     /// (Android without Auth Tab, targets without a backend, and Apple
-    /// systems older than iOS 17.4 / macOS 14.4), also resolved on first poll and without
-    /// claiming the busy slot. [`AuthSessionError::Busy`] if another
+    /// systems older than iOS 17.4 / macOS 14.4), normally also resolved on
+    /// first poll and without claiming the busy slot; on Android it can also
+    /// arrive as the session's result, after the slot was claimed, if Auth
+    /// Tab support disappears between the check and the launch (the slot is
+    /// then released like any other result's). [`AuthSessionError::Busy`] if another
     /// [`AuthSession`] is already live, also resolved on first poll.
     /// Otherwise, per platform:
     /// [`AuthSessionError::PlatformNotInitialized`]/
@@ -1151,7 +1174,11 @@ impl AuthSession {
     /// pre-dispatch failure such as [`AuthSessionError::NoHandler`]) comes
     /// back with an **inert** handle: cancelling it does nothing, and in
     /// particular never touches the session whose presence made this
-    /// request `Busy`.
+    /// request `Busy`. On Android, [`AuthSessionError::HttpsCallbackUnsupported`]
+    /// is normally such a refusal too, but it can also arrive later as the
+    /// session's result when Auth Tab support disappears between the check
+    /// and the launch (see [`Self::start`]); the handle is live until then,
+    /// and cancelling it after that result does nothing.
     ///
     /// While the browser is in front the app is in the background, where its
     /// UI-thread timers (`frust::time`) do not run: a cancel scheduled on one
@@ -2416,6 +2443,41 @@ mod tests {
                 lock_active().as_ref().map(|live| &live.callback),
                 Some(&LiveCallback::Request(expected))
             );
+        });
+    }
+
+    /// The Android launch-time re-check: support answered `true`, then the
+    /// launch found none. Whether the backend refuses synchronously or
+    /// reports the refusal later as the session's result, the caller gets
+    /// `HttpsCallbackUnsupported` and the slot claimed for it is released.
+    #[test]
+    fn an_https_refusal_after_the_claim_releases_the_slot() {
+        with_clean_active(|| {
+            let (mut sync_refused, generation) = StartFuture::begin_with(
+                https_request(),
+                || true,
+                |_req, _token| Err(AuthSessionError::HttpsCallbackUnsupported),
+            );
+            assert_eq!(
+                poll_once(&mut sync_refused),
+                Poll::Ready(Err(AuthSessionError::HttpsCallbackUnsupported))
+            );
+            assert!(
+                generation.is_none(),
+                "a synchronous refusal gives an inert handle"
+            );
+            assert!(lock_active().is_none(), "the slot must be released");
+
+            let (mut posted, generation) =
+                StartFuture::begin_with(https_request(), || true, |_req, _token| Ok(()));
+            let generation = generation.expect("an accepted launch is live");
+            assert_eq!(poll_once(&mut posted), Poll::Pending);
+            resolve(generation, Err(AuthSessionError::HttpsCallbackUnsupported));
+            assert_eq!(
+                poll_once(&mut posted),
+                Poll::Ready(Err(AuthSessionError::HttpsCallbackUnsupported))
+            );
+            assert!(lock_active().is_none(), "the slot must be released");
         });
     }
 
