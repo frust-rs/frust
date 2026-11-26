@@ -1,12 +1,11 @@
 //! Auth session section: the `frust-auth-session` plugin's device-gate page
-//! — `plugins/auth-session`'s whole vertical slice (Android Custom Tabs /
-//! Apple `ASWebAuthenticationSession`, plus the desktop
+//! — `plugins/auth-session`'s whole vertical slice (Android Auth Tab /
+//! Custom Tabs, Apple `ASWebAuthenticationSession`, plus the desktop
 //! [`LoopbackSession`]) exercised from real button presses against the
 //! committed static pages under `plugins/auth-session/gate` (see that
-//! directory's own README for how to host them and the zero-infra httpbin
-//! alternative).
+//! directory's own README for how to host them).
 //!
-//! # The four custom-scheme buttons
+//! # The custom-scheme buttons
 //!
 //! - **Callback** starts an [`AuthSession`] against `<base>callback.html?
 //!   scheme=frustplay` — `callback.html` immediately redirects to
@@ -30,15 +29,22 @@
 //!   `cookie.html` sets (or reads back) a test cookie and prints it, so a
 //!   tester can confirm cookies persist across a non-ephemeral session and
 //!   do not across an ephemeral one (the `Ephemeral` toggle below).
+//! - **Cancel in 5 s** starts a session with [`AuthSession::start_with_cancel`]
+//!   against `<base>cookie.html` and cancels it from another thread five
+//!   seconds later (the app's UI-thread timers do not run behind the
+//!   browser): `Ok(Cancelled)`, with the Apple sheet dismissed and the
+//!   Android tab left open.
+//! - **Https callback** starts a session whose callback is a claimed `https`
+//!   redirect for a domain the app is not associated with: a probe of what
+//!   each platform does with it, not a sign-in (see `fire_https`).
 //!
 //! The `Base URL` field defaults to `https://frust.dev/gate/auth-session/`
 //! (editable so a runner can point it at wherever the gate pages are
-//! actually hosted, or at the httpbin alternative the gate README
-//! documents) and every button appends its own page name to it.
+//! actually hosted) and every button appends its own page name to it.
 //!
 //! # Desktop loopback
 //!
-//! Below the four buttons above, a second block exercises
+//! Below the buttons above, a second block exercises
 //! [`LoopbackSession`] (RFC 8252 §7.3) plus `frust-oauth-native`'s PKCE/
 //! `state`/callback-validation/token-grant-body builders — together the
 //! desktop gate vehicle this crate pair ships for Linux, Windows and macOS
@@ -128,8 +134,7 @@ macro_rules! local_sig {
 
 // The gate pages' https origin, editable so a runner can point it at
 // wherever `plugins/auth-session/gate`'s pages are actually hosted (see
-// that directory's own README), or at the zero-infra httpbin alternative it
-// also documents. Also the source of the desktop loopback block's
+// that directory's own README). Also the source of the desktop loopback block's
 // `issuer` — this field's value with its trailing `/` trimmed.
 local_sig!(
     base_url_sig,
@@ -218,10 +223,11 @@ const HTTPS_CALLBACK_PATH: &str = "/gate/auth-session/done";
 /// redirect ([`AuthSessionRequest::https`]) against `<base>cookie.html`, a
 /// page that never redirects. Where the platform cannot catch an https
 /// redirect the status line reads `Err(HttpsCallbackUnsupported)` at once and
-/// no browser appears. Where it can, a session opens: on Android (Auth Tab)
-/// the browser refuses the unverified domain and the status line names the
-/// failed verification; on Apple the sheet stays up until it is closed
-/// (`Ok(Cancelled)`).
+/// no browser appears. Where it can, what the gate observed: on Apple (iOS
+/// 27.2, macOS 27.2.1) no alert and no sheet appear and the status line
+/// reads `Ok(Cancelled)` within about two seconds, because the system
+/// reports its refusal of an unassociated domain as a cancel; on Android
+/// (Chrome 159) an Auth Tab opens, and closing it gives `Ok(Cancelled)`.
 fn fire_https(_state: &mut PlaygroundState) {
     let base = base_url_sig().get_untracked();
     let ephemeral = ephemeral_sig().get_untracked();
@@ -251,7 +257,7 @@ fn render(result: &Result<AuthSessionOutcome, AuthSessionError>) -> String {
 
 /// Start a session against `<base><path>`, writing `"{label} -> <outcome>"`
 /// (see [`render`]) into [`status_sig`] once it resolves — the handler every
-/// button except `Busy` uses (see this module doc's *The four custom-scheme
+/// button except `Busy` uses (see this module doc's *The custom-scheme
 /// buttons*).
 fn fire(label: &'static str, path: &'static str) -> impl Fn(&mut PlaygroundState) + 'static {
     move |_state: &mut PlaygroundState| {
