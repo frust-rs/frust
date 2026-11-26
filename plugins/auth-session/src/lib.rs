@@ -1,5 +1,5 @@
 //! `frust-auth-session`: an RFC 8252-style "OAuth for native apps" in-app
-//! browser session — Android Custom Tabs / macOS+iOS
+//! browser session — Android Auth Tab or Custom Tabs / macOS+iOS
 //! `ASWebAuthenticationSession` presented over the request's `https` URL,
 //! resolving to the redirect the identity provider sends back to the
 //! request's [`AuthCallback`] (a custom scheme such as `myapp://…`, or a
@@ -40,9 +40,9 @@
 //! from the UI thread's local executor (`frust::spawn_local`, per
 //! `crates/frust-reactive/src/executor.rs`'s `ForgeExecutor::spawn_local`)
 //! or from any other executor a caller prefers: resolution is driven by the
-//! platform's own main thread (Android's main looper delivering the Custom
-//! Tabs redirect intent, Apple's completion block dispatched onto the main
-//! queue), not by whichever thread happens to be polling, so nothing about
+//! platform's own main thread (Android's main looper delivering the Auth Tab
+//! activity result or the Custom Tabs redirect intent, Apple's completion
+//! block dispatched onto the main queue), not by whichever thread happens to be polling, so nothing about
 //! this future requires the UI thread specifically — it only *has* to reach
 //! the UI thread if the caller's own continuation touches UI state.
 //!
@@ -62,11 +62,13 @@
 //! result reported after the session finished or was abandoned is discarded
 //! rather than resolving whatever session happens to be live now. The
 //! generation is bookkeeping on this side of the platform boundary, not
-//! evidence about the redirect: on Android the host stamps whichever
-//! callback-scheme `Intent` it observes with the generation pending at that
-//! moment (the `android` module's *The generation round trip*), so a stale
-//! tab's late redirect can still complete the live session. PKCE and `state`
-//! (*Security* below) are what bind a callback to a request.
+//! evidence about the redirect: on the Android Custom Tabs fallback the host
+//! stamps whichever callback-scheme `Intent` it observes with the generation
+//! pending at that moment (the `android` module's *The generation round
+//! trip*), so a stale tab's late redirect can still complete the live
+//! session. An Auth Tab session is answered by the activity result of the
+//! tab it launched instead, which no other `Intent` can produce. PKCE and
+//! `state` (*Security* below) are what bind a callback to a request.
 //!
 //! The slot releases when the live session resolves (by outcome or by
 //! error), when the backend drops its resolution handle without ever
@@ -80,9 +82,9 @@
 //! (or the task awaiting it) frees the slot for the next `start`.
 //!
 //! Releasing the slot is **not** the same as ending the platform UI. A
-//! dropped future only frees this crate's bookkeeping: on Android the Custom
-//! Tab stays on screen until the user closes it (a redirect it delivers
-//! afterwards finds no pending session and is dropped); on iOS/macOS the
+//! dropped future only frees this crate's bookkeeping: on Android the Auth
+//! Tab or Custom Tab stays on screen until the user closes it (a redirect it
+//! delivers afterwards finds no pending session and is dropped); on iOS/macOS the
 //! presented `ASWebAuthenticationSession` sheet stays up until the user
 //! dismisses it or the next [`AuthSession::start`] cancels it in favour of
 //! the new session. To end a live session programmatically, start it with
@@ -90,16 +92,17 @@
 //! [`AuthSessionCancel::cancel`]: the future resolves
 //! [`AuthSessionOutcome::Cancelled`], the slot is freed, and the backend is
 //! asked to tear its UI down (`-cancel` on Apple; on Android, where no API
-//! closes a Custom Tab, the tab stays open until the user leaves it — see
+//! closes an Auth Tab or a Custom Tab, the tab stays open until the user
+//! leaves it — see
 //! [`AuthSessionCancel`]).
 //!
 //! # Security
 //!
 //! **Callers MUST use PKCE (RFC 7636, `S256`) and MUST verify the `state`
 //! parameter they generated before exchanging the authorization code.** No
-//! platform can prove a callback came from the session it launched: on
-//! Android the redirect arrives as an ordinary `Intent` that any app
-//! registering the same custom scheme can deliver, and while iOS/macOS
+//! platform can prove a callback came from the session it launched: on the
+//! Android Custom Tabs fallback the redirect arrives as an ordinary `Intent`
+//! that any app registering the same custom scheme can deliver, and while iOS/macOS
 //! intercept the redirect in-process inside the session's own browser tab,
 //! the redirect itself is still an unauthenticated HTTP response. An
 //! [`AuthSessionOutcome::Callback`] is therefore evidence that *a* redirect
@@ -118,6 +121,10 @@
 //! for scheme, host and path before it is handed over; that is a consistency
 //! check on the platform's delivery, not proof of where the redirect came
 //! from, so PKCE and `state` bind here exactly as they do for a custom scheme.
+//! On Android the `https` form runs only in an Auth Tab, and the browser
+//! verifies the app's claim on the domain through Digital Asset Links
+//! (`assetlinks.json` served by the callback host); a failed or timed-out
+//! verification resolves as [`AuthSessionError::Platform`] naming which.
 //!
 //! # Desktop loopback
 //!
@@ -170,7 +177,7 @@
 //!
 //! | Target | [`AuthSession`] (custom scheme) | [`LoopbackSession`] |
 //! |---|---|---|
-//! | Android | Chrome Custom Tabs (`android` module) | [`AuthSessionError::NoHandler`] |
+//! | Android | Auth Tab where the browser offers it, else Chrome Custom Tabs (`android` module) | [`AuthSessionError::NoHandler`] |
 //! | iOS | `ASWebAuthenticationSession` (`apple` module) | [`AuthSessionError::NoHandler`] |
 //! | macOS | `ASWebAuthenticationSession` (`apple` module) | system browser + `127.0.0.1` listener |
 //! | Linux, Windows | [`AuthSessionError::NoHandler`] (`unsupported` module) | system browser + `127.0.0.1` listener |
@@ -184,15 +191,22 @@
 //! The first column is about [`AuthCallback::CustomScheme`] requests. An
 //! [`AuthCallback::Https`] request (a claimed `https` redirect, the form RFC
 //! 8252 §7.2 prefers where a platform supports it) is validated like any
-//! other, then started only on Apple systems that have the
-//! `ASWebAuthenticationSessionCallback` API: iOS 17.4 or later, macOS 14.4 or
-//! later. On Android, on targets without a backend, and on older Apple
-//! systems it is refused with [`AuthSessionError::HttpsCallbackUnsupported`],
-//! before the busy slot is claimed and before any UI appears.
+//! other, then started only where a backend can catch it: on Apple systems
+//! that have the `ASWebAuthenticationSessionCallback` API (iOS 17.4 or later,
+//! macOS 14.4 or later), and on Android when the browser the plugin picks
+//! offers Auth Tab (Chrome 137 or later) and the app's domain serves Digital
+//! Asset Links. On Android without Auth Tab, on targets without a backend, and
+//! on older Apple systems it is refused with
+//! [`AuthSessionError::HttpsCallbackUnsupported`], before the busy slot is
+//! claimed and before any UI appears.
 //!
 //! # The Android double-delivery note
 //!
-//! On Android, the callback URL Custom Tabs redirects back into the app
+//! This note holds for the Custom Tabs fallback only. An Auth Tab session
+//! gets its redirect as an activity result and not as a deep link, so it is
+//! delivered once and the app needs no intent filter for the callback.
+//!
+//! On the Custom Tabs fallback, the callback URL redirected back into the app
 //! reaches the platform **twice**: once as the redirect this crate's Android
 //! backend resolves [`AuthSession::start`]'s future with, and once more as an
 //! ordinary deep link the app's own `frust::deep_links()` stream also
@@ -289,7 +303,9 @@ pub enum AuthCallback {
     /// URL's, so write a percent-escape exactly as the provider sends it.
     ///
     /// Started on Apple systems with the callback API (iOS 17.4 or later,
-    /// macOS 14.4 or later); elsewhere [`AuthSession::start`] answers
+    /// macOS 14.4 or later) and on Android when the browser offers Auth Tab
+    /// (Chrome 137 or later), where the app's domain must serve Digital Asset
+    /// Links; elsewhere [`AuthSession::start`] answers
     /// [`AuthSessionError::HttpsCallbackUnsupported`] for one.
     ///
     /// [`host`]: AuthCallback::Https::host
@@ -392,7 +408,12 @@ impl fmt::Debug for AuthSessionRequest {
 /// What the future resolves to when the user switches away from the app
 /// while a custom-scheme session is live differs per platform:
 ///
-/// - **Android**: nothing resolves while the app is in the background, and
+/// - **Android, Auth Tab**: the session is answered only by the activity
+///   result of the tab it launched. An unrelated Activity resume never
+///   resolves it [`Self::Cancelled`]; it resolves on the redirect, the user
+///   closing the tab, or [`AuthSessionCancel::cancel`].
+/// - **Android, Custom Tabs fallback**: nothing resolves while the app is in
+///   the background, and
 ///   returning to a task whose top is still the Custom Tab resumes the tab,
 ///   not the app, so that resolves nothing either. The first time one of
 ///   the app's own Activities resumes *without* the callback intent — the
@@ -420,7 +441,7 @@ pub enum AuthSessionOutcome {
     /// The session ended before the identity provider ever redirected: the
     /// user dismissed the in-app browser tab, the app called
     /// [`AuthSessionCancel::cancel`] (or [`LoopbackCancel::cancel`]), or — on
-    /// Android — an Activity resumed without the callback (see *Leaving the
+    /// the Android Custom Tabs fallback — an Activity resumed without the callback (see *Leaving the
     /// app while a session is live* above).
     Cancelled,
 }
@@ -499,8 +520,9 @@ pub enum AuthSessionError {
     /// target's backend cannot start a session that catches one. Answered
     /// after validation, before the busy slot is claimed and before any UI
     /// appears — so it never makes another request `Busy`. Answered on
-    /// Android, on targets without a backend, and on Apple systems older
-    /// than iOS 17.4 / macOS 14.4; a custom-scheme request is unaffected.
+    /// Android when the browser offers no Auth Tab, on targets without a
+    /// backend, and on Apple systems older than iOS 17.4 / macOS 14.4; a
+    /// custom-scheme request is unaffected.
     #[error("auth session: https callbacks are not supported on this platform")]
     HttpsCallbackUnsupported,
 }
@@ -1094,8 +1116,8 @@ impl AuthSession {
     /// touched, and resolved on the future's first poll rather than
     /// deferred. [`AuthSessionError::HttpsCallbackUnsupported`] for a valid
     /// [`AuthCallback::Https`] request on a backend that cannot catch one
-    /// (Android, targets without a backend, and Apple systems older than
-    /// iOS 17.4 / macOS 14.4), also resolved on first poll and without
+    /// (Android without Auth Tab, targets without a backend, and Apple
+    /// systems older than iOS 17.4 / macOS 14.4), also resolved on first poll and without
     /// claiming the busy slot. [`AuthSessionError::Busy`] if another
     /// [`AuthSession`] is already live, also resolved on first poll.
     /// Otherwise, per platform:
@@ -1146,7 +1168,7 @@ impl AuthSession {
     }
 
     /// Whether [`Self::start`] (a custom-scheme callback) has a backend on
-    /// this build target: Android (Chrome Custom Tabs) and Apple
+    /// this build target: Android (Auth Tab or Chrome Custom Tabs) and Apple
     /// (`target_vendor = "apple"`, so iOS and macOS both, on
     /// `ASWebAuthenticationSession`). `false` on Linux and Windows, where
     /// [`Self::start`] answers [`AuthSessionError::NoHandler`] — the desktop
@@ -1154,6 +1176,9 @@ impl AuthSession {
     /// [`LoopbackSession::is_supported`] (the crate doc's *Platform notes*
     /// table). The two predicates answer two different questions on purpose;
     /// this one never says `true` for a target where `start` cannot work.
+    /// It also says nothing about [`AuthCallback::Https`]: whether that form
+    /// can start is decided per request at `start` time (Apple with the
+    /// callback API; Android when the browser offers Auth Tab).
     ///
     /// A compile-time answer about the backends this target builds, not a
     /// runtime probe: `true` on Android still leaves
@@ -1183,12 +1208,13 @@ impl AuthSession {
 ///   (half a second at most) that lets the cancelled one finish animating
 ///   out — the platform refuses to present over a sheet still on its way
 ///   down.
-/// - **Android**: there is no API to close a Custom Tab. The host forgets
-///   the pending session, and a launch for it that had not run yet opens no
-///   tab; a tab already open **stays open** in front of the app until the
-///   user leaves it, and a redirect it delivers later finds no pending
-///   session and is dropped (it still reaches the app's own deep-link
-///   stream — this crate doc's *The Android double-delivery note*).
+/// - **Android**: there is no API to close an Auth Tab or a Custom Tab. The
+///   host forgets the pending session, and a launch for it that had not run
+///   yet opens no tab; a tab already open **stays open** in front of the app
+///   until the user leaves it, and a redirect it delivers later finds no
+///   pending session and is dropped. On the Custom Tabs fallback that
+///   redirect still reaches the app's own deep-link stream (this crate
+///   doc's *The Android double-delivery note*); an Auth Tab's does not.
 ///
 /// Every step is keyed to the session's generation: once that session has
 /// finished (by outcome, error, a previous cancel, or the caller dropping
@@ -2293,13 +2319,15 @@ mod tests {
         });
     }
 
-    /// Off Apple no backend catches an https redirect, so a valid https
-    /// request is refused on first poll with `HttpsCallbackUnsupported`, the
-    /// slot is never claimed, the cancel handle is inert, and a following
-    /// custom-scheme start is not `Busy`. Not built for Apple targets, where
-    /// a system with the callback API would accept the request and queue a
-    /// real session: the Apple https path is covered at the device gate only.
-    #[cfg(not(target_vendor = "apple"))]
+    /// Where no backend can catch an https redirect (neither Apple nor
+    /// Android), a valid https request is refused on first poll with
+    /// `HttpsCallbackUnsupported`, the slot is never claimed, the cancel
+    /// handle is inert, and a following custom-scheme start is not `Busy`.
+    /// Not built for Apple targets, where a system with the callback API
+    /// would accept the request and queue a real session, nor for Android,
+    /// where the real predicate asks the JVM: those https paths are covered at
+    /// the device gate only.
+    #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
     #[test]
     fn an_https_request_is_refused_without_claiming_the_slot() {
         with_clean_active(|| {
@@ -2322,10 +2350,11 @@ mod tests {
         });
     }
 
-    /// With a session live, an https request is refused off Apple before the
-    /// Busy check, and the live session is untouched. Not built for Apple
-    /// targets, for the reason on the test above.
-    #[cfg(not(target_vendor = "apple"))]
+    /// With a session live, an https request is refused (where no backend can
+    /// catch one) before the Busy check, and the live session is untouched.
+    /// Not built for Apple or Android targets, for the reason on the test
+    /// above.
+    #[cfg(not(any(target_os = "android", target_vendor = "apple")))]
     #[test]
     fn an_https_refusal_leaves_a_live_session_alone() {
         with_clean_active(|| {

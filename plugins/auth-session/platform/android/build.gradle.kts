@@ -1,6 +1,7 @@
 // `frust-auth-session`'s Android side — a `com.android.library` module holding
-// the plugin's Chrome Custom Tabs host (`FrustAuthSessionHost`) and its
-// process-start init provider. It is wired into a generated app exactly like
+// the plugin's browser-tab host (`FrustAuthSessionHost`: Auth Tab when the
+// browser offers it, Chrome Custom Tabs otherwise) and its process-start init
+// provider. It is wired into a generated app exactly like
 // `plugins/secure-storage/platform/android` (`frust tui` → Add Plugin, or the
 // plugin README by hand):
 //
@@ -69,9 +70,9 @@ android {
 }
 
 dependencies {
-    // `androidx.browser` 1.10.0 (current stable) — `CustomTabsIntent` is the
-    // whole of what `FrustAuthSessionHost` needs to launch a Chrome Custom Tab;
-    // this is a Version-Pin Policy pin recorded in `docs/PLUGINS_DEVELOPMENT.md`
+    // `androidx.browser` 1.10.0 (current stable) — `CustomTabsIntent` is
+    // what `FrustAuthSessionHost` launches a Chrome Custom Tab with; this is
+    // a Version-Pin Policy pin recorded in `docs/PLUGINS_DEVELOPMENT.md`
     // § Version Pins (the plugin's doc-update task adds the row).
     //
     // Deliberately NOT on `:frust-embedding`: the host talks only to the
@@ -79,11 +80,23 @@ dependencies {
     // no frust framework type, the same shape `plugins/secure-storage`'s
     // biometric helper takes for the same reason (see that module's own
     // `build.gradle.kts` comment on the seam for a module that DOES need one).
+    // It also carries `androidx.browser.auth.AuthTabIntent` (stable since
+    // 1.9.0), the Auth Tab launch the host prefers when the chosen browser
+    // offers it.
     implementation("androidx.browser:browser:1.10.0")
 
-    // `ProviderSelectionTest` (JVM unit test, `testDebugUnitTest`) covers
-    // `FrustAuthSessionHost.chooseCustomTabsProvider` — a plain Kotlin
-    // decision function with no Android framework dependency, so JUnit 4 is
+    // `androidx.activity` (`ComponentActivity.activityResultRegistry` and
+    // `ActivityResultLauncher`), which the Auth Tab launch registers its
+    // result launcher through. `androidx.browser` 1.10.0 depends on it at
+    // runtime only, so it is not on the compile classpath unless declared.
+    // 1.9.0 is the version `androidx.browser` 1.10.0 already resolves, so
+    // declaring it moves nothing; a Version-Pin Policy pin like the one above.
+    implementation("androidx.activity:activity:1.9.0")
+
+    // `ProviderSelectionTest` and `AuthTabResultTest` (JVM unit tests,
+    // `testDebugUnitTest`) cover `chooseCustomTabsProvider`,
+    // `chooseLaunchMode` and `authTabResultKind` — plain Kotlin decision
+    // functions with no Android framework dependency, so JUnit 4 is
     // enough; no Robolectric needed. Exact pin, per
     // `docs/DEVELOPMENT.md` § Version-Pin Policy — recorded in
     // `docs/PLUGINS_DEVELOPMENT.md` § Version Pins.
