@@ -72,6 +72,12 @@
 //!   `RESULT_VERIFICATION_TIMED_OUT`, `8` `RESULT_UNKNOWN_CODE` or a code
 //!   the host does not know.
 //!
+//! The host turns a posted launch's return code into its `kind` through one
+//! explicit mapping (`postedLaunchKind` in `FrustAuthSessionHost.kt`), never
+//! by reusing the number, so the two tables can change independently; this
+//! module's `START_*` and `RESULT_*` constants mirror the host's `START_*`
+//! and `KIND_*` ones, and both sides pin their numbers in a unit test.
+//!
 //! [`outcome_from_kind`] maps each posted failure onto **the same**
 //! [`crate::AuthSessionError`] its synchronous counterpart returns, so a
 //! caller cannot tell the two delivery routes apart: `kind` `2` is the
@@ -100,8 +106,12 @@
 //! double-delivery note* — the callback URL also reaches
 //! `frust::deep_links()` as an ordinary deep link; this future is the single
 //! authoritative source for it, never that stream. An Auth Tab session is
-//! answered only by its launcher's Activity result: a resume never reports
-//! it Cancelled, and its redirect is not a deep link.
+//! answered by its launcher's Activity result, and its redirect is not a
+//! deep link: while the launcher is attached (re-attached on a recreated
+//! Activity), a resume never reports it Cancelled. Once the launcher is gone
+//! for good — the launching Activity finished, or came back without the
+//! state the launcher needs — the host resolves the session Cancelled once,
+//! so the slot is never left claimed with nothing able to answer it.
 //!
 //! # Cancelling a live session
 //!
@@ -123,9 +133,12 @@
 //!
 //! Nothing closes the tab: Android has no API for that, so **the browser
 //! stays open** in front of the app until the user leaves it. A Custom Tab's
-//! later redirect is dropped by the host as unsolicited; an Auth Tab's
-//! launcher is unregistered by the cancel, so the result it may still
-//! deliver is dropped by the Activity's result registry.
+//! later redirect is dropped by the host as unsolicited. An Auth Tab's
+//! launcher is unregistered by the cancel, which removes its callback; the
+//! Activity's result registry still parks a later result under the
+//! session's key, but no registration in this process uses that key again
+//! (it carries the generation), so the result is never delivered, and in a
+//! new process the host drops it (the host's class doc, *Process death*).
 //!
 //! A failure to reach the host (no platform handles, the Gradle module not
 //! linked, a JNI error) is not reported anywhere but a debug trace: the
@@ -329,11 +342,16 @@ pub(crate) fn start(req: AuthSessionRequest, token: SessionToken) -> Result<(), 
 /// only Android surface that catches an https redirect. `crate` asks this
 /// before claiming the busy slot and refuses an https request with
 /// [`AuthSessionError::HttpsCallbackUnsupported`] when it answers `false`.
-/// Any failure to ask (no platform handles, the Gradle module not linked, a
-/// JNI error) answers `false`; the start itself would report those. The
-/// answer can change before the launch runs (a browser uninstalled in
-/// between): the launch re-checks and reports the same refusal through
-/// [`START_HTTPS_UNSUPPORTED`]/[`RESULT_HTTPS_UNSUPPORTED`].
+///
+/// The predicate has no error channel, so when the host cannot be reached
+/// at all (no platform handles, the Gradle module not linked, a JNI error)
+/// the answer is `false` too, and the https request is refused as
+/// unsupported rather than with the error that cause would otherwise give;
+/// a debug-only trace names the real cause. The answer can also change
+/// before the launch runs (a browser uninstalled in between): the launch
+/// re-checks and reports the same refusal through
+/// [`START_HTTPS_UNSUPPORTED`]/[`RESULT_HTTPS_UNSUPPORTED`], after the slot
+/// was claimed, and the slot is released as for any other result.
 pub(crate) fn https_callback_supported() -> bool {
     with_host(|env, class| {
         run_jni(env, "FrustAuthSessionHost.httpsCallbackSupported", |env| {
@@ -346,7 +364,18 @@ pub(crate) fn https_callback_supported() -> bool {
             .z()
         })
     })
-    .unwrap_or(false)
+    .unwrap_or_else(|err| {
+        // No `log` dependency (the platform-plugin charter); the error names
+        // an exception class or a missing handle, never a URL.
+        #[cfg(debug_assertions)]
+        eprintln!(
+            "frust-auth-session: the host could not be asked about Auth Tab support ({err}); \
+             the https request is refused as unsupported"
+        );
+        #[cfg(not(debug_assertions))]
+        let _ = err;
+        false
+    })
 }
 
 /// The backend half of [`crate::AuthSessionCancel::cancel`] — call the
@@ -719,7 +748,23 @@ mod tests {
             ],
             [0, 1, 2, 4, 5, 6, 7, 8]
         );
-        assert_eq!(START_HTTPS_UNSUPPORTED, RESULT_HTTPS_UNSUPPORTED);
+    }
+
+    /// The return-code numbers are the Kotlin host's `START_*` constants
+    /// (its `AuthTabResultTest` pins the same list, with `3`, which this
+    /// module reports through the generic arm). They are a separate table
+    /// from the kinds: the host maps one onto the other explicitly.
+    #[test]
+    fn start_code_numbers_match_the_kotlin_table() {
+        assert_eq!(
+            [
+                START_ACCEPTED,
+                START_NO_RESUMED_ACTIVITY,
+                START_ACTIVITY_NOT_FOUND,
+                START_HTTPS_UNSUPPORTED,
+            ],
+            [0, 1, 2, 5]
+        );
     }
 
     /// `3` (the host's "some other exception") and any value this crate

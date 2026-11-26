@@ -76,16 +76,30 @@ internal fun chooseCustomTabsProvider(
     return if (chosen != null && chosen in CUSTOM_TABS_PROVIDER_ALLOWLIST) chosen else null
 }
 
-/** How [FrustAuthSessionHost] presents one session — see [chooseLaunchMode]. */
-internal enum class LaunchMode {
-    /** `androidx.browser.auth.AuthTabIntent`: the redirect returns as an Activity result. */
-    AUTH_TAB,
+/**
+ * How [FrustAuthSessionHost] presents one session — [chooseLaunchMode]'s
+ * answer. Each case carries what its launch needs, so the launch branches on
+ * the case alone and never re-checks a condition [chooseLaunchMode] already
+ * decided. [A] is the launching Activity's type: `ComponentActivity` in the
+ * host, any stand-in in a JVM test.
+ */
+internal sealed class LaunchMode<out A : Any> {
+    /**
+     * `androidx.browser.auth.AuthTabIntent`, pinned to [provider], with its
+     * result launcher registered on [activity]'s `activityResultRegistry`:
+     * the redirect returns as an Activity result.
+     */
+    data class AuthTab<out A : Any>(val provider: String, val activity: A) : LaunchMode<A>()
 
-    /** A Custom Tab: the redirect returns as a deep link read on the next resume. */
-    CUSTOM_TABS,
+    /**
+     * A Custom Tab waiting for a redirect to [scheme], pinned to [provider]
+     * when there is one: the redirect returns as a deep link read on the next
+     * resume.
+     */
+    data class CustomTabs(val provider: String?, val scheme: String) : LaunchMode<Nothing>()
 
     /** Neither can catch the requested redirect (an https one without Auth Tab). */
-    UNSUPPORTED,
+    data object Unsupported : LaunchMode<Nothing>()
 }
 
 /**
@@ -96,21 +110,42 @@ internal enum class LaunchMode {
  * Auth Tab is used whenever it can be: [provider] (the package
  * [chooseCustomTabsProvider] picked, or `null` for none) answers
  * [authTabSupported] (`CustomTabsClient.isAuthTabSupported`) and the
- * launching Activity is a `ComponentActivity` ([componentActivity]), whose
- * `activityResultRegistry` carries the result back. Otherwise a custom-scheme
- * session takes today's Custom Tabs path unchanged, and an https one
- * ([httpsCallback]) is [LaunchMode.UNSUPPORTED]: only Auth Tab can catch an
- * https redirect on Android.
+ * launching Activity is a `ComponentActivity` ([componentActivity] non-null),
+ * whose `activityResultRegistry` carries the result back. Otherwise a
+ * custom-scheme session ([customScheme] non-null) takes the Custom Tabs
+ * path, and an https one ([customScheme] `null`) is [LaunchMode.Unsupported]:
+ * only Auth Tab can catch an https redirect on Android.
  */
-internal fun chooseLaunchMode(
-    httpsCallback: Boolean,
+internal fun <A : Any> chooseLaunchMode(
+    customScheme: String?,
     provider: String?,
-    componentActivity: Boolean,
+    componentActivity: A?,
     authTabSupported: (String) -> Boolean,
-): LaunchMode {
-    if (provider != null && componentActivity && authTabSupported(provider)) return LaunchMode.AUTH_TAB
-    return if (httpsCallback) LaunchMode.UNSUPPORTED else LaunchMode.CUSTOM_TABS
+): LaunchMode<A> {
+    if (provider != null && componentActivity != null && authTabSupported(provider)) {
+        return LaunchMode.AuthTab(provider, componentActivity)
+    }
+    return if (customScheme != null) LaunchMode.CustomTabs(provider, customScheme) else LaunchMode.Unsupported
 }
+
+// `FrustAuthSessionHost.start`/`startHttps` return codes — the table in `start`'s KDoc and
+// `plugins/auth-session/src/android.rs`'s `START_*` constants; change all three together. A
+// different scale from the `KIND_*` constants below: the two meet only in [postedLaunchKind].
+
+/** Return code: the launch was accepted. */
+internal const val START_ACCEPTED = 0
+
+/** Return code: no resumed Activity. */
+internal const val START_NO_RESUMED_ACTIVITY = 1
+
+/** Return code: `ActivityNotFoundException` (no browser). */
+internal const val START_NO_BROWSER = 2
+
+/** Return code: any other exception. */
+internal const val START_LAUNCH_FAILED = 3
+
+/** Return code: an https redirect, but the provider offers no Auth Tab. */
+internal const val START_HTTPS_UNSUPPORTED = 5
 
 // `nativeOnAuthSessionResult` kinds — the table in `FrustAuthSessionHost.nativeOnAuthSessionResult`'s
 // KDoc and `plugins/auth-session/src/android.rs`'s `RESULT_*` constants; change all three together.
@@ -159,6 +194,136 @@ internal fun authTabResultKind(resultCode: Int): Int = when (resultCode) {
 }
 
 /**
+ * The `nativeOnAuthSessionResult` kind a posted launch reports for the
+ * return code [code] its synchronous twin would have returned, or `null` for
+ * [START_ACCEPTED] (nothing to report: the session's answer comes later) —
+ * pure, top-level and JVM-tested (`AuthTabResultTest`). The one place the two
+ * scales meet, so either table can change without the other: in particular
+ * [START_NO_RESUMED_ACTIVITY] is `1`, which as a kind means Cancelled, so it
+ * becomes [KIND_NO_RESUMED_ACTIVITY]. A code this function does not know is
+ * [KIND_LAUNCH_FAILED], never passed through as a kind.
+ */
+internal fun postedLaunchKind(code: Int): Int? = when (code) {
+    START_ACCEPTED -> null
+    START_NO_RESUMED_ACTIVITY -> KIND_NO_RESUMED_ACTIVITY
+    START_NO_BROWSER -> KIND_NO_BROWSER
+    START_LAUNCH_FAILED -> KIND_LAUNCH_FAILED
+    START_HTTPS_UNSUPPORTED -> KIND_HTTPS_UNSUPPORTED
+    else -> KIND_LAUNCH_FAILED
+}
+
+/** The Activity lifecycle callback [authTabLifecycleAction] is asked about. */
+internal enum class AuthTabEvent {
+    /** `onActivityPostCreated`: an Activity of the app was created (or recreated). */
+    CREATED,
+
+    /** `onActivityResumed`: an Activity of the app resumed. */
+    RESUMED,
+
+    /** `onActivityDestroyed`: an Activity of the app was destroyed. */
+    DESTROYED,
+}
+
+/**
+ * What [FrustAuthSessionHost] does with its pending Auth Tab session on one
+ * [AuthTabEvent] — [authTabLifecycleAction]'s answer. Every `CANCEL_*` case
+ * resolves the session Cancelled once and logs its [cancelReason].
+ */
+internal enum class AuthTabAction(val cancelReason: String?) {
+    /** Nothing changes: the launcher (if any) stays as it is. */
+    KEEP(null),
+
+    /**
+     * The launching Activity is destroyed to be recreated: drop it and its
+     * launcher, and wait for the new instance.
+     */
+    DETACH(null),
+
+    /** A recreated launching Activity came up: register the session's key on it. */
+    REATTACH(null),
+
+    /** The launching Activity finished: the result can never arrive. */
+    CANCEL_FINISHED("the launching Activity finished"),
+
+    /** The launching Activity came back without the state its launcher needs. */
+    CANCEL_NOT_RESTORED("the launching Activity was recreated without its saved launcher"),
+
+    /** Another Activity came up while the launcher was gone. */
+    CANCEL_OTHER_ACTIVITY("an Activity other than the launching one was created while the launcher was gone"),
+
+    /** An Activity resumed while the launcher was gone, with nothing left to re-attach to. */
+    CANCEL_NO_LAUNCHER("an Activity resumed while the launcher was gone"),
+}
+
+/**
+ * Decides what an Activity lifecycle [event] does to the pending Auth Tab
+ * session — pure, top-level and JVM-tested (`AuthTabResultTest`); the
+ * lifecycle callbacks gather the inputs and apply the answer. The rule is
+ * that every way the session can lose its launcher ends in exactly one
+ * resolution, and that a session whose launcher is attached is never
+ * resolved by a lifecycle event (leaving the app and coming back must not
+ * cancel it).
+ *
+ * - [launched]: the session's tab has been launched. Before that, the launch
+ *   itself owns the session, and every event is [AuthTabAction.KEEP].
+ * - [hasOwner]: an Activity currently holds the session's launcher.
+ * - [isOwner]: the event's Activity is that holder ([AuthTabEvent.DESTROYED]
+ *   only; a destroyed bystander is [AuthTabAction.KEEP]).
+ * - [finishing]: the event's Activity is finishing ([AuthTabEvent.DESTROYED]
+ *   only): [AuthTabAction.CANCEL_FINISHED], or [AuthTabAction.DETACH] when
+ *   it is being destroyed to be recreated.
+ * - [savedState]: the created Activity has a saved state
+ *   ([AuthTabEvent.CREATED] only).
+ * - [sameTaskAndClass]: the created Activity is a `ComponentActivity` of the
+ *   launching task and class ([AuthTabEvent.CREATED] only).
+ * - [keyRestored]: its result registry restored the session's key as a
+ *   launched one ([AuthTabEvent.CREATED] only), so the result still in
+ *   flight can be delivered to a new registration.
+ *
+ * With no owner, a created Activity that passes all three [AuthTabEvent.CREATED]
+ * gates is [AuthTabAction.REATTACH]; one of the launching task and class that
+ * misses either of the last two is [AuthTabAction.CANCEL_NOT_RESTORED]; any
+ * other is [AuthTabAction.CANCEL_OTHER_ACTIVITY]. A resume with no owner is
+ * [AuthTabAction.CANCEL_NO_LAUNCHER]: a recreated launcher is re-attached on
+ * creation, before it resumes, so by then nothing can attach it any more.
+ */
+internal fun authTabLifecycleAction(
+    event: AuthTabEvent,
+    launched: Boolean,
+    hasOwner: Boolean,
+    isOwner: Boolean = false,
+    finishing: Boolean = false,
+    savedState: Boolean = false,
+    sameTaskAndClass: Boolean = false,
+    keyRestored: Boolean = false,
+): AuthTabAction {
+    if (!launched) return AuthTabAction.KEEP
+    return when (event) {
+        AuthTabEvent.DESTROYED -> when {
+            !isOwner -> AuthTabAction.KEEP
+            finishing -> AuthTabAction.CANCEL_FINISHED
+            else -> AuthTabAction.DETACH
+        }
+        AuthTabEvent.CREATED -> when {
+            hasOwner -> AuthTabAction.KEEP
+            !sameTaskAndClass -> AuthTabAction.CANCEL_OTHER_ACTIVITY
+            savedState && keyRestored -> AuthTabAction.REATTACH
+            else -> AuthTabAction.CANCEL_NOT_RESTORED
+        }
+        AuthTabEvent.RESUMED -> if (hasOwner) AuthTabAction.KEEP else AuthTabAction.CANCEL_NO_LAUNCHER
+    }
+}
+
+/**
+ * The name `androidx.activity`'s `ActivityResultRegistry.onSaveInstanceState`
+ * stores its launched keys under (1.9.0, the pinned version — read from the
+ * artifact's class file). Read by `FrustAuthSessionHost.registryRestoredKey`
+ * only; a registry that writes no such entry is treated as having restored
+ * the key, the behaviour before that check existed.
+ */
+private const val REGISTRY_LAUNCHED_KEYS = "KEY_COMPONENT_ACTIVITY_LAUNCHED_KEYS"
+
+/**
  * The `frust-auth-session` plugin's Android host — the Kotlin half of the
  * frozen Rust↔Kotlin contract also implemented by
  * `plugins/auth-session/src/android.rs`. It presents a session in Auth Tab
@@ -191,29 +356,39 @@ internal fun authTabResultKind(resultCode: Int): Int = when (resultCode) {
  * `CustomTabsClient.isAuthTabSupported` and the resumed Activity is a
  * `ComponentActivity`, the session runs in Auth Tab, for either redirect
  * form; otherwise a custom-scheme session runs in a Custom Tab exactly as
- * before, and an https one is refused (code `5`).
+ * before, and an https one is refused (code `5`). The answer carries the
+ * provider and the `ComponentActivity` the launch needs ([LaunchMode]).
  *
  * ## Auth Tab: the result comes from the launcher, never from a resume
  *
  * The launcher is registered at launch time on the launching Activity's
  * `activityResultRegistry` under the key `frust.authsession.<generation>`
  * (the plugin tier's Activity Result rule — no registration before
- * `onCreate`, no shell change). Its callback is the only thing that resolves
- * an Auth Tab session: [onActivityResumed] neither reads a redirect nor
- * reports Cancelled for one, so leaving the app and coming back while the tab
- * is open changes nothing. The callback checks that the session it was
- * registered for is still [pending] (cancel, or a newer session, makes it a
- * no-op) and maps the result with [authTabResultKind].
+ * `onCreate`, no shell change). While that launcher is attached, its
+ * callback is the only thing that resolves an Auth Tab session:
+ * [onActivityResumed] neither reads a redirect nor reports Cancelled for
+ * one, so leaving the app and coming back while the tab is open changes
+ * nothing. The callback checks that the session it was registered for is
+ * still [pending] (cancel, or a newer session, makes it a no-op) and maps the
+ * result with [authTabResultKind].
  *
- * The launching Activity can go away while the tab is open:
+ * The launching Activity can go away while the tab is open. What each
+ * lifecycle callback does about it is decided by [authTabLifecycleAction]:
  *
  * - **Recreated** (a configuration change, or the system destroying it while
  *   it keeps its saved state): its registry saved the key with its request
  *   code, so [onActivityPostCreated] registers the same key on the new
- *   instance (same task, same class, restored state) and the result is
+ *   instance (same task, same class, saved state present, and the key
+ *   restored as launched — [registryRestoredKey]) and the result is
  *   delivered there.
+ * - **Recreated, but not re-attachable**: an Activity of the launching task
+ *   and class comes back without saved state or without the key, another
+ *   Activity is created while the launcher is gone, or an Activity resumes
+ *   with no launcher attached. Nothing can deliver the result any more, so
+ *   the session is resolved Cancelled once, with the reason logged.
  * - **Finishing**: the result can never arrive, so the session is resolved
  *   Cancelled at once.
+ * - **Re-registration throws**: the session is resolved with kind `3`.
  * - **Process death**: nothing pending survives, and the restored Activity
  *   is not resolved by anything: no callback, no deep link. Its registry
  *   restored the key and parks the result under it, and generations restart
@@ -223,8 +398,13 @@ internal fun authTabResultKind(resultCode: Int): Int = when (resultCode) {
  *   result arrives afterwards (observed on a phone).
  *
  * Only the launching instance's registry ever holds the launcher, so a
- * second Activity instance never sees or resolves the session. [pending]
+ * second Activity instance never receives the session's result. [pending]
  * drops its references to an Activity when that Activity is destroyed.
+ *
+ * Every way a session ends — its result, a lifecycle resolution, a cancel,
+ * a failed launch or re-registration — goes through [clearPending], which
+ * unregisters an Auth Tab launcher and forgets the session; [resolvePending]
+ * pairs it with the one native answer.
  *
  * ## Custom Tab: why the outcome is read from `activity.intent`
  *
@@ -255,8 +435,13 @@ internal fun authTabResultKind(resultCode: Int): Int = when (resultCode) {
  * [cancel] resolves nothing itself (the native side already has) and closes
  * nothing: Android has no API to close either tab, so **the browser stays
  * in front until the user leaves it**. A Custom Tab's later redirect finds no
- * pending session; an Auth Tab's launcher is unregistered, so its later
- * result is dropped by the Activity's registry. What [cancel] guarantees,
+ * pending session. An Auth Tab's launcher is unregistered, which removes its
+ * callback but not the launch: `androidx.activity`'s registry still maps the
+ * key's request code, so a later result is parked under the key for a future
+ * registration of that same key. None comes in this process — keys carry the
+ * generation, which is never reused within a process — so the result is
+ * never delivered; in a new process, where generations restart, a parked
+ * result is dropped as the process-death case above describes. What [cancel] guarantees,
  * whatever thread it and the start are called on:
  *
  * - **A launch that has not run yet never opens a tab.** [cancel] records the
@@ -295,21 +480,6 @@ internal fun authTabResultKind(resultCode: Int): Int = when (resultCode) {
  */
 object FrustAuthSessionHost {
     private const val TAG = "frust"
-
-    /** Return code: the launch was accepted. */
-    private const val START_ACCEPTED = 0
-
-    /** Return code: no resumed Activity. */
-    private const val START_NO_RESUMED_ACTIVITY = 1
-
-    /** Return code: [ActivityNotFoundException]. */
-    private const val START_NO_BROWSER = 2
-
-    /** Return code: any other exception. */
-    private const val START_LAUNCH_FAILED = 3
-
-    /** Return code: an https redirect, but the provider offers no Auth Tab. */
-    private const val START_HTTPS_UNSUPPORTED = 5
 
     /** Prefix of the `activityResultRegistry` key an Auth Tab launcher is registered under. */
     private const val AUTH_TAB_KEY_PREFIX = "frust.authsession."
@@ -460,10 +630,11 @@ object FrustAuthSessionHost {
      * via [mainHandler] and this call returns `0` immediately — the eventual
      * outcome then arrives through [nativeOnAuthSessionResult]: the session's
      * answer later, or a failed deferred launch at once from the posted
-     * runnable as kind `2`, `3`, `4` or `5` (`4` stands in for return code
-     * `1`, because kind `1` means "cancelled" on the native side).
+     * runnable as kind `2`, `3`, `4` or `5`, mapped from the return code by
+     * [postedLaunchKind] (`4` stands in for return code `1`, because kind `1`
+     * means "cancelled" on the native side).
      *
-     * Return codes:
+     * Return codes (the top-level `START_*` constants):
      * - `0` — accepted (the tab was launched; the answer arrives later via
      *   [nativeOnAuthSessionResult])
      * - `1` — no resumed Activity
@@ -500,11 +671,14 @@ object FrustAuthSessionHost {
     fun httpsCallbackSupported(): Boolean {
         val act = activity
         val ctx: Context = act ?: appContext ?: return false
+        // No Activity known yet: answer for the `ComponentActivity` a frust
+        // app launches from (the launch itself checks the real one).
+        val launcherHolder: Any? = if (act == null) ctx else act as? ComponentActivity
         return try {
             val provider = customTabsProvider(ctx)
-            chooseLaunchMode(true, provider, act?.let { it is ComponentActivity } ?: true) {
+            chooseLaunchMode(null, provider, launcherHolder) {
                 CustomTabsClient.isAuthTabSupported(ctx, it)
-            } == LaunchMode.AUTH_TAB
+            } is LaunchMode.AuthTab
         } catch (e: Exception) {
             Log.w(TAG, "frust-auth-session: Auth Tab support check failed (${e.javaClass.name})")
             false
@@ -517,16 +691,10 @@ object FrustAuthSessionHost {
             return launch(url, redirect, ephemeral, generation)
         }
         mainHandler.post {
-            val result = launch(url, redirect, ephemeral, generation)
-            // A deferred launch that fails must still resolve the Rust future:
-            // `1` (no resumed Activity) is a synchronous return code, so on the
-            // posted path it is reported as kind `4` — `1` as a *kind* means
-            // "cancelled" and must never be sent here. Every other failure
-            // code is the same number as its kind.
-            when (result) {
-                START_ACCEPTED -> Unit
-                START_NO_RESUMED_ACTIVITY -> nativeOnAuthSessionResult(generation, KIND_NO_RESUMED_ACTIVITY, null)
-                else -> nativeOnAuthSessionResult(generation, result, null)
+            // A deferred launch that fails must still resolve the Rust future,
+            // with the kind [postedLaunchKind] maps its return code to.
+            postedLaunchKind(launch(url, redirect, ephemeral, generation))?.let { kind ->
+                nativeOnAuthSessionResult(generation, kind, null)
             }
         }
         return START_ACCEPTED
@@ -569,10 +737,26 @@ object FrustAuthSessionHost {
         if (pending?.generation == generation) clearPending()
     }
 
-    /** Forget [pending], unregistering an Auth Tab launcher. Main thread. */
+    /**
+     * Forget [pending], unregistering an Auth Tab launcher — the one cleanup
+     * every exit of a session goes through (the class doc's Auth Tab
+     * section). Main thread.
+     */
     private fun clearPending() {
         (pending as? AuthTabPending)?.let(::unbind)
         pending = null
+    }
+
+    /**
+     * Answers [session] with [kind] and [url] if it is still [pending],
+     * clearing it first ([clearPending]) so nothing can answer it twice (the
+     * class doc's one-delivery rule). A session no longer pending is left
+     * alone. Main thread.
+     */
+    private fun resolvePending(session: Pending, kind: Int, url: String?) {
+        if (pending !== session) return
+        clearPending()
+        nativeOnAuthSessionResult(session.generation, kind, url)
     }
 
     /**
@@ -605,15 +789,16 @@ object FrustAuthSessionHost {
         val act = activity ?: return START_NO_RESUMED_ACTIVITY
         return try {
             val provider = customTabsProvider(act)
-            val mode = chooseLaunchMode(redirect is Redirect.Https, provider, act is ComponentActivity) {
+            val customScheme = (redirect as? Redirect.Scheme)?.scheme
+            val mode = chooseLaunchMode(customScheme, provider, act as? ComponentActivity) {
                 CustomTabsClient.isAuthTabSupported(act, it)
             }
-            when {
-                mode == LaunchMode.AUTH_TAB && provider != null && act is ComponentActivity ->
-                    launchAuthTab(act, provider, url, redirect, ephemeral, generation)
-                redirect is Redirect.Scheme ->
-                    launchCustomTab(act, provider, url, redirect.scheme, ephemeral, generation)
-                else -> {
+            when (mode) {
+                is LaunchMode.AuthTab ->
+                    launchAuthTab(mode.activity, mode.provider, url, redirect, ephemeral, generation)
+                is LaunchMode.CustomTabs ->
+                    launchCustomTab(act, mode.provider, url, mode.scheme, ephemeral, generation)
+                LaunchMode.Unsupported -> {
                     Log.i(TAG, "frust-auth-session: an https redirect needs Auth Tab, which no browser offers")
                     START_HTTPS_UNSUPPORTED
                 }
@@ -726,6 +911,24 @@ object FrustAuthSessionHost {
     }
 
     /**
+     * Whether [act]'s result registry restored [key] as a launched
+     * registration, so a registration made now receives the result still in
+     * flight. Asked through the registry's public `onSaveInstanceState`,
+     * which only copies its state into the bundle it is given. A registry
+     * that writes no launched-keys entry (a layout other than the pinned
+     * `androidx.activity`'s), or a probe that throws, answers `true`: the
+     * key is registered as it was before this check existed.
+     */
+    private fun registryRestoredKey(act: ComponentActivity, key: String): Boolean = try {
+        val probe = Bundle()
+        act.activityResultRegistry.onSaveInstanceState(probe)
+        probe.getStringArrayList(REGISTRY_LAUNCHED_KEYS)?.contains(key) ?: true
+    } catch (e: Exception) {
+        Log.w(TAG, "frust-auth-session: reading the result registry's state failed (${e.javaClass.name})")
+        true
+    }
+
+    /**
      * The Auth Tab launcher's callback — the only thing that resolves an Auth
      * Tab session. Main thread. A result for a session that is no longer
      * [pending] (cancelled, superseded) is dropped.
@@ -740,14 +943,24 @@ object FrustAuthSessionHost {
             Log.i(TAG, "frust-auth-session: session ${flight.generation} dropped a result left by an earlier process")
             return
         }
-        unbind(flight)
         // The result code only: the URI carries the authorization response.
         Log.i(TAG, "frust-auth-session: session ${flight.generation} Auth Tab result code ${result.resultCode}")
-        if (pending !== flight) return
-        pending = null
+        if (pending !== flight) {
+            unbind(flight)
+            return
+        }
         val kind = authTabResultKind(result.resultCode)
         val url = if (kind == KIND_CALLBACK) result.resultUri?.toString() else null
-        nativeOnAuthSessionResult(flight.generation, kind, url)
+        resolvePending(flight, kind, url)
+    }
+
+    /**
+     * Resolves the pending Auth Tab session [p] Cancelled for the lifecycle
+     * reason [action] names, logging that reason (never the URL).
+     */
+    private fun cancelForLifecycle(p: AuthTabPending, action: AuthTabAction) {
+        Log.i(TAG, "frust-auth-session: session ${p.generation} resolved Cancelled: ${action.cancelReason}")
+        resolvePending(p, KIND_CANCELLED, null)
     }
 
     /**
@@ -823,11 +1036,12 @@ object FrustAuthSessionHost {
      * - `0` — Callback: the redirect arrived; [url] carries it
      * - `1` — Cancelled: the user dismissed the tab (a Custom Tab: the
      *   Activity resumed without the callback intent; Auth Tab:
-     *   `RESULT_CANCELED`, or the launching Activity finished)
+     *   `RESULT_CANCELED`), or an Auth Tab session lost its launcher for good
+     *   (one of [authTabLifecycleAction]'s `CANCEL_*` answers)
      * - `2` — posted-path only: no browser could take the intent
      *   ([ActivityNotFoundException])
-     * - `3` — posted-path only: the deferred launch failed for any other
-     *   reason
+     * - `3` — the deferred launch failed for any other reason, or
+     *   re-registering an Auth Tab launcher on a recreated Activity threw
      * - `4` — posted-path only: the deferred launch found no resumed
      *   Activity (kept out of kind `1`'s slot, which means "cancelled")
      * - `5` — posted-path only: an https redirect, but the browser offers no
@@ -838,8 +1052,9 @@ object FrustAuthSessionHost {
      * - `8` — Auth Tab `RESULT_UNKNOWN_CODE`, or any code this host does not
      *   know
      *
-     * Kinds `2`-`5` are reported from [startSession]'s posted runnable;
-     * every other kind from the main thread.
+     * Kinds `2`-`5` are reported from [startSession]'s posted runnable
+     * ([postedLaunchKind]), `3` also from a failed re-registration; every
+     * kind is reported on the main thread.
      *
      * Implemented in `plugins/auth-session/src/android.rs` as
      * `Java_dev_frust_authsession_FrustAuthSessionHost_nativeOnAuthSessionResult`.
@@ -854,7 +1069,10 @@ object FrustAuthSessionHost {
      * Caches whichever Activity is currently resumed, decides on resume
      * whether a pending Custom Tab session's redirect returned, and keeps an
      * Auth Tab session's launcher attached to the launching Activity across
-     * recreation — see the class doc's sections on each.
+     * recreation, or resolves the session once it cannot be — see the class
+     * doc's sections on each. The Auth Tab decisions are
+     * [authTabLifecycleAction]'s; these callbacks only gather its inputs and
+     * apply its answer.
      */
     private val activityCallbacks =
         object : Application.ActivityLifecycleCallbacks {
@@ -862,22 +1080,36 @@ object FrustAuthSessionHost {
 
             /**
              * Re-registers a pending Auth Tab session's key on a recreated
-             * launching Activity: same task and class, restored state, and
-             * no live registration left. Runs after `onCreate`, by which time
-             * the registry has restored the key's request code.
+             * launching Activity, or resolves the session Cancelled when the
+             * Activity that came up cannot take the launcher
+             * ([authTabLifecycleAction]). Runs after `onCreate`, by which time
+             * the registry has restored the key's request code, and before
+             * any result is dispatched to the new instance.
              */
             override fun onActivityPostCreated(activity: Activity, savedInstanceState: Bundle?) {
                 val p = pending as? AuthTabPending ?: return
-                if (p.owner != null || savedInstanceState == null) return
-                if (activity !is ComponentActivity) return
-                if (activity.taskId != p.taskId || activity.javaClass.name != p.activityClass) return
-                try {
-                    bind(p, activity)
-                    Log.i(TAG, "frust-auth-session: session ${p.generation} Auth Tab launcher re-registered")
-                } catch (e: Exception) {
-                    Log.e(TAG, "frust-auth-session: re-registering the Auth Tab launcher failed (${e.javaClass.name})")
-                    pending = null
-                    nativeOnAuthSessionResult(p.generation, KIND_LAUNCH_FAILED, null)
+                val component = activity as? ComponentActivity
+                val sameTaskAndClass = component != null &&
+                    activity.taskId == p.taskId && activity.javaClass.name == p.activityClass
+                val action = authTabLifecycleAction(
+                    AuthTabEvent.CREATED,
+                    launched = p.launched,
+                    hasOwner = p.owner != null,
+                    savedState = savedInstanceState != null,
+                    sameTaskAndClass = sameTaskAndClass,
+                    keyRestored = p.owner == null && component != null && savedInstanceState != null &&
+                        registryRestoredKey(component, p.key),
+                )
+                when {
+                    action == AuthTabAction.REATTACH && component != null -> try {
+                        bind(p, component)
+                        Log.i(TAG, "frust-auth-session: session ${p.generation} Auth Tab launcher re-registered")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "frust-auth-session: re-registering the Auth Tab launcher failed (${e.javaClass.name})")
+                        resolvePending(p, KIND_LAUNCH_FAILED, null)
+                    }
+                    action.cancelReason != null -> cancelForLifecycle(p, action)
+                    else -> Unit
                 }
             }
 
@@ -885,18 +1117,29 @@ object FrustAuthSessionHost {
 
             override fun onActivityResumed(activity: Activity) {
                 this@FrustAuthSessionHost.activity = activity
-                // An Auth Tab session is resolved only by its launcher.
-                val p = pending as? CustomTabPending ?: return
-                val i = activity.intent
-                if (i != null && i !== p.launchIntent && i !== consumedIntent &&
-                    i.data?.scheme == p.callbackScheme
-                ) {
-                    pending = null
-                    consumedIntent = i
-                    nativeOnAuthSessionResult(p.generation, KIND_CALLBACK, i.data.toString())
-                } else {
-                    pending = null
-                    nativeOnAuthSessionResult(p.generation, KIND_CANCELLED, null)
+                when (val p = pending) {
+                    // An Auth Tab session with its launcher attached is resolved
+                    // only by that launcher; one without is resolved here.
+                    is AuthTabPending -> {
+                        val action = authTabLifecycleAction(
+                            AuthTabEvent.RESUMED,
+                            launched = p.launched,
+                            hasOwner = p.owner != null,
+                        )
+                        if (action.cancelReason != null) cancelForLifecycle(p, action)
+                    }
+                    is CustomTabPending -> {
+                        val i = activity.intent
+                        if (i != null && i !== p.launchIntent && i !== consumedIntent &&
+                            i.data?.scheme == p.callbackScheme
+                        ) {
+                            consumedIntent = i
+                            resolvePending(p, KIND_CALLBACK, i.data.toString())
+                        } else {
+                            resolvePending(p, KIND_CANCELLED, null)
+                        }
+                    }
+                    null -> Unit
                 }
             }
 
@@ -912,19 +1155,27 @@ object FrustAuthSessionHost {
              * registry and is not unregistered here: its saved state is what
              * lets [onActivityPostCreated] reattach on a recreated instance.
              * A finishing launcher can never receive the result, so its
-             * session is resolved Cancelled.
+             * session is resolved Cancelled ([authTabLifecycleAction]).
              */
             override fun onActivityDestroyed(activity: Activity) {
                 if (activity === this@FrustAuthSessionHost.activity) {
                     this@FrustAuthSessionHost.activity = null
                 }
                 val p = pending as? AuthTabPending ?: return
-                if (p.owner !== activity) return
+                val action = authTabLifecycleAction(
+                    AuthTabEvent.DESTROYED,
+                    launched = p.launched,
+                    hasOwner = p.owner != null,
+                    isOwner = p.owner === activity,
+                    finishing = activity.isFinishing,
+                )
+                if (action == AuthTabAction.KEEP) return
                 p.owner = null
                 p.launcher = null
-                if (activity.isFinishing) {
-                    pending = null
-                    nativeOnAuthSessionResult(p.generation, KIND_CANCELLED, null)
+                if (action.cancelReason != null) {
+                    cancelForLifecycle(p, action)
+                } else {
+                    Log.i(TAG, "frust-auth-session: session ${p.generation} waiting for its launching Activity to be recreated")
                 }
             }
         }
