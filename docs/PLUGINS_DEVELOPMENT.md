@@ -228,10 +228,10 @@ Findings, all open:
 
 A device gate for `frust-auth-session` (`plugins/auth-session`), driven from `examples/playground`'s
 Auth session page (`examples/playground/src/pages/auth_session.rs`) against the two committed gate
-pages (`plugins/auth-session/gate`) — see that directory's own README for hosting the pages and its
-zero-infra httpbin alternative, not repeated here:
+pages (`plugins/auth-session/gate`), published at `https://frust.dev/gate/auth-session/` (the
+playground's default) — see that directory's own README for hosting and the full script:
 
-- **Callback:** tap `Callback`. Expected: the in-app browser tab (Custom Tabs on Android,
+- **Callback:** tap `Callback`. Expected: the in-app browser tab (Auth Tab or Custom Tabs on Android,
   `ASWebAuthenticationSession` on iOS/macOS) presents `callback.html`, redirects immediately, and
   the status line reads `Callback -> Ok(Callback("frustplay://auth/callback?code=x&state=gate"))`.
 - **Cancel:** tap `Cancel test`, then dismiss the presented tab without letting it navigate.
@@ -243,10 +243,19 @@ zero-infra httpbin alternative, not repeated here:
   `frustauth=1` on a second run; toggle `Ephemeral` on and repeat, confirming the session sees no
   cookie set by an earlier non-ephemeral run (Apple's `prefersEphemeralWebBrowserSession`;
   Android's `CustomTabsIntent.Builder#setEphemeralBrowsingEnabled` is advisory to the browser).
-- **Android double delivery:** the Callback step's `latest deep link:` line also updates on
-  Android — the same callback URL additionally arrives as an ordinary deep link
-  (`auth-session-android-callback-rides-intent-filter` in [LIMITATIONS.md](LIMITATIONS.md)); this
-  is expected, not a bug — treat the future as the single authoritative source.
+- **Cancel in 5 s:** tap `Cancel in 5 s`. Expected: `Cancel in 5 s -> Ok(Cancelled), cancel called
+  at 5.0 s`; the Apple sheet or window is dismissed, the Android tab stays open
+  (`auth-session-android-cancel-leaves-tab-open` in [LIMITATIONS.md](LIMITATIONS.md)); a `Callback`
+  started right after completes.
+- **Https callback:** tap `Https callback` (a probe for a domain the app is not associated with,
+  not a sign-in). Expected on iOS/macOS: no UI and `Ok(Cancelled)` within about two seconds
+  (`auth-session-apple-unassociated-https-reads-as-cancelled-v1`); on Android an Auth Tab opens.
+  Completing an `https` redirect needs a test domain and is not device-verified
+  (`auth-session-https-callback-unverified-v1`).
+- **Android double delivery (Custom Tabs fallback only):** the Callback step's `latest deep link:`
+  line also updates — the same callback URL additionally arrives as an ordinary deep link
+  (`auth-session-android-callback-rides-intent-filter` in [LIMITATIONS.md](LIMITATIONS.md)); expected,
+  not a bug — treat the future as the single authoritative source. Under Auth Tab the line does not update.
 - **Add Plugin dialog:** clean scaffold builds with zero hand edits on both mobile platforms.
 - **Gradle and R8 tripwires:** `(cd examples/playground/android && ./gradlew
   :frust-auth-session:compileDebugKotlin)` compiles the Kotlin host; `(cd examples/playground/android
