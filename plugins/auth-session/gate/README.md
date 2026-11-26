@@ -85,7 +85,10 @@ Expected per platform:
   `true`): the steps behave as described above.
 - **Every other target** (desktop Linux/Windows without an Apple backend): every button resolves to
   `Err(NoHandler)` immediately — no platform authentication user agent exists there
-  (`plugins/auth-session/src/unsupported.rs`'s own doc documents the recommended fallback).
+  (`plugins/auth-session/src/unsupported.rs`'s own doc documents the recommended fallback) —
+  except `Https callback`, which resolves `Err(HttpsCallbackUnsupported)`: an `https` callback is
+  refused before a backend is asked to start. An Android browser without Auth Tab gives the same
+  error for that button, before any tab opens.
 
 ## Manual gate script — Desktop loopback
 

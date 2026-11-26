@@ -306,7 +306,7 @@ The one-live-session slot (the same one [`AuthSession::start`] claims) is claime
     superseded tab's late redirect from the live session's own
     (`auth-session-android-callback-rides-intent-filter` in
     [LIMITATIONS.md](https://github.com/frust-rs/frust/blob/main/docs/LIMITATIONS.md)). PKCE + `state` (§ 3.4) are
-    the caller's defence (Custom Tabs path only; an Auth Tab answers with its own result). Dropping the awaited future releases the Busy slot
+    the caller's defence and are required on every path (Auth Tab removes only the timing attribution: it answers with its own result). Dropping the awaited future releases the Busy slot
     but does not close the tab; to end a session, start it with
     `AuthSession::start_with_cancel` and call the handle's `cancel` (the tab
     still stays open on Android: `auth-session-android-cancel-leaves-tab-open`).
@@ -336,7 +336,7 @@ authorization code or state parameter on any platform. **Callers MUST use PKCE (
 S256 challenge method) and MUST verify the `state` parameter against their own session state
 before exchanging the code for tokens on EVERY platform.** 
 
-RFC 8252 § 8.1 documents the risks of custom-scheme redirects: Android accepts any Intent carrying
+RFC 8252 § 8.1 documents the risks of custom-scheme redirects: the Android Custom Tabs fallback accepts any Intent carrying
 the callback scheme while a session is pending, so any installed app or tapped link can forge a
 redirect; iOS/macOS intercept the redirect in-process (in-app only, not as a deep link), but the
 redirect itself is unauthenticated — the crate has no way to prove it came from the identity
