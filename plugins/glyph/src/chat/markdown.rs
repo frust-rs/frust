@@ -8,7 +8,8 @@
 //!   or interprets HTML. A safe link is reported through `.on_link(..)`; an
 //!   unsafe one, or one whose label is an http(s) URL of another host, is
 //!   plain text then its URL in parentheses. Hidden characters in a label or
-//!   a shown URL read as `?`.
+//!   a shown URL read as `?`, zero-width joiners included (the strict
+//!   [`style::display_url_text`]); body text is not filtered here.
 //! - **One widget per block.** Every top-level block is its own child, keyed
 //!   by position; a block whose model (and streaming role) is unchanged keeps
 //!   its widget across a rebuild: no re-render, re-shape or layout.
@@ -211,10 +212,11 @@ fn has_safe_link(inlines: &[MdInline]) -> bool {
     })
 }
 
-/// An unsafe URL as shown: control, bidi and zero-width characters become
-/// `?` (a URL has no line breaks or tabs to keep).
+/// An unsafe URL as shown: control, bidi and zero-width characters, the
+/// zero-width joiner and non-joiner included, become `?` (a URL has no line
+/// breaks or tabs to keep).
 fn shown_url(url: &str) -> String {
-    style::display_text(url)
+    style::display_url_text(url)
         .chars()
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
@@ -291,7 +293,8 @@ struct Look {
     italic: bool,
     bold: bool,
     strike: bool,
-    /// Inside a link's label: hidden characters are shown as `?`.
+    /// Inside a link's label: hidden characters, zero-width joiners
+    /// included, are shown as `?`.
     label: bool,
 }
 
@@ -309,7 +312,7 @@ fn styled(
     };
     let text: String = text.into();
     let text = if look.label {
-        style::display_text(&text)
+        style::display_url_text(&text)
     } else {
         text
     };
@@ -1510,7 +1513,8 @@ mod tests {
                 .on_link(|app: &mut App, url| app.links.push(url.to_owned()))
         });
         assert_eq!(rig.texts()[0].0, "a?b?c?d?e and f (javascript:?g?)");
-        assert_eq!(shown_url("x\u{2069}\n\u{200C}y"), "x??\u{200C}y");
+        assert_eq!(shown_url("x\u{2069}\n\u{200C}y"), "x???y");
+        assert_eq!(shown_url("y\u{200D}z\r\n"), "y?z??");
         let rect = rig.text_rect("a?b");
         rig.click(Point::new(rect.x0 + 6.0, rect.y0 + 6.0));
         assert_eq!(
@@ -1518,6 +1522,32 @@ mod tests {
             ["https://x.example/".to_owned()],
             "still tappable"
         );
+    }
+
+    #[test]
+    fn link_labels_and_shown_urls_mark_zero_width_joiners_body_text_keeps_them() {
+        let source = "[docs\u{200D}](https://x.example/) and [docs](https://x.example/) \
+                      [f](<javascript:a\u{200C}b\u{200D}c>)";
+        let mut rig = Rig::new(true, 400.0);
+        rig.show(|_| markdown(source).on_link(|app: &mut App, url| app.links.push(url.to_owned())));
+        assert_eq!(
+            rig.texts()[0].0,
+            "docs? and docs f (javascript:a?b?c)",
+            "a label differing by a joiner does not read the same"
+        );
+
+        let spoof = "[https://exa\u{200D}mple.com/](https://example.com/)";
+        let mut rig = Rig::new(true, 400.0);
+        rig.show(|_| markdown(spoof).on_link(|app: &mut App, url| app.links.push(url.to_owned())));
+        assert_eq!(
+            rig.texts()[0].0,
+            "https://exa?mple.com/ (https://example.com/)"
+        );
+
+        let body = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} mi\u{200C}x";
+        let mut rig = Rig::new(true, 400.0);
+        rig.show(|_| markdown(body));
+        assert_eq!(rig.texts()[0].0, body);
     }
 
     #[test]

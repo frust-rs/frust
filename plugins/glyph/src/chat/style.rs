@@ -226,11 +226,11 @@ pub(crate) fn mix(base: Color, over: Color, t: f32) -> Color {
     ])
 }
 
-/// Whether `c` is hidden or reorders text: a control character other than
-/// newline and tab, a bidi embedding, override or isolate, or a zero-width
-/// character. The zero-width joiner and non-joiner are not hidden: emoji
-/// sequences and some scripts need them. A CR is judged here alone; the CR of
-/// a CRLF pair is kept by [`display_text`], which sees the next character.
+/// Whether `c` is hidden or reorders body text: a control character other
+/// than newline and tab, a bidi embedding, override or isolate, or a
+/// zero-width character. The zero-width joiner and non-joiner are not hidden:
+/// emoji sequences and some scripts need them. A CR is judged here alone; the
+/// CR of a CRLF pair is kept by [`display_text`], which sees the next character.
 pub(crate) fn is_hidden_char(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(
@@ -239,10 +239,20 @@ pub(crate) fn is_hidden_char(c: char) -> bool {
         )
 }
 
-/// Untrusted `text` as displayed: every [`is_hidden_char`] becomes a visible
-/// `?`, so agent-supplied text cannot hide or reorder what the user reads. A CR
-/// immediately followed by LF (a CRLF line ending) passes through unchanged; a
-/// lone CR is still replaced.
+/// Whether `c` is hidden in a URL or a link's visible label: every
+/// [`is_hidden_char`] plus the zero-width non-joiner and joiner (U+200C,
+/// U+200D), which a URL never needs and which would let two different links
+/// read the same.
+pub(crate) fn is_hidden_url_char(c: char) -> bool {
+    is_hidden_char(c) || matches!(c, '\u{200C}' | '\u{200D}')
+}
+
+/// Untrusted body `text` as displayed: every [`is_hidden_char`] becomes a
+/// visible `?`, so agent-supplied text cannot hide or reorder what the user
+/// reads. A CR immediately followed by LF (a CRLF line ending) passes through
+/// unchanged; a lone CR is still replaced. Used for prose and code: approval
+/// titles, details and option labels. Never for a URL or a link label; those
+/// use [`display_url_text`].
 pub(crate) fn display_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -251,6 +261,17 @@ pub(crate) fn display_text(text: &str) -> String {
         out.push(if is_hidden_char(c) && !crlf { '?' } else { c });
     }
     out
+}
+
+/// An untrusted URL or link label as displayed: every [`is_hidden_url_char`]
+/// becomes `?`, the zero-width joiner and non-joiner included, and every CR
+/// too (no CRLF exemption). Used for a markdown link's visible label and the
+/// URL shown after an untappable link, so a link cannot read the same as a
+/// different one.
+pub(crate) fn display_url_text(text: &str) -> String {
+    text.chars()
+        .map(|c| if is_hidden_url_char(c) { '?' } else { c })
+        .collect()
 }
 
 /// `text` with every tab expanded to [`TAB_WIDTH`] spaces.
@@ -357,6 +378,23 @@ mod tests {
             "a?b?c?d?e"
         );
         assert_eq!(display_text("a\u{2066}b\u{2069}c"), "a?b?c");
+    }
+
+    #[test]
+    fn display_url_text_marks_joiners_and_every_cr() {
+        assert_eq!(display_url_text("exa\u{200D}mple"), "exa?mple");
+        assert_eq!(display_url_text("exa\u{200C}mple"), "exa?mple");
+        assert_ne!(display_url_text("docs\u{200D}"), display_url_text("docs"));
+        assert_eq!(display_url_text("a\r\nb"), "a?\nb");
+        assert_eq!(display_url_text("a\rb"), "a?b");
+        assert_eq!(display_url_text("a\tb\nc"), "a\tb\nc");
+    }
+
+    #[test]
+    fn both_strengths_mark_bidi_and_other_zero_width_characters() {
+        let raw = "a\u{202E}b\u{2066}c\u{200B}d\u{200E}e\u{200F}f\u{FEFF}g";
+        assert_eq!(display_text(raw), "a?b?c?d?e?f?g");
+        assert_eq!(display_url_text(raw), "a?b?c?d?e?f?g");
     }
 
     #[test]
