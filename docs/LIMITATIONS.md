@@ -516,28 +516,6 @@ documentation.
 
 ---
 
-### `plugin-sync-applied-count-omits-gitignore` — `frust plugin sync` can report one fewer applied change than `frust plugin list` counted as pending
-
-**Observed**: for a manifest-declared plugin with a Swift package, the pending count has two rows
-for the package: the Xcode project reference and the `/ios/<Package>` line in the app's root
-`.gitignore`. `frust plugin list` and the `frust run` / `frust build` stop message count both.
-`frust plugin sync` applies both but reports them as one item, the Swift package reference, so it
-prints for example `6 applied` after `7 pending`. The `.gitignore` line is written; only the count
-and the item list differ. A second sync reports `up to date`.
-
-**Applies to**: `frust plugin sync` (and `frust plugin add`) of a manifest-declared plugin with an
-iOS Swift package, in an app that has `ios/` and a root `.gitignore` without the line.
-
-**Why accepted**: cosmetic. Nothing is left unapplied, and `git diff` shows the line.
-
-**Evidence**: `crates/frust-drive/src/plugin/pending.rs`'s `pending_contributions` (the
-`GitignoreLink` row) against `crates/frust-drive/src/plugin/apply.rs`'s `SwiftPackageRef` arm (one
-outcome for both writes) and `crates/frust-cli/src/commands/plugin.rs`'s `sync_with`; device gate
-2026-11-19, check 3 in
-[the external plugin fixture](../crates/frust-drive/tests/fixtures/external-plugin/README.md).
-
----
-
 ### `plugin-entitlement-capability-not-checked` — a plugin's iOS entitlement is written to the project, but the capability behind it is not checked
 
 **Observed**: an entitlement a plugin contributes is written to the entitlements file of every
@@ -1590,27 +1568,6 @@ via `app_logs`; only the port number itself is exposed.
 **Evidence**: `crates/frust-tui/src/supervise/mcp_backend.rs` module doc ("What this backend
 deliberately cannot do", `DEVTOOLS_OWNED_BY_WORKBENCH`); `crates/frust-tui/tests/mcp_embedded.rs`'s
 `devtools_backed_tools_report_the_embedded_mode_refusal` test.
-
----
-
-### `mcp-embedded-fast-rebind-can-fail` — toggling the embedded MCP server off then on quickly can transiently fail
-
-**Observed**: stopping the embedded server cancels its `CancellationToken` and immediately clears
-`AppState::mcp`, but the listener's actual close is asynchronous — it completes only when the
-server task's own stopped report arrives. Toggling the server back on before that report lands can
-race a bind against a socket the OS has not yet released, failing with a visible bind error
-surfaced through `AppState::mcp_error`. A second toggle after the failure succeeds normally.
-
-**Applies to**: `frust-tui`'s embedded MCP server, which always rebinds the same fixed port
-(`DEFAULT_MCP_PORT`, 4848) rather than an ephemeral one.
-
-**Why accepted**: blocking the toggle until the stop is provably complete would turn an otherwise
-immediate action into a wait; the failure is visible and immediately retryable, so the workbench
-favors responsiveness over a masked wait.
-
-**Evidence**: `crates/frust-tui/src/engine/mod.rs`'s `Engine::stop_mcp` doc comment ("A caller that
-must know the port is free again... waits for that message"); `crates/frust-tui/src/engine/update.rs`'s
-`Message::McpStopped` handling (`mcp_error` retention).
 
 ---
 
@@ -3629,31 +3586,6 @@ each design system — which closes it for that catalog's apps only, not for the
 
 ---
 
-### `selection-toolbar-mouse-hold-opens` — a held mouse press opens the selection toolbar, because the field's long-press ignores the contact source
-
-**Observed**: `EventCtx::pointer_id` reports whether a contact is a mouse or a touch, but the text
-field's long-press does not consult it and arms on any primary `Down`, so holding a mouse button
-still inside a field for the long-press threshold selects the word under it and raises the toolbar,
-which no desktop platform does. The desktop gesture actually meant to open it (a secondary press)
-works as well: this is an extra route, not a missing one.
-
-**Applies to**: desktop and any mouse-driven host on the framework route. `drag::draggable()` does
-read the source and needs a hold only for touch; the field does not. The entry is scoped to the text field: the generic
-gesture detector (`crates/frust-widgets/src/gesture.rs`) does not consult the source either, so its
-`on_long_press` and `on_hold_progress` also fire for a held mouse.
-
-**Why accepted**: the wrong behaviour costs a selection the user can dismiss, never an edit.
-
-**Evidence**: `crates/frust-core/src/event/pointer.rs`'s `PointerSource`/`PointerId`;
-`crates/frust-core/src/event/ctx.rs`'s `EventCtx::pointer_id`;
-`crates/frust-widgets/src/textinput.rs`'s "Selection gestures and the toolbar" section (the
-long-press arms on a primary `Down`, with no source consulted);
-`crates/frust-widgets/src/drag/draggable.rs` (`DragPolicy::Auto`).
-
-**Trigger for removal**: the field's long-press gates on `PointerSource::Touch`.
-
----
-
 ### `text-input-read-only-not-copyable` — a read-only field cannot be selected from or copied
 
 **Observed**: `TextInputView::read_only(true)` makes a field non-interactive through the same focus
@@ -3910,28 +3842,6 @@ for a plugin-tier widget to queue a state-bearing callback onto the next frame")
 itself, documented there); `crates/frust/src/lib.rs`'s `authoring` module (no
 `mark_pending_result_flush` re-export); `plugins/beui/src/agents/todo_list.rs` module docs ("The
 automatic collapse reports nothing").
-
----
-
-### `shadcn-bubble-fixed-to-unit-state` — `bubble()` cannot be embedded directly in a `View<State>` tree for `State != ()`
-
-**Observed**: every other leaf component in `frust-shadcn` is generic over `State` (even the
-non-interactive ones carry an unused `State` bound so they compose directly into any app's tree);
-`bubble()`'s `BubbleView` instead implements `View<()>` only — its sibling `bubble_group()` in the
-same module is properly `State`-generic. An app with `State != ()` cannot place a `bubble()` as a
-direct child; it needs a `Component`-boundary indirection (a nested component whose own `State` is
-`()`) to embed one.
-
-**Applies to**: `frust_shadcn::bubble` only — no other component in the 55-component catalog has
-this asymmetry, `message`/`message_scroller` included.
-
-**Why accepted**: a chat bubble has no callbacks to carry `State` for in the first place; the fix
-(a `State`-generic signature matching every sibling) is a small, low-risk cleanup with no
-functional gap behind it — tracked here as a catalog ergonomic inconsistency, not a capability
-gap.
-
-**Evidence**: `plugins/shadcn/src/components/bubble.rs` (`impl View<()> for BubbleView` versus
-`impl<State: 'static> View<State> for BubbleGroupView<State>` in the same file).
 
 ---
 
@@ -4769,26 +4679,6 @@ docs; `docs/WIDGETS_ARCHITECTURE.md` *Slivers and the viewport*.
 
 ---
 
-### `scroll-controller-desktop-frame-gate-gap` — a `ScrollController` write from a handler that requests no redraw waits for the next desktop frame
-
-**Observed**: a desktop shell does not consult the pending-result-flush flag the mobile frame gate
-uses. A `jump_to`/`animate_to` issued from a handler that itself requests no redraw is recorded, but
-it is applied only at the attached surface's next layout or paint, which waits for whichever desktop
-frame some other input produces. The scroll visibly lags until then.
-
-**Applies to**: desktop shells (macOS, Windows, Linux) driving a `ScrollView`/`ListView` (or
-`frust-shadcn`'s `scroll_area`) from a non-redrawing handler such as a timer or a background signal.
-
-**Why accepted**: the same mechanism gap `PanZoomController` already has. The queued write is never
-lost, only applied on a later frame.
-
-**Trigger for removal**: desktop shells consult the pending-result-flush flag (the mobile form is in
-SHELLS_ARCHITECTURE.md, *Mobile frame path*), or a controller write requests its own redraw.
-
-**Evidence**: `docs/WIDGETS_ARCHITECTURE.md` *Programmatic scroll* (desktop frame-gate paragraph).
-
----
-
 ### `scrollbar-vertical-pointer-only` — the baseline scrollbar is vertical, pointer-driven and invisible to semantics
 
 **Observed**: `.scrollbar(ScrollbarStyle)` exists only on the vertical `ScrollView` and `ListView`; horizontal surfaces and `CustomScrollView` take no bar. The bar is reached by pointer alone — no keyboard focus or keys — and contributes no semantics node of its own. A `ListView` can show one blank frame after a large thumb jump, as after any controller jump applied at paint, before the next rebuild re-windows its rows.
@@ -5310,42 +5200,6 @@ fill: a documented fidelity gap" section.
 
 ---
 
-### `material-textfield-slot-blur-on-interactive-children` — an interactive leading/trailing slot child blurs the field before its own tap registers
-
-**Observed**: `frust_material::text_field`'s leading/trailing icon slots are
-routed through the shared container contract
-(`frust::authoring::route_event`), not a text-field-specific one. That
-contract's blur-on-outside-tap rule fires on `Down`: "a `Down` that does not
-re-establish focus on the child it hits clears every focused sibling." A slot
-child that is itself interactive (a password-visibility toggle, a clear
-button) has not yet claimed focus at the moment its own `Down` arrives, so
-that `Down` reads as an outside tap and blurs the field first — before the
-slot child's own tap handler ever sees the event. The module doc states this
-plainly: "**A `Down` on an interactive slot blurs the field** ... not
-something this widget adds or can suppress — another reason the slots are
-meant for plain icons."
-
-**Applies to**: any app placing an interactive view (not a static icon) in
-`TextFieldView::leading`/`trailing`. Two mainstream M3 patterns are not
-properly buildable in v1: a password-visibility toggle and a trailing clear
-button both need their own tap to land without first blurring the field they
-sit on.
-
-**Why accepted**: the blur-on-outside-tap rule is the shared container
-contract every multi-child `frust-widgets` container routes through
-(`authoring::route_event`), not something `text_field.rs` opted into or can
-override locally. A fix needs a slot-level opt-out — a way for a same-widget
-slot child to be exempted from blur-on-outside-tap when it is itself the
-`Down` target — which is a `frust-widgets`/`frust::authoring` seam change,
-not a catalog-level fix. Deliberately left as a v1 scope line (icon slots are
-"the intended content") rather than attempted inside the port.
-
-**Evidence**: `plugins/material/src/text_field.rs` module doc's "Known
-limitations" section (the "A `Down` on an interactive slot blurs the field"
-bullet).
-
----
-
 ### `material-picker-strings-no-i18n-seam` — the date picker's typed-entry mode is a fixed `mm/dd/yyyy`
 
 **Observed**: the date and time pickers take their labels, month and weekday names and the
@@ -5366,34 +5220,28 @@ through `MaterialDate`, which no caller has needed yet; the calendar mode is ful
 
 ---
 
-### `material-modal-staged-dismiss-private-to-host` — two components' content-owned close affordances still can't request the staged exit ramp
+### `material-modal-staged-dismiss-private-to-host` — the full-screen dialog's header close button dismisses without the staged exit ramp
 
 **Observed**: `frust_material::overlay::modal`'s staged-exit machine (scrim tap, Escape, close
-button, drag, Android back all reverse-ramp before the app's dismissal fires) is now reachable from
-caller-built content too: `ModalDismiss`, installed via `.dismiss_handle(handle)` on the modal host
-view, stages the same reverse exit `stage_dismiss` runs for chrome gestures — one staging path
-covers both, and it carries a `PopResult` so a staged "Apply"/"Save" still reaches the pusher's
-`on_result`. It deliberately bypasses `dismissable(false)` (that flag gates *user* exits; an
-app-wired dismiss is not one). The forwarding builder method has landed on `side_sheet`, all three
-`dialog` variants, `date_picker`, `time_picker`, and `bottom_sheet` (`sheet.rs`). `search`'s
-full-screen view back button and `navigation_drawer`'s app-driven dismiss-on-select `on_select`
-handler are the two holdouts: neither `SearchViewView` nor `NavigationDrawerView` forwards a
-`dismiss_handle` method, so both still call `NavigatorController::pop()` directly and dismiss
-**unstaged** while every host-chrome gesture on the same panel stages one.
+button, drag, Android back all reverse-ramp before the app's dismissal fires) is reachable from
+caller-built content through `ModalDismiss`, installed via `.dismiss_handle(handle)`; every
+`overlay::modal` family forwards it (`side_sheet`, all three `dialog` variants, `date_picker`,
+`time_picker`, `bottom_sheet`, `search`'s full-screen view and `navigation_drawer`). The one
+content-owned close that does not use it is `full_screen_dialog`'s leading header close button: it
+fires the dialog's `on_dismiss` directly, which `show_overlay_modal` wires to
+`NavigatorController::pop()`, so it dismisses **unstaged**, with no slide-down ramp, even when a
+handle is installed. Escape and an Android back press on the same dialog still take the staged
+exit; the header's trailing action takes it through the handle.
 
-**Applies to**: `frust_material::search`'s full-screen view back button and
-`frust_material::navigation_drawer`'s dismiss-on-select handler only — both still cite this id in
-their own doc comments. Every other `overlay::modal` family (`side_sheet`, `dialog` and its
-confirmation/full-screen variants, `date_picker`, `time_picker`, `bottom_sheet`) is closed.
+**Applies to**: `frust_material::dialog::full_screen_dialog`'s header close button only.
 
-**Why accepted**: extending the forwarding builder method to `search`/`navigation_drawer` is small,
-mechanical follow-up work, not a new design problem.
+**Why accepted**: the close affordance predates the handle and is the family's documented unstaged
+exit; routing it through the handle is small follow-up work, not a new design problem.
 
 **Evidence**: `plugins/material/src/overlay/modal.rs`'s `ModalDismiss` type and its "App-initiated
-dismiss" module-doc section; `dismiss_handle` forwarding methods in `side_sheet.rs`, `dialog.rs`,
-`date_picker/dialog.rs`, `time_picker/mod.rs`, `sheet.rs`; `search/view.rs`'s header doc (back
-affordance still pops unstaged) and `navigation_drawer.rs`'s "Selecting does not dismiss" section
-(both cite this id).
+dismiss" module-doc section; `plugins/material/src/dialog.rs` (module doc, "The full-screen
+header's close button dismisses unstaged"; `FullScreenDialogView::dismiss_handle`, whose doc says
+the close affordance is not routed through it; `close_view` built from `on_dismiss`).
 
 ---
 
@@ -5447,31 +5295,6 @@ settle-delivery fix — not something this crate can attempt.
 
 **Evidence**: `plugins/material/src/refresh_indicator.rs` module doc's "Documented seam gap: the
 scroll offset is not held during a refresh" section (incl. the `on_scroll` one-event-late note).
-
----
-
-### `material-fab-fixed-tier-icon-centering` — a tight-constrained FAB paints its icon off-center
-
-**Observed**: `FabWidget` lays its icon out against its `FabSize` tier's own container box, not the
-box the widget was actually laid out at, so a FAB rendered at a tight-constrained size that differs
-from its nominal tier paints its icon off-center inside that box. Measured on the toolbar's
-scroll-hide FAB morph (80dp to 56dp, tight-constrained so layout, visual and hit rects stay one):
-about 12dp of icon offset at the 80dp end. The baseline `IconWidget` scales and centers its glyph
-inside its own laid-out box, so the offset comes entirely from the FAB's fixed container math.
-
-**Applies to**: any FAB rendered at a size other than its nominal `FabSize` tier; today only
-`toolbar.rs`'s 80dp-to-56dp scroll morph. `fab_menu`'s trigger avoids the class by hand-rolling its
-morph through `shapes::Morph`.
-
-**Why accepted / fix direction**: closing it needs a `FabView` seam that exposes the actual
-container size continuously (a `container_size` prop) so icon layout can track the constrained box
-instead of the nominal tier. Until then, avoid constraining a FAB away from its tier if the icon has
-to stay centered.
-
-**Evidence**: `plugins/material/src/toolbar.rs` module doc (FAB morph section);
-`plugins/material/src/fab.rs` (`Widget for FabWidget::layout`'s `self.size.container()`);
-`plugins/material/src/fab_menu.rs` module doc (trigger-morph rationale);
-`crates/frust-widgets/src/icon.rs` (`IconWidget`'s layout and paint).
 
 ---
 
@@ -7789,31 +7612,17 @@ heavily under fat LTO's dead-code elimination and identical-code folding, leavin
 
 ---
 
-### `network-image-android-cache-dir-late` — an Android load issued before platform init is memory-only for that process
+### `network-image-disk-hit-decode-failure-not-evicted` — a disk cache entry this build cannot decode is kept, not evicted
 
-**Observed**: `frust_paths::cache_dir()` is `None` until the shell runs `nativeInitPlatform`. A `network_image` load issued before then runs memory-only (one `log::info`), and the disk cache is not retried for the rest of that process.
+**Observed**: a disk-cached body whose bytes are unreadable is evicted and fetched from the network once, and concurrent loads of the URL share that one refetch. A disk hit that fails for any other reason keeps its disk entry and returns the error: an unsupported format (for example WebP with the `webp` feature off), an image over the size limit, or one over the decode budget. The view shows its error slot for that URL on every attempt, with no network request, until the entry is evicted by the LRU or `clear_disk`/`clear_all` is called.
 
-**Applies to**: Android, a load started before native platform initialization (for example from a static initializer).
+**Applies to**: disk-cache hits that fail with an unsupported format, too large or over budget.
 
-**Why accepted**: every shell initializes before the first frame, so views built from `build` are unaffected; the disk cache is opened lazily on the first miss and, once absent, stays absent.
+**Why accepted**: a refetch would fetch the same bytes and fail the same way, and the size and budget limits are per request, so an entry another target still decodes stays valid.
 
-**Trigger for removal**: re-resolving `cache_dir()` on a later miss, or a shell ordering guarantee that makes the case unreachable.
+**Trigger for removal**: a failure of this kind evicts or bypasses the disk entry.
 
-**Evidence**: `plugins/network-image/src/loader.rs` (lazy disk open on first miss); `crates/frust-paths` (shell-installed slot).
-
----
-
-### `network-image-disk-hit-decode-failure-not-evicted` — a disk cache entry that fails to decode is not evicted
-
-**Observed**: when bytes read from the disk cache fail to decode (corrupt file, unsupported format after the `webp` feature was turned off), the load fails and the entry stays; the view shows its error slot on every attempt until the entry is evicted by the LRU or `clear_disk`/`clear_all` is called.
-
-**Applies to**: disk-cache hits whose bytes no longer decode.
-
-**Why accepted**: fetched bytes are written only after a successful fetch and writes are atomic, so a corrupt entry is rare; automatic eviction would risk refetch loops for a genuinely undecodable origin image.
-
-**Trigger for removal**: evict-on-decode-failure plus a single refetch in `ImageLoader`.
-
-**Evidence**: `plugins/network-image/src/loader.rs` (disk-hit decode path); `plugins/network-image/src/disk_cache.rs`.
+**Evidence**: `plugins/network-image/src/loader.rs` (`indicates_corrupt_bytes` and the shared recovery of an unreadable disk body); `plugins/network-image/src/disk_cache.rs`.
 
 ---
 
@@ -8737,19 +8546,19 @@ gestures, the handles, the soft keyboard interplay or the live edge under a real
 
 ---
 
-### `glyph-chat-hidden-character-filter-incomplete` — the chat hidden-character filter misses some invisible characters and marks some legitimate ones
+### `glyph-chat-hidden-character-filter-incomplete` — the chat hidden-character filters miss some invisible characters
 
-**Observed**: agent-supplied text in an approval card, a link label and a shown URL has control characters (other than newline and tab), bidi embeddings, overrides and isolates, and the zero-width range `U+200B` to `U+200F` plus `U+FEFF` replaced with `?`. Other invisible characters (for example the word joiner `U+2060` and the tag characters) pass through. The same filter shows `?` for the joiner inside an emoji sequence and for the CR of a CRLF line ending.
+**Observed**: agent-supplied text has control characters (other than newline and tab), bidi embeddings, overrides and isolates, `U+200B`, `U+200E`, `U+200F` and `U+FEFF` replaced with `?`. Approval-card and other body text passes `U+200C`, `U+200D` and a CR followed by LF; link labels and shown URLs also replace `U+200C`, `U+200D` and every CR with `?`. Other invisible characters pass through both filters: `U+2060` to `U+2064`, `U+00AD`, `U+061C`, `U+180E`, the variation selectors and the tag characters, so two link labels can still differ by an invisible character. A URL written inside an approval detail goes through the body filter, not the URL one.
 
 **Applies to**: `approval_card`, and links in `markdown` and `message_row`.
 
-**Workaround**: normalise line endings and strip other invisible characters from untrusted text before building the view.
+**Workaround**: strip other invisible characters from untrusted text before building the view.
 
-**Why accepted**: the filter covers the characters that reorder or hide the text a user reads; a full Unicode default-ignorable table is not carried.
+**Why accepted**: the filters cover the characters that reorder or hide the text a user reads; a full Unicode default-ignorable table is not carried.
 
-**Trigger for removal**: a filter that covers the default-ignorable code points and passes emoji joiners and CRLF.
+**Trigger for removal**: both filters cover the remaining default-ignorable code points (the body filter still passing emoji joiners and CRLF).
 
-**Evidence**: (2026-11-22) `plugins/glyph/src/chat/style.rs` (`is_hidden_char`, `display_text`). Code and headless tests.
+**Evidence**: (2026-11-22, revised 2026-11-27) `plugins/glyph/src/chat/style.rs` (`is_hidden_char`, `display_text` for body text, `display_url_text` and `is_hidden_url_char` for link labels and shown URLs). Code and headless tests.
 
 ---
 
@@ -9910,22 +9719,6 @@ viewport-top row, so the gap does not apply while it is stuck.
 **Trigger for removal**: a hot run is checked with the property set.
 
 **Evidence**: `crates/frust-drive/src/plugin/registry.rs` (`AndroidLibcxxShared`).
-
----
-
-### `plugin-add-android-after-plugin` — adding the android platform after a plugin does not report the skipped Android contributions as pending
-
-**Observed**: `frust plugin add` satisfies `ManifestPermission` and `AndroidLibcxxShared` contributions only when the project has an `android/` directory, and skips them otherwise (so `frust plugin add haptics` works on a desktop-only app). If `android/` is added later, those skipped contributions are not reported as pending.
-
-**Applies to**: a project that adds the android platform after adding `models`, `onnx` or another plugin that contributes to it.
-
-**Workaround**: re-run `frust plugin add <id>` after adding the platform, or make the edits listed in the plugin README.
-
-**Why accepted**: the skipped set is not recorded anywhere.
-
-**Trigger for removal**: the pending report covers skipped contributions.
-
-**Evidence**: `crates/frust-drive/src/plugin/pending.rs`.
 
 ---
 
