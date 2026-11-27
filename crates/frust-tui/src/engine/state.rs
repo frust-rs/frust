@@ -83,12 +83,13 @@ pub struct SearchState {
 /// `McpStopped` with *that* generation whether the server returned `Ok`,
 /// returned an error, or panicked (a `JoinError`). The stop effect is always
 /// applied by the runner right after the toggle, and the cancellation it fires
-/// starts the server's graceful shutdown, so the server task does resolve. The one way the send can fail is the engine's receiver being gone
-/// — the event loop has exited (or the runtime is shutting down and the
-/// watcher is dropped with it) — and then there is no model left to clear.
-/// The report can be *late* (graceful shutdown waits for in-flight requests)
-/// but never missing, so no timeout recovers the marker: a toggle meanwhile
-/// only flips [`Self::start_wanted`], which the sidebar row shows.
+/// starts the server's graceful shutdown, so the server task does resolve.
+/// The one way the send can fail is the engine's receiver being gone — the
+/// event loop has exited (or the runtime is shutting down and the watcher is
+/// dropped with it) — and then there is no model left to clear. The report
+/// can be *late* (graceful shutdown waits for in-flight requests) but never
+/// missing, so no timeout recovers the marker: a toggle meanwhile only flips
+/// [`Self::start_wanted`], which [`AppState::mcp_shown_status`] shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpStopping {
     /// The generation of the server being stopped.
@@ -462,6 +463,18 @@ impl AppState {
         match &self.mcp {
             Some(handle) => handle.status(),
             None => McpStatus::Stopped,
+        }
+    }
+
+    /// The server state every surface shows: [`Self::mcp_status`], except
+    /// that a start queued behind a stop still in flight reads as
+    /// [`McpStatus::Starting`]. The user has asked for a server and one is on
+    /// its way, so showing it as stopped would invite the press that cancels
+    /// it. The sidebar row and the MCP panel both read this, so they agree.
+    pub fn mcp_shown_status(&self) -> McpStatus {
+        match self.mcp_stopping {
+            Some(stopping) if stopping.start_wanted => McpStatus::Starting,
+            _ => self.mcp_status(),
         }
     }
 

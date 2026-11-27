@@ -391,7 +391,8 @@ fn render_sidebar(
 /// `(0)` beside a listening server would read as a problem rather than as an
 /// idle server waiting for an agent.
 fn mcp_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    let (text, color) = mcp_state_token(&mcp_row_status(state), state.mcp_error.is_some(), theme);
+    let (text, color) =
+        mcp_state_token(&state.mcp_shown_status(), state.mcp_error.is_some(), theme);
     Line::from(vec![
         Span::styled("  MCP ", Style::default().fg(theme.muted())),
         Span::styled(text, Style::default().fg(color)),
@@ -427,17 +428,6 @@ fn dap_state_token(
         DapStatus::Starting => ("start…".to_string(), theme.warn()),
         DapStatus::Listening { port, clients: 0 } => (format!(":{port}"), theme.success()),
         DapStatus::Listening { port, clients } => (format!(":{port} ({clients})"), theme.success()),
-    }
-}
-
-/// The server state the MCP row reads: [`AppState::mcp_status`], except that a
-/// start queued behind a stop still in flight reads as
-/// [`McpStatus::Starting`]. The user has asked for a server and one is on its
-/// way, so showing `off` would invite the second press that cancels it.
-fn mcp_row_status(state: &AppState) -> McpStatus {
-    match state.mcp_stopping {
-        Some(stopping) if stopping.start_wanted => McpStatus::Starting,
-        _ => state.mcp_status(),
     }
 }
 
@@ -810,6 +800,8 @@ mod tests {
             ("  MCP start… · M".to_string(), theme.warn()),
             "a queued start reads as starting, not off"
         );
+        // The MCP panel is rendered from the same read, so it agrees.
+        assert_eq!(state.mcp_shown_status(), McpStatus::Starting);
 
         update(&mut state, Message::ToggleMcpServer);
         assert_eq!(
@@ -817,6 +809,7 @@ mod tests {
             ("  MCP off · M".to_string(), theme.muted()),
             "the second press cancelled the queued start"
         );
+        assert_eq!(state.mcp_shown_status(), McpStatus::Stopped);
     }
 
     /// Every state's row still fits the *default* sidebar (26 columns, less

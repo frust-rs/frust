@@ -1515,17 +1515,10 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                         // The user asked for this stop and for the start
                         // queued behind it, so the old server is being
                         // replaced, not failing: no toast, and no reason that
-                        // the start would only clear again. The error is still
-                        // logged the way the workbench logs its other
-                        // background diagnostics (stderr, which the raw-mode
-                        // screen never shows).
-                        Some(error) if start_after => {
-                            eprintln!(
-                                "frust-tui: the MCP server stopped for a restart with an error: \
-                                 {error}"
-                            );
-                            false
-                        }
+                        // the start would only clear again. The error is
+                        // dropped: this reducer does no I/O, and the start
+                        // that follows reports its own failure.
+                        Some(_) if start_after => false,
                         Some(error) => {
                             // Two surfaces, deliberately: the toast catches the
                             // eye of someone looking elsewhere, and `mcp_error`
