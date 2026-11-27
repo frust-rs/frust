@@ -714,3 +714,36 @@ fn points_handle_is_bounded_and_counts_changes() {
     twin.push(1.0, 1.0);
     assert_eq!(p.len(), 1);
 }
+
+#[test]
+fn a_large_stored_radius_leaves_the_data_area_a_usable_extent() {
+    let _g = hold();
+    // A 400 x 40 widget, one stored point of radius 20 far outside the domain, and ordinary
+    // points at three heights.
+    let p = Points::new(16);
+    p.extend([
+        ScatterPoint::new(500.0, 50.0).with_radius(20.0),
+        ScatterPoint::new(10.0, 0.0),
+        ScatterPoint::new(50.0, 50.0),
+        ScatterPoint::new(90.0, 100.0),
+    ]);
+    let mut rig = rig(|| fixed(scatter_chart(p.clone()).grid(&[0.0, 1.0], &[0.0, 1.0])));
+    let rec = rig.paint(400.0, 40.0);
+    let (vertical, horizontal) = split_rules(&rec);
+    assert_eq!((vertical.len(), horizontal.len()), (2, 2));
+    // The vertical rules span the data area's height: at least half the plot's.
+    assert!(vertical[0].height() >= 20.0 - EPS, "{:?}", vertical[0]);
+    let centres: Vec<Point> = rec
+        .marks()
+        .into_iter()
+        .flat_map(|(_, boxes)| boxes)
+        .map(|b| b.center())
+        .collect();
+    assert_eq!(centres.len(), 3);
+    // Bottom, middle and top points land at three different heights, bottom lowest on screen.
+    assert!(centres[0].y > centres[1].y + 1.0 && centres[1].y > centres[2].y + 1.0);
+    assert!(centres[0].y - centres[2].y >= 15.0, "{centres:?}");
+    // The points and the rules share the one area: the extreme points sit on the rules.
+    assert!(covers(horizontal[1].y0, horizontal[1].y1, centres[0].y));
+    assert!(covers(horizontal[0].y0, horizontal[0].y1, centres[2].y));
+}

@@ -13,12 +13,13 @@ import PackageDescription
 // object files — they resolve at the app's final link. That split mirrors
 // Flutter's (`flutter_embedding` is Java/Kotlin-only; the engine ships
 // separately); this split compiles/links on both the device
-// (`arm64-apple-ios15.0`) and simulator triples, Debug and Release.
+// (`arm64-apple-ios15.1`) and simulator triples, Debug and Release.
 //
 // `platforms:` must stay **at or below** every consumer's
 // `IPHONEOS_DEPLOYMENT_TARGET` — a package minimum ABOVE the app's is a compile
-// error, not a warning. `.iOS(.v15)` is exactly the generated app's 15.0; do
-// not raise it without raising the template's deployment target first.
+// error, not a warning. The generated app targets iOS 15.1; this package's own floor
+// (`.iOS(.v15)`, i.e. 15.0) is a little lower, which is fine. Do not raise it
+// above the template's deployment target.
 let package = Package(
     name: "FrustEmbedding",
     platforms: [.iOS(.v15)],

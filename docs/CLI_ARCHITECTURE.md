@@ -168,7 +168,7 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   ever shells out directly.
 - `create`: CLI args convert into `frust-drive::scaffold::generate`, which renders the embedded
   `crates/frust-drive/templates/app/` tree against a `TemplateContext` — a pure file-write, no `ProcessRunner`
-  involved — then `platform_wiring::sync` writes the Android/iOS wiring (one `cargo metadata` run, which downloads the frust crates on first use in registry mode, so the network is needed once; `--no-sync`, `cli::CreatePlatformArgs`, defers the step to the next `frust run`/`frust build`). `--frust-path <checkout>` selects path mode. `--deeplink-https-host <HOST>` (a bare DNS name, validated and lower-cased; allowed without `--deeplink-scheme`) adds a second Android intent filter with `autoVerify` for `https` + host and, when iOS is scaffolded, writes `ios/Runner/Runner.entitlements` with `applinks:` and `webcredentials:` entries and `CODE_SIGN_ENTITLEMENTS` on the Runner configurations; scaffold calls the plugin entitlement writer's replace variant for this (a scaffold-to-plugin edge inside `frust-drive`), so `--overwrite` with another host rewrites it. The association files (`assetlinks.json`, `apple-app-site-association`) are the app owner's to host. The rendered app depends on `frust-glyph` and calls `frust_glyph::install()` from
+  involved — then `platform_wiring::sync` writes the Android/iOS wiring (one `cargo metadata` run, which downloads the frust crates on first use in registry mode, so the network is needed once; `--no-sync`, `cli::CreatePlatformArgs`, defers the step to the next `frust run`/`frust build`). `--frust-path <checkout>` selects path mode: a relative value is resolved against the invoking directory (`resolve_frust_checkout`; an unreadable current directory is `FrustPathError::NoCurrentDir`) and written into the new project's `Cargo.toml` relative to the project directory (`FrustCheckout::manifest_path`, absolute when the two share no root); an absolute value is written as given. The plugin dependency paths derive from it, folded lexically (`frust_plugins_dir`). `--deeplink-https-host <HOST>` (a bare DNS name, validated and lower-cased; allowed without `--deeplink-scheme`) adds a second Android intent filter with `autoVerify` for `https` + host and, when iOS is scaffolded, writes `ios/Runner/Runner.entitlements` with `applinks:` and `webcredentials:` entries and `CODE_SIGN_ENTITLEMENTS` on the Runner configurations; scaffold calls the plugin entitlement writer's replace variant for this (a scaffold-to-plugin edge inside `frust-drive`), so `--overwrite` with another host rewrites it. The association files (`assetlinks.json`, `apple-app-site-association`) are the app owner's to host. The rendered app depends on `frust-glyph` and calls `frust_glyph::install()` from
   `app!(setup = { .. })`, so a freshly scaffolded app is Glyph-themed by default — swapping to
   Material/Cupertino, or dropping a built-in design system entirely, is a manifest+setup-call edit
   the template's own comments walk through (see [PLUGINS_ARCHITECTURE.md](PLUGINS_ARCHITECTURE.md)'s
@@ -340,7 +340,7 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   code depends on the file it creates. `Contribution::IosFramework` (first used by `auth-session`)
   appends `-framework <name>` to every `OTHER_LDFLAGS` list of the Runner's pbxproj: a pure-`objc2`
   Apple arm's own `#[link(kind = "framework")]` never reaches Xcode's link of the iOS staticlib, so
-  a framework symbol it references must be linked by the app. `Contribution::IosLibrary` (first used by `onnx`; a manifest's `libraries` key) appends `-l<name>` to the same lists. `IosFramework` and `IosLibrary` count as satisfied on a project with no `ios/` directory, and new apps are scaffolded at iOS 15.1.
+  a framework symbol it references must be linked by the app. `Contribution::IosLibrary` (first used by `onnx`; a manifest's `libraries` key) appends `-l<name>` to the same lists. A manifest `libraries` name starting with `-` or `.` is refused. New apps are scaffolded at iOS 15.1.
   `Contribution::AndroidThemeParent`
   (built-in only; `native-widgets`, whose three contributions are it, the Cargo dependency and its
   Gradle module, asks for `Theme.Material3.DayNight.NoActionBar`) is decided by the manifest's
@@ -353,9 +353,11 @@ child output can't garble a caller's raw-mode terminal (relevant to `frust-tui`)
   true` under `[package.metadata.frust.plugin.android]`) sets `frust.cargoNdk.linkLibcxxShared=true`
   in `android/gradle.properties`, which the template's `cargoNdkBuild` turns into `cargo ndk
   --link-libcxx-shared` so the APK carries the NDK's `libc++_shared.so`; a build script that never
-  reads the property is refused before any write, with the line to add. A project with no
-  `android/` directory counts it, and `ManifestPermission`, as satisfied ([LIMITATIONS.md](LIMITATIONS.md)
-  `plugin-add-android-after-plugin`).
+  reads the property is refused before any write, with the line to add. A contribution for a
+  platform whose directory (`android/`, `ios/`) the project lacks is neither applied nor listed as
+  already present; the pending report is recomputed from disk on every call, so contributions for a
+  platform added later are reported pending then. A manifest plugin's `.gitignore` line for its
+  iOS package link is its own report row, so `frust plugin sync` counts the same rows.
   A plugin's three desktop-lane `Contribution`s
   (`MacosPlistEntry`/`MacosEntitlement`/`LinuxDesktopEntry`) are the one family `add_plugin` never
   writes into a project file at all — `macos/Info.plist`, `macos/app.entitlements`, and
