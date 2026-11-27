@@ -166,33 +166,6 @@ lensFacing)` contract carries no resolution parameter").
 
 ---
 
-### `barcode-nodup-full-rate-decode` — NoDuplicates and Unrestricted policies decode every frame
-
-**Observed**: `DetectionPolicy::NoDuplicates` and `Unrestricted` decode every
-delivered camera frame (~30 fps) by design — only `Throttled` gates decode on
-time. The absence counter in `NoDuplicates` (`ABSENCE_FRAMES`, set to 30 frames)
-counts processed frames and is calibrated to camera rate, making the counter's
-cadence inseparable from the decode cadence.
-
-**Applies to**: every platform this crate targets — the barcode stream's
-`on_detect` callback fires at full camera rate for both policies, consuming CPU
-on every frame.
-
-**Why accepted**: both policies filter on the decode result — a duplicate can
-only be recognised by decoding the frame — and `Throttled` is the time-gated
-choice for an app that needs a lower decode rate. The CPU and thermal cost on
-ARM mobile has not been benchmarked; playground's scan strip has a timing mode
-that measures it.
-
-**Future lever (documented option only, NOT implemented)**: advance the
-absence counter on skipped/undecoded frames too, decoupling counter cadence
-from decode cadence and allowing a slower-than-camera-rate re-arm delay.
-
-**Evidence**: `plugins/camera/src/barcode/stream.rs`'s `should_decode`
-(NoDuplicates and Unrestricted always return `true`).
-
----
-
 ### `clip-desktop-sensitivity-noop` — `set_text_sensitive` applies no sensitivity marking on desktop
 
 **Observed**: `Clipboard::set_text_sensitive` on macOS, Linux, and Windows (the
@@ -221,54 +194,6 @@ not attempted, to keep the desktop backend on one dependency.
 `org.nspasteboard.org`'s `ConcealedType` convention; `arboard`'s public API
 surveyed for a custom-format write (none). See `plugins/clipboard/README.md`'s `## 2.
 Security` section for the crate-level writeup.
-
----
-
-### `android-clipboard-read-focus-gate-and-toast` — an Android paste needs window focus, and a cross-app read raises a system toast
-
-**Observed**: the Android shell drains the framework's paste request each
-frame and reads the primary clip through `ClipboardManager`, inheriting two
-platform behaviours it does not try to hide. (1) **The focus gate (Android
-10+)**: `getPrimaryClip` returns nothing unless the app currently has input
-focus, so a paste attempted while the window is unfocused yields nothing and
-is deliberately indistinguishable here from an empty clipboard — no error
-reaches the tree or the user. (2) **The read toast (Android 12+)**: the
-system shows an "<app> pasted from <app>" toast the first time the app reads
-another app's clip. The emptiness check runs before the real read precisely
-because `hasPrimaryClip` raises no toast, so only a read a user actually
-asked for ever crosses that line. A `SecurityException` from a device policy
-or profile restriction is caught and logged: the paste does not happen and
-the frame loop survives. The write side has its own platform note — Android
-13+ shows the system's own "copied" confirmation, which nothing here
-suppresses or duplicates. (2026-09-12)
-
-**Applies to**: Android only, every field the framework's `EditCommand::Paste`
-route reaches — the framework selection toolbar's Paste, a hardware `Ctrl+V`,
-and `performContextMenuAction`. iOS is unaffected (its reads go through the
-system edit menu); desktop and web have their own gates.
-
-**Why accepted**: both are platform contracts rather than frust behaviour, and
-neither has a route around it that keeps the read honest — focus is a
-precondition the OS enforces, and the toast is the OS telling the user what
-the app just did. Reporting a null read as an error would put a failure in
-front of the user for the ordinary case of an empty clipboard.
-
-**Evidence**:
-`crates/frust-shell-android/platform/android/frust-embedding/src/main/kotlin/dev/frust/FrustSurfaceView.kt`'s
-`readClipboardText` doc comment, which names all three behaviours in place,
-and its `writeClipboardText` neighbour for the copy confirmation.
-
-**Trigger for removal**: none — this describes the platform, and is kept so a
-paste that silently does nothing is diagnosable rather than mysterious. The
-behaviours themselves are read from the platform contract and from the shipped
-source, not from an on-device observation of each one. A debug build of
-`examples/glyph-catalog` was run on a Pixel 5 (redfin) on 2026-09-12 and the
-operator reported the clipboard legs working; the APK was confirmed to carry
-this code (`nativeFocusGeneration`, `readClipboardTextAsync` and
-`clipboardResolutionEpoch` all present in the shipped dex and arm64-v8a `.so`,
-against positive controls). That run is not enumerated leg-by-leg here, and in
-particular did not confirm the URI-backed path — see
-`android-uri-clipboard-paste-is-async-and-may-be-dropped`.
 
 ---
 
@@ -934,50 +859,6 @@ from `CosmeticLoopRate::FLOOR_HZ` (`crates/frust-theme/src/motion.rs`).
 
 ---
 
-### `paced-starvation-min-lattice` — a fast paced loop repaints a slow loop at the fast rate
-
-**Observed**: multiple paced frame requests in the same paint pass fold to a
-MIN-lattice — the tightest interval wins. When a 30 Hz decorative shimmer runs
-beside a 2 Hz caret blink, the caret repaints at 30 Hz for as long as the
-shimmer runs. The caret sees 15 repaints for every frame it could display, all
-visually indistinguishable from its requested 2 Hz cadence and bearing no
-visible glitch or missed frame.
-
-**Why by design**: the core-side MIN fold guarantees a *slow* request can never
-starve a fast one — every paced requester is repainted at least as often as it
-asked. A fast loop's tighter interval sets the frame rate for the whole tick,
-and slower cadences riding along cost no frame the fast loop wasn't already
-forcing. Motion that genuinely must run every vsync is a `TickClass::Transition`
-request, not paced at all.
-
-**Applies to**: Android, iOS, and desktop — all three shells support paced frame
-requests. The MIN-lattice fold happens core-side
-(`PaintCtx::request_frame_paced_at`, crates/frust-core/src/widget.rs), before
-any shell sees the aggregated `PaintOutcome::paced_interval`, so the starvation
-shape is identical everywhere — only the resolution mechanism differs. Android
-and iOS resolve the requested interval through the frame gate's pre-paint skip
-decision (`FrameGate::decide_paced` / `FramePacing::effective_interval`,
-crates/frust-shell-common/src/frame_gate.rs); desktop resolves it post-paint
-through delayed-redraw scheduling in `next_paced_wake`
-(crates/frust-shell-desktop/src/paced_wake.rs), the identical
-`max(cap, requested)` resolution, and pacing is on by default there too.
-
-**Bound**: the repainting at the fast rate lasts exactly as long as the tighter
-paced loop is active. A static screen with a 2 Hz caret and no concurrent
-motion reverts to 2 Hz caret repaints.
-
-**Evidence**: the MIN-lattice contract is stated in
-`crates/frust-core/src/widget.rs`, `PaintCtx::request_frame_paced_at` rustdoc
-(the two contracts on `request_frame_paced_at`, especially "MIN-lattice
-aggregation" and "a *slow* request can never starve a fast one"), and resolved
-by the shell at `crates/frust-shell-common/src/frame_gate.rs`,
-`FramePacing::effective_interval` (the `effective_interval` method and its doc,
-especially the "MIN fold already happened in core" bullet) and, on desktop, at
-`crates/frust-shell-desktop/src/paced_wake.rs`, `next_paced_wake` (the same
-`max(cap, requested)` rule, delayed-redraw side).
-
----
-
 ### `tui-raw-mode-signing-scrub` — plaintext signing scrub unavailable from TUI session keyboard signal
 
 **Observed**: a TUI session keeps the terminal in raw mode (via `cfmakeraw`,
@@ -1597,32 +1478,6 @@ doc ("Stopping the app" section); `stopping_an_android_session_force_stops_the_a
 
 ---
 
-### `mcp-stop-app-termination-in-flight` — `stop_app`/`restart_app` can return before the app is actually gone
-
-**Observed**: `SessionBackend::stop_app`/`restart_app`'s "Blocking" describes how long the *call*
-takes to return, not what has finished when it does. Both `frust-mcp`'s own `SessionEngine` and
-`frust-tui`'s embedded `TuiSessionBackend` may reply once the session reaches its terminal state
-while the best-effort OS-level app termination (`am force-stop`/`simctl terminate`) is still running
-on its own thread. An agent that immediately re-queries device state (outside Frust's own tooling)
-could observe the app as still present for a short window after the tool call returns.
-
-**Applies to**: every `stop_app`/`restart_app` call through either `SessionBackend` implementation.
-
-**Why accepted**: this is request semantics, not a race to fix. On `frust-mcp`'s own
-`SessionEngine` the session is terminal by the time the call returns (its teardown is synchronous);
-on the embedded `TuiSessionBackend` **neither** the session's terminal state **nor** the OS-level
-termination is complete when the call returns — the stop request has merely been posted, the kill
-issued best-effort, and the session's terminal state follows asynchronously through the workbench's
-normal event path (`serve_command`'s own doc: a `stop_app` is a *request*). A `stop_app` reply's
-snapshot can therefore still read `running`; an agent needing the terminal state must poll
-`list_sessions`. Coupling either side would mean blocking the caller (or the workbench event loop)
-on an unbounded `adb`/`simctl` call for no benefit `frust-mcp`'s own tools need today.
-
-**Evidence**: `crates/frust-mcp/src/backend.rs`'s `SessionBackend::stop_app`/`restart_app` doc
-comments ("Blocking' describes how long the call may take, not what has finished when it returns").
-
----
-
 ### `tui-mcp-sessions-tab-uncapped` — session tabs have no automatic cap, and an evicted MCP record's tab stays until closed by hand
 
 **Observed**: `frust-tui`'s `AppState::sessions` map — one entry per session tab — has no automatic
@@ -1870,30 +1725,6 @@ anything beyond success/failure will be misled.
 
 ---
 
-### `dap-log-subscription-may-drop-lines` — a slow DAP client can lose output lines under back-pressure
-
-**Observed**: `SessionBackend::subscribe_session_events` is a bounded (`LOG_SUBSCRIPTION_CAP`,
-4096-line) channel; a client that reads `output` events slower than the app produces lines causes
-`frust-dap`'s log pump to back up and the feed to drop the oldest lines once full. Loss is never
-silent: an in-band `[frust] <N> log line(s) dropped (…)` line is delivered as its own `output` event
-before the gap. This is the *feed's own* loss marker — see `dap-supervisor-drop-not-marked` below
-for a distinct, upstream loss the feed cannot see at all when the host is `frust-tui`.
-
-**Applies to**: any `frust-dap` session whose client (or the DAP wire itself) cannot keep up with
-the app's log rate; unreachable in ordinary interactive use.
-
-**Why accepted**: the alternative is an unbounded buffer (a memory-growth hazard) or blocking the
-app's own log-ingest thread on a slow client (a hang hazard) — neither acceptable for a debug
-server. A marked drop is the same trade-off every implementer of `subscribe_session_events` makes
-(`frust-mcp`'s own reference `SessionEngine`, and `frust-tui`'s embedded backend, both bound at the
-same cap).
-
-**Evidence**: `crates/frust-mcp/src/backend.rs`'s `subscribe_session_events` doc comment (bounded,
-in-band loss markers); `crates/frust-dap/src/adapter/pump.rs`'s log pump (`read_feed`/
-`forward_events`).
-
----
-
 ### `dap-helix-config-skipped` — Helix never gets a generated DAP config
 
 **Observed**: `frust_dap::ide_config::generate_ide_config` for `ParentIde::Helix` always returns
@@ -1967,27 +1798,6 @@ reprinted output only, and the `ConfigAction::StalePort` branch) and
 `DapSettings::admit_auto_toast`
 (the once-per-root-and-IDE-per-run toast limit) and `DapIdeReport::summary`'s stale-port message;
 `crates/frust-dap/src/ide_config/emacs.rs`'s `EmacsGenerator::has_frust_entry` (always `false`).
-
----
-
-### `dap-mcp-launched-sessions-skip-auto-ide-config` — a session launched through the embedded MCP/DAP backend never triggers automatic IDE-config generation
-
-**Observed**: `engine::update::launch_effect` — the one path an app launch's automatic
-`GenerateIdeConfig` write rides — is reached only from the workbench's own launch paths (the
-run-config modal, run-on-all-devices); a session an MCP tool or a DAP client starts through
-`supervise::mcp_backend`'s `TuiSessionBackend::run_app` bypasses it entirely, by design, so that
-launch never writes or refreshes an IDE's DAP launch config. (2026-09-24)
-
-**Applies to**: every session started via the embedded MCP `run_app` tool or a DAP client's
-`launch` request; a session started by hand in the workbench, or the DAP settings dialog's own
-explicit `g`, are unaffected.
-
-**Why accepted**: an MCP/DAP-launched session already has a client attached over a protocol that
-required a config to connect with in the first place — generating one for it would be redundant,
-not corrective. A human launching the same project by hand still gets the usual on-launch write.
-
-**Evidence**: `crates/frust-tui/src/engine/update.rs`'s `launch_effect` doc comment ("Sessions
-launched through the MCP/DAP backend … never pass through here, by design").
 
 ---
 
@@ -2109,25 +1919,6 @@ split of the lib/bin crate names.
 
 ---
 
-### `windows-run-warns-missing-icon-before-first-build` — `frust run` warns about a missing `icon.ico` before the first `frust build`
-
-**Observed**: `frust run` on Windows prints a `build/desktop/windows/icon.ico not found — run frust
-build` warning until a `frust build` has produced that file once.
-
-**Applies to**: a freshly scaffolded or freshly cloned Windows project that has never run `frust
-build`.
-
-**Why accepted**: the icon is generated by the build pipeline, not the scaffold, so a project's very
-first `frust run` necessarily predates it; the warning is accurate and self-resolving on the next
-`frust build`.
-
-**Evidence**: a Windows 11 gate, 2026-09-24.
-
-**Trigger for removal**: `frust run` generating the icon itself ahead of a first build, if that is
-ever judged worth doing.
-
----
-
 ### `i18n-live-locale-change` — a system-language change while the app runs is not reactive
 
 **Observed**: `frust_i18n::system_locales()` re-queries the OS on every call, but nothing in
@@ -2148,27 +1939,6 @@ calls `I18n::set_locale`.
 
 **Evidence**: `plugins/i18n/src/detect/mod.rs`'s module doc; `plugins/i18n/README.md` §6's "Not
 reactive" note.
-
----
-
-### `i18n-rtl-unverified` — intra-line bidi behavior with FSI/PDI marks is device-unverified
-
-**Observed**: this framework's widget layout is LTR, and nothing in it has been
-device-verified rendering right-to-left content. `LocaleSet`'s default bidi isolation wraps
-every interpolated placeable in FSI/PDI marks (`U+2068`/`U+2069`) specifically so an RTL
-argument cannot reorder the surrounding text — but how the text stack's bidi (`parley_engine`'s
-levels plus frust's own L2 reorder in `frust-text`'s `layout/`) handles those marks alongside
-mixed-direction text has not been exercised on a device.
-
-**Applies to**: any message interpolating an RTL argument into an LTR (or mixed) message,
-pending the device gate the `i18n` manual test owes (`docs/PLUGINS_DEVELOPMENT.md`).
-
-**Why accepted**: no RTL locale or right-to-left CLDR data has shipped in this repo's locale
-sets yet; bidi layout was out of scope for this plugin's v1, which owns message resolution and
-formatting, not text layout.
-
-**Evidence**: `plugins/i18n/src/engine/mod.rs`'s `LocaleSet::with_isolating` doc; the pending
-`i18n` device gate in `docs/PLUGINS_DEVELOPMENT.md`.
 
 ---
 
@@ -2301,35 +2071,6 @@ distinct winit backend for the `app_id` path that has not yet been run for this 
 
 ---
 
-### `desktop-windows-titlebar-theme-revert` — a Windows titlebar override can be silently reverted between app brightness changes
-
-**Observed**: winit 0.30.13's `Window::set_theme` never writes back its own `preferred_theme`
-field (a winit bug), so its `WM_SETTINGCHANGE` handler — which branches on that field being `None`
-to mean "no app override, follow the system" — treats an app-forced titlebar the same as an
-unthemed one and can silently re-apply the *system* theme over it, without necessarily firing
-`WindowEvent::ThemeChanged`. `frust-shell-windows`'s `TitlebarTheme` (`theme.rs`)
-has no `applied == wanted` latch, so every core-signaled brightness change re-issues
-`set_theme`, which closes the revert path between two *different* app-resolved brightnesses. It
-does not close a revert that happens *between* those changes — most notably while an app override
-is active: the core's override-wins rule holds `self.theme.brightness` steady across a platform
-`ThemeChanged`, so the edge-gate that drives `take_pending` may not re-fire at all while the
-mismatch persists. The 2026-08-19 Windows-11 gate probed the headline sequence by hand — the
-system theme flipped while an app override held — and observed **no** revert (build 26200); the
-residual window is timing-dependent and stays open at this winit pin.
-
-**Applies to**: `frust-shell-windows` apps using an OS-native (non-`with_theme`) titlebar with
-either the system-follow path or an app-forced brightness override, on any winit 0.30.13 build.
-
-**Why accepted**: no winit-level fix exists to consume (the bug is in winit, not fixable from this
-crate alone); a full fix needs shell-owned system-theme detection (e.g. polling the registry key
-winit itself would consult) rather than reacting to winit's event stream — and it stays deferred:
-the Windows runtime gate's manual `WM_SETTINGCHANGE` probe did not reproduce a revert, so the
-detector would be built against a case no one can currently trigger.
-
-**Evidence**: `crates/frust-shell-windows/src/theme.rs` module docs (the residual-gap section).
-
----
-
 ### `desktop-decorations-creation-time-only` — the window frame style is fixed when the window is created
 
 **Observed**: `DesktopConfig::decorations` and `title_buttons` are read once, while the window
@@ -2347,22 +2088,6 @@ known use picks one style at startup.
 
 **Trigger for removal**: an app that needs a live switch, and a gate showing the switch is sound on
 each OS.
-
----
-
-### `desktop-window-commands-off-desktop-noop` — window commands do nothing off the desktop shell
-
-**Observed**: `push_window_command` only fills a process-global queue that the desktop shell
-drains. Mobile and web shells never drain it, so a command pushed there is never executed; the
-queue is bounded at 32 and, once full, drops the oldest non-`RequestClose` entry and logs one
-warning per process.
-
-**Applies to**: Android, iOS and web builds that share app code with a desktop build.
-
-**Why accepted**: window actions have no meaning on those shells, and a shared title-bar widget
-stays harmless there. `WindowState` is likewise absent, so an app reads it as an `Option`.
-
-**Evidence**: `crates/frust-core/src/window_control.rs` (queue, cap and overflow warning).
 
 ---
 
@@ -4978,22 +4703,6 @@ and compare against the kit.
 
 ---
 
-### `path-clip-mask-rerasterized` — `PushClipPath` is always a coverage mask, re-rasterized per push
-
-**Observed**: `ClipStack::push_path` always takes the mask shape — never a page, never a scissor —
-and there is no mask cache, so a path clip is re-rasterized on every push; a retained body under it
-is never retained.
-
-**Applies to**: scenes with many or large path clips per frame.
-
-**Why accepted**: correctness first; clip masks for rounded rects already work this way.
-
-**Trigger for removal**: a measured frame where path-clip rasterization shows up, then a mask cache.
-
-**Evidence**: `docs/RENDER_ARCHITECTURE.md` (`compile::clip`); `crates/frust-engine/src/compile/clip.rs`.
-
----
-
 ### `nav-swipe-depth-staleness` — `depth()`/`can_pop()`/`back_interest()` run eager, the route-state observable runs conservative, for the same in-flight interactive swipe
 
 **Observed**: from the left-edge steal (`begin_interactive_pop`) to the settle-frame publish,
@@ -5110,35 +4819,6 @@ alongside the `CornerRadii`/`DashPattern` primitives rather than blocking on it.
 
 **Evidence**: `crates/frust-engine/src/compile/blur_rrect.rs`'s decode of
 `Command::BlurredRoundedRect` through `CornerRadii::largest` and its regression test.
-
----
-
-### `material-from-seed-diverges-from-baked-baseline` — `theme_from_seed`/`from_seed(#6750A4)` is not pixel-identical to `baseline()`
-
-**Observed**: `frust_material::from_seed`/`theme_from_seed` ports current
-`material-color-utilities` 0.11.1, while `baseline()` transcribes Google's
-published Material 3 reference palette (material-web tokens v0.192) — two
-different sources of truth for the same seed color. Seeding `from_seed` with
-`#6750A4` (the reference seed `baseline()` itself was built from) does not
-reproduce `baseline()` exactly: the error ramp differs (`#BA1A1A` from MCU vs
-`#B3261E` baked), and roughly half the remaining roles drift by ±1 RGB step.
-
-**Applies to**: any app calling both `baseline()` and `theme_from_seed`/
-`from_seed(#6750A4)` and expecting identical output, or switching a theme
-from one to the other at runtime.
-
-**Why accepted**: this is correct interop behavior, not a bug — `from_seed`
-matches a Flutter app seeded identically via current MCU, which is the point
-of exposing it. The divergence from `baseline()` is pinned deliberately by an
-explicit table test (`from_seed_diverges_from_the_baked_baseline_only_as_recorded`,
-`plugins/material/src/tokens/hct.rs`) rather than fixed, since "fixing" it
-would mean rebaking `baseline()` off MCU output and breaking the documented
-reference-palette contract instead. Consequence: an app switching
-`baseline()` → `theme_from_seed(#6750A4)` sees a subtle recolor across roughly
-half its roles plus a visibly different error red.
-
-**Evidence**: `plugins/material/src/tokens/hct.rs`'s
-`from_seed_diverges_from_the_baked_baseline_only_as_recorded` test.
 
 ---
 
@@ -6669,10 +6349,9 @@ records.
 for — the selection toolbar's Paste item, or any `EventCtx::request_paste`
 — cannot ride the DOM `paste` event, which only a keystroke raises. The
 shell answers it with `navigator.clipboard.readText()` instead, and that
-call is permission-gated where the keyboard's own paste is not: Chrome on
-Android prompts, iOS Safari shows its Paste callout, and Firefox refuses a
-read it cannot tie to a gesture. A refusal is one dropped paste, logged and
-never retried. On a page that is not a secure context (`http://` other than
+call is permission-gated where the keyboard's own paste is not: the browser
+may prompt (Safari shows its Paste callout) or refuse a read it cannot tie
+to a gesture. A refusal is one dropped paste, logged and never retried. On a page that is not a secure context (`http://` other than
 `localhost`) `navigator.clipboard` is undefined outright, so a toolbar
 paste and an app-driven copy no-op for the whole run — a keyboard paste is
 unaffected there, since the `paste` event carries its own text.
@@ -6685,10 +6364,7 @@ partial or wrong insertion, and the keyboard route the same field offers is
 not gated at all.
 
 **Trigger for removal**: nothing in frust closes it — the gate belongs to
-the browser. What is owed is observation of how each engine actually
-behaves: the browser gate so far has run on Safari only and only partially,
-the Chrome and Firefox legs are unconfirmed, and Firefox is not installed on
-the development machine.
+the browser.
 
 ---
 
@@ -7804,40 +7480,6 @@ slot pills, and the behavior is deterministic and pinned by tests.
 
 ---
 
-### `i18n-tzdb-bundled-size` — `frust-i18n` bundles the jiff time-zone database
-
-**Observed**: `jiff` is pinned with `tzdb-bundle-always` so instant-to-civil conversion works on
-Android and iOS, which expose no system zoneinfo. Measured: `frust-i18n`'s Android release rlib
-grew from 1439872 to 1440312 bytes (+440 B), and the bundled database is the 599954-byte
-`libjiff_tzdb` intermediate rlib. The final app-size delta is unmeasured.
-
-**Applies to**: an app using `frust-i18n` zoned formatting on any platform.
-
-**Why accepted**: correctness of DST and zone offsets on every platform outweighs an
-unmeasured, linker-trimmed size cost.
-
-**Trigger for removal**: the platform tzdb (`tzdb-bundle-platform`) proven reliable on Android
-and iOS.
-
-**Evidence**: (2026-10-23) `plugins/i18n/Cargo.toml`'s `jiff` pin; the rlib sizes above.
-
----
-
-### `material-strings-machine-drafted-locales` — the non-English Material string tables are machine-drafted
-
-**Observed**: the th, vi, ja, zh-Hans, es, de and fr `MaterialStrings` tables in
-`plugins/material-i18n/src/tables` are machine-drafted and pending native review; only English
-is reviewed. Month and weekday names come from CLDR; the other strings are hand-written.
-
-**Applies to**: apps shipping those languages through `frust-material-i18n`.
-
-**Why accepted**: a machine draft is better than English fallback and the tables are plain
-data, replaceable without an API change.
-
-**Evidence**: (2026-10-23) the native-review table in `plugins/material-i18n/README.md`.
-
----
-
 ### `material-date-picker-strings-static-str` — a runtime date-picker table is leaked once per language
 
 **Observed**: `DatePickerStrings` is `Copy` with `&'static str` fields, so a runtime locale
@@ -8314,25 +7956,6 @@ cost is that the same tap cannot also dismiss it.
 
 ---
 
-### `rich-text-mouse-drag-selects-not-scrolls` — a mouse drag on selectable text inside a scroll view selects instead of scrolling
-
-**Observed**: a mouse press-drag on a `selectable` block selects by grapheme and vetoes the takeover of every enclosing scroll
-surface, the desktop convention. Dragging the mouse over such text inside a `ScrollView` or `ListView` therefore never
-scrolls the list; the wheel, the scrollbar and a touch drag still do (a touch drag that is not a handle drag scrolls the
-parent).
-
-**Applies to**: desktop and web, a `selectable` block inside a scroll surface that the mouse would otherwise drag.
-
-**Workaround**: scroll with the wheel, the scrollbar or the keyboard; start the drag outside the text.
-
-**Why accepted**: it matches how desktop text behaves; selecting is the point of a mouse drag over text.
-
-**Trigger for removal**: not planned; this entry records the behaviour.
-
-**Evidence**: (2026-11-22) `crates/frust-widgets/src/rich_text.rs` ("Selection" section, Mouse bullet); `crates/frust-widgets/tests/rich_text_selection.rs`. Headless tests only.
-
----
-
 ### `rich-text-selection-single-block-no-autoscroll` — selection stops at one block and a drag does not autoscroll
 
 **Observed**: a selection lives inside one `rich_text` block, never across two (a drag past a block's edge clamps to its
@@ -8391,23 +8014,6 @@ the pin needs the fling simulation to be re-bounded as the end moves.
 **Trigger for removal**: a fling that keeps its momentum when released from an overscrolled end of a stuck list.
 
 **Evidence**: (2026-11-22) a Phase review finding; `crates/frust-widgets/src/list_view.rs` ("Stick to end", release and re-stick paragraph); established from the code path and headless tests, not a device observation.
-
----
-
-### `selection-and-stick-to-end-linux-headless-only` — selectable `rich_text` and `stick_to_end` have headless Linux evidence only
-
-**Observed**: `RichTextView::selectable` (long-press, handles, toolbar, mouse and keyboard gestures, the focus rules) and the
-keyed `ListView` live-edge mode (opening at the end, the same-frame pin, release and re-stick, the transition callback) are
-covered by headless tests run on Linux. No recorded run on an Android phone, an iPhone or macOS exists for the touch
-gestures, the handles, the soft keyboard interplay or the live edge under a real fling and keyboard resize.
-
-**Applies to**: all hosts; touch input, the soft keyboard and real frame pacing are what a headless test cannot show.
-
-**Why accepted**: the device gate walks these after they land; until it is recorded the behaviour is code and headless-test only.
-
-**Trigger for removal**: the device gate's results are recorded.
-
-**Evidence**: (2026-11-22) `crates/frust-widgets/tests/rich_text_selection.rs`, `crates/frust-widgets/tests/rich_text_spans.rs`, `crates/frust-widgets/tests/list_stick_to_end.rs`; no device run.
 
 ---
 
@@ -8552,20 +8158,6 @@ gestures, the handles, the soft keyboard interplay or the live edge under a real
 **Trigger for removal**: both filters cover the remaining default-ignorable code points (the body filter still passing emoji joiners and CRLF).
 
 **Evidence**: (2026-11-22, revised 2026-11-27) `plugins/glyph/src/chat/style.rs` (`is_hidden_char`, `display_text` for body text, `display_url_text` and `is_hidden_url_char` for link labels and shown URLs). Code and headless tests.
-
----
-
-### `glyph-chat-linux-headless-only` — the chat family has headless tests and two Android walks; no iPhone, macOS or screen-reader run
-
-**Observed**: every `frust_glyph::chat` component is covered by headless tests run on Linux, and the catalog's Agent chat page was walked on a Pixel 5 (Android 14) and a OnePlus 9 (Android 15) with synthetic taps, judged from screenshots and screen recordings. No recorded run exists on an iPhone or on macOS, with a screen reader, or measuring the frame cost of a long stream; on Android a wide table, diff collapse, the composer's line cap and IME composition were not exercised.
-
-**Applies to**: iOS and macOS hosts; assistive technology and real frame pacing on every host.
-
-**Why accepted**: the Android leg of the device gate is recorded; the iPhone and macOS legs need a Mac host.
-
-**Trigger for removal**: the iPhone and macOS legs of the device gate and a screen-reader pass are recorded.
-
-**Evidence**: (2026-11-23) `examples/glyph-catalog/README.md` §10 (the dated gate run); `plugins/glyph/tests/chat_api.rs`, `plugins/glyph/tests/layout_skip_audit.rs`, `examples/glyph-catalog/tests/agent_chat.rs`.
 
 ---
 
@@ -8901,25 +8493,6 @@ gestures, the handles, the soft keyboard interplay or the live edge under a real
 
 **Evidence**: (2026-11-11) `plugins/photo-library/src/apple_library.rs` (*Cursor paging*, `Snapshot`); `plugins/photo-library/src/library.rs` (`SnapshotStore`, `SNAPSHOT_SESSIONS`). Code and headless tests (the store). Device (2026-11-11): an iPhone 13 mini (iOS 27.2) paged 6,155 assets in pages of 60, equal to the library's Recents count, with Load more disabled at the end. A session with an item added part-way has not run on iOS (`photo-library-change-feed-not-device-tested`).
 
----
-
-### `photo-library-change-feed-not-device-tested` — parts of the change feed and cursor paging have not run on a device
-
-**Observed**: device gates ran on 2026-11-11 on a Pixel 5 (Android 14) and an iPhone 13 mini (iOS 27.2) and passed for the core paths: token save, empty, inserted, updated and deleted deltas on Android, an inserted delta and the wake counter on iOS, a token surviving a relaunch, and cursor paging on both. Still unverified on a device:
-
-- iOS: a forged or expired token answering `FullRescan`; `cloud_identifiers`; anything on iOS 15 (the no-history path). An updated and a deleted delta ran on 2026-11-12 (iPhone 13 mini, iOS 27.2); the delete also reported one updated asset that was not touched, cause not looked into.
-- Android: API 29 (always `FullRescan`); the observer's Stop; token size and per-call snapshot cost on a large library (only 156 assets were measured).
-- Both: an iOS cursor session with an item added part-way; thumbnail refresh after a delta on iOS.
-
-**Applies to**: iOS apps that use `cloud_identifiers` or run on iOS 15; Android apps on API 29, with a large library, or that rely on the observer's Stop.
-
-**Workaround**: none; verify the listed paths on the target device before depending on them.
-
-**Why accepted**: the remaining gates need hardware or a library not yet on hand; the verified paths have run.
-
-**Trigger for removal**: the device gate records a run of each unverified item above.
-
-**Evidence**: (2026-11-11) the device table in `examples/playground/README.md`; code and headless tests in `plugins/photo-library/src/changes.rs`, `apple_changes.rs`, `android_changes.rs`, `apple_library.rs`, `android_library.rs`.
 ---
 
 ### `photo-library-live-photo-still-only` — exporting a Live Photo returns its still, not the paired video
