@@ -165,7 +165,7 @@ pub struct BubbleWidget {
     pill_size: Size,
 }
 
-impl View<()> for BubbleView {
+impl<State: 'static> View<State> for BubbleView {
     type Element = BubbleWidget;
 
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> BubbleWidget {
@@ -489,6 +489,34 @@ mod tests {
         let size = layout(&mut w, 300.0);
         let rec = paint(&mut w, size);
         assert!(rec.rounded_rects.is_empty());
+    }
+
+    /// A non-unit app state: a bubble must embed directly in its tree.
+    #[allow(dead_code)]
+    struct AppState {
+        unread: u32,
+    }
+
+    #[test]
+    fn bubble_builds_under_a_non_unit_state_type() {
+        let view = bubble("hi");
+        let mut counter = 0u64;
+        let mut w = View::<AppState>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        let size = w.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 200.0)));
+        assert!(size.width > 0.0);
+    }
+
+    #[test]
+    fn bubble_group_embeds_bubbles_under_a_non_unit_state_type() {
+        let view: BubbleGroupView<AppState> = bubble_group(vec![bubble("one"), bubble("two")]);
+        let mut counter = 0u64;
+        let mut w = View::<AppState>::build(&view, &mut BuildCtx::new(&mut counter));
+        let mut tcx = TextContext::new();
+        let mut lctx = LayoutCtx::with_text_context(&mut tcx as &mut dyn Any);
+        w.layout(&mut lctx, &BoxConstraints::loose(Size::new(300.0, 400.0)));
+        assert!(w.children[1].origin().y > w.children[0].origin().y);
     }
 
     #[test]
