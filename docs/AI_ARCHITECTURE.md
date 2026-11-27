@@ -148,8 +148,8 @@ app ──► frust (facade)
   time; models are data and are downloaded, verified, through `frust-models`. On Android arm64 the
   runtime is linked into the app's own `.so`, so the plugin has no Gradle module; its registry
   entry contributes `AndroidLibcxxShared`, which makes the scaffold's `cargoNdkBuild` package the
-  NDK's `libc++_shared.so` the archive needs (a hot `frust run --watch` does not:
-  `onnx-hot-run-libcxx-shared`). On arm64 iOS the runtime is linked statically too; the entry contributes `-lc++` (`IosLibrary`) and the CoreML and Foundation `IosFramework` links, and requires iOS 15.1. The convention every
+  NDK's `libc++_shared.so` the archive needs (a hot `frust run --watch`
+  stages it through cargo-ndk's own flag). On arm64 iOS the runtime is linked statically too; the entry contributes `-lc++` (`IosLibrary`) and the CoreML and Foundation `IosFramework` links, and requires iOS 15.1. The convention every
   plugin shipping a native runtime follows is in
   [PLUGINS_CODE_STANDARDS.md](PLUGINS_CODE_STANDARDS.md)'s Plugin Conventions.
 - **Build-time fetch.** The first build on a machine downloads the prebuilt archive for the

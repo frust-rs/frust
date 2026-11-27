@@ -9121,22 +9121,6 @@ viewport-top row, so the gap does not apply while it is stuck.
 
 ---
 
-### `onnx-hot-run-libcxx-shared` — a hot `frust run --watch` on Android does not package `libc++_shared.so`, so a `frust-onnx` app fails to start
-
-**Observed**: the app needs the NDK's `libc++_shared.so` in the APK when `frust-onnx` is linked statically. The `frust.cargoNdk.linkLibcxxShared` Gradle property makes the scaffold's `cargoNdkBuild` task add it, but a hot run (`frust run --watch -d <device>`, hot by default) builds the app's `.so` outside that task. On a device the installed APK holds only the app's own `.so`, and the app dies at launch with `UnsatisfiedLinkError: dlopen failed: library "libc++_shared.so" not found`; the CLI reports that the app did not report a pid.
-
-**Applies to**: Android apps that use `frust-onnx`, or any plugin that sets the property, run with `--watch` in its default hot mode.
-
-**Workaround**: run without `--watch`, or with `--watch --no-hot`; both go through the Gradle task.
-
-**Why accepted**: found on a device just before a release; the hot path needs its own staging step for the library.
-
-**Trigger for removal**: the hot path packages the library when the property is set, checked on a device.
-
-**Evidence**: `crates/frust-drive/src/plugin/registry.rs` (`AndroidLibcxxShared`); Pixel 5 (Android 14), `examples/onnx-vision` at `7b299d189` with the property set, 2026-11-28, recorded in `examples/onnx-vision/README.md`.
-
----
-
 ### `onnx-vision-android-polish` — the onnx-vision example labels picked Android photos by media id and its accessibility tree can go stale during a download
 
 **Observed**: on Android a photo picked with the system picker is labelled by its media id rather than its file name, and while a model downloads the accessibility tree is not refreshed with the progress line, so a screen reader can read stale text.

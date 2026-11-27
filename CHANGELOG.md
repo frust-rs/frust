@@ -770,6 +770,12 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   plugin path dependencies derive from it and are folded (`../../plugins/x`, not
   `../../crates/frust/../../plugins/x`). An absolute path is written as it is, and so is a
   relative one that shares no root with the project.
+- `frust run --watch` on Android: the hot build now packages the NDK's `libc++_shared.so` for a
+  project that sets `frust.cargoNdk.linkLibcxxShared` (set by `frust plugin add onnx`). Before, the
+  APK held only the app's own library and the app died at launch with an `UnsatisfiedLinkError`.
+- `frust run --watch`: a hot start with unchanged sources hot-patches again under cargo 1.100. The
+  hot build forces the app crate to relink by removing cargo's fingerprints, and cargo 1.100 moved
+  them; a second start then found no captured link step and fell back to relaunching on change.
 
 ### Security
 
