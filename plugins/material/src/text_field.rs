@@ -120,11 +120,12 @@
 //!   `DECORATION_HEIGHT`, so the Dart source's `maxLines` (and with it the
 //!   baseline's `multiline` mode) is not exposed; neither are its
 //!   `keyboardType`/`textInputAction`/`inputFormatters`/`onTapOutside` knobs.
-//! - **A `Down` on an interactive slot blurs the field.** That is the shared
-//!   container contract (`frust::authoring::route_event`'s blur-on-outside-tap:
-//!   a `Down` that does not re-establish focus on the child it hits clears
-//!   every focused sibling), not something this widget adds or can suppress —
-//!   another reason the slots are meant for plain icons.
+//! - **Pressing an interactive slot child keeps the field focused.** Both
+//!   slots are wrapped in `frust::keep_focus`, so a clear button or a
+//!   visibility toggle in a slot still receives its press while the field
+//!   keeps its caret and the keyboard. Focus is lost at the `Up` that
+//!   completes a tap elsewhere (the shared container's blur-on-outside-tap),
+//!   and the wrapper opts the slot out of that.
 
 use std::rc::Rc;
 
@@ -313,14 +314,14 @@ impl<State: 'static> TextFieldView<State> {
     /// The slot's content owns its own ink and size; the field only reserves
     /// and positions the slot.
     pub fn leading(mut self, view: impl View<State>) -> Self {
-        self.leading = Some(AnyView::new(view));
+        self.leading = Some(AnyView::new(frust::keep_focus(view)));
         self
     }
 
     /// Mount a trailing view in a `ICON_SIZE` slot at the field's end edge —
     /// see [`leading`](Self::leading).
     pub fn trailing(mut self, view: impl View<State>) -> Self {
-        self.trailing = Some(AnyView::new(view));
+        self.trailing = Some(AnyView::new(frust::keep_focus(view)));
         self
     }
 
@@ -1148,6 +1149,58 @@ mod tests {
         }
         assert!(handle.is_focused(), "autofocus focused the wrapped field");
         assert_eq!(state.focus, [true]);
+    }
+
+    #[test]
+    fn pressing_an_interactive_slot_child_keeps_the_field_focused() {
+        #[derive(Default)]
+        struct S {
+            text: String,
+            taps: u32,
+        }
+        let handle = FocusHandle::new();
+        let mut logic = {
+            let handle = handle.clone();
+            move |s: &mut S| {
+                text_field::<S, _>(s.text.clone(), |s: &mut S, t| s.text = t)
+                    .focus_handle(handle.clone())
+                    .trailing(frust::button("x", |s: &mut S| s.taps += 1))
+            }
+        };
+        let mut root: RenderRoot<S, TextFieldView<S>> = RenderRoot::new();
+        let mut state = S::default();
+        let mut tcx = TextContext::new();
+        let mut pass = |root: &mut RenderRoot<S, TextFieldView<S>>, state: &mut S| {
+            root.rebuild(&mut logic, state);
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), FrameTime::ZERO);
+        };
+        let tap = |root: &mut RenderRoot<S, TextFieldView<S>>, state: &mut S, at: Point| {
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                root.event(
+                    state,
+                    &InputEvent::Pointer(PointerEvent {
+                        phase,
+                        position: at,
+                        button: PointerButton::Primary,
+                    }),
+                );
+            }
+        };
+        pass(&mut root, &mut state);
+        tap(&mut root, &mut state, IN_FIELD);
+        pass(&mut root, &mut state);
+        assert!(handle.is_focused(), "tapping the field focuses it");
+
+        let in_slot = Point::new(WINDOW.width - HPAD - ICON_SIZE / 2.0, 28.0);
+        tap(&mut root, &mut state, in_slot);
+        pass(&mut root, &mut state);
+        assert_eq!(state.taps, 1, "the slot child received the press");
+        assert!(handle.is_focused(), "a slot press keeps the field focused");
+
+        tap(&mut root, &mut state, Point::new(160.0, 140.0));
+        pass(&mut root, &mut state);
+        assert!(!handle.is_focused(), "a press outside the field blurs it");
     }
 
     /// The window every harness lays out in.
