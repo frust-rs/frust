@@ -1510,7 +1510,7 @@ mod tests {
                 .on_link(|app: &mut App, url| app.links.push(url.to_owned()))
         });
         assert_eq!(rig.texts()[0].0, "a?b?c?d?e and f (javascript:?g?)");
-        assert_eq!(shown_url("x\u{2069}\n\u{200C}y"), "x???y");
+        assert_eq!(shown_url("x\u{2069}\n\u{200C}y"), "x??\u{200C}y");
         let rect = rig.text_rect("a?b");
         rig.click(Point::new(rect.x0 + 6.0, rect.y0 + 6.0));
         assert_eq!(
