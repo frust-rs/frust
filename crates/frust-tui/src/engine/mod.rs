@@ -64,8 +64,8 @@ pub use session_view::{
     LineSelection, LogBuffer, Scroll, SessionTarget, SessionView, line_matches, strip_ansi,
 };
 pub use state::{
-    AppState, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Screen, SearchState,
-    clamp_sidebar_width,
+    AppState, McpStopping, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, Screen,
+    SearchState, clamp_sidebar_width,
 };
 pub use toast::{Toast, ToastKind, Toasts};
 pub use update::{DevtoolsTarget, Effect, MetricsTarget, Outcome, update};

@@ -391,7 +391,7 @@ fn render_sidebar(
 /// `(0)` beside a listening server would read as a problem rather than as an
 /// idle server waiting for an agent.
 fn mcp_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    let (text, color) = mcp_state_token(&state.mcp_status(), state.mcp_error.is_some(), theme);
+    let (text, color) = mcp_state_token(&mcp_row_status(state), state.mcp_error.is_some(), theme);
     Line::from(vec![
         Span::styled("  MCP ", Style::default().fg(theme.muted())),
         Span::styled(text, Style::default().fg(color)),
@@ -427,6 +427,17 @@ fn dap_state_token(
         DapStatus::Starting => ("start…".to_string(), theme.warn()),
         DapStatus::Listening { port, clients: 0 } => (format!(":{port}"), theme.success()),
         DapStatus::Listening { port, clients } => (format!(":{port} ({clients})"), theme.success()),
+    }
+}
+
+/// The server state the MCP row reads: [`AppState::mcp_status`], except that a
+/// start queued behind a stop still in flight reads as
+/// [`McpStatus::Starting`]. The user has asked for a server and one is on its
+/// way, so showing `off` would invite the second press that cancels it.
+fn mcp_row_status(state: &AppState) -> McpStatus {
+    match state.mcp_stopping {
+        Some(stopping) if stopping.start_wanted => McpStatus::Starting,
+        _ => state.mcp_status(),
     }
 }
 
@@ -762,6 +773,49 @@ mod tests {
                 false
             ),
             ":4848 (2)"
+        );
+    }
+
+    /// While a stop is still closing the listener, the row reads `off` — unless
+    /// the user has already asked for the server back, when it reads the
+    /// starting state the same press would show on a stopped server. A second
+    /// press cancels the queued start, and the row says so.
+    #[test]
+    fn the_mcp_row_shows_a_start_queued_behind_a_stop_as_starting() {
+        use crate::engine::{McpStopping, update};
+
+        let theme = Theme::frust_dark();
+        let row = |state: &AppState| -> (String, Color) {
+            let line = mcp_line(state, &theme);
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            (text, line.spans[1].style.fg.expect("the token is colored"))
+        };
+        // The runner's `stop_mcp` has taken the handle, so nothing is installed.
+        let mut state = AppState {
+            mcp_stopping: Some(McpStopping {
+                generation: 0,
+                start_wanted: false,
+            }),
+            ..AppState::default()
+        };
+        assert_eq!(row(&state), ("  MCP off · M".to_string(), theme.muted()));
+
+        update(&mut state, Message::ToggleMcpServer);
+        assert_eq!(
+            row(&state),
+            ("  MCP start… · M".to_string(), theme.warn()),
+            "a queued start reads as starting, not off"
+        );
+
+        update(&mut state, Message::ToggleMcpServer);
+        assert_eq!(
+            row(&state),
+            ("  MCP off · M".to_string(), theme.muted()),
+            "the second press cancelled the queued start"
         );
     }
 

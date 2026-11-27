@@ -75,6 +75,20 @@ pub struct SearchState {
 
 /// A requested embedded-MCP-server stop that has not yet been confirmed by the
 /// server's own stopped report (see [`AppState::mcp_stopping`]).
+///
+/// The marker relies on that report always arriving, and it does: it is only
+/// ever set for the generation of the handle installed on the model, which
+/// only [`super::Engine::start_mcp`] installs, and that same call spawns the
+/// watcher task that awaits the server task's `JoinHandle` and sends
+/// `McpStopped` with *that* generation whether the server returned `Ok`,
+/// returned an error, or panicked (a `JoinError`). The stop effect is always
+/// applied by the runner right after the toggle, and the cancellation it fires
+/// starts the server's graceful shutdown, so the server task does resolve. The one way the send can fail is the engine's receiver being gone
+/// — the event loop has exited (or the runtime is shutting down and the
+/// watcher is dropped with it) — and then there is no model left to clear.
+/// The report can be *late* (graceful shutdown waits for in-flight requests)
+/// but never missing, so no timeout recovers the marker: a toggle meanwhile
+/// only flips [`Self::start_wanted`], which the sidebar row shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct McpStopping {
     /// The generation of the server being stopped.
@@ -276,7 +290,8 @@ pub struct AppState {
     /// emitted, cleared when that server's own `McpStopped` report arrives.
     /// While it is set a toggle-on does not start a server (the fixed port
     /// may still be held); it records the wish in
-    /// [`McpStopping::start_wanted`] and the report emits the start.
+    /// [`McpStopping::start_wanted`] and the report emits the start. Why the
+    /// report is guaranteed to arrive is on [`McpStopping`].
     pub mcp_stopping: Option<McpStopping>,
     /// The embedded DAP server, while one is running (`None` = stopped) —
     /// [`Self::mcp`]'s exact counterpart, with the same live-resource
