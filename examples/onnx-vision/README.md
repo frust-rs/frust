@@ -10,7 +10,10 @@ Two destinations behind a Material 3 navigation bar:
   Download, a live progress line (bytes, percent, speed) from `DownloadTracker`, Cancel, Resume
   (starting again continues from the kept partial file) and Delete. Above the rows: the store's
   disk use (`ModelStore::total_bytes` plus partial downloads) and, on a device with less than
-  4 GB of RAM (`DeviceMemory::query`), a note that one model session can peak near 380 MB.
+  4 GB of RAM (`DeviceMemory::query`), a note that memory grows with each loaded model session.
+  The recorded device run (OnePlus 9, Android 15, release build) peaked at 458 MB in a fresh
+  process with all three sessions loaded, and 499 MB after 30 runs over two photos; the figure
+  is that app's total peak RSS, not a per-session cost.
 - **Vision**: the bundled sample or a photo picked with the system picker, and three actions
   driven by `VisionHandle`: Subject mask (a tinted alpha layer over the photo), Faces (boxes
   and the five landmarks drawn over it) and Depth (a grayscale map, near is white). An action
@@ -31,6 +34,11 @@ cargo run                                   # desktop (Linux, macOS, Windows)
 frust run -d <device>                       # an Android phone or the iOS simulator
 frust build apk --target-platform android-arm64
 ```
+
+`ios/FrustEmbedding` is not tracked in the repository: `frust create`, `frust run` and
+`frust build ios` generate it (a machine-local symlink to the embedding package). A bare
+`xcodebuild` of `ios/`, or opening `ios/Runner.xcodeproj` in Xcode before any of those has run,
+fails at package resolution. Run `frust build ios` once first, then open the project.
 
 - **Desktop**: ONNX Runtime is linked statically on Linux (glibc), Apple-silicon macOS and
   Windows. The first build downloads its prebuilt archive (about 11 MB) and caches it. Picked
