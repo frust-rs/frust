@@ -240,6 +240,35 @@ fn a_long_press_selects_the_word_with_handles_and_the_toolbar() {
     assert_eq!(h.copied().as_deref(), Some("beta"));
 }
 
+/// A handle press that travels less than a touch slop must not end as the
+/// blurring tap of a press that claimed nothing: the same on every platform,
+/// whatever the font's advance widths make of a character-wide drag.
+#[test]
+fn a_short_handle_gesture_keeps_the_selection_and_brings_the_toolbar_back() {
+    let _policy = framework_policy();
+    let mut h = Harness::new(block);
+    let beta = h.at(TEXT, 6..10);
+    h.hold(beta);
+    h.pointer(PointerPhase::Up, beta, true);
+    h.frame(700.0);
+    let knob = h
+        .scene
+        .knobs
+        .iter()
+        .max_by(|a, b| a.x0.total_cmp(&b.x0))
+        .expect("two knobs")
+        .center();
+    let end = Point::new(knob.x + 4.0, beta.y);
+    assert!(h.pointer(PointerPhase::Down, end, true));
+    h.pointer(PointerPhase::Up, end, true);
+    h.frame(800.0);
+    assert!(
+        h.root.selection_toolbar().is_some_and(|r| r.present_menu),
+        "the toolbar is back once the handle is let go"
+    );
+    assert_eq!(h.copied().as_deref(), Some("beta"));
+}
+
 #[test]
 fn dragging_the_end_handle_extends_by_character() {
     let _policy = framework_policy();
