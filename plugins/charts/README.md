@@ -160,7 +160,9 @@ points.push_point(ScatterPoint::new(2.0, 35.0).with_radius(6.0));
 scatter_chart::<App>(points.clone()).shape(ScatterShape::Cross).colors([blue, green]);
 ```
 
-Both axes default to an automatic domain, and a point outside a domain is skipped.
+Both axes default to an automatic domain, and a point outside a domain is skipped. Points and
+grid rules share one data area, inset by the largest radius in the series, so a point on the
+range edge is drawn whole and a point on a grid fraction sits on its rule.
 
 ```rust
 use frust_charts::{RadarShape, RadarStyle, radar_chart};

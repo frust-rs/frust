@@ -462,18 +462,146 @@ fn grid_rules_sit_on_whole_pixels() {
     let rec = rig.paint(200.0, 100.0);
     let rules = rec.rules();
     assert_eq!(rules.len(), 5);
+    // The rules span the data area: the 200 x 100 plot inset by the default radius (3).
     let vertical: Vec<f64> = rules
         .iter()
-        .filter(|(r, _)| near(r.width(), 1.0) && near(r.height(), 100.0))
+        .filter(|(r, _)| near(r.width(), 1.0) && near(r.height(), 94.0))
         .map(|(r, _)| r.x0)
         .collect();
-    assert_eq!(vertical, [0.0, 100.0, 199.0]);
+    assert_eq!(vertical, [3.0, 100.0, 196.0]);
     let horizontal: Vec<f64> = rules
         .iter()
-        .filter(|(r, _)| near(r.width(), 200.0))
+        .filter(|(r, _)| near(r.width(), 194.0))
         .map(|(r, _)| r.y0)
         .collect();
-    assert_eq!(horizontal, [50.0, 99.0]);
+    assert_eq!(horizontal, [50.0, 96.0]);
+    for (r, _) in &rules {
+        for v in [r.x0, r.y0, r.x1, r.y1] {
+            assert!((v - v.round()).abs() < EPS, "{r:?}");
+        }
+    }
+}
+
+/// The vertical rules (sorted left to right) and the horizontal rules (sorted top to bottom).
+fn split_rules(rec: &Rec) -> (Vec<Rect>, Vec<Rect>) {
+    let rules: Vec<Rect> = rec.rules().into_iter().map(|(r, _)| r).collect();
+    let mut vertical: Vec<Rect> = rules
+        .iter()
+        .copied()
+        .filter(|r| near(r.width(), 1.0) && r.height() > 1.0)
+        .collect();
+    let mut horizontal: Vec<Rect> = rules
+        .iter()
+        .copied()
+        .filter(|r| near(r.height(), 1.0) && r.width() > 1.0)
+        .collect();
+    vertical.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+    horizontal.sort_by(|a, b| a.y0.total_cmp(&b.y0));
+    (vertical, horizontal)
+}
+
+/// Whether `value` lies in the whole-pixel span `lo..=hi` a 1 px rule covers.
+fn covers(lo: f64, hi: f64, value: f64) -> bool {
+    lo - EPS <= value && value <= hi + EPS
+}
+
+#[test]
+fn a_point_at_a_grid_fraction_sits_on_its_rule() {
+    let _g = hold();
+    // On each axis: the range minimum, one interior fraction and the maximum.
+    let (xs, ys) = ([0.0_f32, 25.0, 100.0], [0.0_f32, 50.0, 100.0]);
+    let mut data: Vec<(f32, f32)> = xs.iter().map(|&x| (x, 50.0)).collect();
+    data.extend(ys.iter().map(|&y| (25.0, y)));
+    let p = points_of(16, &data);
+    for shape in [ScatterShape::Circle, ScatterShape::Square] {
+        for (width, height) in [(200.0, 100.0), (201.0, 99.0)] {
+            let mut rig = rig(|| {
+                fixed(
+                    scatter_chart(p.clone())
+                        .shape(shape)
+                        .radius(4.0)
+                        .grid(&[0.0, 0.25, 1.0], &[0.0, 0.5, 1.0]),
+                )
+            });
+            let rec = rig.paint(width, height);
+            let (vertical, horizontal) = split_rules(&rec);
+            assert_eq!((vertical.len(), horizontal.len()), (3, 3), "{shape:?}");
+            let centres: Vec<Point> = rec
+                .marks()
+                .into_iter()
+                .flat_map(|(_, boxes)| boxes)
+                .map(|b| b.center())
+                .collect();
+            assert_eq!(centres.len(), data.len());
+            // The first three points sit on x = 0, 25 and 100: the three vertical rules.
+            for (centre, rule) in centres[..3].iter().zip(&vertical) {
+                assert!(
+                    covers(rule.x0, rule.x1, centre.x),
+                    "{shape:?} {width}x{height}: centre {centre:?} is off the rule {rule:?}"
+                );
+            }
+            // The last three sit on y = 0, 50 and 100: the bottom, middle and top rules.
+            for (centre, rule) in centres[3..].iter().zip(horizontal.iter().rev()) {
+                assert!(
+                    covers(rule.y0, rule.y1, centre.y),
+                    "{shape:?} {width}x{height}: centre {centre:?} is off the rule {rule:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_data_area_holds_still_as_points_enter_and_leave_the_range() {
+    let _g = hold();
+    // A small point at a quarter of the x range and a large one a whole range to its right.
+    let p = Points::new(8);
+    p.extend([
+        ScatterPoint::new(25.0, 50.0).with_radius(2.0),
+        ScatterPoint::new(125.0, 50.0).with_radius(8.0),
+    ]);
+    let view = |x_lo: f32| {
+        let p = p.clone();
+        move || {
+            scatter_chart(p.clone())
+                .x_domain(YDomain::fixed(x_lo, x_lo + 100.0))
+                .y_domain(YDomain::fixed(0.0, 100.0))
+                .radius(2.0)
+                .grid(&[0.0, 0.25, 1.0], &[0.0, 1.0])
+        }
+    };
+    let centre_and_rules = |rig: &mut Rig| {
+        let rec = rig.paint(200.0, 100.0);
+        let boxes: Vec<Rect> = rec.marks().into_iter().flat_map(|(_, b)| b).collect();
+        assert_eq!(boxes.len(), 1, "one point in range");
+        (boxes[0].center(), split_rules(&rec))
+    };
+
+    // Only the small point is in range.
+    let mut rig = rig(view(0.0));
+    let (small, rules) = centre_and_rules(&mut rig);
+
+    // Pan the x range by a whole range: the large point enters, the small one leaves, and the
+    // large one lands where the small one was, under the same rules.
+    rig.rebuild(view(100.0));
+    let (large, panned_rules) = centre_and_rules(&mut rig);
+    assert!(
+        near(large.x, small.x) && near(large.y, small.y),
+        "{large:?} != {small:?}"
+    );
+    assert_eq!(panned_rules, rules);
+
+    // Move the large point out of range without panning back: nothing else moves.
+    rig.rebuild(view(0.0));
+    let (before, _) = centre_and_rules(&mut rig);
+    p.set(1, ScatterPoint::new(-300.0, 50.0).with_radius(8.0));
+    let (after, after_rules) = centre_and_rules(&mut rig);
+    assert!(near(before.x, after.x) && near(before.y, after.y));
+    assert_eq!(after_rules, rules);
+    p.set(1, ScatterPoint::new(75.0, 50.0).with_radius(8.0));
+    let rec = rig.paint(200.0, 100.0);
+    assert_eq!(rec.mark_count(), 2, "the large point is back in range");
+    assert_eq!(split_rules(&rec), rules);
 }
 
 #[test]
