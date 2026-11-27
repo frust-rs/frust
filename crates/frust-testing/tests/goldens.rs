@@ -31,10 +31,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use frust_core::event::PointerId;
 use frust_core::{
-    FrameTime, InputEvent, PointerPhase, RenderRoot, SelectionToolbarBuilder,
-    SelectionToolbarPolicy, SelectionToolbarRequest, install_selection_toolbar_builder_if_unset,
-    set_selection_toolbar_policy,
+    FrameTime, InputEvent, PointerButton, PointerEvent, PointerPhase, RenderRoot,
+    SelectionToolbarBuilder, SelectionToolbarPolicy, SelectionToolbarRequest,
+    install_selection_toolbar_builder_if_unset, set_selection_toolbar_policy,
 };
 use frust_scene::{Command, Scene};
 use frust_testing::ORACLE_ID;
@@ -42,7 +43,7 @@ use frust_testing::case::{CaseSpec, Tolerance};
 use frust_testing::corpus::{CorpusCase, Expect, Probe, render_case, unit_cases};
 use frust_testing::frame::{
     FrameSpec, SAMPLE_TEXT_LONG, foreign_font_runs, frame, glyph_run_count, physical_case,
-    pin_type_scale, pinned_text_style, pointer, test_text_context,
+    pin_type_scale, pinned_text_style, test_text_context,
 };
 use frust_testing::golden::{compare_golden, goldens_root, update_goldens_enabled};
 use frust_testing::meta::GoldenMeta;
@@ -403,8 +404,8 @@ fn rfc3339_now_has_the_shape_golden_meta_promises() {
 // of the SAME root today (it takes `root: &mut RenderRoot` by reference, and
 // `RenderRoot::event` is public and callable directly between calls, exactly
 // as `frame::press_at`/`tap_at` already do) — so no new helper was needed in
-// `src/frame.rs` for this case; it is driven with the existing `frame`/
-// `pointer` exports alone.
+// `src/frame.rs` for this case; it is driven with the existing `frame`
+// export and a touch contact built inline.
 //
 // # Text: why "Hello, Hello", not the literal example text
 //
@@ -581,7 +582,19 @@ fn record_text_input_selection_toolbar_long_press(scene: &mut Scene) {
         &mut warmup,
     );
 
-    let _ = root.event(&mut state, &pointer(PointerPhase::Down, press));
+    // A touch contact: only a touch hold arms the long-press, a held mouse
+    // button selects nothing.
+    let _ = root.event(
+        &mut state,
+        &InputEvent::PointerContact {
+            pointer_id: PointerId::touch(0),
+            event: PointerEvent {
+                phase: PointerPhase::Down,
+                position: press,
+                button: PointerButton::Primary,
+            },
+        },
+    );
 
     // This paint seeds the long-press epoch from its own frame time.
     let mut seeded = Scene::new();
