@@ -532,6 +532,7 @@ impl ScrollController {
     /// for the policy this implements.
     fn record(&self, command: ControllerCommand) {
         let mut shared = self.shared.borrow_mut();
+        let was_empty = shared.commands.is_empty();
         match command {
             ControllerCommand::Offset(offset) => {
                 let segment_start = shared
@@ -568,6 +569,14 @@ impl ScrollController {
         }
         drop(shared);
         frust_core::mark_pending_result_flush();
+        // The flag alone does not wake an idle desktop loop: ask for a frame
+        // so a write from a handler that redraws nothing is applied now. Only
+        // the empty-to-queued edge asks, so a write the surface re-records
+        // while it is applying a frame (queue still non-empty or drained
+        // within the frame) cannot request a frame every frame.
+        if was_empty {
+            frust_core::request_repaint();
+        }
     }
 
     /// Whether `self` and `other` are clones of one handle.
