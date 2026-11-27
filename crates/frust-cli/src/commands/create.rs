@@ -5,7 +5,6 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use crate::cli::CreatePlatformArgs;
-use frust_drive::host_path;
 use frust_drive::platform_wiring::{self, Report, SyncError};
 use frust_drive::scaffold::{
     self, DesignSystemContext, FrustDependency, ScaffoldPlatform, TemplateContext, context,
@@ -80,7 +79,7 @@ fn run_with(args: CreateArgs, sync: WireFn<'_>) -> Result<u8> {
         org: args.org,
         description: args.description,
         frust_version: env!("CARGO_PKG_VERSION").to_string(),
-        frust: resolve_frust_dependency(args.frust_path.as_deref())?,
+        frust: resolve_frust_dependency(args.frust_path.as_deref(), &dest)?,
         deeplink_scheme: args.deeplink_scheme,
         deeplink_host: args.deeplink_host,
     };
@@ -202,7 +201,7 @@ fn run_design_system(args: CreateArgs) -> Result<u8> {
     let ctx = DesignSystemContext {
         name: name.clone(),
         frust_version: env!("CARGO_PKG_VERSION").to_string(),
-        frust: resolve_frust_dependency(args.frust_path.as_deref())?,
+        frust: resolve_frust_dependency(args.frust_path.as_deref(), &dest)?,
     };
 
     let template_dir_override = args.template_dir.as_deref().map(Path::new);
@@ -234,14 +233,16 @@ fn run_design_system(args: CreateArgs) -> Result<u8> {
 /// "<repo-root>" }`, a virtual-workspace manifest with no `[package]` table
 /// and a hard Cargo error at build time instead of scaffold time.
 ///
-/// The override value is rendered through [`host_path::to_portable_string`]
-/// before returning: on Windows, `Path::canonicalize()` returns a verbatim
-/// `\\?\C:\...` path, which is both an invalid TOML escape sequence once
-/// substituted into `Cargo.toml`'s `frust = { path = "..." }` and
-/// unresolvable by a template's `..`-relative sibling joins — the portable,
-/// forward-slash form Cargo/Gradle/Xcode all accept on Windows fixes both.
-/// Identity on every other host.
-fn resolve_frust_dependency(overridden: Option<&str>) -> Result<FrustDependency> {
+/// A relative override is the invoking directory's: it locates the checkout
+/// from there and is written relative to `dest`, the new project's
+/// directory (see [`context::FrustCheckout::manifest_path`]); an absolute
+/// one is written absolute. The value is rendered portable, forward-slash
+/// ([`frust_drive::host_path::to_portable_string`]): on Windows a verbatim
+/// `\\?\C:\...` path is both an invalid TOML escape sequence once
+/// substituted into `Cargo.toml` and unresolvable by a template's
+/// `..`-relative sibling joins. The printed note names exactly what the
+/// manifest holds.
+fn resolve_frust_dependency(overridden: Option<&str>, dest: &Path) -> Result<FrustDependency> {
     let Some(path) = overridden else {
         return Ok(FrustDependency::Registry {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -249,15 +250,18 @@ fn resolve_frust_dependency(overridden: Option<&str>) -> Result<FrustDependency>
     };
     // The checkout decides the package name the generated manifest names:
     // `frust-ui` since the rename, `frust` for an older checkout.
-    let (resolved, package) = context::resolve_frust_checkout(Path::new(path))?;
-    let resolved = host_path::to_portable_string(&resolved);
-    if resolved != path {
-        println!("note: --frust-path `{path}` normalised to `{resolved}`");
+    let checkout = context::resolve_frust_checkout(Path::new(path))?;
+    let dependency = checkout.dependency_for(dest);
+    let written = dependency.path();
+    if written != path {
+        let base = if Path::new(written).is_relative() {
+            ", relative to the project directory"
+        } else {
+            ""
+        };
+        println!("note: --frust-path `{path}` is written to Cargo.toml as `{written}`{base}");
     }
-    Ok(FrustDependency::PathPackage {
-        path: resolved,
-        package,
-    })
+    Ok(dependency)
 }
 
 /// Infers a project name from `dir`'s basename, resolving `.`/`..`

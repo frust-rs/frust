@@ -1078,6 +1078,8 @@ fn init_logger_once() {
                 "frust-shell-android: log level {level} (set {LEVEL_PROPERTY} to change it)"
             ),
         }
+        // With logging up, so the panic line reaches logcat; panic=abort otherwise loses it.
+        crate::panic_hook::install_once();
     });
 }
 

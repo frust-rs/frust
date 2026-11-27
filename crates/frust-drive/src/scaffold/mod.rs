@@ -807,8 +807,7 @@ mod tests {
             "{cargo_toml}"
         );
         assert!(
-            cargo_toml
-                .contains("frust-material = { path = \"/path/to/frust/../../plugins/material\" }"),
+            cargo_toml.contains("frust-material = { path = \"/path/plugins/material\" }"),
             "{cargo_toml}"
         );
         assert!(!cargo_toml.contains("frust-glyph"), "{cargo_toml}");
@@ -2304,8 +2303,7 @@ mod tests {
         );
         // Material 3 is this variant's design system too.
         assert!(
-            cargo_toml
-                .contains("frust-material = { path = \"/path/to/frust/../../plugins/material\" }"),
+            cargo_toml.contains("frust-material = { path = \"/path/plugins/material\" }"),
             "{cargo_toml}"
         );
         assert!(!cargo_toml.contains("frust-glyph"), "{cargo_toml}");

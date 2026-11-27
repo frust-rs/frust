@@ -91,6 +91,10 @@ mod lifecycle;
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 mod log_level;
 
+// The panic hook: logs a panic's message and location to logcat before the abort. The
+// formatting is host-tested; it is installed from `JNI_OnLoad`.
+mod panic_hook;
+
 #[cfg(target_os = "android")]
 mod app;
 #[cfg(target_os = "android")]

@@ -205,6 +205,122 @@ pub(crate) fn to_portable_string_inner(path: &Path, windows: bool) -> String {
     }
 }
 
+/// `path`, a `/`-separated path as a dependency line writes it, with each
+/// `.` segment dropped and each `<name>/..` pair folded away — lexically, as
+/// cargo itself joins a `path` dependency: nothing is read from disk and no
+/// symlink is resolved. A relative path keeps its leading `..` segments; a
+/// `..` directly under a root (`/`, `//`, `C:/`) is dropped. A path holding
+/// a backslash is returned unchanged, since on Windows that is a separator
+/// this does not parse. `x/..` alone folds to `.`.
+pub fn collapse_dot_segments(path: &str) -> String {
+    if path.contains('\\') {
+        return path.to_string();
+    }
+    let (root, rest) = path.split_at(root_len(path));
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in rest.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => match segments.last() {
+                Some(last) if *last != ".." => {
+                    segments.pop();
+                }
+                _ if !root.is_empty() => {}
+                _ => segments.push(".."),
+            },
+            name => segments.push(name),
+        }
+    }
+    let joined = segments.join("/");
+    if root.is_empty() && joined.is_empty() {
+        ".".to_string()
+    } else {
+        format!("{root}{joined}")
+    }
+}
+
+/// The length of the root a `/`-separated `path` starts with: its leading
+/// slashes (`/`, `//` for a UNC share), or `C:/` for a drive. Zero for a
+/// relative path.
+fn root_len(path: &str) -> usize {
+    let drive =
+        path.len() >= 3 && path.as_bytes()[0].is_ascii_alphabetic() && path[1..].starts_with(":/");
+    if drive {
+        3
+    } else {
+        path.len() - path.trim_start_matches('/').len()
+    }
+}
+
+/// `to` expressed relative to the directory `from`, both absolute
+/// `/`-separated paths (the [`to_portable_string`] form): each is folded with
+/// [`collapse_dot_segments`], their common leading segments are dropped, and
+/// one `..` is prepended per segment of `from` left over — lexically, as
+/// cargo joins a `path` dependency onto its manifest directory, so neither
+/// path need exist and no symlink is resolved. `to` equal to `from` gives
+/// `.`.
+///
+/// `None` when the two share no root to climb to: either path is relative
+/// or holds a backslash, their roots differ (`C:/` and `D:/`, a drive and
+/// `/`), or two UNC paths name different `//server/share`s. The caller then
+/// keeps the absolute path. A drive letter is compared case-insensitively;
+/// every other segment exactly.
+pub fn relative_path_lexically(from: &str, to: &str) -> Option<String> {
+    let from = collapse_dot_segments(from);
+    let to = collapse_dot_segments(to);
+    if from.contains('\\') || to.contains('\\') {
+        return None;
+    }
+    let (from_root, from_rest) = from.split_at(root_len(&from));
+    let (to_root, to_rest) = to.split_at(root_len(&to));
+    if from_root.is_empty() || !from_root.eq_ignore_ascii_case(to_root) {
+        return None;
+    }
+    let segments = |rest: &str| -> Vec<String> {
+        rest.split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let from_segments = segments(from_rest);
+    let to_segments = segments(to_rest);
+    let common = from_segments
+        .iter()
+        .zip(&to_segments)
+        .take_while(|(a, b)| a == b)
+        .count();
+    // A UNC path's first two segments are its server and share: there is
+    // no `..` above a share, so two shares share no root.
+    if from_root == "//" && common < 2 {
+        return None;
+    }
+    let relative: Vec<&str> = std::iter::repeat_n("..", from_segments.len() - common)
+        .chain(to_segments[common..].iter().map(String::as_str))
+        .collect();
+    Some(if relative.is_empty() {
+        ".".to_string()
+    } else {
+        relative.join("/")
+    })
+}
+
+/// `path` with `.` dropped and each `..` folding away the component before
+/// it — lexically, since the directory need not exist. Meant for an absolute
+/// path: a leading `..` of a relative one is dropped.
+pub fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Whether `a` and `b` name the same location after [`simplify`] — on
 /// Windows, component-wise and case-insensitive (`C:\Dev\X` == `c:/dev/x`,
 /// and either separator is accepted since a value that already went through
@@ -469,5 +585,97 @@ mod tests {
             Path::new("/home/dev/frust"),
             false,
         ));
+    }
+
+    #[test]
+    fn collapse_dot_segments_folds_name_parent_pairs_lexically() {
+        for (path, expected) in [
+            ("../../crates/frust/../../plugins/x", "../../plugins/x"),
+            ("../frust/../../plugins/x", "../../plugins/x"),
+            ("vendor/crates/frust/../../plugins/x", "vendor/plugins/x"),
+            ("./crates/frust/./../../plugins/x", "plugins/x"),
+            ("/path/to/frust/../../plugins/x", "/path/plugins/x"),
+            ("/a/../../x", "/x"),
+            ("//srv/sh/frust/../p", "//srv/sh/p"),
+            (
+                "C:/dev/frust/crates/frust/../../plugins/x",
+                "C:/dev/frust/plugins/x",
+            ),
+            ("C:/../x", "C:/x"),
+            ("x/..", "."),
+            ("../..", "../.."),
+            ("a//b/", "a/b"),
+            // A backslash is a separator this does not parse.
+            (r"C:\dev\frust\..\x", r"C:\dev\frust\..\x"),
+        ] {
+            assert_eq!(collapse_dot_segments(path), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn relative_path_lexically_climbs_between_sibling_directories() {
+        assert_eq!(
+            relative_path_lexically("/work/apps/app", "/work/frust/crates/frust").as_deref(),
+            Some("../../frust/crates/frust")
+        );
+        assert_eq!(
+            relative_path_lexically("C:/work/app", "c:/work/frust/crates/frust").as_deref(),
+            Some("../frust/crates/frust")
+        );
+        assert_eq!(
+            relative_path_lexically("//srv/sh/app", "//srv/sh/frust").as_deref(),
+            Some("../frust")
+        );
+    }
+
+    #[test]
+    fn relative_path_lexically_climbs_out_of_a_nested_destination() {
+        assert_eq!(
+            relative_path_lexically("/work/a/b/c/app", "/work/frust").as_deref(),
+            Some("../../../../frust")
+        );
+        // A target below the destination needs no climb at all.
+        assert_eq!(
+            relative_path_lexically("/work", "/work/vendor/frust").as_deref(),
+            Some("vendor/frust")
+        );
+    }
+
+    /// `frust create .`: the destination is the invoking directory itself,
+    /// so the relative path the user typed comes back folded.
+    #[test]
+    fn relative_path_lexically_from_the_invoking_directory_itself() {
+        assert_eq!(
+            relative_path_lexically("/work/app/.", "/work/app/../frust/crates/frust").as_deref(),
+            Some("../frust/crates/frust")
+        );
+        assert_eq!(
+            relative_path_lexically("/work/app", "/work/app/").as_deref(),
+            Some(".")
+        );
+        assert_eq!(relative_path_lexically("/", "/").as_deref(), Some("."));
+    }
+
+    #[test]
+    fn relative_path_lexically_is_none_without_a_common_root() {
+        for (from, to) in [
+            ("C:/work/app", "D:/frust"),
+            ("/work/app", "C:/frust"),
+            ("//srv/one/app", "//srv/two/frust"),
+            ("//a/sh/app", "//b/sh/app"),
+            ("work/app", "work/frust"),
+            ("/work/app", "frust"),
+            (r"C:\work\app", r"C:\frust"),
+        ] {
+            assert_eq!(relative_path_lexically(from, to), None, "{from} -> {to}");
+        }
+    }
+
+    #[test]
+    fn normalize_lexically_folds_an_absolute_path() {
+        assert_eq!(
+            normalize_lexically(Path::new("/a/b/../c/./d")),
+            PathBuf::from("/a/c/d")
+        );
     }
 }

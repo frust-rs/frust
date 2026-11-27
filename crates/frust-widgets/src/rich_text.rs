@@ -1501,6 +1501,11 @@ impl RichTextWidget {
                 select.end_press();
                 // A handle stands at a selection end, its knob below the line.
                 if let Some((fixed, grab)) = self.handle_at(select, p.position) {
+                    // The block holds the focus its handles hang from: keep it,
+                    // or the root arms a blur and a handle gesture that travels
+                    // less than a touch slop ends as a tap that drops the
+                    // selection.
+                    ctx.keep_focus();
                     select.press = SelectPress::Handle { fixed, grab };
                     select.vetoes = crate::scroll::ambient_scroll_vetoes();
                     select.raise_vetoes();

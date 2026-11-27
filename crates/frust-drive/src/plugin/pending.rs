@@ -55,7 +55,7 @@ impl PendingContribution {
     pub fn describe(&self) -> String {
         match (&self.contribution, self.step) {
             (Contribution::SwiftPackageRef { package_name, .. }, PendingStep::GitignoreLink) => {
-                format!(".gitignore entry `/ios/{package_name}`")
+                apply::gitignore_link_label(package_name)
             }
             _ => self.contribution.describe(),
         }
@@ -145,7 +145,7 @@ pub fn pending_contributions(
 
 /// The platform directory a contribution edits a file under, if it edits
 /// one: `android` or `ios`.
-fn platform_dir(contribution: &Contribution) -> Option<&'static str> {
+pub(super) fn platform_dir(contribution: &Contribution) -> Option<&'static str> {
     match contribution {
         Contribution::ManifestPermission { .. }
         | Contribution::GradleModule { .. }
@@ -794,6 +794,7 @@ mod tests {
             apply::add_plugin_from_with(&locator, &app, &catalog, "acme-ble", &[]).unwrap();
         assert_eq!(locator.calls(), 0);
         let outcomes: Vec<AddOutcome> = report.items.iter().map(|i| i.outcome).collect();
+        // The scaffolded `/ios/Frust*` line already covers the package link.
         assert_eq!(
             outcomes,
             [
@@ -801,8 +802,13 @@ mod tests {
                 AddOutcome::Applied,
                 AddOutcome::Applied,
                 AddOutcome::Applied,
+                AddOutcome::AlreadyPresent,
                 AddOutcome::Applied,
             ]
+        );
+        assert_eq!(
+            report.items[4].description,
+            ".gitignore entry `/ios/FrustAcmeBle`"
         );
         assert_eq!(
             read(&app, "Cargo.toml"),
@@ -1107,9 +1113,10 @@ mod tests {
             let catalog = catalog(vec![entry.clone()]);
             let report = sync_plugins(&app, &catalog).unwrap();
             assert_eq!(report.plugins.len(), 1, "{report:?}");
+            // Kept `ios/` adds the package link's `.gitignore` row.
             assert_eq!(
                 report.plugins[0].items.len(),
-                3,
+                if kept == "ios" { 4 } else { 3 },
                 "the dependency line and the {kept} items only: {report:?}"
             );
             assert!(report.changed());
@@ -1169,6 +1176,93 @@ mod tests {
         let tree = snapshot(&app);
         assert!(!sync_plugins(&app, &catalog).unwrap().changed());
         assert_eq!(snapshot(&app), tree);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The Swift package and its `.gitignore` line are two report items, so
+    /// what a sync reports applied is exactly what was pending, row for row.
+    #[test]
+    fn a_swift_package_and_its_gitignore_line_are_two_applied_items() {
+        let root = temp_root("gitignore-items");
+        let app = scaffold_app(&root);
+        let entry = link_entry(&root);
+        depend(&app, "frust-acme-ble = { path = \"../acme-ble\" }");
+        let pending: Vec<String> = pending_contributions(&app, &entry, &[])
+            .unwrap()
+            .iter()
+            .map(PendingContribution::describe)
+            .collect();
+
+        let report = sync_plugins(&app, &catalog(vec![entry])).unwrap();
+        let applied: Vec<&str> = report.plugins[0]
+            .items
+            .iter()
+            .filter(|item| item.outcome == AddOutcome::Applied)
+            .map(|item| item.description.as_str())
+            .collect();
+        assert_eq!(applied, pending, "{report:?}");
+        let swift = applied
+            .iter()
+            .position(|d| *d == "Xcode Swift package `AcmeLink`")
+            .unwrap();
+        assert_eq!(applied[swift + 1], ".gitignore entry `/ios/AcmeLink`");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Contributions skipped while the app had no `android/` are pending as
+    /// soon as the directory exists: the pending report reads the project as
+    /// it is on every call.
+    #[test]
+    fn android_items_skipped_without_android_are_pending_once_it_is_added() {
+        let root = temp_root("android-later");
+        let app = scaffold_app(&root);
+        fs::remove_dir_all(app.join("android")).unwrap();
+        let entry = plugin_entry(&root, "acme-ble", PACKAGE, None, MANIFEST);
+        let catalog = catalog(vec![entry.clone()]);
+        let locator = StubLocator::failing("a manifest plugin is never located");
+        apply::add_plugin_from_with(&locator, &app, &catalog, "acme-ble", &[]).unwrap();
+        assert_eq!(pending_contributions(&app, &entry, &[]).unwrap(), []);
+
+        // `android/` from the app template, as a fresh scaffold renders it.
+        let donor = scaffold_app(&temp_root("android-later-template"));
+        fs::rename(donor.join("android"), app.join("android")).unwrap();
+        let pending = pending_contributions(&app, &entry, &[]).unwrap();
+        let rows: Vec<String> = pending.iter().map(PendingContribution::describe).collect();
+        assert_eq!(
+            rows,
+            [
+                "Gradle module `:frust-acme-ble`",
+                "AndroidManifest.xml permission `android.permission.BLUETOOTH_CONNECT`",
+            ]
+        );
+        let stop = pending_stop(&app, &catalog);
+        assert!(stop.warnings.is_empty(), "{:?}", stop.warnings);
+        assert_eq!(stop.plugins.len(), 1, "{stop}");
+        assert_eq!(stop.plugins[0].pending, pending);
+        let _ = fs::remove_dir_all(donor.parent().unwrap());
+        let _ = fs::remove_dir_all(&root);
+
+        // A built-in plugin's permission, skipped the same way, is pending
+        // (`frust plugin list`'s count) once `android/` exists.
+        let root = temp_root("android-later-built-in");
+        let app = scaffold_app(&root);
+        fs::remove_dir_all(app.join("android")).unwrap();
+        apply::add_plugin_with(&StubLocator::new(), &app, "haptics", &[]).unwrap();
+        let built_in = PluginCatalog::built_in();
+        let haptics = built_in.find("haptics").unwrap();
+        assert_eq!(pending_contributions(&app, haptics, &[]).unwrap(), []);
+        let donor = scaffold_app(&temp_root("android-later-built-in-template"));
+        fs::rename(donor.join("android"), app.join("android")).unwrap();
+        let rows: Vec<String> = pending_contributions(&app, haptics, &[])
+            .unwrap()
+            .iter()
+            .map(PendingContribution::describe)
+            .collect();
+        assert_eq!(
+            rows,
+            ["AndroidManifest.xml permission `android.permission.VIBRATE`"]
+        );
+        let _ = fs::remove_dir_all(donor.parent().unwrap());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1393,12 +1487,16 @@ mod tests {
                 &[],
             )
             .unwrap();
-            assert_eq!(report.items.len(), 3, "{absent}: {report:?}");
+            // Kept `ios/` adds the package link's `.gitignore` row, which the
+            // scaffolded `/ios/Frust*` line already covers.
+            let expected = if kept == "ios" { 4 } else { 3 };
+            assert_eq!(report.items.len(), expected, "{absent}: {report:?}");
             assert!(
                 report
                     .items
                     .iter()
                     .skip(1)
+                    .filter(|i| !i.description.starts_with(".gitignore"))
                     .all(|i| i.outcome == AddOutcome::Applied),
                 "{report:?}"
             );

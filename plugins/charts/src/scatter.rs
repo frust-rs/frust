@@ -10,8 +10,14 @@
 //! to its maximum on that axis with both ends rounded outward. A point whose x or y lies
 //! outside its domain is skipped, never clamped onto an edge.
 //!
+//! Points and grid rules map through one data area: the widget's bounds inset by the largest
+//! mark any stored point can draw (the chart's [`radius`](ScatterChartView::radius) and every
+//! radius a point sets, in range or not), so a point on the range edge is drawn whole and a
+//! point on a grid fraction sits on its rule. The area depends on the configuration and the
+//! stored series only, never on the domains, so panning a domain moves no rule.
+//!
 //! Points of one colour are batched into a single path per paint, and the built paths are
-//! cached by the handle's revision, the plot size, the resolved domains and the colour that
+//! cached by the handle's revision, the data area, the resolved domains and the colour that
 //! stands in for an unset one, so an unchanged frame rebuilds no geometry. Circles are
 //! paths, squares and crosses are made of whole-pixel rectangles.
 //!
@@ -36,6 +42,10 @@ use crate::geometry::{grid_rule_ys, snap, y_for};
 use crate::{Tone, YDomain};
 
 const DEFAULT_RADIUS: f32 = 3.0;
+/// The most the data area is inset on one side, as a fraction of that axis's plot length. Two
+/// sides take at most half an axis, so the area always keeps at least half of each axis; a
+/// mark larger than the bounded inset is clipped by the widget at the range edge.
+const MAX_INSET_FRACTION: f64 = 0.25;
 const DEFAULT_HEIGHT: f64 = 160.0;
 const UNBOUNDED_WIDTH: f64 = 160.0;
 const FALLBACK_GRID: Color = Color::from_rgb8(0xd0, 0xd4, 0xda);
@@ -433,7 +443,10 @@ impl<S: 'static> ScatterChartView<S> {
     }
 
     /// The radius, in logical pixels, of a point that sets none (default 3). A square's side
-    /// is twice the radius and a cross's arms reach the radius from the centre.
+    /// is twice the radius and a cross's arms reach the radius from the centre. The data area
+    /// is inset by the larger of this and every radius a stored point sets, so an edge point is
+    /// drawn whole; the inset is capped at a quarter of each axis, so a larger mark is clipped
+    /// at the range edge.
     pub fn radius(mut self, radius: f32) -> Self {
         self.spec.radius = radius;
         self
@@ -463,9 +476,10 @@ impl<S: 'static> ScatterChartView<S> {
         self
     }
 
-    /// Grid rules: vertical rules at `x_fractions` of the width (0.0 the left edge) and
-    /// horizontal rules at `y_fractions` of the height (0.0 the bottom edge). Fractions are
-    /// clamped to `0.0..=1.0`; non-finite ones are skipped.
+    /// Grid rules: vertical rules at `x_fractions` of the data area's width (0.0 the left edge,
+    /// the x range's minimum) and horizontal rules at `y_fractions` of its height (0.0 the
+    /// bottom edge), across the data area. A point at a fraction of its range sits on the rule
+    /// at that fraction. Fractions are clamped to `0.0..=1.0`; non-finite ones are skipped.
     pub fn grid(mut self, x_fractions: &[f32], y_fractions: &[f32]) -> Self {
         self.spec.grid = (x_fractions.to_vec(), y_fractions.to_vec());
         self
@@ -490,7 +504,7 @@ impl<S: 'static> View<S> for ScatterChartView<S> {
     fn build(&self, _ctx: &mut BuildCtx<'_>) -> ScatterChartWidget {
         ScatterChartWidget {
             spec: self.spec.clone(),
-            extents: None,
+            summary: None,
             built: None,
         }
     }
@@ -504,7 +518,7 @@ impl<S: 'static> View<S> for ScatterChartView<S> {
         let flags = self.spec.changes(&prev.spec);
         if flags != ChangeFlags::NONE {
             element.spec = self.spec.clone();
-            element.extents = None;
+            element.summary = None;
             element.built = None;
         }
         flags
@@ -532,11 +546,27 @@ fn extents_of(view: &PointsView<'_>) -> Option<Extents> {
     Some(e)
 }
 
+/// The largest radius any stored point sets for itself, 0 when none does. Every point counts,
+/// in its axis range or not, so the data area does not move as points enter or leave a range.
+fn largest_own_radius(view: &PointsView<'_>) -> f64 {
+    view.iter()
+        .filter_map(|p| p.radius.map(length))
+        .fold(0.0, f64::max)
+}
+
+/// What the stored points contribute to a paint, taken once per revision.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Summary {
+    extents: Option<Extents>,
+    own_radius: f64,
+}
+
 /// What the built paths depend on besides the widget's own options.
 #[derive(Clone, Debug, PartialEq)]
 struct BuildKey {
     revision: u64,
-    plot: Rect,
+    /// The data area points map through, the same one the grid rules use.
+    area: Rect,
     x_domain: (f32, f32),
     y_domain: (f32, f32),
     default_color: Color,
@@ -551,8 +581,8 @@ struct Built {
 /// The retained widget behind [`ScatterChartView`].
 pub struct ScatterChartWidget {
     spec: Spec,
-    /// The data's extents and the revision they were taken at.
-    extents: Option<(u64, Option<Extents>)>,
+    /// The data's summary and the revision it was taken at.
+    summary: Option<(u64, Summary)>,
     built: Option<Built>,
 }
 
@@ -598,11 +628,27 @@ impl ScatterChartWidget {
         }
     }
 
+    /// The data area of `plot`: inset on every side by the reach of the largest mark a stored
+    /// point can draw, `own_radius` being the largest radius a point sets for itself. It
+    /// depends on the configuration and the whole series, never on the domains, so it holds
+    /// still while points enter or leave a range. Points and grid rules both map through it.
+    fn data_area(&self, plot: Rect, own_radius: f64) -> Rect {
+        let reach = length(self.spec.radius).max(own_radius);
+        let inset = match self.spec.shape {
+            ScatterShape::Circle => reach.ceil(),
+            // Snapping to whole pixels can move a rectangle's far edge up to a pixel outward.
+            ScatterShape::Square | ScatterShape::Cross => reach.ceil() + 1.0,
+        };
+        let dx = inset.min(plot.width() * MAX_INSET_FRACTION).max(0.0);
+        let dy = inset.min(plot.height() * MAX_INSET_FRACTION).max(0.0);
+        Rect::new(plot.x0 + dx, plot.y0 + dy, plot.x1 - dx, plot.y1 - dy)
+    }
+
     fn build(&self, view: &PointsView<'_>, key: BuildKey) -> Built {
-        let plot = key.plot;
         let (x_lo, x_hi) = key.x_domain;
         let (y_lo, y_hi) = key.y_domain;
         let default_radius = length(self.spec.radius);
+        let area = key.area;
         let mut groups: Vec<(Color, BezPath)> = Vec::new();
         for point in view.iter() {
             if point.x < x_lo || point.x > x_hi || point.y < y_lo || point.y > y_hi {
@@ -613,8 +659,8 @@ impl ScatterChartWidget {
                 continue;
             }
             let fraction = f64::from(point.x - x_lo) / f64::from(x_hi - x_lo);
-            let cx = plot.x0 + fraction * plot.width();
-            let cy = y_for(point.y, key.y_domain, plot);
+            let cx = area.x0 + fraction * area.width();
+            let cy = y_for(point.y, key.y_domain, area);
             let color = self.color_of(&point, key.default_color);
             let at = groups.iter().position(|(c, _)| *c == color);
             let at = at.unwrap_or_else(|| {
@@ -626,15 +672,17 @@ impl ScatterChartWidget {
         Built { key, groups }
     }
 
-    fn paint_grid(&self, origin: Point, plot: Rect, color: Color, scene: &mut dyn PaintScene) {
+    /// Rules at the grid fractions of `area`, the data area the points map through, so a
+    /// point on a fraction is centred on its rule to within the rule's whole-pixel snap.
+    fn paint_grid(&self, origin: Point, area: Rect, color: Color, scene: &mut dyn PaintScene) {
         let (x_fractions, y_fractions) = &self.spec.grid;
-        let left = snap(plot.x0);
-        let right = (snap(plot.x1) - 1.0).max(left);
+        let left = snap(area.x0);
+        let right = (snap(area.x1) - 1.0).max(left);
         let mut xs: Vec<f64> = x_fractions
             .iter()
             .filter(|f| f.is_finite())
             .map(|&f| {
-                let x = plot.x0 + f64::from(f.clamp(0.0, 1.0)) * plot.width();
+                let x = area.x0 + f64::from(f.clamp(0.0, 1.0)) * area.width();
                 snap(x - 0.5).clamp(left, right)
             })
             .collect();
@@ -642,18 +690,18 @@ impl ScatterChartWidget {
         xs.dedup();
         for x in xs {
             scene.fill_rect(
-                Point::new(origin.x + x, origin.y + plot.y0),
-                Size::new(1.0, plot.height()),
+                Point::new(origin.x + x, origin.y + area.y0),
+                Size::new(1.0, area.height()),
                 color,
             );
         }
-        let mut ys = grid_rule_ys(y_fractions, plot);
+        let mut ys = grid_rule_ys(y_fractions, area);
         ys.sort_by(f64::total_cmp);
         ys.dedup();
         for y in ys {
             scene.fill_rect(
-                Point::new(origin.x + plot.x0, origin.y + y),
-                Size::new(plot.width(), 1.0),
+                Point::new(origin.x + area.x0, origin.y + y),
+                Size::new(area.width(), 1.0),
                 color,
             );
         }
@@ -693,26 +741,36 @@ impl Widget for ScatterChartWidget {
         let grid_color = theme.map_or(FALLBACK_GRID, |t| t.scheme().outline_variant);
         let plot = Rect::from_origin_size(Point::ZERO, size);
 
-        scene.push_clip(origin, size);
-        self.paint_grid(origin, plot, grid_color, scene);
         let points = self.spec.points.clone();
-        points.with_points(|view| {
+        let area = points.with_points(|view| {
             let revision = view.revision();
-            if self.extents.map(|(r, _)| r) != Some(revision) {
-                self.extents = Some((revision, extents_of(&view)));
-            }
-            let extents = self.extents.and_then(|(_, e)| e);
+            let summary = match self.summary {
+                Some((r, summary)) if r == revision => summary,
+                _ => {
+                    let summary = Summary {
+                        extents: extents_of(&view),
+                        own_radius: largest_own_radius(&view),
+                    };
+                    self.summary = Some((revision, summary));
+                    summary
+                }
+            };
+            let extents = summary.extents;
             let key = BuildKey {
                 revision,
-                plot,
+                area: self.data_area(plot, summary.own_radius),
                 x_domain: self.spec.x_domain.resolve_range(extents.map(|e| e.x)),
                 y_domain: self.spec.y_domain.resolve_range(extents.map(|e| e.y)),
                 default_color,
             };
+            let area = key.area;
             if self.built.as_ref().map(|b| &b.key) != Some(&key) {
                 self.built = Some(self.build(&view, key));
             }
+            area
         });
+        scene.push_clip(origin, size);
+        self.paint_grid(origin, area, grid_color, scene);
         if let Some(built) = &self.built {
             for (color, path) in &built.groups {
                 scene.fill_path(origin, path, &Brush::Solid(*color));

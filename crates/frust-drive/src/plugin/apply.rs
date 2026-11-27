@@ -16,7 +16,7 @@ use super::{
 };
 use crate::build_dirs::BuildLayout;
 use crate::facade_key;
-use crate::host_path;
+use crate::host_path::{self, normalize_lexically};
 use crate::packages::{CargoLocator, LockfilePolicy, PackageLocator};
 use crate::platform_wiring::{self, SyncError};
 use crate::process::RealProcessRunner;
@@ -474,17 +474,38 @@ pub(super) fn add_entry_with(
         None => None,
     };
 
-    // Everything else.
+    // Everything else. A contribution for a platform whose directory the
+    // project lacks has nothing to edit and is left out of the report, as
+    // `pending::for_project` leaves it out of a manifest plugin's; a
+    // manifest plugin's Swift package reports its `.gitignore` line as an
+    // item of its own, as the pending report lists it. `item_at[i]` is the
+    // report row of contribution `i`.
     let mut items = Vec::with_capacity(contributions.len());
-    for (contribution, applied) in contributions.iter().zip(outcomes) {
+    let mut item_at = vec![None; contributions.len()];
+    for (at, (contribution, applied)) in contributions.iter().zip(outcomes).enumerate() {
         let outcome = match applied {
             Some(outcome) => outcome,
             None => apply_contribution(contribution, &resolution, &mut doc, &mut cargo_changed)?,
         };
+        let platform_absent = super::pending::platform_dir(contribution)
+            .is_some_and(|dir| !project_root.join(dir).is_dir());
+        if platform_absent && outcome == AddOutcome::AlreadyPresent {
+            continue;
+        }
+        item_at[at] = Some(items.len());
         items.push(AddItem {
             description: contribution.describe(),
             outcome,
         });
+        if let Contribution::SwiftPackageRef { package_name, .. } = contribution
+            && matches!(resolution.form, DepForm::Manifest { .. })
+            && project_root.join(GITIGNORE_REL).is_file()
+        {
+            items.push(AddItem {
+                description: gitignore_link_label(package_name),
+                outcome: apply_gitignore_ios_link(project_root, package_name)?,
+            });
+        }
     }
 
     // The machine-local keys and links, for the modules whose directory is
@@ -503,8 +524,10 @@ pub(super) fn add_entry_with(
         let wirings =
             platform_wiring::wire_modules(project_root, &targets).map_err(wiring_error)?;
         for (at, wiring) in slots.into_iter().zip(wirings) {
-            if wiring.changed() {
-                items[at].outcome = AddOutcome::Applied;
+            if wiring.changed()
+                && let Some(row) = item_at[at]
+            {
+                items[row].outcome = AddOutcome::Applied;
             }
         }
     }
@@ -888,14 +911,10 @@ fn apply_contribution(
         Contribution::AndroidThemeParent { parent } => {
             apply_android_theme_parent(project_root, &resolution.spec.id, parent)
         }
+        // A manifest plugin's `.gitignore` line is its own report item,
+        // applied by `add_entry_with` right after this one.
         Contribution::SwiftPackageRef { package_name, .. } => {
-            let pbxproj = apply_swift_package_ref(project_root, package_name)?;
-            if matches!(resolution.form, DepForm::Manifest { .. })
-                && apply_gitignore_ios_link(project_root, package_name)? == AddOutcome::Applied
-            {
-                return Ok(AddOutcome::Applied);
-            }
-            Ok(pbxproj)
+            apply_swift_package_ref(project_root, package_name)
         }
         Contribution::IosFramework { name } => apply_ios_framework(project_root, name),
         Contribution::IosLibrary { name } => apply_ios_library(project_root, name),
@@ -1339,25 +1358,11 @@ impl FrustDep {
 
 /// The path-mode Cargo dependency path for a plugin: `<frust>/../../plugins/<crate_dir>`
 /// — the facade crate sits two levels below the checkout root, every plugin
-/// crate under its `plugins/`. Relative to the same base as `frust_path`.
+/// crate under its `plugins/`. Relative to the same base as `frust_path`,
+/// and folded lexically ([`host_path::collapse_dot_segments`]), so
+/// `../../crates/frust` gives `../../plugins/<crate_dir>`.
 fn plugin_dep_path(frust_path: &str, crate_dir: &str) -> String {
-    format!("{frust_path}/../../plugins/{crate_dir}")
-}
-
-/// `path` with `.` dropped and each `..` folding away the component before
-/// it — lexically, since the directory need not exist.
-fn normalize_lexically(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::ParentDir => {
-                out.pop();
-            }
-            Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
+    host_path::collapse_dot_segments(&format!("{frust_path}/../../plugins/{crate_dir}"))
 }
 
 /// The package a plugin's platform files ship in: the crate its base
@@ -2731,6 +2736,12 @@ pub(super) fn gitignore_covers_ios_link(src: &str, package_name: &str) -> bool {
             exact.iter().any(|e| e == line)
                 || (package_name.starts_with("Frust") && line == "/ios/Frust*")
         })
+}
+
+/// The report label of the `.gitignore` line for the `ios/<package_name>`
+/// link, in an add report and a pending one alike.
+pub(super) fn gitignore_link_label(package_name: &str) -> String {
+    format!(".gitignore entry `/ios/{package_name}`")
 }
 
 /// Whether the app's root `.gitignore` exists and lacks an entry for the
@@ -4202,10 +4213,13 @@ mod tests {
         // Cargo.toml: the dep landed with a path derived from the frust dep.
         let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
         assert!(cargo.contains("frust-secure-storage"), "{cargo}");
+        // Folded lexically: `<frust>/../../plugins` is `/nonexistent/plugins`.
+        let plugins = FRUST_PATH.strip_suffix("/frust/checkout").unwrap();
         assert!(
-            cargo.contains(&format!("{FRUST_PATH}/../../plugins/secure-storage")),
+            cargo.contains(&format!("{plugins}/plugins/secure-storage\"")),
             "{cargo}"
         );
+        assert!(!cargo.contains("/../"), "{cargo}");
 
         // The app's own manifest and proguard-rules.pro are NOT edited: the
         // permission rides the plugin module's manifest (merger) and the keep
@@ -4417,10 +4431,12 @@ mod tests {
             "no tracked file names the checkout"
         );
 
-        // The Cargo dep path is the relative one, as written.
+        // The Cargo dep path is relative like the `frust` one, folded.
         let cargo = fs::read_to_string(&cargo_path).unwrap();
         assert!(
-            cargo.contains(&format!("{REL_FRUST}/../../plugins/secure-storage")),
+            cargo.contains(
+                "frust-secure-storage = { path = \"../checkout/plugins/secure-storage\" }"
+            ),
             "{cargo}"
         );
 
@@ -4802,9 +4818,7 @@ mod tests {
         add_plugin_with(&locator, &root, "iap", &[]).unwrap();
         let cargo = fs::read_to_string(root.join(CARGO_TOML_REL)).unwrap();
         assert!(
-            cargo.contains(
-                "frust-iap = { path = \"/nonexistent/frust/checkout/../../plugins/iap\" }"
-            ),
+            cargo.contains("frust-iap = { path = \"/nonexistent/plugins/iap\" }"),
             "{cargo}"
         );
         assert_eq!(
@@ -5882,7 +5896,7 @@ mod tests {
         let cargo = fs::read_to_string(&cargo_path).unwrap();
         assert!(cargo.contains("clean-signals-frust"), "{cargo}");
         assert!(
-            cargo.contains("vendor/crates/frust/../../plugins/clean-signals-frust"),
+            cargo.contains("\"vendor/plugins/clean-signals-frust\""),
             "{cargo}"
         );
 
@@ -6728,6 +6742,73 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Adding a plugin to a project without `ios/` (or without `android/`)
+    /// leaves that platform's satisfied items out of the report — neither
+    /// present nor applied — as the pending report and a manifest plugin's
+    /// add leave them out; the other platform's items are still reported.
+    #[test]
+    fn an_add_does_not_report_items_for_an_absent_platform() {
+        let spec = PluginSpec {
+            id: Cow::Borrowed("absent-platform"),
+            crate_dir: Cow::Borrowed("absent-platform"),
+            base: Cow::Owned(vec![
+                Contribution::CargoDep {
+                    name: Cow::Borrowed("frust-absent-platform"),
+                },
+                Contribution::IosLibrary {
+                    name: Cow::Borrowed("c++"),
+                },
+                Contribution::IosFramework {
+                    name: Cow::Borrowed("CoreML"),
+                },
+                Contribution::ManifestPermission {
+                    permission: Cow::Borrowed("android.permission.NFC"),
+                },
+            ]),
+            ..PluginSpec::DEFAULT
+        };
+        for (absent, kept) in [("ios", "android"), ("android", "ios")] {
+            let root = scaffold_project(&format!("add-no-{absent}"));
+            fs::remove_dir_all(root.join(absent)).unwrap();
+            let report = add_test_spec(&root, &spec).unwrap();
+            let items: Vec<(&str, AddOutcome)> = report
+                .items
+                .iter()
+                .map(|item| (item.description.as_str(), item.outcome))
+                .collect();
+            let expected: Vec<(&str, AddOutcome)> = if kept == "android" {
+                vec![
+                    (
+                        "Cargo.toml dependency `frust-absent-platform`",
+                        AddOutcome::Applied,
+                    ),
+                    (
+                        "AndroidManifest.xml permission `android.permission.NFC`",
+                        AddOutcome::Applied,
+                    ),
+                ]
+            } else {
+                vec![
+                    (
+                        "Cargo.toml dependency `frust-absent-platform`",
+                        AddOutcome::Applied,
+                    ),
+                    (
+                        "Xcode library `-lc++` (`OTHER_LDFLAGS`)",
+                        AddOutcome::Applied,
+                    ),
+                    (
+                        "Xcode framework `CoreML` (`OTHER_LDFLAGS`)",
+                        AddOutcome::Applied,
+                    ),
+                ]
+            };
+            assert_eq!(items, expected, "without {absent}/");
+            assert!(!root.join(absent).exists(), "{absent}/ is never created");
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
     /// `ios/` present but its pbxproj gone is a broken iOS project, not an
     /// absent one: both link flags still fail on the missing file.
     #[test]
@@ -7251,16 +7332,9 @@ mod tests {
                 .iter()
                 .map(|i| (i.description.as_str(), i.outcome))
                 .collect::<Vec<_>>(),
+            // The Android items have nothing to edit and are not reported.
             [
                 ("Cargo.toml dependency `frust-onnx`", AddOutcome::Applied),
-                (
-                    "Android `libc++_shared.so` in the APK (`frust.cargoNdk.linkLibcxxShared`)",
-                    AddOutcome::AlreadyPresent
-                ),
-                (
-                    "AndroidManifest.xml permission `android.permission.INTERNET`",
-                    AddOutcome::AlreadyPresent
-                ),
                 (
                     "Xcode library `-lc++` (`OTHER_LDFLAGS`)",
                     AddOutcome::Applied
@@ -7300,9 +7374,8 @@ mod tests {
     }
 
     /// `models` and `onnx` on a scaffold generated without the android platform:
-    /// only `Cargo.toml` and (for `onnx`'s link lines) the pbxproj change, every
-    /// Android item reports already present and `plugin_statuses` reports both
-    /// added.
+    /// only `Cargo.toml` and (for `onnx`'s link lines) the pbxproj change, no
+    /// Android item is reported and `plugin_statuses` reports both added.
     #[test]
     fn models_and_onnx_on_an_app_without_android_change_no_android_file() {
         let dest = unique_temp_dir("internet-no-android");
@@ -7318,12 +7391,13 @@ mod tests {
 
         for id in ["models", "onnx"] {
             let report = add_plugin(&dest, id, &[]).unwrap();
-            let internet = report
-                .items
-                .iter()
-                .find(|i| i.description.contains("android.permission.INTERNET"))
-                .unwrap();
-            assert_eq!(internet.outcome, AddOutcome::AlreadyPresent, "{report:?}");
+            assert!(
+                !report
+                    .items
+                    .iter()
+                    .any(|i| i.description.contains("android.permission.INTERNET")),
+                "{report:?}"
+            );
         }
         let after = snapshot_tree(&dest);
         let changed: Vec<&String> = after
@@ -7349,8 +7423,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dest);
     }
 
-    /// `haptics` on a desktop-only app: its VIBRATE permission is satisfied
-    /// without an `android/` directory, so only `Cargo.toml` changes.
+    /// `haptics` on a desktop-only app: its VIBRATE permission has nothing to
+    /// edit without an `android/` directory and is not reported, so only
+    /// `Cargo.toml` changes.
     #[test]
     fn haptics_on_an_app_without_android_writes_only_the_dependency() {
         let dest = unique_temp_dir("haptics-no-android");
@@ -7364,12 +7439,13 @@ mod tests {
         let before = snapshot_tree(&dest);
 
         let report = add_plugin(&dest, "haptics", &[]).unwrap();
-        let vibrate = report
-            .items
-            .iter()
-            .find(|i| i.description.contains("android.permission.VIBRATE"))
-            .unwrap();
-        assert_eq!(vibrate.outcome, AddOutcome::AlreadyPresent, "{report:?}");
+        assert!(
+            !report
+                .items
+                .iter()
+                .any(|i| i.description.contains("android.permission.VIBRATE")),
+            "{report:?}"
+        );
         let after = snapshot_tree(&dest);
         let changed: Vec<&String> = after
             .keys()
@@ -7381,8 +7457,9 @@ mod tests {
     }
 
     /// `onnx` on an app without `ios/` (desktop and Android only): its three
-    /// link lines are satisfied, so only `Cargo.toml` and the two Android files
-    /// change, nothing under `ios/` is created, and nothing stays pending.
+    /// link lines have nothing to edit and are not reported, so only
+    /// `Cargo.toml` and the two Android files change, nothing under `ios/` is
+    /// created, and nothing stays pending.
     #[test]
     fn adding_onnx_to_an_app_without_ios_writes_no_ios_file() {
         let dest = unique_temp_dir("onnx-no-ios");
@@ -7402,22 +7479,9 @@ mod tests {
             .iter()
             .map(|i| (i.description.as_str(), i.outcome))
             .collect();
-        assert_eq!(
-            outcomes[3..],
-            [
-                (
-                    "Xcode library `-lc++` (`OTHER_LDFLAGS`)",
-                    AddOutcome::AlreadyPresent
-                ),
-                (
-                    "Xcode framework `CoreML` (`OTHER_LDFLAGS`)",
-                    AddOutcome::AlreadyPresent
-                ),
-                (
-                    "Xcode framework `Foundation` (`OTHER_LDFLAGS`)",
-                    AddOutcome::AlreadyPresent
-                ),
-            ],
+        assert_eq!(outcomes.len(), 3, "{report:?}");
+        assert!(
+            outcomes.iter().all(|(d, _)| !d.starts_with("Xcode")),
             "{report:?}"
         );
         let after = snapshot_tree(&dest);

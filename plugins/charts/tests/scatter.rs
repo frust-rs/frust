@@ -194,10 +194,11 @@ fn circles_sit_at_their_mapped_positions() {
     assert_eq!(marks.len(), 1);
     let boxes = &marks[0].1;
     assert_eq!(boxes.len(), 3);
-    // x = value / 100 * 200; y runs bottom to top over 100.
+    // The data area is the 200 x 100 plot inset by the radius (4): x runs 4..196, y runs
+    // bottom to top over 4..96.
     assert_box(boxes[0], [96.0, 46.0, 104.0, 54.0]);
-    assert_box(boxes[1], [46.0, 21.0, 54.0, 29.0]);
-    assert_box(boxes[2], [196.0, 96.0, 204.0, 104.0]);
+    assert_box(boxes[1], [48.0, 23.0, 56.0, 31.0]);
+    assert_box(boxes[2], [192.0, 92.0, 200.0, 100.0]);
 }
 
 #[test]
@@ -266,14 +267,15 @@ fn points_outside_a_domain_are_skipped_not_clamped() {
 #[test]
 fn auto_domains_span_the_data() {
     let _g = hold();
-    // Data 0..100 on both axes resolves to 0..100, so the extremes reach the plot's corners.
+    // Data 0..100 on both axes resolves to 0..100, so the extremes reach the corners of the
+    // data area, which is the plot inset by the radius.
     let p = points_of(8, &[(0.0, 0.0), (100.0, 100.0)]);
     let mut rig = rig(|| scatter_chart(p.clone()).radius(2.0));
     let rec = rig.paint(200.0, 100.0);
     let boxes = &rec.marks()[0].1;
     assert_eq!(boxes.len(), 2);
-    assert_box(boxes[0], [-2.0, 98.0, 2.0, 102.0]);
-    assert_box(boxes[1], [198.0, -2.0, 202.0, 2.0]);
+    assert_box(boxes[0], [0.0, 96.0, 4.0, 100.0]);
+    assert_box(boxes[1], [196.0, 0.0, 200.0, 4.0]);
 }
 
 #[test]
@@ -364,7 +366,7 @@ fn replacing_then_painting_updates_without_a_rebuild() {
     let second = rig.paint(100.0, 100.0);
     let boxes = &second.marks()[0].1;
     assert_eq!(boxes.len(), 2);
-    assert_box(boxes[0], [8.0, 88.0, 12.0, 92.0]);
+    assert_box(boxes[0], [9.6, 86.4, 13.6, 90.4]);
 
     p.push(50.0, 50.0);
     assert_eq!(rig.paint(100.0, 100.0).mark_count(), 3);
@@ -397,7 +399,7 @@ fn input_is_ignored() {
 #[test]
 fn every_draw_is_clipped_to_the_widget_and_marks_stay_inside_or_clip() {
     let _g = hold();
-    // Points on the edges overhang by their radius, inside the one clip.
+    // Points on the edges are drawn whole, inside the one clip.
     let p = points_of(8, &[(0.0, 0.0), (100.0, 100.0), (50.0, 50.0)]);
     let mut rig = rig(|| {
         fixed(
@@ -419,6 +421,40 @@ fn every_draw_is_clipped_to_the_widget_and_marks_stay_inside_or_clip() {
 }
 
 #[test]
+fn points_on_the_range_edge_are_drawn_whole_and_outside_ones_are_clipped() {
+    let _g = hold();
+    let edge = [
+        (0.0, 0.0),
+        (100.0, 0.0),
+        (0.0, 100.0),
+        (100.0, 100.0),
+        (50.0, 50.0),
+    ];
+    for shape in [
+        ScatterShape::Circle,
+        ScatterShape::Square,
+        ScatterShape::Cross,
+    ] {
+        let mut data = edge.to_vec();
+        data.push((100.5, 50.0));
+        data.push((50.0, -0.5));
+        let p = points_of(16, &data);
+        let mut rig = rig(|| fixed(scatter_chart(p.clone()).shape(shape).radius(5.0)));
+        let rec = rig.paint(200.0, 100.0);
+        let boxes: Vec<Rect> = rec.marks().into_iter().flat_map(|(_, b)| b).collect();
+        // Out-of-range points are skipped; a cross is two bars per point.
+        let per_point = if shape == ScatterShape::Cross { 2 } else { 1 };
+        assert_eq!(boxes.len(), edge.len() * per_point, "{shape:?}");
+        for b in boxes {
+            assert!(
+                b.x0 >= -EPS && b.y0 >= -EPS && b.x1 <= 200.0 + EPS && b.y1 <= 100.0 + EPS,
+                "{shape:?} mark {b:?} reaches outside the 200 x 100 widget"
+            );
+        }
+    }
+}
+
+#[test]
 fn grid_rules_sit_on_whole_pixels() {
     let _g = hold();
     let p = points_of(4, &[(1.0, 1.0)]);
@@ -426,18 +462,146 @@ fn grid_rules_sit_on_whole_pixels() {
     let rec = rig.paint(200.0, 100.0);
     let rules = rec.rules();
     assert_eq!(rules.len(), 5);
+    // The rules span the data area: the 200 x 100 plot inset by the default radius (3).
     let vertical: Vec<f64> = rules
         .iter()
-        .filter(|(r, _)| near(r.width(), 1.0) && near(r.height(), 100.0))
+        .filter(|(r, _)| near(r.width(), 1.0) && near(r.height(), 94.0))
         .map(|(r, _)| r.x0)
         .collect();
-    assert_eq!(vertical, [0.0, 100.0, 199.0]);
+    assert_eq!(vertical, [3.0, 100.0, 196.0]);
     let horizontal: Vec<f64> = rules
         .iter()
-        .filter(|(r, _)| near(r.width(), 200.0))
+        .filter(|(r, _)| near(r.width(), 194.0))
         .map(|(r, _)| r.y0)
         .collect();
-    assert_eq!(horizontal, [50.0, 99.0]);
+    assert_eq!(horizontal, [50.0, 96.0]);
+    for (r, _) in &rules {
+        for v in [r.x0, r.y0, r.x1, r.y1] {
+            assert!((v - v.round()).abs() < EPS, "{r:?}");
+        }
+    }
+}
+
+/// The vertical rules (sorted left to right) and the horizontal rules (sorted top to bottom).
+fn split_rules(rec: &Rec) -> (Vec<Rect>, Vec<Rect>) {
+    let rules: Vec<Rect> = rec.rules().into_iter().map(|(r, _)| r).collect();
+    let mut vertical: Vec<Rect> = rules
+        .iter()
+        .copied()
+        .filter(|r| near(r.width(), 1.0) && r.height() > 1.0)
+        .collect();
+    let mut horizontal: Vec<Rect> = rules
+        .iter()
+        .copied()
+        .filter(|r| near(r.height(), 1.0) && r.width() > 1.0)
+        .collect();
+    vertical.sort_by(|a, b| a.x0.total_cmp(&b.x0));
+    horizontal.sort_by(|a, b| a.y0.total_cmp(&b.y0));
+    (vertical, horizontal)
+}
+
+/// Whether `value` lies in the whole-pixel span `lo..=hi` a 1 px rule covers.
+fn covers(lo: f64, hi: f64, value: f64) -> bool {
+    lo - EPS <= value && value <= hi + EPS
+}
+
+#[test]
+fn a_point_at_a_grid_fraction_sits_on_its_rule() {
+    let _g = hold();
+    // On each axis: the range minimum, one interior fraction and the maximum.
+    let (xs, ys) = ([0.0_f32, 25.0, 100.0], [0.0_f32, 50.0, 100.0]);
+    let mut data: Vec<(f32, f32)> = xs.iter().map(|&x| (x, 50.0)).collect();
+    data.extend(ys.iter().map(|&y| (25.0, y)));
+    let p = points_of(16, &data);
+    for shape in [ScatterShape::Circle, ScatterShape::Square] {
+        for (width, height) in [(200.0, 100.0), (201.0, 99.0)] {
+            let mut rig = rig(|| {
+                fixed(
+                    scatter_chart(p.clone())
+                        .shape(shape)
+                        .radius(4.0)
+                        .grid(&[0.0, 0.25, 1.0], &[0.0, 0.5, 1.0]),
+                )
+            });
+            let rec = rig.paint(width, height);
+            let (vertical, horizontal) = split_rules(&rec);
+            assert_eq!((vertical.len(), horizontal.len()), (3, 3), "{shape:?}");
+            let centres: Vec<Point> = rec
+                .marks()
+                .into_iter()
+                .flat_map(|(_, boxes)| boxes)
+                .map(|b| b.center())
+                .collect();
+            assert_eq!(centres.len(), data.len());
+            // The first three points sit on x = 0, 25 and 100: the three vertical rules.
+            for (centre, rule) in centres[..3].iter().zip(&vertical) {
+                assert!(
+                    covers(rule.x0, rule.x1, centre.x),
+                    "{shape:?} {width}x{height}: centre {centre:?} is off the rule {rule:?}"
+                );
+            }
+            // The last three sit on y = 0, 50 and 100: the bottom, middle and top rules.
+            for (centre, rule) in centres[3..].iter().zip(horizontal.iter().rev()) {
+                assert!(
+                    covers(rule.y0, rule.y1, centre.y),
+                    "{shape:?} {width}x{height}: centre {centre:?} is off the rule {rule:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_data_area_holds_still_as_points_enter_and_leave_the_range() {
+    let _g = hold();
+    // A small point at a quarter of the x range and a large one a whole range to its right.
+    let p = Points::new(8);
+    p.extend([
+        ScatterPoint::new(25.0, 50.0).with_radius(2.0),
+        ScatterPoint::new(125.0, 50.0).with_radius(8.0),
+    ]);
+    let view = |x_lo: f32| {
+        let p = p.clone();
+        move || {
+            scatter_chart(p.clone())
+                .x_domain(YDomain::fixed(x_lo, x_lo + 100.0))
+                .y_domain(YDomain::fixed(0.0, 100.0))
+                .radius(2.0)
+                .grid(&[0.0, 0.25, 1.0], &[0.0, 1.0])
+        }
+    };
+    let centre_and_rules = |rig: &mut Rig| {
+        let rec = rig.paint(200.0, 100.0);
+        let boxes: Vec<Rect> = rec.marks().into_iter().flat_map(|(_, b)| b).collect();
+        assert_eq!(boxes.len(), 1, "one point in range");
+        (boxes[0].center(), split_rules(&rec))
+    };
+
+    // Only the small point is in range.
+    let mut rig = rig(view(0.0));
+    let (small, rules) = centre_and_rules(&mut rig);
+
+    // Pan the x range by a whole range: the large point enters, the small one leaves, and the
+    // large one lands where the small one was, under the same rules.
+    rig.rebuild(view(100.0));
+    let (large, panned_rules) = centre_and_rules(&mut rig);
+    assert!(
+        near(large.x, small.x) && near(large.y, small.y),
+        "{large:?} != {small:?}"
+    );
+    assert_eq!(panned_rules, rules);
+
+    // Move the large point out of range without panning back: nothing else moves.
+    rig.rebuild(view(0.0));
+    let (before, _) = centre_and_rules(&mut rig);
+    p.set(1, ScatterPoint::new(-300.0, 50.0).with_radius(8.0));
+    let (after, after_rules) = centre_and_rules(&mut rig);
+    assert!(near(before.x, after.x) && near(before.y, after.y));
+    assert_eq!(after_rules, rules);
+    p.set(1, ScatterPoint::new(75.0, 50.0).with_radius(8.0));
+    let rec = rig.paint(200.0, 100.0);
+    assert_eq!(rec.mark_count(), 2, "the large point is back in range");
+    assert_eq!(split_rules(&rec), rules);
 }
 
 #[test]
@@ -549,4 +713,37 @@ fn points_handle_is_bounded_and_counts_changes() {
     assert!(p.ptr_eq(&twin) && !p.ptr_eq(&Points::new(3)));
     twin.push(1.0, 1.0);
     assert_eq!(p.len(), 1);
+}
+
+#[test]
+fn a_large_stored_radius_leaves_the_data_area_a_usable_extent() {
+    let _g = hold();
+    // A 400 x 40 widget, one stored point of radius 20 far outside the domain, and ordinary
+    // points at three heights.
+    let p = Points::new(16);
+    p.extend([
+        ScatterPoint::new(500.0, 50.0).with_radius(20.0),
+        ScatterPoint::new(10.0, 0.0),
+        ScatterPoint::new(50.0, 50.0),
+        ScatterPoint::new(90.0, 100.0),
+    ]);
+    let mut rig = rig(|| fixed(scatter_chart(p.clone()).grid(&[0.0, 1.0], &[0.0, 1.0])));
+    let rec = rig.paint(400.0, 40.0);
+    let (vertical, horizontal) = split_rules(&rec);
+    assert_eq!((vertical.len(), horizontal.len()), (2, 2));
+    // The vertical rules span the data area's height: at least half the plot's.
+    assert!(vertical[0].height() >= 20.0 - EPS, "{:?}", vertical[0]);
+    let centres: Vec<Point> = rec
+        .marks()
+        .into_iter()
+        .flat_map(|(_, boxes)| boxes)
+        .map(|b| b.center())
+        .collect();
+    assert_eq!(centres.len(), 3);
+    // Bottom, middle and top points land at three different heights, bottom lowest on screen.
+    assert!(centres[0].y > centres[1].y + 1.0 && centres[1].y > centres[2].y + 1.0);
+    assert!(centres[0].y - centres[2].y >= 15.0, "{centres:?}");
+    // The points and the rules share the one area: the extreme points sit on the rules.
+    assert!(covers(horizontal[1].y0, horizontal[1].y1, centres[0].y));
+    assert!(covers(horizontal[0].y0, horizontal[0].y1, centres[2].y));
 }

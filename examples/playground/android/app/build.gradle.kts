@@ -181,7 +181,8 @@ android {
     // filters and the staged `.so` files, not the source set.
     sourceSets.getByName("main").jniLibs.setSrcDirs(listOf("../../build/android/jniLibs"))
 
-    // Example flavor scaffold — uncomment and mirror frust.toml's [flavors].
+    // Example flavor scaffold — a flavor declared here must not also be declared in frust.toml's
+    // [flavors]: the CLI refuses a flavor declared in both.
     // flavorDimensions += "env"
     // productFlavors {
     //     create("dev")  { dimension = "env"; applicationIdSuffix = ".dev" }

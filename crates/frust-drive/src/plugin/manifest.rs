@@ -666,16 +666,23 @@ fn dotted_name(ctx: &Ctx<'_>, key: &str, name: String) -> Result<String, Manifes
     }
 }
 
-/// A library name as `-l` takes it: `[A-Za-z0-9_+.-]+` (so `c++`).
+/// A library name as `-l` takes it: `[A-Za-z0-9_+.-]+` (so `c++`), not
+/// starting with `-` or `.` — it is written into the linker flag `-l<name>`.
 fn library_name(ctx: &Ctx<'_>, key: &str, name: String) -> Result<String, ManifestError> {
-    if matches_charset(&name, |c| c.is_ascii_alphanumeric() || "_+.-".contains(c)) {
+    if is_library_name(&name) {
         Ok(name)
     } else {
         Err(ctx.err(
             key,
-            format!("has `{name}`, which is not of `[A-Za-z0-9_+.-]+`"),
+            format!("has `{name}`, which is not of `[A-Za-z0-9_+.-]+` or starts with `-` or `.`"),
         ))
     }
+}
+
+/// Whether `name` is a library name [`library_name`] accepts.
+pub(super) fn is_library_name(name: &str) -> bool {
+    matches_charset(name, |c| c.is_ascii_alphanumeric() || "_+.-".contains(c))
+        && !name.starts_with(['-', '.'])
 }
 
 /// A Gradle module or Swift package name: `[A-Za-z0-9_-]+`, not starting
@@ -1234,7 +1241,20 @@ mod tests {
 
     #[test]
     fn library_names_are_checked() {
-        for name in ["", "c ++", "lib/z", "z\\\"", "z,", "a;b"] {
+        for name in [
+            "",
+            "c ++",
+            "lib/z",
+            "z\\\"",
+            "z,",
+            "a;b",
+            "-",
+            "-lz",
+            "-framework",
+            ".",
+            "..",
+            ".z",
+        ] {
             assert_rejected(
                 "library",
                 &format!("[package.metadata.frust.plugin.ios]\nlibraries = [\"{name}\"]\n"),
@@ -1247,6 +1267,28 @@ mod tests {
             "[package.metadata.frust.plugin.ios]\nlibraries = \"c++\"\n",
             ".ios",
         );
+    }
+
+    /// The built-in registry's library names (base and features) pass the
+    /// rule a manifest's are held to.
+    #[test]
+    fn every_built_in_library_name_is_a_valid_library_name() {
+        let mut names = Vec::new();
+        for spec in crate::plugin::registry::known_plugins() {
+            let features = spec
+                .optional_features
+                .iter()
+                .flat_map(|f| f.contributions.iter());
+            for contribution in spec.base.iter().chain(features) {
+                if let Contribution::IosLibrary { name } = contribution {
+                    names.push(name.to_string());
+                }
+            }
+        }
+        assert!(!names.is_empty(), "the registry links at least one library");
+        for name in names {
+            assert!(is_library_name(&name), "{name}");
+        }
     }
 
     #[test]

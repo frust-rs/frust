@@ -1,5 +1,7 @@
 //! The vision catalog: shape checks offline, one ignored live drift test.
 
+#![cfg(feature = "catalog")]
+
 use std::collections::HashSet;
 
 use frust_models::{ModelSource, ModelStore};

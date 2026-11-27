@@ -3,8 +3,9 @@
 use frust::Color;
 use frust::authoring::{BezPath, Point, Rect};
 use frust::kurbo::{CubicBez, ParamCurve, PathEl};
-use frust_charts::{
-    LineGeometry, Orientation, Tone, line_segments, smooth_polyline, tone_gradient,
+use frust_charts::Tone;
+use frust_charts::geometry::{
+    LineGeometry, Orientation, line_segments, smooth_polyline, tone_gradient,
 };
 
 const CALM: Color = Color::from_rgb8(0x2e, 0x9e, 0x5b);

@@ -19,6 +19,13 @@ pub enum FrustPathError {
          neither"
     )]
     NotFacadeCrate { given: String },
+    /// A relative `--frust-path` is relative to the invoking directory, and
+    /// that directory could not be read — so the checkout cannot be located.
+    #[error(
+        "--frust-path `{given}` is relative to the current directory, which could not be read: \
+         {reason}"
+    )]
+    NoCurrentDir { given: String, reason: String },
 }
 
 /// Canonicalises a `--frust-path` argument to the `frust` facade crate
@@ -42,24 +49,103 @@ pub enum FrustPathError {
 /// [`frust_path_from_project_subdir`]); it must be normalised before it ever
 /// reaches them.
 pub fn resolve_frust_crate_path(path: &Path) -> Result<PathBuf, FrustPathError> {
-    resolve_frust_checkout(path).map(|(dir, _)| dir)
+    resolve_frust_checkout(path).map(|checkout| checkout.dir)
+}
+
+/// A `--frust-path` resolved to a checkout's facade crate by
+/// [`resolve_frust_checkout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrustCheckout {
+    /// The facade crate directory: absolute when `relative_to` is set,
+    /// otherwise the absolute path the user gave (or its nested
+    /// `crates/frust`).
+    pub dir: PathBuf,
+    /// The facade package name the directory's manifest declares
+    /// (`frust-ui` or the older `frust`), which the generated dependency
+    /// must repeat as `package = "<name>"` for cargo to find it — see
+    /// [`FrustDependency::PathPackage`].
+    pub package: String,
+    /// The invoking directory a relative `--frust-path` was resolved
+    /// against; `None` for an absolute one.
+    pub relative_to: Option<PathBuf>,
+}
+
+impl FrustCheckout {
+    /// The facade path the `Cargo.toml` of a project generated at
+    /// `project_dir` names, in forward-slash form.
+    ///
+    /// An absolute `--frust-path` gives the absolute facade directory. A
+    /// relative one gives a path relative to the project directory — the
+    /// base cargo resolves a manifest's `path` against — so a tree moved as
+    /// a whole keeps building: `project_dir` (relative to the same invoking
+    /// directory when it is not absolute) and the facade directory are
+    /// compared lexically by [`host_path::relative_path_lexically`]. When
+    /// the two share no root (two Windows drives) the absolute path is
+    /// written instead.
+    pub fn manifest_path(&self, project_dir: &Path) -> String {
+        let absolute = host_path::to_portable_string(&self.dir);
+        let Some(invoked_from) = &self.relative_to else {
+            return absolute;
+        };
+        let project = host_path::to_portable_string(&invoked_from.join(project_dir));
+        host_path::relative_path_lexically(&project, &absolute).unwrap_or(absolute)
+    }
+
+    /// The `frust` dependency of a project generated at `project_dir`: a
+    /// path dependency on [`Self::manifest_path`], so the template's plugin
+    /// paths ([`FrustDependency::plugins_dir`]) derive from the same path.
+    pub fn dependency_for(&self, project_dir: &Path) -> FrustDependency {
+        FrustDependency::PathPackage {
+            path: self.manifest_path(project_dir),
+            package: self.package.clone(),
+        }
+    }
 }
 
 /// [`resolve_frust_crate_path`] plus the facade package name the directory's
-/// manifest declares (`frust-ui` or the older `frust`), which the generated
-/// dependency must repeat as `package = "<name>"` for cargo to find it —
-/// see [`FrustDependency::PathPackage`].
-pub fn resolve_frust_checkout(path: &Path) -> Result<(PathBuf, String), FrustPathError> {
-    if let Some(name) = facade_package_name(path) {
-        return Ok((path.to_path_buf(), name.to_string()));
+/// manifest declares, and whether the given path was relative.
+///
+/// A relative `path` is the user's, relative to the invoking directory, not
+/// to the project about to be generated: it is resolved against the current
+/// directory (and folded lexically) to locate the checkout, and that
+/// directory is kept in [`FrustCheckout::relative_to`] so
+/// [`FrustCheckout::manifest_path`] can re-express it from the project. An
+/// absolute `path` is used as given. A current directory that cannot be
+/// read is [`FrustPathError::NoCurrentDir`]; a relative path is never
+/// probed or returned unresolved.
+pub fn resolve_frust_checkout(path: &Path) -> Result<FrustCheckout, FrustPathError> {
+    resolve_frust_checkout_from(path, std::env::current_dir)
+}
+
+/// [`resolve_frust_checkout`] with the current-directory lookup injected,
+/// so its failure is testable without changing the process directory.
+fn resolve_frust_checkout_from(
+    path: &Path,
+    current_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> Result<FrustCheckout, FrustPathError> {
+    let given = path.display().to_string();
+    let (resolved, relative_to) = if path.is_relative() {
+        let cwd = current_dir().map_err(|err| FrustPathError::NoCurrentDir {
+            given: given.clone(),
+            reason: err.to_string(),
+        })?;
+        (host_path::normalize_lexically(&cwd.join(path)), Some(cwd))
+    } else {
+        (path.to_path_buf(), None)
+    };
+    let checkout = |dir: PathBuf, package: &str| FrustCheckout {
+        dir,
+        package: package.to_string(),
+        relative_to: relative_to.clone(),
+    };
+    if let Some(name) = facade_package_name(&resolved) {
+        return Ok(checkout(resolved, name));
     }
-    let nested = path.join("crates").join("frust");
+    let nested = resolved.join("crates").join("frust");
     if let Some(name) = facade_package_name(&nested) {
-        return Ok((nested, name.to_string()));
+        return Ok(checkout(nested, name));
     }
-    Err(FrustPathError::NotFacadeCrate {
-        given: path.display().to_string(),
-    })
+    Err(FrustPathError::NotFacadeCrate { given })
 }
 
 /// A minimal `Cargo.toml` parse: only `[package] name`, serde-ignoring
@@ -143,7 +229,7 @@ pub enum FrustDependency {
     Path(String),
     /// A checkout's facade crate directory whose manifest names the package
     /// `package` — `frust` for a checkout older than the rename. What
-    /// `--frust-path` produces via [`resolve_frust_checkout`].
+    /// `--frust-path` produces via [`FrustCheckout::dependency_for`].
     PathPackage { path: String, package: String },
     /// The crates.io release at this version.
     Registry { version: String },
@@ -190,8 +276,21 @@ impl FrustDependency {
         }
     }
 
+    /// The checkout's `plugins/` directory in path mode — two levels above
+    /// the facade crate, folded lexically so a relative facade path such as
+    /// `../../crates/frust` gives `../../plugins` — and empty in registry
+    /// mode. The path-mode plugin dependencies in the Cargo.toml templates
+    /// are `<this>/<crate_dir>`.
+    pub fn plugins_dir(&self) -> String {
+        let path = host_path::to_portable_string(Path::new(self.path()));
+        if path.is_empty() {
+            return path;
+        }
+        host_path::collapse_dot_segments(&format!("{path}/../../plugins"))
+    }
+
     /// The template variables every Cargo.toml template reads.
-    fn render_vars(&self) -> [(&'static str, String); 3] {
+    fn render_vars(&self) -> [(&'static str, String); 4] {
         [
             ("frust_dep_line", self.dep_line()),
             ("frust_plugin_version", self.registry_version().to_string()),
@@ -199,6 +298,7 @@ impl FrustDependency {
                 "frust_path",
                 host_path::to_portable_string(Path::new(self.path())),
             ),
+            ("frust_plugins_dir", self.plugins_dir()),
         ]
     }
 }
@@ -964,6 +1064,145 @@ mod tests {
             .as_str()
             .expect("frust dependency must carry a `path`");
         assert_eq!(frust_dep_path, "C:/dev/frust-checkout/crates/frust");
+        assert_eq!(
+            manifest["dependencies"]["frust-material"]["path"].as_str(),
+            Some("C:/dev/frust-checkout/plugins/material")
+        );
+    }
+
+    /// The plugin path dependencies the templates write are folded
+    /// lexically, relative facade paths included; registry mode has none.
+    #[test]
+    fn the_plugins_dir_is_folded_lexically() {
+        for (frust, expected) in [
+            ("../../crates/frust", "../../plugins"),
+            ("../checkout/crates/frust", "../checkout/plugins"),
+            ("/path/to/frust", "/path/plugins"),
+        ] {
+            assert_eq!(
+                FrustDependency::Path(frust.into()).plugins_dir(),
+                expected,
+                "{frust}"
+            );
+        }
+        let registry = FrustDependency::Registry {
+            version: "0.6.7".into(),
+        };
+        assert_eq!(registry.plugins_dir(), "");
+
+        let mut ctx = test_context();
+        ctx.frust = FrustDependency::Path("../../crates/frust".into());
+        let vars = ctx.render_vars();
+        assert_eq!(vars.get("frust_plugins_dir").unwrap(), "../../plugins");
+    }
+
+    /// A relative `--frust-path` is the invoking directory's: it resolves to
+    /// an absolute facade directory, never one relative to the new project.
+    #[test]
+    fn a_relative_frust_path_resolves_against_the_current_directory() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cwd = std::env::current_dir().unwrap();
+        let portable = |path: &Path| host_path::to_portable_string(&path.canonicalize().unwrap());
+        let relative =
+            host_path::relative_path_lexically(&portable(&cwd), &portable(&crates.join("frust")))
+                .expect("the current directory and the checkout share a root");
+        let checkout = resolve_frust_checkout(Path::new(&relative)).unwrap();
+        assert!(checkout.dir.is_absolute(), "{}", checkout.dir.display());
+        assert_eq!(
+            checkout.dir.canonicalize().unwrap(),
+            crates.join("frust").canonicalize().unwrap()
+        );
+        assert_eq!(checkout.package, "frust-ui");
+        assert_eq!(checkout.relative_to.as_deref(), Some(cwd.as_path()));
+    }
+
+    /// A current directory that cannot be read is an error naming the
+    /// relative path, never a fallback to the unresolved path; an absolute
+    /// path never asks for it.
+    #[test]
+    fn an_unreadable_current_directory_is_an_error_for_a_relative_path() {
+        let gone = || Err(std::io::Error::other("directory removed"));
+        let err = resolve_frust_checkout_from(Path::new("../frust"), gone).unwrap_err();
+        assert_eq!(
+            err,
+            FrustPathError::NoCurrentDir {
+                given: "../frust".into(),
+                reason: "directory removed".into(),
+            }
+        );
+        let message = err.to_string();
+        assert!(message.contains("`../frust`"), "{message}");
+        assert!(message.contains("directory removed"), "{message}");
+
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .canonicalize();
+        let absolute = crates.unwrap().join("frust");
+        let checkout = resolve_frust_checkout_from(&absolute, || unreachable!()).unwrap();
+        assert_eq!(checkout.dir, absolute);
+        assert_eq!(checkout.relative_to, None);
+    }
+
+    /// A relative `--frust-path` is written relative to the new project,
+    /// whichever directory it is created in; both manifest paths derive
+    /// from that one path.
+    #[test]
+    fn a_relative_frust_path_is_written_relative_to_the_project() {
+        let root = abs_path("work");
+        let checkout = FrustCheckout {
+            dir: PathBuf::from(format!("{root}/frust/crates/frust")),
+            package: "frust-ui".into(),
+            relative_to: Some(PathBuf::from(format!("{root}/invoker"))),
+        };
+        for (project_dir, expected) in [
+            ("../apps/app", "../../frust/crates/frust"),
+            (".", "../frust/crates/frust"),
+            ("nested/app", "../../../frust/crates/frust"),
+        ] {
+            assert_eq!(
+                checkout.manifest_path(Path::new(project_dir)),
+                expected,
+                "{project_dir}"
+            );
+        }
+        // An absolute project directory is not joined onto the invoking one.
+        let elsewhere = PathBuf::from(format!("{root}/frust/examples/app"));
+        assert_eq!(checkout.manifest_path(&elsewhere), "../../crates/frust");
+
+        let mut ctx = test_context();
+        ctx.frust = checkout.dependency_for(Path::new("../apps/app"));
+        let vars = ctx.render_vars();
+        assert_eq!(vars.get("frust_path").unwrap(), "../../frust/crates/frust");
+        assert_eq!(
+            vars.get("frust_plugins_dir").unwrap(),
+            "../../frust/plugins"
+        );
+    }
+
+    /// An absolute `--frust-path` is written as given, wherever the project
+    /// goes; a relative one with no common root falls back to absolute.
+    #[test]
+    fn an_absolute_frust_path_or_one_without_a_common_root_stays_absolute() {
+        let root = abs_path("work");
+        let dir = PathBuf::from(format!("{root}/frust/crates/frust"));
+        let absolute = FrustCheckout {
+            dir: dir.clone(),
+            package: "frust-ui".into(),
+            relative_to: None,
+        };
+        let expected = host_path::to_portable_string(&dir);
+        assert_eq!(absolute.manifest_path(Path::new("../apps/app")), expected);
+        assert_eq!(absolute.manifest_path(Path::new(".")), expected);
+
+        let other_drive = FrustCheckout {
+            dir: PathBuf::from("C:/dev/frust/crates/frust"),
+            package: "frust-ui".into(),
+            relative_to: Some(PathBuf::from("D:/work")),
+        };
+        assert_eq!(
+            other_drive.manifest_path(Path::new("app")),
+            "C:/dev/frust/crates/frust"
+        );
     }
 
     fn test_design_system_context() -> DesignSystemContext {
@@ -1093,9 +1332,14 @@ mod tests {
             for name in ["frust", "frust-ui"] {
                 let root = unique_temp_dir(&format!("named-{name}"));
                 write_manifest(&root.join("crates").join("frust"), name);
-                let (dir, package) = resolve_frust_checkout(&root).unwrap();
+                let FrustCheckout {
+                    dir,
+                    package,
+                    relative_to,
+                } = resolve_frust_checkout(&root).unwrap();
                 assert_eq!(dir, root.join("crates").join("frust"));
                 assert_eq!(package, name);
+                assert_eq!(relative_to, None);
                 let dep = FrustDependency::PathPackage {
                     path: "/checkout/crates/frust".into(),
                     package,

@@ -5,10 +5,11 @@ use std::sync::{Mutex, PoisonError};
 
 use frust::authoring::{BezPath, Point, Rect};
 use frust::kurbo::PathEl;
-use frust_charts::{
-    BlockColumn, LineGeometry, Orientation, Series, area_paths, block_columns, fit_columns,
-    grid_rule_ys, line_segments, polyline, slot_spacing, snap, snap_rule_y, x_for_age, x_for_slot,
-    y_for, y_for_inverted,
+use frust_charts::Series;
+use frust_charts::geometry::{
+    BlockColumn, LineGeometry, Orientation, area_paths, block_columns, fit_columns, grid_rule_ys,
+    line_segments, polyline, slot_spacing, snap, snap_rule_y, x_for_age, x_for_slot, y_for,
+    y_for_inverted,
 };
 
 /// Series writes request a process-wide repaint; tests that write one hold this.

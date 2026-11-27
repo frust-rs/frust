@@ -11,10 +11,12 @@ use frust::authoring::scene::GlyphRun;
 use frust::authoring::text::TextContext;
 use frust::authoring::{BezPath, Brush, ChangeFlags, PaintScene, Point, Rect, Shape, Size};
 use frust::{Color, FrameTime};
+use frust_charts::geometry::{
+    Orientation, TIMED_COLUMN_WIDTH, time_span, timed_area_paths, timed_line_segments, x_for_time,
+};
 use frust_charts::{
-    Orientation, PlotStyle, Series, SeriesSource, SeriesStyle, SparkStyle, SparklineView,
-    TIMED_COLUMN_WIDTH, TimeSeriesView, TimedSeries, YAxis, YDomain, sparkline, time_series,
-    time_span, timed_area_paths, timed_line_segments, x_for_time,
+    PlotStyle, Series, SeriesSource, SeriesStyle, SparkStyle, SparklineView, TimeSeriesView,
+    TimedSeries, YAxis, YDomain, sparkline, time_series,
 };
 use frust_core::{RenderRoot, repaint_generation};
 use frust_reactive::ReactiveRuntime;
