@@ -49,7 +49,18 @@ pub fn resolve_frust_crate_path(path: &Path) -> Result<PathBuf, FrustPathError> 
 /// manifest declares (`frust-ui` or the older `frust`), which the generated
 /// dependency must repeat as `package = "<name>"` for cargo to find it —
 /// see [`FrustDependency::PathPackage`].
+///
+/// A relative `path` is the user's, relative to the invoking directory, not
+/// to the project about to be generated, where the manifest resolves it: it
+/// is resolved against the current directory (and folded lexically), so the
+/// result is absolute like an absolute `path`, which is used as given.
 pub fn resolve_frust_checkout(path: &Path) -> Result<(PathBuf, String), FrustPathError> {
+    let given = path.display().to_string();
+    let resolved = match std::env::current_dir() {
+        Ok(cwd) if path.is_relative() => host_path::normalize_lexically(&cwd.join(path)),
+        _ => path.to_path_buf(),
+    };
+    let path = resolved.as_path();
     if let Some(name) = facade_package_name(path) {
         return Ok((path.to_path_buf(), name.to_string()));
     }
@@ -57,9 +68,7 @@ pub fn resolve_frust_checkout(path: &Path) -> Result<(PathBuf, String), FrustPat
     if let Some(name) = facade_package_name(&nested) {
         return Ok((nested, name.to_string()));
     }
-    Err(FrustPathError::NotFacadeCrate {
-        given: path.display().to_string(),
-    })
+    Err(FrustPathError::NotFacadeCrate { given })
 }
 
 /// A minimal `Cargo.toml` parse: only `[package] name`, serde-ignoring
@@ -190,8 +199,21 @@ impl FrustDependency {
         }
     }
 
+    /// The checkout's `plugins/` directory in path mode — two levels above
+    /// the facade crate, folded lexically so a relative facade path such as
+    /// `../../crates/frust` gives `../../plugins` — and empty in registry
+    /// mode. The path-mode plugin dependencies in the Cargo.toml templates
+    /// are `<this>/<crate_dir>`.
+    pub fn plugins_dir(&self) -> String {
+        let path = host_path::to_portable_string(Path::new(self.path()));
+        if path.is_empty() {
+            return path;
+        }
+        host_path::collapse_dot_segments(&format!("{path}/../../plugins"))
+    }
+
     /// The template variables every Cargo.toml template reads.
-    fn render_vars(&self) -> [(&'static str, String); 3] {
+    fn render_vars(&self) -> [(&'static str, String); 4] {
         [
             ("frust_dep_line", self.dep_line()),
             ("frust_plugin_version", self.registry_version().to_string()),
@@ -199,6 +221,7 @@ impl FrustDependency {
                 "frust_path",
                 host_path::to_portable_string(Path::new(self.path())),
             ),
+            ("frust_plugins_dir", self.plugins_dir()),
         ]
     }
 }
@@ -964,6 +987,71 @@ mod tests {
             .as_str()
             .expect("frust dependency must carry a `path`");
         assert_eq!(frust_dep_path, "C:/dev/frust-checkout/crates/frust");
+        assert_eq!(
+            manifest["dependencies"]["frust-material"]["path"].as_str(),
+            Some("C:/dev/frust-checkout/plugins/material")
+        );
+    }
+
+    /// The plugin path dependencies the templates write are folded
+    /// lexically, relative facade paths included; registry mode has none.
+    #[test]
+    fn the_plugins_dir_is_folded_lexically() {
+        for (frust, expected) in [
+            ("../../crates/frust", "../../plugins"),
+            ("../checkout/crates/frust", "../checkout/plugins"),
+            ("/path/to/frust", "/path/plugins"),
+        ] {
+            assert_eq!(
+                FrustDependency::Path(frust.into()).plugins_dir(),
+                expected,
+                "{frust}"
+            );
+        }
+        let registry = FrustDependency::Registry {
+            version: "0.6.7".into(),
+        };
+        assert_eq!(registry.plugins_dir(), "");
+
+        let mut ctx = test_context();
+        ctx.frust = FrustDependency::Path("../../crates/frust".into());
+        let vars = ctx.render_vars();
+        assert_eq!(vars.get("frust_plugins_dir").unwrap(), "../../plugins");
+    }
+
+    /// A relative `--frust-path` is the invoking directory's: it resolves to
+    /// an absolute facade directory, never one relative to the new project.
+    #[test]
+    fn a_relative_frust_path_resolves_against_the_current_directory() {
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let cwd = std::env::current_dir().unwrap();
+        let relative = pathdiff_lexical(&cwd, &crates.join("frust"));
+        let (dir, package) = resolve_frust_checkout(&relative).unwrap();
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert_eq!(
+            dir.canonicalize().unwrap(),
+            crates.join("frust").canonicalize().unwrap()
+        );
+        assert_eq!(package, "frust-ui");
+    }
+
+    /// `to` relative to `from`, both absolute, by components.
+    fn pathdiff_lexical(from: &Path, to: &Path) -> PathBuf {
+        let from = from.canonicalize().unwrap();
+        let to = to.canonicalize().unwrap();
+        let common = from
+            .components()
+            .zip(to.components())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let mut rel = PathBuf::new();
+        for _ in common..from.components().count() {
+            rel.push("..");
+        }
+        for part in to.components().skip(common) {
+            rel.push(part.as_os_str());
+        }
+        rel
     }
 
     fn test_design_system_context() -> DesignSystemContext {

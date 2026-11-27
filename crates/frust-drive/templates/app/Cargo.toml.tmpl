@@ -24,7 +24,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 {%- if frust_plugin_version %}
 frust-material = "{{ frust_plugin_version }}"
 {%- else %}
-frust-material = { path = "{{ frust_path }}/../../plugins/material" }
+frust-material = { path = "{{ frust_plugins_dir }}/material" }
 {%- endif %}
 
 # Present so the release-only `lean` feature can cap the log level. Never make

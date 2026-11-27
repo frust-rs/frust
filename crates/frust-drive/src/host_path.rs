@@ -205,6 +205,61 @@ pub(crate) fn to_portable_string_inner(path: &Path, windows: bool) -> String {
     }
 }
 
+/// `path`, a `/`-separated path as a dependency line writes it, with each
+/// `.` segment dropped and each `<name>/..` pair folded away — lexically, as
+/// cargo itself joins a `path` dependency: nothing is read from disk and no
+/// symlink is resolved. A relative path keeps its leading `..` segments; a
+/// `..` directly under a root (`/`, `//`, `C:/`) is dropped. A path holding
+/// a backslash is returned unchanged, since on Windows that is a separator
+/// this does not parse. `x/..` alone folds to `.`.
+pub fn collapse_dot_segments(path: &str) -> String {
+    if path.contains('\\') {
+        return path.to_string();
+    }
+    let slashes = path.len() - path.trim_start_matches('/').len();
+    let drive =
+        path.len() >= 3 && path.as_bytes()[0].is_ascii_alphabetic() && path[1..].starts_with(":/");
+    let root_len = if drive { 3 } else { slashes };
+    let (root, rest) = path.split_at(root_len);
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in rest.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => match segments.last() {
+                Some(last) if *last != ".." => {
+                    segments.pop();
+                }
+                _ if !root.is_empty() => {}
+                _ => segments.push(".."),
+            },
+            name => segments.push(name),
+        }
+    }
+    let joined = segments.join("/");
+    if root.is_empty() && joined.is_empty() {
+        ".".to_string()
+    } else {
+        format!("{root}{joined}")
+    }
+}
+
+/// `path` with `.` dropped and each `..` folding away the component before
+/// it — lexically, since the directory need not exist. Meant for an absolute
+/// path: a leading `..` of a relative one is dropped.
+pub fn normalize_lexically(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Whether `a` and `b` name the same location after [`simplify`] — on
 /// Windows, component-wise and case-insensitive (`C:\Dev\X` == `c:/dev/x`,
 /// and either separator is accepted since a value that already went through
@@ -469,5 +524,38 @@ mod tests {
             Path::new("/home/dev/frust"),
             false,
         ));
+    }
+
+    #[test]
+    fn collapse_dot_segments_folds_name_parent_pairs_lexically() {
+        for (path, expected) in [
+            ("../../crates/frust/../../plugins/x", "../../plugins/x"),
+            ("../frust/../../plugins/x", "../../plugins/x"),
+            ("vendor/crates/frust/../../plugins/x", "vendor/plugins/x"),
+            ("./crates/frust/./../../plugins/x", "plugins/x"),
+            ("/path/to/frust/../../plugins/x", "/path/plugins/x"),
+            ("/a/../../x", "/x"),
+            ("//srv/sh/frust/../p", "//srv/sh/p"),
+            (
+                "C:/dev/frust/crates/frust/../../plugins/x",
+                "C:/dev/frust/plugins/x",
+            ),
+            ("C:/../x", "C:/x"),
+            ("x/..", "."),
+            ("../..", "../.."),
+            ("a//b/", "a/b"),
+            // A backslash is a separator this does not parse.
+            (r"C:\dev\frust\..\x", r"C:\dev\frust\..\x"),
+        ] {
+            assert_eq!(collapse_dot_segments(path), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn normalize_lexically_folds_an_absolute_path() {
+        assert_eq!(
+            normalize_lexically(Path::new("/a/b/../c/./d")),
+            PathBuf::from("/a/c/d")
+        );
     }
 }

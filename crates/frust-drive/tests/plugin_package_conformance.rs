@@ -587,7 +587,7 @@ mod plugin_package_location {
 
         let cargo = read(&app.join("Cargo.toml"));
         assert!(
-            cargo.contains("frust-iap = { path = \"../checkout/crates/frust/../../plugins/iap\" }"),
+            cargo.contains("frust-iap = { path = \"../checkout/plugins/iap\" }"),
             "{cargo}"
         );
         assert_eq!(

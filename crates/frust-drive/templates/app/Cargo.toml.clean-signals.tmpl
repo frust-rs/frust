@@ -24,7 +24,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 {%- if frust_plugin_version %}
 frust-material = "{{ frust_plugin_version }}"
 {%- else %}
-frust-material = { path = "{{ frust_path }}/../../plugins/material" }
+frust-material = { path = "{{ frust_plugins_dir }}/material" }
 {%- endif %}
 
 # `--arch clean-signals` demo: the Frust bridge for `clean-signals`
@@ -32,7 +32,7 @@ frust-material = { path = "{{ frust_path }}/../../plugins/material" }
 {%- if frust_plugin_version %}
 clean-signals-frust = "{{ frust_plugin_version }}"
 {%- else %}
-clean-signals-frust = { path = "{{ frust_path }}/../../plugins/clean-signals-frust" }
+clean-signals-frust = { path = "{{ frust_plugins_dir }}/clean-signals-frust" }
 {%- endif %}
 
 # Must keep the same requirement as `clean-signals-frust`'s own `clean-signals`
