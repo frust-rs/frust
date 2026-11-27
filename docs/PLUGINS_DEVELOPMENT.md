@@ -293,8 +293,7 @@ A device gate for `frust-i18n` (`plugins/i18n`), against an app depending on the
   calendar month names follow the locale.
 - **No visible tofu.** Interpolated text must render with **no visible tofu boxes** — the
   default FSI/PDI bidi isolation marks (`U+2068`/`U+2069`) are invisible by design; a visible
-  box is a finding, not an accepted degrade ([LIMITATIONS.md](LIMITATIONS.md)'s
-  `i18n-rtl-unverified`). The escape hatch is `LocaleSet::with_isolating(false)` plus a new
+  box is a finding, not an accepted degrade. The escape hatch is `LocaleSet::with_isolating(false)` plus a new
   [LIMITATIONS.md](LIMITATIONS.md) entry, never silently dropping isolation.
 
 Keep this checklist in sync with `plugins/i18n/README.md` §9.

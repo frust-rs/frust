@@ -136,8 +136,9 @@ fn sync(saved: Option<Vec<u8>>) -> Result<Vec<u8>, PhotoError> {
 - An `AssetId` stays the same across launches on one device on a best-effort basis, so an app may store
   it. It is not portable to another device or platform, and a restore from backup or a reinstall may
   change it; use a cloud identifier to name an asset across devices.
-- The core paths ran on a Pixel 5 and an iPhone 13 mini; iOS updated and deleted deltas, `cloud_identifiers`,
-  iOS 15, API 29 and large Android libraries have not run on a device (`photo-library-change-feed-not-device-tested`).
+- The core paths ran on a Pixel 5 and an iPhone 13 mini. An iOS updated and a deleted delta ran once
+  (2026-11-12, iOS 27.2); the delete also reported one updated asset that was not touched, cause not
+  looked into. `cloud_identifiers`, iOS 15, API 29 and large Android libraries have not run on a device.
 
 ### Apply a delta with `assets_by_id`
 

@@ -471,8 +471,7 @@ fmt::datetime_at_offset(&en, 1_700_000_000, 8 * 3_600, DateLength::Short)?;     
 "Asia/Makassar") }` takes an IANA id or a fixed offset (`"+08:00"`); with no `timeZone` the instant
 renders in UTC. The positional may be epoch seconds or an ISO string with `Z` or a `±HH:MM` suffix
 (converted to the UTC instant it names; no suffix means UTC). The zone applies to the instant, so a
-zone-less civil date cannot be re-zoned. Zone data adds the jiff tzdb to the binary — see
-`docs/LIMITATIONS.md`'s `i18n-tzdb-bundled-size`.
+zone-less civil date cannot be re-zoned. Zone data adds the jiff tzdb to the binary.
 
 Ranges (slot pills, booking windows) are hand-rolled, because ICU4X 2.4 exposes no interval
 formatter: `fmt::time_range`, `time_range_in_zone`, `date_range` and `datetime_range_in_zone`

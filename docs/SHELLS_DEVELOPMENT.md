@@ -392,7 +392,7 @@ into `BeginMove` (a second one into `ToggleMaximized`) or, with `.resize(edge)`,
   from timers and tasks. `RequestClose` takes the OS close-button path (`on_close_requested`).
 - **Push contract:** one desktop window, no window id; push from UI-thread contexts. A push does
   not wake the loop: it runs at the end of the current dispatch or the next frame. Off desktop
-  nothing drains the queue (`desktop-window-commands-off-desktop-noop`).
+  nothing drains the queue.
 - **Per OS:** macOS `BeginResize` is a no-op (`desktop-macos-begin-resize-unsupported`; hide resize
   strips there and while maximized or fullscreen) and the traffic-light placement is best effort
   (`desktop-title-buttons-macos-best-effort`); Windows adds the DWM shadow to an undecorated window

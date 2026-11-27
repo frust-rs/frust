@@ -13,7 +13,7 @@
 //!
 //! Why forty frames on one renderer rather than one frame on a fresh one. A
 //! refusal is a skipped frame with no fallback renderer (see
-//! `docs/LIMITATIONS.md`'s `engine-scheduler-escalation`), so a shape that
+//! `docs/LIMITATIONS.md`'s `engine-scheduler-skip-on-escalation`), so a shape that
 //! refuses while an opacity is fractional refuses for the whole gesture and
 //! freezes the surface at whatever it last presented — which reads on a device
 //! as a scrub that holds instead of snapping back, not as a wrong pixel. One

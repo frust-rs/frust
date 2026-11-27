@@ -142,6 +142,9 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   `AuthSessionRequest::custom_scheme(url, "myapp")`, and add `.ephemeral(true)` where it was set.
   `AuthSessionError` gained the variant `HttpsCallbackUnsupported`, so an exhaustive `match` needs
   the new arm.
+- `frust-widgets` `text_input`: only a touch hold arms the long-press now. A held mouse button no
+  longer selects a word or opens the selection toolbar, as it did before. Migration: none for a
+  touch app; with a mouse, select a word with a double click and a range by dragging.
 
 ### Added
 
@@ -240,7 +243,8 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   and prints what it applied, or `up to date`. Every plugin is checked before the first write, so a
   refusal leaves the project untouched, and a re-run changes nothing. For a declared plugin with a
   Swift package, `sync` and `add` also append `/ios/<Package>` to the app's root `.gitignore`, and
-  that line counts as a pending edit until it is there. Optional features are chosen
+  that line counts as a pending edit until it is there, and is a row of its own in the report, so
+  the applied count matches what the pending list showed. Optional features are chosen
   with `frust plugin add --feature`, and built-in plugins are still added with `frust plugin add`.
 - `frust run` (device lanes) and `frust build` (Android and iOS) stop before any build process when
   a declared plugin the app depends on has tracked edits pending. The message names the plugin and
@@ -603,6 +607,16 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   writes `ios/Runner/Runner.entitlements` with `applinks:` and `webcredentials:` entries, setting
   `CODE_SIGN_ENTITLEMENTS` on the Runner configurations.
 
+- `frust-shell-android`: a Rust panic is written to logcat at error priority under the `frust` tag,
+  with its location, thread and message, before the process aborts; the hook then runs the hook
+  that was installed before it, once per panic. Under `panic = "abort"` the message was otherwise
+  lost to a bare `SIGABRT`.
+- `frust-material`: `SearchViewView::dismiss_handle` and `NavigationDrawerView::dismiss_handle`
+  take a `ModalDismiss`, so a control inside the view (a destination's `on_select`, the search
+  view's back affordance) closes it through the same staged exit as a scrim tap, `Escape` or a
+  back press, not by popping the page at once. `show_search_view` wires one to the back affordance
+  itself.
+
 ### Changed
 
 - New apps target iOS 15.1 (15.0 before), the minimum of the ONNX Runtime archive `frust-onnx`
@@ -674,6 +688,10 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   deep-link stream must read it from the session's outcome. On browsers without Auth Tab the
   behaviour is unchanged.
 
+- `frust-drive` `add_plugin` and the other add entry points: an item for an `android/` or `ios/`
+  directory the project lacks is left out of the report, where it was listed as already present.
+  Nothing is written for it either way.
+
 ### Fixed
 
 - `frust-onnx` and `frust-models`: `VisionHandle`, `DownloadTracker` and `ModelList` write their
@@ -729,6 +747,29 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   raw URL stays in `deep_links()`. The query of a host-only https link (`https://host?x=1`) is kept.
   The log line for a link dropped before the runtime exists no longer prints the URL, only its
   scheme and length.
+
+- `frust-widgets`: a `ScrollController` write that takes its queue from empty to non-empty requests
+  a repaint, so an idle desktop loop applies it; before, the write waited for the next unrelated
+  frame.
+- `frust-material`: pressing a text field's leading or trailing slot child keeps focus only when
+  that field is focused. Otherwise it is an ordinary press, so it blurs the field that holds focus
+  instead of leaving it focused. A floating action button's icon is centred in the size its
+  constraints give it, where it sat off-centre when that differed from the tier's own size.
+- `frust-shadcn`: `bubble()` can be placed in a view tree of any state type, not only `()`.
+- `frust-network-image`: a cache directory that is provided after the loader exists (as on
+  Android) is picked up, where an unresolved directory used to switch the disk cache off for the
+  process. A disk-cached image is evicted and fetched again only when its bytes cannot be read; an
+  over-budget, too-large or unsupported-format result leaves the entry alone. Concurrent loads of
+  one URL share a single eviction and fetch.
+- `frust-tui`: switching the embedded MCP server off and on again waits for the stopped listener
+  before it binds the port again. A start queued behind the stop shows as starting in the sidebar
+  row and in the MCP panel, and a requested restart no longer shows a failure toast.
+- `frust create --frust-path` with a relative path writes the checkout to the generated
+  `Cargo.toml` relative to the new project's directory (the path is still found from the directory
+  the command runs in), where the value was written as given and resolved against the project. The
+  plugin path dependencies derive from it and are folded (`../../plugins/x`, not
+  `../../crates/frust/../../plugins/x`). An absolute path is written as it is, and so is a
+  relative one that shares no root with the project.
 
 ### Security
 

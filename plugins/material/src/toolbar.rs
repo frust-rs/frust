@@ -122,14 +122,13 @@
 //! applied as **tight constraints** on the fab slot instead: the pod's laid-out
 //! rect is the morphing square, which is what [`mod@crate::fab`] fills its
 //! container, shadow and state layer against, and what hit-testing and the
-//! accessibility bounds read. What tight constraints cannot reach is
-//! [`mod@crate::fab`]'s *icon centering*, which is computed against its own
-//! [`crate::FabSize`] tier (56dp for the default `Medium`) rather than the box
-//! it is handed — so at the collapsed 80dp end the icon reads 12dp off-center.
-//! Closing that needs either an edit to `fab.rs` (out of this module's scope)
-//! or painting a child at a size it was not laid out at (which would desync
-//! hit-testing from the visual). An app that wants a pixel-exact collapsed end
-//! supplies its own fab view sized off [`ToolbarMorph::size`].
+//! accessibility bounds read, and its icon is centred in that rect. What
+//! tight constraints cannot reach is the icon's *size*: it stays at its
+//! [`crate::FabSize`] tier's own, where upstream's rescale grows it with the
+//! box. Closing that needs painting a child at a size it was not laid out at
+//! (which would desync hit-testing from the visual). An app that wants a
+//! pixel-exact collapsed end supplies its own fab view sized off
+//! [`ToolbarMorph::size`].
 //!
 //! # Scroll-hide: the app owns the wiring
 //!

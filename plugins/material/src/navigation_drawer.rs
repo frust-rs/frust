@@ -141,12 +141,12 @@
 //! every control in this catalog follows. An app that wants the common
 //! real-world dismiss-on-select UX calls `controller.pop()` (or its own
 //! signal write) from inside its own `on_select`, exactly like any other
-//! app-owned dismiss decision in this crate — but that pop is **unstaged**:
+//! app-owned dismiss decision in this crate. A raw pop is **unstaged**:
 //! immediate, with no reverse-ramp exit, while every host-chrome dismiss
 //! gesture on the same drawer (scrim tap, `Escape`, an Android back press)
-//! stages one (`docs/LIMITATIONS.md`'s
-//! `material-modal-staged-dismiss-private-to-host`). A user who dismisses by
-//! selecting sees a different exit motion than one who taps the scrim.
+//! stages one. To get the same slide-out from `on_select`, install a
+//! [`ModalDismiss`] with [`NavigationDrawerView::dismiss_handle`] and call
+//! `dismiss()` on it instead.
 //!
 //! # No edge-swipe-to-open: absent upstream
 //!
@@ -1423,8 +1423,8 @@ impl<State: 'static> OverlayModalContent<State> for NavigationDrawerView<State> 
 /// for you, staged behind the slide-out exit ramp — selecting a destination
 /// is **not** one of them (see the [module docs](self)' Selecting does not
 /// dismiss section); an app that wants that UX pops from inside its own
-/// `on_select`, but that pop is **unstaged** (no reverse-ramp exit) —
-/// `docs/LIMITATIONS.md`'s `material-modal-staged-dismiss-private-to-host`.
+/// `on_select`; a raw pop is **unstaged** (no reverse-ramp exit), so route it
+/// through [`NavigationDrawerView::dismiss_handle`] to take the slide-out.
 ///
 /// ```ignore
 /// show_navigation_drawer(
@@ -1432,8 +1432,8 @@ impl<State: 'static> OverlayModalContent<State> for NavigationDrawerView<State> 
 ///     || navigation_drawer(sections.clone(), state.drawer_index, |s: &mut State, i| {
 ///         s.drawer_index = i;
 ///         // Unstaged: dismiss-on-select is an app decision, not the
-///         // default, and this pop skips the staged reverse-ramp exit
-///         // every host-chrome dismiss gesture on this drawer takes.
+///         // default, and this pop skips the staged reverse-ramp exit.
+///         // Use `dismiss_handle` for the staged route.
 ///         s.nav.pop();
 ///     }),
 ///     |state: &mut State, _result: PopResult| {},

@@ -587,7 +587,7 @@ The desktop tier is unevenly proven, and the gap is tracked rather than assumed 
 |---|---|
 | **macOS** | Runtime-verified on hardware: real windows, the app-named menu bar, ⌘Q by both menu and accelerator, Hide/Show All, and close-then-Dock-click reopen |
 | **Windows** | Runtime-verified on hardware: titlebar/taskbar icon, AppUserModelID identity, titlebar theming, menu-bar activation delivery, accelerators, and quit. An accelerator enters the `HACCEL` only if its submenu is attached before the item is appended (documented at its `menu.rs` site) |
-| **Linux** | Proven by cross-target compilation only, plus every native call site read against its vendored source. Owed: a non-headless `app_id`/icon pass. See [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` and `desktop-windows-titlebar-theme-revert` |
+| **Linux** | Proven by cross-target compilation only, plus every native call site read against its vendored source. Owed: a non-headless `app_id`/icon pass. See [LIMITATIONS.md](LIMITATIONS.md) `desktop-shells-runtime-unverified` |
 | **Decorations / window commands** | Linux (X11, Wayland), Windows and macOS gates all passed (SHELLS_DEVELOPMENT.md § Decorations and window commands); open: `desktop-windows-menu-bar-undecorated-unverified` |
 
 Multi-window is out of scope: every desktop shell manages exactly one window (`desktop-single-window`).
