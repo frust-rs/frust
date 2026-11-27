@@ -105,13 +105,18 @@ type KeyedFuture = Shared<LoadFuture<LoadResult>>;
 type RawKey = (String, Scope);
 type RawFuture = Shared<LoadFuture<Result<RawBody, FetchError>>>;
 
-/// Raw response bytes plus where they came from, so a body that fails to
-/// decode can be told apart: a disk one is evicted and fetched again, a
+/// Raw response bytes plus where they came from, so a body whose bytes will
+/// not decode can be told apart: a disk one is evicted and fetched again, a
 /// network one is not retried.
 #[derive(Clone)]
 struct RawBody {
     bytes: Arc<Vec<u8>>,
-    from_disk: bool,
+    /// `Some` for a disk hit: the one eviction-and-refetch shared by every
+    /// load that received this body, set by the first to find it unreadable.
+    /// It rides the raw single-flight future, so it lives exactly as long as
+    /// the [`RawEntry`] and the loads holding this body. `None` for a network
+    /// body, which is final.
+    recovery: Option<Arc<OnceLock<RawFuture>>>,
 }
 
 /// One keyed load, alive while any [`Consumer`] of it is.
@@ -315,23 +320,85 @@ async fn fetch_network(
     Ok(bytes)
 }
 
-/// Drop the disk entry whose body failed to decode, then fetch and decode once
-/// more. A failure of that second body is returned as is, never retried.
-async fn retry_after_corrupt_disk(
-    inner: &Arc<Inner>,
+/// Whether `err` says the stored bytes themselves are unreadable: the one
+/// decode failure that justifies evicting a disk entry and fetching it again.
+///
+/// The other kinds say nothing about the bytes. `OverBudget` depends on the
+/// requested target, `TooLarge` and `UnsupportedFormat` on the configured
+/// limits and build features, so a valid entry another target still decodes
+/// is kept; `Task` means the blocking decode panicked or was cancelled.
+/// Exhaustive on purpose: a new variant must decide here.
+fn indicates_corrupt_bytes(err: &DecodeError) -> bool {
+    match err {
+        DecodeError::Decode(_) => true,
+        DecodeError::UnsupportedFormat(_)
+        | DecodeError::TooLarge { .. }
+        | DecodeError::OverBudget { .. }
+        | DecodeError::Task(_) => false,
+    }
+}
+
+/// Whether `fut` finished with a fetch error, directly or through the
+/// recovery of its disk body. Such an entry is replaced, not joined, so a
+/// failure is only seen by the loads that were waiting on it.
+fn raw_failed(fut: &RawFuture) -> bool {
+    match fut.peek() {
+        Some(Err(_)) => true,
+        Some(Ok(body)) => body
+            .recovery
+            .as_ref()
+            .and_then(|slot| slot.get())
+            .is_some_and(|refetch| matches!(refetch.peek(), Some(Err(_)))),
+        None => false,
+    }
+}
+
+/// The shared recovery for an unreadable disk body: drop the disk entry, then
+/// fetch from the network and write the new body through. Lazy, like the raw
+/// fetch, and final: its body carries no recovery of its own.
+fn refetch_after_corrupt_disk(
+    inner: Arc<Inner>,
     url: String,
     headers: Vec<(String, String)>,
     scope: Scope,
+) -> RawFuture {
+    let boxed: LoadFuture<Result<RawBody, FetchError>> = Box::pin(async move {
+        let disk = disk_handle(inner.clone()).await;
+        if let Some(d) = disk.clone() {
+            let u = url.clone();
+            let _ = spawn_blocking(move || d.remove_scoped(&u, scope.as_ref())).await;
+        }
+        let bytes = fetch_network(&inner, url, headers, scope, disk).await?;
+        Ok(RawBody {
+            bytes,
+            recovery: None,
+        })
+    });
+    boxed.shared()
+}
+
+/// Decode a disk body; if its bytes are unreadable, join the one recovery
+/// every load of this body shares (the first starts it with `start`) and
+/// decode the refetched body. A failure of that second body is returned as
+/// is, never retried.
+async fn decode_disk_body(
+    bytes: Arc<Vec<u8>>,
+    recovery: &OnceLock<RawFuture>,
+    start: impl FnOnce() -> RawFuture,
     target: Option<TargetPx>,
     limits: DecodeLimits,
 ) -> LoadResult {
-    let disk = disk_handle(inner.clone()).await;
-    if let Some(d) = disk.clone() {
-        let u = url.clone();
-        let _ = spawn_blocking(move || d.remove_scoped(&u, scope.as_ref())).await;
+    // Another load already found these very bytes unreadable: skip straight
+    // to the refetched body rather than decoding them again.
+    if recovery.get().is_none() {
+        match decode_shared(bytes, target, limits).await {
+            Err(e) if indicates_corrupt_bytes(&e) => {}
+            other => return other.map_err(LoadError::from),
+        }
     }
-    let bytes = fetch_network(inner, url, headers, scope, disk).await?;
-    decode_shared(bytes, target, limits)
+    let refetch = recovery.get_or_init(start).clone();
+    let body = refetch.await?;
+    decode_shared(body.bytes, target, limits)
         .await
         .map_err(LoadError::from)
 }
@@ -405,22 +472,33 @@ impl ImageLoader {
         let scope = key.scope;
         // Dropping this body before `raw` resolves drops `release` with it.
         let fut: LoadFuture<LoadResult> = Box::pin(async move {
-            let fetched = raw.await;
-            drop(release);
-            let result = match fetched {
-                Ok(body) => {
-                    let first = decode_shared(body.bytes, target, limits).await;
-                    match first {
-                        // A corrupt disk entry: evict it and fetch once more.
-                        // The refetched body is final, whatever its source.
-                        Err(_) if body.from_disk => {
-                            retry_after_corrupt_disk(&inner, url, headers, scope, target, limits)
-                                .await
-                        }
-                        other => other.map_err(LoadError::from),
-                    }
+            let result = match raw.await {
+                Err(e) => {
+                    drop(release);
+                    Err(LoadError::Fetch(e))
                 }
-                Err(e) => Err(LoadError::Fetch(e)),
+                Ok(RawBody {
+                    bytes,
+                    recovery: None,
+                }) => {
+                    drop(release);
+                    decode_shared(bytes, target, limits)
+                        .await
+                        .map_err(LoadError::from)
+                }
+                // A disk body keeps its raw share until its outcome settles:
+                // a load joining meanwhile then gets this same body, and with
+                // it the same recovery, rather than reading the entry that
+                // recovery is about to evict or has just rewritten.
+                Ok(RawBody {
+                    bytes,
+                    recovery: Some(recovery),
+                }) => {
+                    let start = || refetch_after_corrupt_disk(inner.clone(), url, headers, scope);
+                    let result = decode_disk_body(bytes, &recovery, start, target, limits).await;
+                    drop(release);
+                    result
+                }
             };
             if let Ok(source) = &result {
                 lock(&inner.memory).insert(task_key.clone(), source.clone());
@@ -452,13 +530,14 @@ impl ImageLoader {
     }
 
     /// Join or start the raw fetch for `req.url`, counting one more user.
-    /// A fetch that already finished with an error is replaced, not joined.
+    /// A fetch that already finished with an error (or whose disk body's
+    /// recovery did) is replaced, not joined.
     fn acquire_raw(&self, req: &LoadRequest) -> (RawFuture, RawRelease) {
         let scope = header_scope(&req.headers);
         let raw_key: RawKey = (req.url.clone(), scope);
         let mut raw = lock(&self.inner.raw);
         if let Some(entry) = raw.get_mut(&raw_key)
-            && !matches!(entry.fut.peek(), Some(Err(_)))
+            && !raw_failed(&entry.fut)
         {
             entry.users += 1;
             let release = RawRelease {
@@ -484,14 +563,14 @@ impl ImageLoader {
                     log::debug!("network-image: disk hit");
                     return Ok(RawBody {
                         bytes: Arc::new(bytes),
-                        from_disk: true,
+                        recovery: Some(Arc::new(OnceLock::new())),
                     });
                 }
             }
             let bytes = fetch_network(&inner, url, headers, scope, disk).await?;
             Ok(RawBody {
                 bytes,
-                from_disk: false,
+                recovery: None,
             })
         });
         let fut = boxed.shared();
@@ -736,6 +815,120 @@ mod tests {
             let err = loader.load(req("https://x/d", 4)).await.err().unwrap();
             assert!(matches!(err, LoadError::Decode(_)));
             assert_eq!(fetcher.calls(), 1);
+        });
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A disk cache in a fresh `dir` holding `bytes` for `url`.
+    fn seed_disk(dir: &std::path::Path, url: &str, bytes: &[u8]) {
+        DiskCache::open(dir.to_path_buf(), 1 << 20)
+            .unwrap()
+            .put(url, bytes)
+            .unwrap();
+    }
+
+    fn limited(dir: PathBuf, decode_limits: DecodeLimits) -> LoaderConfig {
+        LoaderConfig {
+            decode_limits,
+            ..config(Some(dir))
+        }
+    }
+
+    #[test]
+    fn an_over_budget_disk_hit_keeps_the_entry_and_fetches_nothing() {
+        let dir = temp("over-budget");
+        let url = "https://x/budget";
+        seed_disk(&dir, url, &png());
+        // The 8x8 RGB png needs 448 bytes at natural size (a 16 px box) and
+        // 752 fitted to 4 px (the resize working set), so 600 splits them.
+        let limits = DecodeLimits {
+            max_alloc_bytes: 600,
+            ..DecodeLimits::default()
+        };
+        let fetcher = Fetcher::new(png());
+        let loader = ImageLoader::new(fetcher.clone(), limited(dir.clone(), limits));
+        run(async {
+            let err = loader.load(req(url, 4)).await.err().unwrap();
+            assert!(
+                matches!(err, LoadError::Decode(DecodeError::OverBudget { .. })),
+                "{err:?}"
+            );
+            assert_eq!(fetcher.calls(), 0, "no refetch");
+            let disk = loader.inner.disk.get().unwrap().clone().unwrap();
+            assert_eq!(disk.get(url).unwrap(), png(), "entry kept");
+
+            let src = loader.load(req(url, 16)).await.unwrap();
+            assert_eq!(src.natural_size().width, 8.0);
+            assert_eq!(fetcher.calls(), 0, "served from disk");
+            assert_eq!(loader.raw_entry_count(), 0);
+        });
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_too_large_disk_hit_keeps_the_entry_and_fetches_nothing() {
+        let dir = temp("too-large");
+        let url = "https://x/large";
+        seed_disk(&dir, url, &png());
+        let limits = DecodeLimits {
+            max_width: 4,
+            ..DecodeLimits::default()
+        };
+        let fetcher = Fetcher::new(png());
+        let loader = ImageLoader::new(fetcher.clone(), limited(dir.clone(), limits));
+        run(async {
+            let err = loader.load(req(url, 4)).await.err().unwrap();
+            assert!(
+                matches!(err, LoadError::Decode(DecodeError::TooLarge { .. })),
+                "{err:?}"
+            );
+            assert_eq!(fetcher.calls(), 0, "no refetch");
+            let disk = loader.inner.disk.get().unwrap().clone().unwrap();
+            assert_eq!(disk.get(url).unwrap(), png(), "entry kept");
+        });
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_loads_of_a_corrupt_disk_entry_share_one_refetch() {
+        let dir = temp("corrupt-concurrent");
+        let url = "https://x/shared";
+        seed_disk(&dir, url, b"not an image");
+        let fetcher = Fetcher::new(png());
+        let loader = ImageLoader::new(fetcher.clone(), config(Some(dir.clone())));
+        run(async {
+            let (a, b) = tokio::join!(loader.load(req(url, 4)), loader.load(req(url, 6)));
+            assert_eq!(a.unwrap().natural_size().width, 4.0);
+            assert_eq!(b.unwrap().natural_size().width, 6.0);
+            assert_eq!(fetcher.calls(), 1, "one eviction and refetch for both");
+            let disk = loader.inner.disk.get().unwrap().clone().unwrap();
+            assert_eq!(disk.get(url).unwrap(), png(), "entry replaced");
+            assert_eq!(loader.raw_entry_count(), 0);
+        });
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn spawned_loads_of_a_corrupt_disk_entry_share_one_refetch() {
+        let dir = temp("corrupt-spawned");
+        let url = "https://x/spawned";
+        seed_disk(&dir, url, b"not an image");
+        let fetcher = Fetcher::new(png());
+        let loader = ImageLoader::new(fetcher.clone(), config(Some(dir.clone())));
+        run(async {
+            let handles: Vec<_> = [2, 3, 4, 5, 6, 7]
+                .into_iter()
+                .map(|side| tokio::spawn(loader.load(req(url, side))))
+                .collect();
+            for h in handles {
+                h.await.unwrap().unwrap();
+            }
+            assert_eq!(fetcher.calls(), 1, "one eviction and refetch for all");
+            assert_eq!(loader.raw_entry_count(), 0);
         });
         drop(loader);
         let _ = std::fs::remove_dir_all(dir);
