@@ -22,7 +22,7 @@ use super::devtools::{ConnEvent, ConnState, DevtoolsPhase, DevtoolsTab, Inspecto
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::{SessionTarget, SessionView, truncate_with_ellipsis};
-use super::state::{AppState, Screen};
+use super::state::{AppState, McpStopping, Screen};
 use super::toast::ToastKind;
 use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
 
@@ -1492,6 +1492,15 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 installed => {
                     let was_running = installed.is_some();
                     state.mcp = None;
+                    // The stop this report confirms: the listener is closed
+                    // now, so a start the user asked for meanwhile is safe.
+                    let start_after = match state.mcp_stopping {
+                        Some(stopping) if stopping.generation == generation => {
+                            state.mcp_stopping = None;
+                            stopping.start_wanted
+                        }
+                        _ => false,
+                    };
                     match error {
                         Some(error) => {
                             // Two surfaces, deliberately: the toast catches the
@@ -1503,15 +1512,37 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                                 .toasts
                                 .push(ToastKind::Error, format!("MCP server stopped: {error}"));
                             state.mcp_error = Some(error);
+                            if start_after {
+                                state.mcp_error = None;
+                                return Outcome {
+                                    redraw: true,
+                                    effect: Some(Effect::StartMcpServer),
+                                };
+                            }
                             Outcome::redraw()
                         }
+                        None if start_after => Outcome {
+                            redraw: true,
+                            effect: Some(Effect::StartMcpServer),
+                        },
                         None => Outcome::dirty(was_running),
                     }
                 }
             }
         }
         Message::ToggleMcpServer => {
-            if state.mcp.is_some() {
+            if let Some(stopping) = state.mcp_stopping.as_mut() {
+                // A stop is still closing the listener, so the port may not be
+                // free: no start (and no second stop) goes out. The toggle
+                // flips whether a start is wanted once the stop is confirmed
+                // — a second toggle cancels the first.
+                stopping.start_wanted = !stopping.start_wanted;
+                Outcome::redraw()
+            } else if let Some(handle) = state.mcp.as_ref() {
+                state.mcp_stopping = Some(McpStopping {
+                    generation: handle.generation(),
+                    start_wanted: false,
+                });
                 // The handle is dropped by the runner's `stop_mcp`, not here:
                 // cancelling a live server is exactly the impure work the
                 // pure core pushes out as an effect.
@@ -7999,6 +8030,59 @@ mod tests {
         // B's *own* stop report, by contrast, is applied.
         assert!(update(&mut st, Message::McpStopped(1, None)).redraw);
         assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
+    }
+
+    /// The fast-rebind race: a toggle-on while the stop is still closing the
+    /// listener must wait for the server's own stopped report.
+    #[test]
+    fn a_toggle_on_while_stopping_starts_only_after_the_stopped_report() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        assert_eq!(
+            update(&mut st, Message::ToggleMcpServer).effect,
+            Some(Effect::StopMcpServer)
+        );
+        // The runner's `stop_mcp` takes the handle.
+        st.mcp = None;
+
+        let out = update(&mut st, Message::ToggleMcpServer);
+        assert!(out.redraw);
+        assert_eq!(out.effect, None, "no start while the listener may be open");
+
+        let out = update(&mut st, Message::McpStopped(0, None));
+        assert!(out.redraw);
+        assert_eq!(out.effect, Some(Effect::StartMcpServer));
+        assert_eq!(st.mcp_stopping, None);
+        // Exactly one: a repeat report starts nothing more.
+        assert_eq!(update(&mut st, Message::McpStopped(0, None)).effect, None);
+    }
+
+    #[test]
+    fn off_on_off_while_stopping_never_starts() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        update(&mut st, Message::ToggleMcpServer);
+        st.mcp = None;
+        assert_eq!(update(&mut st, Message::ToggleMcpServer).effect, None);
+        assert_eq!(update(&mut st, Message::ToggleMcpServer).effect, None);
+
+        let out = update(&mut st, Message::McpStopped(0, None));
+        assert_eq!(out.effect, None);
+        assert_eq!(st.mcp_stopping, None);
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
+    }
+
+    #[test]
+    fn a_plain_off_then_on_after_the_stopped_report_starts_as_before() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        update(&mut st, Message::ToggleMcpServer);
+        st.mcp = None;
+        assert_eq!(update(&mut st, Message::McpStopped(0, None)).effect, None);
+        assert_eq!(
+            update(&mut st, Message::ToggleMcpServer).effect,
+            Some(Effect::StartMcpServer)
+        );
     }
 
     /// A failed start stays visible until the next attempt — and the next

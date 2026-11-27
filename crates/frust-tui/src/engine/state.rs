@@ -73,6 +73,17 @@ pub struct SearchState {
     pub filter: Option<String>,
 }
 
+/// A requested embedded-MCP-server stop that has not yet been confirmed by the
+/// server's own stopped report (see [`AppState::mcp_stopping`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpStopping {
+    /// The generation of the server being stopped.
+    pub generation: u64,
+    /// Whether the user toggled the server back on meanwhile; the stopped
+    /// report then emits the start.
+    pub start_wanted: bool,
+}
+
 /// The whole application model.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -260,6 +271,13 @@ pub struct AppState {
     /// start looking like a silent no-op. Cleared when the next start is
     /// requested.
     pub mcp_error: Option<String>,
+    /// The embedded MCP server whose stop has been requested but whose
+    /// listener is not yet known to be closed: set when the stop effect is
+    /// emitted, cleared when that server's own `McpStopped` report arrives.
+    /// While it is set a toggle-on does not start a server (the fixed port
+    /// may still be held); it records the wish in
+    /// [`McpStopping::start_wanted`] and the report emits the start.
+    pub mcp_stopping: Option<McpStopping>,
     /// The embedded DAP server, while one is running (`None` = stopped) —
     /// [`Self::mcp`]'s exact counterpart, with the same live-resource
     /// ownership rule: [`super::Engine::start_dap`]/`stop_dap` own its
@@ -380,6 +398,7 @@ impl AppState {
             mcp: None,
             mcp_panel_open: false,
             mcp_error: None,
+            mcp_stopping: None,
             dap: None,
             dap_error: None,
             dap_settings: DapSettings::default(),
@@ -736,6 +755,7 @@ impl Default for AppState {
             mcp: None,
             mcp_panel_open: false,
             mcp_error: None,
+            mcp_stopping: None,
             dap: None,
             dap_error: None,
             dap_settings: DapSettings::default(),
