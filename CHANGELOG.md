@@ -753,7 +753,8 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
   frame.
 - `frust-material`: pressing a text field's leading or trailing slot child keeps focus only when
   that field is focused. Otherwise it is an ordinary press, so it blurs the field that holds focus
-  instead of leaving it focused. A floating action button's icon is centred at every size tier.
+  instead of leaving it focused. A floating action button's icon is centred in the size its
+  constraints give it, where it sat off-centre when that differed from the tier's own size.
 - `frust-shadcn`: `bubble()` can be placed in a view tree of any state type, not only `()`.
 - `frust-network-image`: a cache directory that is provided after the loader exists (as on
   Android) is picked up, where an unresolved directory used to switch the disk cache off for the
