@@ -120,12 +120,16 @@
 //!   `DECORATION_HEIGHT`, so the Dart source's `maxLines` (and with it the
 //!   baseline's `multiline` mode) is not exposed; neither are its
 //!   `keyboardType`/`textInputAction`/`inputFormatters`/`onTapOutside` knobs.
-//! - **Pressing an interactive slot child keeps the field focused.** Both
-//!   slots are wrapped in `frust::keep_focus`, so a clear button or a
-//!   visibility toggle in a slot still receives its press while the field
-//!   keeps its caret and the keyboard. Focus is lost at the `Up` that
-//!   completes a tap elsewhere (the shared container's blur-on-outside-tap),
-//!   and the wrapper opts the slot out of that.
+//! - **Pressing an interactive slot child keeps focus only when this field
+//!   holds it.** A press landing in a slot calls `EventCtx::keep_focus` only
+//!   while this field is focused (the paint-pass focus read above), so a clear
+//!   button or a visibility toggle receives its press while the field keeps
+//!   its caret and the keyboard. When another widget holds focus, the press is
+//!   an ordinary press that claims nothing: the slot child still runs its
+//!   action, and the tap's `Up` blurs the other widget (focus moves to no
+//!   one, not to this field), as before slots were wrapped. Focus is lost at
+//!   the `Up` that completes a tap elsewhere (the shared container's
+//!   blur-on-outside-tap).
 
 use std::rc::Rc;
 
@@ -137,7 +141,7 @@ use frust::authoring::{
     Widget,
 };
 use frust::{AnimationController, FocusHandle, Theme, text_input};
-use kurbo::{Point, RoundedRect, Shape, Size};
+use kurbo::{Point, Rect, RoundedRect, Shape, Size};
 use peniko::{Brush, Color};
 
 use super::interaction::{DISABLED_CONTAINER_OPACITY, DISABLED_CONTENT_OPACITY};
@@ -314,14 +318,14 @@ impl<State: 'static> TextFieldView<State> {
     /// The slot's content owns its own ink and size; the field only reserves
     /// and positions the slot.
     pub fn leading(mut self, view: impl View<State>) -> Self {
-        self.leading = Some(AnyView::new(frust::keep_focus(view)));
+        self.leading = Some(AnyView::new(view));
         self
     }
 
     /// Mount a trailing view in a `ICON_SIZE` slot at the field's end edge —
     /// see [`leading`](Self::leading).
     pub fn trailing(mut self, view: impl View<State>) -> Self {
-        self.trailing = Some(AnyView::new(frust::keep_focus(view)));
+        self.trailing = Some(AnyView::new(view));
         self
     }
 
@@ -658,6 +662,10 @@ pub struct TextFieldWidget {
     /// left to catch up unseen; it clears the first time the controller
     /// settles, from which point every transition is the controller's.
     float_priming: bool,
+    /// Whether the field held focus at its last paint (the pod's focus path,
+    /// the same read that drives the accent). A focus change dirties paint, so
+    /// this is current at the next press; it gates the slot `keep_focus`.
+    focused: bool,
 }
 
 /// Build the ordered pod window `[field, leading?, trailing?]` and its
@@ -767,6 +775,7 @@ impl<State: 'static> View<State> for TextFieldView<State> {
             float,
             float_target,
             float_priming: true,
+            focused: false,
         }
     }
 
@@ -899,6 +908,7 @@ impl Widget for TextFieldWidget {
         // The pod's focus path is authoritative (a container-routed blur never
         // reaches this widget's `event`) — see the module docs.
         let focused = ctx.has_focus() && self.enabled;
+        self.focused = focused;
         let frame_time = ctx.frame_time();
         let origin = ctx.origin();
         let width = ctx.size().width;
@@ -1015,6 +1025,22 @@ impl Widget for TextFieldWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A press on a slot child keeps the live focus session only while this
+        // field holds it; with another widget focused the press is left to
+        // the container's ordinary rule (a tap blurs it).
+        if self.focused
+            && let InputEvent::Pointer(p) = event
+            && p.phase == PointerPhase::Down
+            && [self.slots.leading, self.slots.trailing]
+                .into_iter()
+                .flatten()
+                .any(|i| {
+                    let pod = &self.children[i];
+                    Rect::from_origin_size(pod.origin(), pod.size()).contains(p.position)
+                })
+        {
+            ctx.keep_focus();
+        }
         let result = frust::authoring::route_event(&mut self.children, ctx, event);
         // The cursor is asked for from the uncaptured `Move` arm only, and
         // after routing so this widget's shape wins over a slot's: the I-beam
@@ -1201,6 +1227,75 @@ mod tests {
         tap(&mut root, &mut state, Point::new(160.0, 140.0));
         pass(&mut root, &mut state);
         assert!(!handle.is_focused(), "a press outside the field blurs it");
+    }
+
+    #[test]
+    fn a_slot_press_keeps_focus_only_when_this_field_holds_it() {
+        #[derive(Default)]
+        struct S {
+            a: String,
+            b: String,
+            a_taps: u32,
+        }
+        let (ha, hb) = (FocusHandle::new(), FocusHandle::new());
+        let mut logic = {
+            let (ha, hb) = (ha.clone(), hb.clone());
+            move |s: &mut S| {
+                frust::column::<S>()
+                    .child(
+                        text_field::<S, _>(s.a.clone(), |s: &mut S, t| s.a = t)
+                            .focus_handle(ha.clone())
+                            .trailing(frust::button("x", |s: &mut S| s.a_taps += 1)),
+                    )
+                    .child(
+                        text_field::<S, _>(s.b.clone(), |s: &mut S, t| s.b = t)
+                            .focus_handle(hb.clone()),
+                    )
+            }
+        };
+        let mut root: RenderRoot<S, frust::FlexView<S>> = RenderRoot::new();
+        let mut state = S::default();
+        let mut tcx = TextContext::new();
+        let mut pass = |root: &mut RenderRoot<S, frust::FlexView<S>>, state: &mut S| {
+            root.rebuild(&mut logic, state);
+            root.layout_with_text(WINDOW, &mut tcx as &mut dyn Any);
+            root.paint(&mut Recorder::default(), FrameTime::ZERO);
+        };
+        let tap = |root: &mut RenderRoot<S, frust::FlexView<S>>, state: &mut S, at: Point| {
+            for phase in [PointerPhase::Down, PointerPhase::Up] {
+                root.event(
+                    state,
+                    &InputEvent::Pointer(PointerEvent {
+                        phase,
+                        position: at,
+                        button: PointerButton::Primary,
+                    }),
+                );
+            }
+        };
+        let a_slot = Point::new(WINDOW.width - HPAD - ICON_SIZE / 2.0, 28.0);
+        let in_b = Point::new(120.0, DECORATION_HEIGHT + 28.0);
+        pass(&mut root, &mut state);
+        tap(&mut root, &mut state, in_b);
+        pass(&mut root, &mut state);
+        assert!(hb.is_focused() && !ha.is_focused(), "B holds focus");
+
+        tap(&mut root, &mut state, a_slot);
+        pass(&mut root, &mut state);
+        assert_eq!(state.a_taps, 1, "A's slot child received the press");
+        assert!(
+            !hb.is_focused() && !ha.is_focused(),
+            "a slot press on a field that does not hold focus blurs the holder"
+        );
+
+        // The single-field rule still holds: A focused, its slot press keeps it.
+        tap(&mut root, &mut state, Point::new(120.0, 28.0));
+        pass(&mut root, &mut state);
+        assert!(ha.is_focused());
+        tap(&mut root, &mut state, a_slot);
+        pass(&mut root, &mut state);
+        assert_eq!(state.a_taps, 2);
+        assert!(ha.is_focused(), "A's own slot press keeps A focused");
     }
 
     /// The window every harness lays out in.
