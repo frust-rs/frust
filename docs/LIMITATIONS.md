@@ -3810,38 +3810,31 @@ programmatic-focus seam in `crates/frust-core/src/focus_handle.rs`.
 
 ---
 
-### `no-plugin-reachable-deferred-state-callback` — a plugin-tier widget cannot queue a state-bearing callback onto a later frame
+### `no-plugin-reachable-deferred-state-callback` — two plugin families report a non-event state change late or not at all
 
-**Observed**: the framework's `mark_pending_result_flush`/`take_pending_result_flush` seam that
-lets a widget defer a callback across frames is `frust-core`-internal — not re-exported through
-`frust::authoring` (`frust_widgets::authoring` re-exports the shape it wants callers to match, not
-the seam itself). A plugin-tier widget that needs to fire a callback carrying `&mut State` from a
-non-event pass (e.g. a hover-delay timer observed only in `paint`) has no way to reach it, and so
-cannot hold app state at all for that decision. `frust-shadcn`'s hover tooltip/hover-card is built
-around this exact hole: the open/close decision lives entirely in a widget-local, non-reactive
-`Rc<Cell<_>>` latch instead of app state, specifically because a resting pointer sends no event to
-carry `&mut State` through and the framework offers no alternate route to queue one. `frust-beui`'s
-`todo_list`/`agent_activity` hit the rebuild-driven variant of the same hole: upstream's
-`collapseOnComplete` reports the auto-collapse through a callback the instant it fires; a rebuild
-dispatches no event either, so each port flips its own internal open flag silently instead of
-reporting it, and a host that must know passes the flag itself (`TodoListView::open`/
-`AgentActivityView::open`) rather than reading a callback.
+**Observed**: `frust::authoring` re-exports `mark_pending_result_flush`, so a plugin-tier widget can
+raise the flag from paint and receive a `Housekeeping` broadcast carrying `&mut State` on the next
+rebuild. Two plugin families built before that re-export do not use it. `frust-shadcn`'s hover
+tooltip and hover card decide open and close in a widget-local, non-reactive `Rc<Cell<_>>` latch
+driven from the paint clock, and their `on_open_change` is delivered on the first event pass after
+the transition, so an app mirroring the state sees a hover open late (after the next input) rather
+than when it shows. `frust-beui`'s `todo_list` and `agent_activity` flip their own open flag on the
+automatic `collapseOnComplete` collapse, which happens on a rebuild, and report nothing through
+`on_open_change`; a host that must know passes the flag itself (`TodoListView::open`/
+`AgentActivityView::open`).
 
-**Applies to**: any plugin-tier widget wanting to drive app state from a non-event pass — a
-paint-clock-driven delay (`frust_shadcn::tooltip`/`hover_card`) or a rebuild-driven state flip
-(`frust_beui::todo_list`, `frust_beui::agent_activity`) alike.
+**Applies to**: `frust_shadcn::tooltip`/`hover_card` (`on_open_change` without a controlled
+`open`), and `frust_beui::todo_list`/`agent_activity` (the automatic collapse).
 
-**Why accepted**: the workaround (a shared, non-reactive latch plus, for shadcn, a pod floated
-through the framework overlay portal in its input-transparent tooltip band; an owned, host-driven
-flag for beUI's two lists) fully covers each current caller's needs; widening the public seam is
-framework-level work with no caller it blocks today.
+**Why accepted**: each component's documented workaround (a controlled `open`, or a host-owned flag)
+covers its callers; moving them onto the re-exported flush is follow-up work.
 
-**Evidence**: `plugins/shadcn/src/components/tooltip.rs` module docs ("the framework exposes no way
-for a plugin-tier widget to queue a state-bearing callback onto the next frame");
-`crates/frust-widgets/src/authoring.rs` (`mark_pending_result_flush`'s shape, not the function
-itself, documented there); `crates/frust/src/lib.rs`'s `authoring` module (no
-`mark_pending_result_flush` re-export); `plugins/beui/src/agents/todo_list.rs` module docs ("The
-automatic collapse reports nothing").
+**Trigger for removal**: these components report the change through the pending-result flush.
+
+**Evidence**: `crates/frust/src/lib.rs`'s `authoring` module (`mark_pending_result_flush`
+re-export); `plugins/shadcn/src/components/tooltip.rs` module docs (`on_open_change` "best-effort
+and one pass late"); `plugins/beui/src/agents/todo_list.rs` module docs ("The automatic collapse
+reports nothing"); `plugins/beui/src/agents/agent_activity.rs` (`collapse_on_complete`).
 
 ---
 
@@ -9449,20 +9442,6 @@ viewport-top row, so the gap does not apply while it is stuck.
 **Trigger for removal**: a request carries a lifetime, or a handle is tied to its root.
 
 **Evidence**: `crates/frust-core/src/focus_handle.rs` (module and type docs).
-
----
-
-### `focus-and-long-press-drag-no-device-evidence` — programmatic focus and the long-press drag have no device evidence yet
-
-**Observed**: `FocusHandle`, `autofocus`, `keep_focus`, the focus notice and the long-press follow-ups with their scroll veto are covered by headless tests only. No recorded run on an Android phone, an iPhone or macOS exists for the soft keyboard coming up on a request, a press that keeps focus, or a drag after a fired long press inside a scroll view.
-
-**Applies to**: all hosts; the keyboard and the touch path are what a headless test cannot show.
-
-**Why accepted**: the device gate walks the playground's Forms page after this change lands; until it is recorded the behaviour is code and headless-test only.
-
-**Trigger for removal**: the device gate's results are recorded.
-
-**Evidence**: `crates/frust/tests/text_input_focus.rs` and the long-press tests in `crates/frust-widgets/src/gesture.rs`; no device run.
 
 ---
 
