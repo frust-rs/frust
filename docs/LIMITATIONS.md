@@ -1168,16 +1168,22 @@ localhost or through `adb` only.
 **Observed**: the protocol declares a `screenshot` method (`Capability::Screenshot`,
 result `{ png_base64 }`), but `DevtoolsBackend::screenshot`'s default — which every shell's
 backend implementation inherits — returns `BackendError::NotSupported`, which the wire
-reports as `RpcError::NOT_SUPPORTED`.
+reports as `RpcError::NOT_SUPPORTED`. `frust-mcp`'s `screenshot` tool tries this capability first,
+falls back to `adb screencap` for an Android session, and otherwise returns a clear in-band
+refusal, so today only Android sessions can be screenshotted through it: desktop and iOS Simulator
+sessions have no fallback.
 
-**Applies to**: every shell in v1; no backend overrides the default.
+**Applies to**: every shell in v1; no backend overrides the default. Through `frust-mcp`'s
+`screenshot` tool, desktop and iOS Simulator sessions.
 
 **Why accepted**: v1 scoped the wire shape for a future capability without shipping the
 capture path; the method and capability flag exist precisely so a client can detect support
-per-app rather than guessing, once a backend does implement it.
+per-app rather than guessing, once a backend does implement it. The MCP tool picks the capability
+up automatically once a backend implements it, with no MCP-side change needed.
 
 **Evidence**: `crates/frust-devtools/src/backend.rs`'s `DevtoolsBackend::screenshot` default;
-`crates/frust-devtools-protocol/src/method.rs`'s `screenshot` doc comment.
+`crates/frust-devtools-protocol/src/method.rs`'s `screenshot` doc comment;
+`crates/frust-mcp/src/tools/diagnosis.rs`'s `screenshot` decision chain.
 
 ---
 
@@ -1336,25 +1342,6 @@ listener succeeded, with no `avc: denied` for any socket/bind class; enabling ne
 the discovery line appear immediately. Surfacing path: `frust-devtools-protocol`'s
 `FAILURE_PREFIX`/`parse_failure_line`, `frust-shell-common::devtools::start`'s failure log, and
 `frust-tui`'s `DevtoolsState::start_error` (rendered on the Discovering screen).
-
----
-
-### `mcp-screenshot-desktop-unsupported-v1` — the `screenshot` MCP tool has no desktop or iOS Simulator path
-
-**Observed**: `frust-mcp`'s `screenshot` tool tries the app's own devtools `screenshot` capability
-first, falls back to `adb screencap` for an Android session, and otherwise returns a clear
-in-band refusal. No shell backend declares `Capability::Screenshot` yet (see
-`devtools-screenshot-not-supported-v1`), so today the devtools path never fires and desktop/iOS
-Simulator sessions have no fallback at all — only Android sessions can be screenshotted.
-
-**Applies to**: `frust-mcp`'s `screenshot` tool for desktop and iOS Simulator sessions.
-
-**Why accepted**: the root cause (`devtools-screenshot-not-supported-v1`) is out of scope for this
-crate; the tool is written to pick up the devtools capability automatically once a backend
-implements it, with no MCP-side change needed.
-
-**Evidence**: `crates/frust-mcp/src/tools/diagnosis.rs`'s `screenshot` decision chain; the shared
-root cause is `devtools-screenshot-not-supported-v1`.
 
 ---
 
@@ -2963,7 +2950,7 @@ the demo no longer aborted on text-field focus); the OnePlus 9 (Android 15) chro
 
 ---
 
-### `hover-window-leave-standing` — hover and press chrome outlive the state that caused them, until the next in-window `Move`
+### `hover-window-leave-standing` — hover and press chrome and the cursor shape outlive the state that caused them, until the next in-window `Move`
 
 **Observed**: four deliberate, test-pinned v1 gaps share one cause — nothing re-derives hover
 without a fresh uncaptured pointer `Move`, and the desktop shell delivers no window-leave event.
@@ -2974,10 +2961,13 @@ resting where it clicked shows no hover tint until it moves again; and a scroll 
 mutation happening under a stationary pointer leaves stale hover/pressed chrome in place rather
 than re-testing the pointer's position against whatever moved. All four resolve themselves on the
 next in-window pointer `Move`, which is what makes them a standing-until-next-move gap rather than
-a stuck one.
+a stuck one. The cursor shape has the same window: `RenderRoot::cursor()` re-resolves only on a
+pointer `Move` (captured included), so a widget torn down while its `EventCtx::set_cursor` request
+stands, or one the pointer scrolls or moves out from under while stationary, leaves the last shape in
+place rather than falling back to `CursorIcon::Default` until the next `Move`.
 
 **Applies to**: every desktop shell (`frust-shell-desktop`); any widget using
-`EventCtx::claim_hover`/`PaintCtx::is_hovered`. **Mobile is affected too, in one shape**: each
+`EventCtx::claim_hover`/`PaintCtx::is_hovered` or `EventCtx::set_cursor`. **Mobile is affected too, in one shape**: each
 contact carries its source (`PointerId`/`PointerSource`, read through `EventCtx::pointer_id`), but
 the hover pass does not consult it and both mobile shells map a touch drag to `PointerPhase::Move`,
 so the hover refusal is structural only for a **captured** pointer. A touch drag that captured nothing — a finger sliding
@@ -2989,33 +2979,16 @@ synthetic re-derivation pass, because the alternative (a per-frame position re-t
 input) would give hover its own polling loop the rest of the pipeline doesn't have. A window-leave
 event is a real, addressable gap (winit exposes `CursorLeft`) but is not wired to hover; the
 rest are accepted properties of the epoch model, not shell gaps. The touch residual is accepted
-because the tint is transient: the `Up` rule already bounds it to the length of the gesture.
+because the tint is transient: the `Up` rule already bounds it to the length of the gesture. The
+cursor residual is cosmetic (a stale shape, never a stuck-captured pointer); re-resolving it without
+a `Move` would mean tracking every requester's liveness independently of input.
 
 **Evidence**: `crates/frust-core/src/app/tests/hover.rs`'s hover pipeline tests (`a_captured_move_cannot_claim_hover`,
 `a_down_up_or_cancel_ends_the_hover`, `a_non_pointer_pass_leaves_a_live_hover_standing`);
 the hover pipeline (2026-08-17, commit `68ac7e93`) listed this among its known v1 gaps;
-`crates/frust-core/src/event/pointer.rs` (`PointerSource`/`PointerId`).
-
----
-
-### `cursor-stale-until-next-move` — a torn-down or outrun cursor request keeps its last shape until the next `Move`
-
-**Observed**: `RenderRoot::cursor()` only re-resolves on a pointer `Move` (captured included); a
-widget that is torn down while its request stands, or that the pointer scrolls/moves out from
-under while stationary, leaves the last-resolved shape in place rather than falling back to
-`CursorIcon::Default` immediately. The next pointer `Move` re-resolves it correctly — this is the
-cursor's own version of `hover-window-leave-standing`'s standing-until-next-move window, on the
-same root cause (nothing re-derives without a real `Move`).
-
-**Applies to**: every desktop shell; any widget using `EventCtx::set_cursor`.
-
-**Why accepted**: re-resolving without a pointer `Move` would mean tracking every requester's
-liveness independently of input, the same cost the hover model above declines to pay; the residual
-is cosmetic (a stale shape, never a stuck-captured pointer) and self-corrects on the next motion.
-
-**Evidence**: `crates/frust-core/src/app/session.rs`'s `RenderRoot::cursor()` doc comment ("Residual:
-a widget that is torn down … leaves the last shape in place until the next `Move`");
-the cursor API (merged 2026-08-17, `49bc7657`) listed this among its limitations.
+`crates/frust-core/src/event/pointer.rs` (`PointerSource`/`PointerId`);
+`crates/frust-core/src/app/session.rs`'s `RenderRoot::cursor()` doc comment ("Residual: a widget
+that is torn down … leaves the last shape in place until the next `Move`").
 
 ---
 
@@ -3841,6 +3814,17 @@ and a device reachable: a widget subtree is never perspective-transformed — th
 only a face it renders itself (a colour, a gradient, or a caller-owned texture), so every
 component's own text, avatars, and captions keep compositing flat under `Affine`, opt-in or not.
 
+Turning an opt-in on also changes what four surfaces are, each a consequence of that face boundary.
+`wheel_picker::gpu_drum` and `cylinder_carousel::gpu_cylinder` seat a plate behind every row or ball
+that upstream's CSS 3D scene never paints (a transparent drum or wall would project nothing), and
+the wheel's plate and its 2D label projection disagree by a few percent near the cutoff, where both
+are masked to near-zero alpha, because the plate is projected by the substrate's camera and the
+label is scaled by the component's `PERSPECTIVE` constant. `project_folder::gpu_fan` composites
+every sheet's plate into one target before painting captions over it, so a caption a nearer
+sheet's translucent fill would dim in the flat pile reads at full strength once the fan is
+projected. `wallet_card::gpu_fan` fans the account switcher's open-panel rows, since upstream has
+no card stack to fan.
+
 **Applies to**: `frust_beui::components::tilt_card`/`wheel_picker`/`cylinder_carousel`,
 `frust_beui::blocks::project_folder`/`wallet_card`, and their `gpu_face`/`gpu_drum`/`gpu_cylinder`/
 `gpu_fan` opt-ins.
@@ -3860,7 +3844,10 @@ path there.
 
 **Evidence**: `plugins/beui/src/components/tilt_card.rs`, `wheel_picker.rs`,
 `cylinder_carousel.rs`, `plugins/beui/src/blocks/project_folder.rs`, `wallet_card.rs` module docs'
-"Degradations"/"The true-3D ..." sections; `plugins/beui/src/gpu_fx/mod.rs` module docs ("What it
+"Degradations"/"The true-3D ..." sections (`wheel_picker.rs`: "The drum grows a surface it did not
+have", "The plate and its text disagree slightly at the horizon"; `cylinder_carousel.rs`: "The stage
+grows a wall it did not have"; `project_folder.rs`: "An overlapped caption stops being dimmed";
+`wallet_card.rs`: "A premise correction"); `plugins/beui/src/gpu_fx/mod.rs` module docs ("What it
 still cannot do"); `examples/beui-demo/README.md`'s
 "GPU Effects" section (T400 substrate coverage, Metal owed).
 
@@ -3956,41 +3943,6 @@ serialize concurrent `record` calls.
 compile. The render-thread refusal in (c) ends when the facade exposes the live device's limits to
 widgets; (b) ends with a per-surface `Binding` keyed by `ExternalFrame::drain_id`, or the first
 shell that keeps two engine-tier surfaces live.
-
----
-
-### `beui-gpu-fx-component-additions` — the true-3D opt-ins grow a surface, or a reading, upstream never had
-
-**Observed**: turning `gpu-effects` on changes what a component's surface *is*, per component.
-`wheel_picker::gpu_drum` and `cylinder_carousel::gpu_cylinder` seat a plate behind every row/ball
-that upstream's CSS 3D scene never paints at all — a deliberate departure, not a port, since a
-transparent drum or wall would project nothing — and the wheel's plate and its 2D label
-projection disagree by a few percent near the cutoff, because the plate is projected by the
-substrate's own camera while the label is scaled by the component's `PERSPECTIVE` constant (both
-are masked to near-zero alpha there, so the disagreement is not visible at the horizon itself).
-`project_folder::gpu_fan` composites every sheet's plate into one target before painting captions
-over it, so a caption a nearer sheet's translucent fill would dim in the flat 2D pile instead reads
-at full strength once the fan is projected. `wallet_card::gpu_fan` has no upstream card stack to
-fan at all — upstream's only run of stacked surfaces is the account switcher's own open panel — so
-what the 3D path fans is that panel's rows (see `wallet_card`'s own "A premise correction").
-
-**Applies to**: `wheel_picker::gpu_drum`, `cylinder_carousel::gpu_cylinder`,
-`project_folder::gpu_fan`, `wallet_card::gpu_fan`.
-
-**Why accepted**: each is a named, deliberate consequence of the one boundary every opt-in shares
-(`beui-3d-degradations` above) recorded at the point it was found, not an oversight — a plate is
-what makes a projected drum or wall visible at all; the caption-dimming loss and the card-stack
-substitution both follow directly from "a 3D face is a colour, a gradient, or a texture, never a
-widget subtree," stated once and true everywhere it applies.
-
-**Evidence**: `plugins/beui/src/components/wheel_picker.rs` ("The drum grows a surface it did not
-have", "The plate and its text disagree slightly at the horizon"); `plugins/beui/src/components/cylinder_carousel.rs`
-("The stage grows a wall it did not have"); `plugins/beui/src/blocks/project_folder.rs` ("An
-overlapped caption stops being dimmed"); `plugins/beui/src/blocks/wallet_card.rs` ("A premise
-correction"; "The 2D selected-row plate stands down while the fan is live").
-
-**Trigger for removal**: none planned — each is a direct consequence of the substrate-wide face
-boundary (`beui-3d-degradations` above), not an independent gap.
 
 ---
 
@@ -6272,30 +6224,20 @@ paying for them in every binary.
 
 ### `web-no-plugins-native-widgets-platform-views-v1` — no OS-capability plugin, native-widgets control, or platform view works on the browser tier in v1
 
-**Observed** (evidence: `plugins/clipboard/src/lib.rs`'s per-target
-`set_text`/`get_text` arms, whose total-cover
-`#[cfg(not(any(target_os = "android", target_os = "ios", target_os = "macos",
-target_os = "linux", target_os = "windows")))]` fallback — the one `wasm32`
-actually compiles under — returns
-`ClipboardError::NotAvailable(Unavailability::UnsupportedPlatform)` rather
-than doing anything; `plugins/native-widgets/src/lib.rs`'s
-`#[cfg(target_os = "android")]`/`#[cfg(target_os = "ios")]`-only modules,
-with no third arm for any other target; `crates/frust-shell-web/src/`
-naming no `platform_view` module at all, unlike every concrete shell in
-[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)): the OS-capability plugin
-tier (shared-preferences, secure-storage, camera, clipboard, haptics, iap,
-database, i18n), the native-widgets control plugin, and platform-view
-embedding are each mobile/desktop-only today. A browser app either gets a
-typed "unsupported" answer where a plugin bothers to report one (clipboard —
-see `web-clipboard-unavailable-v1` below), or simply cannot depend on the
-crate meaningfully at all (native-widgets has no non-mobile arm to compile).
-(2026-09-08)
+**Observed**: an index of the browser tier's plugin gaps. The shared-preferences, secure-storage,
+camera, haptics, iap, database and i18n plugins have no web backend and no entry of their own, and
+neither the native-widgets control plugin (its modules are Android- and iOS-only) nor platform-view
+embedding (`crates/frust-shell-web/src/` has no `platform_view` module, unlike every concrete shell
+in [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)) works there; a plugin answers a typed
+"unsupported" error where it reports one. The plugins with their own web entry are clipboard
+(`web-clipboard-unavailable-v1`), file-dialogs (`file-dialogs-web-unsupported`), video-player
+(`video-web-windows-linux-unavailable-v1`), device-info (`device-info-web-unsupported`),
+photo-library (`photo-library-macos-desktop-folder-only`) and the native-widgets toast
+(`native-toast-phones-only`). (2026-09-08)
 
 **Accepted because**: v1's browser tier scope is rendering, input, theme and
 resize (see [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)'s Web tier); a
-web backend for a specific plugin — clipboard's secure-context Clipboard
-API, a File-System-Access-backed storage plugin, a DOM-based control set
-standing in for native-widgets — is each its own future scope, not a
+web backend for a specific plugin is each its own future scope, not a
 same-shape port of the mobile/desktop implementation.
 
 **Trigger for removal**: tracked per plugin as each grows a real web
