@@ -599,19 +599,32 @@ impl ScatterChartWidget {
     }
 
     fn build(&self, view: &PointsView<'_>, key: BuildKey) -> Built {
-        let plot = key.plot;
         let (x_lo, x_hi) = key.x_domain;
         let (y_lo, y_hi) = key.y_domain;
         let default_radius = length(self.spec.radius);
+        let drawn = |point: &ScatterPoint| {
+            let in_range = point.x >= x_lo && point.x <= x_hi && point.y >= y_lo && point.y <= y_hi;
+            let radius = point.radius.map_or(default_radius, length);
+            (in_range && radius > 0.0).then_some(radius)
+        };
+        // The data area is the plot inset by the largest mark's reach, so a point on the range
+        // edge is drawn whole inside the clip; the grid still spans the full plot.
+        let reach = view
+            .iter()
+            .filter_map(|p| drawn(&p))
+            .fold(0.0_f64, f64::max);
+        let inset = match self.spec.shape {
+            ScatterShape::Circle => reach.ceil(),
+            // Snapping to whole pixels can move a rectangle's far edge up to a pixel outward.
+            ScatterShape::Square | ScatterShape::Cross => reach.ceil() + 1.0,
+        }
+        .min((key.plot.width().min(key.plot.height()) / 2.0).max(0.0));
+        let plot = key.plot.inset(-inset);
         let mut groups: Vec<(Color, BezPath)> = Vec::new();
         for point in view.iter() {
-            if point.x < x_lo || point.x > x_hi || point.y < y_lo || point.y > y_hi {
+            let Some(radius) = drawn(&point) else {
                 continue;
-            }
-            let radius = point.radius.map_or(default_radius, length);
-            if radius <= 0.0 {
-                continue;
-            }
+            };
             let fraction = f64::from(point.x - x_lo) / f64::from(x_hi - x_lo);
             let cx = plot.x0 + fraction * plot.width();
             let cy = y_for(point.y, key.y_domain, plot);

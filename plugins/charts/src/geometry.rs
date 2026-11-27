@@ -241,7 +241,7 @@ where
 }
 
 /// [`area_paths`] with each run's top edge a monotone smooth curve (see [`smooth_polyline`]).
-pub fn smooth_area_paths<S>(
+pub(crate) fn smooth_area_paths<S>(
     slots: S,
     capacity: usize,
     domain: (f32, f32),
@@ -332,7 +332,7 @@ pub fn timed_area_paths(
 
 /// [`timed_area_paths`] with each run's top edge a monotone smooth curve (see
 /// [`smooth_polyline`]).
-pub fn smooth_timed_area_paths(
+pub(crate) fn smooth_timed_area_paths(
     points: &[(f64, f32)],
     window: Option<f64>,
     gap_after: Option<f64>,

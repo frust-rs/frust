@@ -23,6 +23,9 @@
 //! label changes. [`YDomain::auto`] spans the data's minimum to maximum, and the polar helpers
 //! ([`arc_path`], [`sector_path`] and others) work in radians, 0 at 3 o'clock, clockwise.
 //!
+//! The geometry helpers the charts are built from (value-to-pixel mapping, line and area paths,
+//! snapping, grid rules) are public under [`geometry`], not at the crate root.
+//!
 //! ```
 //! use frust_charts::{Samples, Series, YDomain};
 //!
@@ -41,7 +44,7 @@ mod bar;
 mod candlestick;
 mod categories;
 mod gauge;
-mod geometry;
+pub mod geometry;
 mod heat;
 mod label;
 mod meter;
@@ -75,14 +78,19 @@ pub use candlestick::{
     Candle, CandleSlots, Candles, CandlestickView, CandlestickWidget, candlestick_chart,
 };
 pub use gauge::{GaugeCap, GaugeView, GaugeWidget, NeedleStyle, gauge};
-pub use geometry::*;
-pub use heat::*;
-pub use meter::*;
+pub use heat::{HeatCellsView, HeatCellsWidget, heat_cells};
+pub use meter::{
+    MeterStripView, MeterStripWidget, MeterValue, MeterView, MeterWidget, Segment, meter,
+    meter_segments, meter_strip,
+};
 pub use pie::{PieChartView, PieChartWidget, pie_chart};
 pub use radar::{RadarChartView, RadarChartWidget, RadarShape, RadarStyle, radar_chart};
 pub use scatter::{
     Points, PointsView, ScatterChartView, ScatterChartWidget, ScatterPoint, ScatterShape,
     scatter_chart,
 };
-pub use sparkline::*;
-pub use time_series::*;
+pub use sparkline::{SparkStyle, SparklineView, SparklineWidget, sparkline};
+pub use time_series::{
+    Corner, PlotStyle, SeriesFill, SeriesStyle, TimeSeriesView, TimeSeriesWidget, auto_domain,
+    time_series,
+};

@@ -194,10 +194,11 @@ fn circles_sit_at_their_mapped_positions() {
     assert_eq!(marks.len(), 1);
     let boxes = &marks[0].1;
     assert_eq!(boxes.len(), 3);
-    // x = value / 100 * 200; y runs bottom to top over 100.
+    // The data area is the 200 x 100 plot inset by the radius (4): x runs 4..196, y runs
+    // bottom to top over 4..96.
     assert_box(boxes[0], [96.0, 46.0, 104.0, 54.0]);
-    assert_box(boxes[1], [46.0, 21.0, 54.0, 29.0]);
-    assert_box(boxes[2], [196.0, 96.0, 204.0, 104.0]);
+    assert_box(boxes[1], [48.0, 23.0, 56.0, 31.0]);
+    assert_box(boxes[2], [192.0, 92.0, 200.0, 100.0]);
 }
 
 #[test]
@@ -266,14 +267,15 @@ fn points_outside_a_domain_are_skipped_not_clamped() {
 #[test]
 fn auto_domains_span_the_data() {
     let _g = hold();
-    // Data 0..100 on both axes resolves to 0..100, so the extremes reach the plot's corners.
+    // Data 0..100 on both axes resolves to 0..100, so the extremes reach the corners of the
+    // data area, which is the plot inset by the radius.
     let p = points_of(8, &[(0.0, 0.0), (100.0, 100.0)]);
     let mut rig = rig(|| scatter_chart(p.clone()).radius(2.0));
     let rec = rig.paint(200.0, 100.0);
     let boxes = &rec.marks()[0].1;
     assert_eq!(boxes.len(), 2);
-    assert_box(boxes[0], [-2.0, 98.0, 2.0, 102.0]);
-    assert_box(boxes[1], [198.0, -2.0, 202.0, 2.0]);
+    assert_box(boxes[0], [0.0, 96.0, 4.0, 100.0]);
+    assert_box(boxes[1], [196.0, 0.0, 200.0, 4.0]);
 }
 
 #[test]
@@ -364,7 +366,7 @@ fn replacing_then_painting_updates_without_a_rebuild() {
     let second = rig.paint(100.0, 100.0);
     let boxes = &second.marks()[0].1;
     assert_eq!(boxes.len(), 2);
-    assert_box(boxes[0], [8.0, 88.0, 12.0, 92.0]);
+    assert_box(boxes[0], [9.6, 86.4, 13.6, 90.4]);
 
     p.push(50.0, 50.0);
     assert_eq!(rig.paint(100.0, 100.0).mark_count(), 3);
@@ -397,7 +399,7 @@ fn input_is_ignored() {
 #[test]
 fn every_draw_is_clipped_to_the_widget_and_marks_stay_inside_or_clip() {
     let _g = hold();
-    // Points on the edges overhang by their radius, inside the one clip.
+    // Points on the edges are drawn whole, inside the one clip.
     let p = points_of(8, &[(0.0, 0.0), (100.0, 100.0), (50.0, 50.0)]);
     let mut rig = rig(|| {
         fixed(
@@ -415,6 +417,40 @@ fn every_draw_is_clipped_to_the_widget_and_marks_stay_inside_or_clip() {
             rect.x0 >= -EPS && rect.y0 >= -EPS && rect.x1 <= 200.0 + EPS && rect.y1 <= 100.0 + EPS,
             "{rect:?}"
         );
+    }
+}
+
+#[test]
+fn points_on_the_range_edge_are_drawn_whole_and_outside_ones_are_clipped() {
+    let _g = hold();
+    let edge = [
+        (0.0, 0.0),
+        (100.0, 0.0),
+        (0.0, 100.0),
+        (100.0, 100.0),
+        (50.0, 50.0),
+    ];
+    for shape in [
+        ScatterShape::Circle,
+        ScatterShape::Square,
+        ScatterShape::Cross,
+    ] {
+        let mut data = edge.to_vec();
+        data.push((100.5, 50.0));
+        data.push((50.0, -0.5));
+        let p = points_of(16, &data);
+        let mut rig = rig(|| fixed(scatter_chart(p.clone()).shape(shape).radius(5.0)));
+        let rec = rig.paint(200.0, 100.0);
+        let boxes: Vec<Rect> = rec.marks().into_iter().flat_map(|(_, b)| b).collect();
+        // Out-of-range points are skipped; a cross is two bars per point.
+        let per_point = if shape == ScatterShape::Cross { 2 } else { 1 };
+        assert_eq!(boxes.len(), edge.len() * per_point, "{shape:?}");
+        for b in boxes {
+            assert!(
+                b.x0 >= -EPS && b.y0 >= -EPS && b.x1 <= 200.0 + EPS && b.y1 <= 100.0 + EPS,
+                "{shape:?} mark {b:?} reaches outside the 200 x 100 widget"
+            );
+        }
     }
 }
 
