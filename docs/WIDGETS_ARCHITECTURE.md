@@ -455,8 +455,8 @@ max_offset]`, stops any fling or settle, and (like `animate_to` and `scroll_to_i
 remaining `Move`s and `Up` fall through to the child. `animate_to` runs a `TweenSimulation`
 on the release fling's ballistic pump; a user `Down` or wheel interrupts it, a later command replaces it, `reduce_motion`
 collapses it to a jump, and a fling, a settle and a tween are never live together. A moving tween owes each frame's Housekeeping
-flush, so `on_scroll` arrives with no input event (flings and settles stay one event late). `scroll_to_item` is list-only. A desktop shell ignores the pending-result-flush flag, so a command from a handler that
-requests no redraw waits for the next frame another input wakes (as `PanZoomController`); the rest is in the controller's rustdoc.
+flush, so `on_scroll` arrives with no input event (flings and settles stay one event late). `scroll_to_item` is list-only. A write into an empty queue requests a repaint, so a command
+wakes an idle desktop loop (`PanZoomController` does not, and waits for the next frame); the rest is in the controller's rustdoc.
 
 **End commands.** `jump_to_end`/`animate_to_end` resolve the end against the maximum when applied, not when recorded, and supersede
 as a jump and an animate; a keyed variable-extent list follows the measured end (stuck under `stick_to_end`, else re-pinned for a

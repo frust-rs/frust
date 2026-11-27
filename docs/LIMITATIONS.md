@@ -6224,8 +6224,10 @@ paying for them in every binary.
 
 ### `web-no-plugins-native-widgets-platform-views-v1` — no OS-capability plugin, native-widgets control, or platform view works on the browser tier in v1
 
-**Observed**: an index of the browser tier's plugin gaps. The shared-preferences, secure-storage,
-camera, haptics, iap, database and i18n plugins have no web backend and no entry of their own, and
+**Observed**: a partial index of the browser tier's plugin gaps; a plugin it does not name is not
+thereby supported, so read that plugin's README. The shared-preferences, secure-storage,
+camera, haptics, iap, database and i18n plugins have no web backend (no `wasm32` implementation in their sources) and
+no entry of their own, and
 neither the native-widgets control plugin (its modules are Android- and iOS-only) nor platform-view
 embedding (`crates/frust-shell-web/src/` has no `platform_view` module, unlike every concrete shell
 in [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md)) works there; a plugin answers a typed
@@ -8089,9 +8091,9 @@ the pin needs the fling simulation to be re-bounded as the end moves.
 
 ### `glyph-chat-hidden-character-filter-incomplete` — the chat hidden-character filters miss some invisible characters
 
-**Observed**: agent-supplied text has control characters (other than newline and tab), bidi embeddings, overrides and isolates, `U+200B`, `U+200E`, `U+200F` and `U+FEFF` replaced with `?`. Approval-card and other body text passes `U+200C`, `U+200D` and a CR followed by LF; link labels and shown URLs also replace `U+200C`, `U+200D` and every CR with `?`. Other invisible characters pass through both filters: `U+2060` to `U+2064`, `U+00AD`, `U+061C`, `U+180E`, the variation selectors and the tag characters, so two link labels can still differ by an invisible character. A URL written inside an approval detail goes through the body filter, not the URL one.
+**Observed**: two filters replace hidden characters in agent-supplied text with `?`: control characters (other than newline and tab), bidi embeddings, overrides and isolates, `U+200B`, `U+200E`, `U+200F` and `U+FEFF`. The body filter covers approval-card text only (title, detail, option labels) and passes `U+200C`, `U+200D` and a CR followed by LF; the URL filter covers markdown link labels and shown URLs and also replaces `U+200C`, `U+200D` and every CR. Markdown and message body prose goes through neither filter. Other invisible characters pass through both filters: `U+2060` to `U+2064`, `U+00AD`, `U+061C`, `U+180E`, the variation selectors and the tag characters, so two link labels can still differ by an invisible character. A URL written inside an approval detail goes through the body filter, not the URL one.
 
-**Applies to**: `approval_card`, and links in `markdown` and `message_row`.
+**Applies to**: `approval_card`, links in `markdown` and `message_row`, and (unfiltered) their body prose.
 
 **Workaround**: strip other invisible characters from untrusted text before building the view.
 

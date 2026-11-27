@@ -67,8 +67,8 @@
 //! generic `FabWidget`, which sizes its icon against its own internal
 //! [`crate::FabSize`] tier rather than the box it is laid out at —
 //! [`mod@super::toolbar`]'s own fab-seam-degrade note documents the resulting
-//! off-center icon at a non-native container size, the exact failure mode a
-//! trigger that shrinks from 80dp down to a 56dp-native tier would hit.
+//! fixed-size icon at a non-native container size, which a trigger that
+//! shrinks from 80dp down to a 56dp-native tier would show.
 //! Composing `fab()` would also mean routing pointer input through a second,
 //! independent `Widget::event` (its own press/haptics/on_press machinery)
 //! underneath this module's own hand-rolled trigger/item/scrim arbitration —
