@@ -229,13 +229,13 @@ use a `File` path there.
 
 Container and codec support is the **platform player's**, and it is not
 symmetric. This crate forwards the source and reports what the player says, so
-treat a `VideoError::Decoder` as a per-platform answer:
+treat a `VideoError::UnsupportedSource` as a per-platform answer:
 
 | Source | Android (ExoPlayer) | iOS / macOS (AVFoundation) |
 |---|---|---|
 | MP4 / H.264+AAC | yes | yes — the intersection to ship |
 | HLS (`.m3u8`) | yes, via the `media3-exoplayer-hls` artifact this module already declares | yes, natively |
-| Matroska / WebM (VP8/VP9) | yes | **no** — reports `VideoError::Decoder` (`video-mkv-webm-apple-unsupported` in `docs/LIMITATIONS.md`) |
+| Matroska / WebM (VP8/VP9) | yes | **no** — reports `VideoError::UnsupportedSource` (`video-mkv-webm-apple-unsupported` in `docs/LIMITATIONS.md`) |
 | anything else | whatever that player's extractor set covers | whatever AVFoundation covers |
 
 On a target with no backend at all — desktop Windows and Linux, and wasm —
