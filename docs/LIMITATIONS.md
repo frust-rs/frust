@@ -1536,7 +1536,7 @@ The first patch of a hot run is slower than steady state: a few hundred ms more 
 against ~1.45 s on Windows. `R` / 'Restart session', MCP's `restart_app` and DAP's
 `frustRestart` are full rebuild + relaunch with State reset (Flutter's hot restart, never
 in-process); a device restart reruns build → install → launch (see
-`tui-device-stop-app-termination-residual` and `mcp-stop-app-termination-in-flight`). `restart_app`
+`tui-device-stop-app-termination-residual`). `restart_app`
 and `frustRestart` bypass the TUI's `restart_session_at`, so their replacement session starts
 unwatched. In the TUI, every hot-capable launch runs hot; `r` hot-patches now (the manual apply),
 and a run with 'Auto-apply on save' off is a supported hot run with no watcher. Turning Watch on
@@ -1823,8 +1823,7 @@ on `SessionView::dropped` (reported through the MCP session summary) — it is n
 store as a line. `supervise::session_feeds::SessionSubscribers::deliver_lines` (what feeds a DAP
 client's `SessionEventFeed`) replays only lines actually present in that log store, so a client
 attached over `frust-dap` has no way to learn the supervisor itself silently dropped `n` lines
-upstream — only the *feed's own* overflow (a separate, already-marked case; see
-`dap-log-subscription-may-drop-lines` above) is reported in band.
+upstream — only the *feed's own* overflow (a separate, already-marked case) is reported in band.
 
 **Applies to**: any `frust-dap` session whose host is `frust-tui` and whose supervisor-level output
 channel overflows; unreachable in ordinary interactive use (the same rarity as the feed's own
@@ -8386,7 +8385,7 @@ the pin needs the fling simulation to be re-bounded as the end moves.
 
 **Trigger for removal**: none for the access case; the asset case is handled for apps that call `changes_since`.
 
-**Evidence**: (2026-11-09, revised 2026-11-11) `plugins/photo-library/src/lib.rs` (`thumbnail`, `cached_thumbnail`, `changes_since`); `plugins/photo-library/src/changes.rs` (`changes_since_with` and its tests); `plugins/photo-library/src/thumb_cache.rs`. The eviction is established from code and headless tests. On a Pixel 5 (Android 14) an edited photo's thumbnail showed the new picture after the delta reported it; the iOS refresh has not been run on a device (`photo-library-change-feed-not-device-tested`).
+**Evidence**: (2026-11-09, revised 2026-11-11) `plugins/photo-library/src/lib.rs` (`thumbnail`, `cached_thumbnail`, `changes_since`); `plugins/photo-library/src/changes.rs` (`changes_since_with` and its tests); `plugins/photo-library/src/thumb_cache.rs`. The eviction is established from code and headless tests. On a Pixel 5 (Android 14) an edited photo's thumbnail showed the new picture after the delta reported it; the iOS refresh has not been run on a device.
 
 ---
 
@@ -8402,7 +8401,7 @@ the pin needs the fling simulation to be re-bounded as the end moves.
 
 **Trigger for removal**: none; a floor raised to iOS 16 and API 30 would remove two of the cases.
 
-**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_changes.rs`, `plugins/photo-library/src/android_changes.rs` and `plugins/photo-library/src/changes.rs`. Code and headless tests. Device (2026-11-11): on a Pixel 5 (Android 14) a forged token answered a full rescan and a fresh token was stored. The iOS expired or forged token, iOS 15 and API 29 have not run on a device (`photo-library-change-feed-not-device-tested`).
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_changes.rs`, `plugins/photo-library/src/android_changes.rs` and `plugins/photo-library/src/changes.rs`. Code and headless tests. Device (2026-11-11): on a Pixel 5 (Android 14) a forged token answered a full rescan and a fresh token was stored. The iOS expired or forged token, iOS 15 and API 29 have not run on a device.
 
 ---
 
@@ -8434,7 +8433,7 @@ the pin needs the fling simulation to be re-bounded as the end moves.
 
 **Trigger for removal**: PhotoKit offering a stable secondary sort or keyset fetch.
 
-**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_library.rs` (*Cursor paging*, `Snapshot`); `plugins/photo-library/src/library.rs` (`SnapshotStore`, `SNAPSHOT_SESSIONS`). Code and headless tests (the store). Device (2026-11-11): an iPhone 13 mini (iOS 27.2) paged 6,155 assets in pages of 60, equal to the library's Recents count, with Load more disabled at the end. A session with an item added part-way has not run on iOS (`photo-library-change-feed-not-device-tested`).
+**Evidence**: (2026-11-11) `plugins/photo-library/src/apple_library.rs` (*Cursor paging*, `Snapshot`); `plugins/photo-library/src/library.rs` (`SnapshotStore`, `SNAPSHOT_SESSIONS`). Code and headless tests (the store). Device (2026-11-11): an iPhone 13 mini (iOS 27.2) paged 6,155 assets in pages of 60, equal to the library's Recents count, with Load more disabled at the end. A session with an item added part-way has not run on iOS.
 
 ---
 

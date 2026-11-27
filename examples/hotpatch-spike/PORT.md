@@ -902,8 +902,7 @@ precondition failed.
    - The token must come from the OS CSPRNG. Today that holds only on unix, and only when
      `/dev/urandom` is readable (`crates/frust-devtools/src/token.rs:22-26`, `:92-105`). Otherwise
      `generate` silently takes the non-CSPRNG fallback (`token.rs:51`, `:27-35`), and **Windows
-     always takes it** (`token.rs:23-26`; `docs/LIMITATIONS.md:1318`,
-     `devtools-token-entropy-windows-fallback`). That fallback is acceptable for reading a widget
+     always takes it** (`token.rs:23-26`). That fallback is acceptable for reading a widget
      tree but not for loading code. So `token::generate` reports its source, and `HotPatch` is
      advertised only for an OS-sourced token (card H1-07). **Windows is excluded from
      `Capability::HotPatch`** until a `BCryptGenRandom` source lands (card H3-02), which is also
@@ -1127,7 +1126,7 @@ Notation:
 |---|---|---|---|---|---|
 | H3-00 | Pin `pdb` 0.8.0 (dx's version) | `Cargo.toml`, `crates/frust-drive/Cargo.toml`, `Cargo.lock` | simple | H1-00 | `cargo build --workspace --locked`; `cargo tree -d` |
 | H3-01 | PE/PDB: symbol cache, jump table, `__imp_` data stubs, Windows x86_64/aarch64 thunks, `lld-link` thin args (`/DLL`, `/EXPORT:` anchor, `/HIGHENTROPYVA:NO`), `/WHOLEARCHIVE` fat link | `crates/frust-drive/src/hotpatch/{pe.rs,thin_link.rs,fat_link.rs}` | complex | H3-00, H1-08 | `cargo test -p frust-drive hotpatch::pe` (on Windows CI) |
-| H3-02 | **Windows enablement preconditions.** A PDB type-record L3 gate (same entries and accepted-set rules as 2.c, read from the PDB's TPI stream) and an OS-CSPRNG devtools token on Windows (`BCryptGenRandom`, through a pinned crate or a sanctioned-unsafe entry per `docs/CODE_STANDARDS.md:14-23`, closing `devtools-token-entropy-windows-fallback`). Until both land, Windows hot sessions are apply-disabled and the app never advertises `HotPatch` | `crates/frust-drive/src/hotpatch/pdb_layout.rs`, `crates/frust-devtools/src/token.rs` | complex | H3-01, H1-05, H1-07 | `cargo test -p frust-drive hotpatch::pdb_layout` (on Windows CI; the H1-05 fixture set, two-patch case included); `cargo test -p frust-devtools token` on Windows (source reported as OS) |
+| H3-02 | **Windows enablement preconditions.** A PDB type-record L3 gate (same entries and accepted-set rules as 2.c, read from the PDB's TPI stream) and an OS-CSPRNG devtools token on Windows (`BCryptGenRandom`, through a pinned crate or a sanctioned-unsafe entry per `docs/CODE_STANDARDS.md:14-23`). Until both land, Windows hot sessions are apply-disabled and the app never advertises `HotPatch` | `crates/frust-drive/src/hotpatch/pdb_layout.rs`, `crates/frust-devtools/src/token.rs` | complex | H3-01, H1-05, H1-07 | `cargo test -p frust-drive hotpatch::pdb_layout` (on Windows CI; the H1-05 fixture set, two-patch case included); `cargo test -p frust-devtools token` on Windows (source reported as OS) |
 | H3-03 | Windows gate on the Dell: rows A, B, D2, D4, G with the PDB gate active; Windows joins `Capability::HotPatch` only if it passes | `examples/hotpatch-spike/RESULTS.md` | medium | H3-02 | matrix on Windows; pass bar as H1-11 |
 
 #### Phase H4: iOS simulator (probe first)

@@ -61,8 +61,7 @@
 //! to react to. Closing that requires shell-owned system-theme detection
 //! (e.g. polling the registry key winit itself would consult), which stays
 //! deferred — the 2026-08-19 Windows runtime gate's manual probe did not
-//! reproduce the revert; see `docs/LIMITATIONS.md`'s
-//! `desktop-windows-titlebar-theme-revert` entry.
+//! reproduce the revert.
 
 use frust_theme::Brightness;
 use winit::window::{Theme, Window};

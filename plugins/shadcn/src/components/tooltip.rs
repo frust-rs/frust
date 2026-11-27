@@ -53,9 +53,13 @@
 //!    the pointer came to rest", and a resting pointer sends nothing. The
 //!    only per-frame pass a widget gets is `paint`, which carries a clock
 //!    ([`PaintCtx::frame_time`](frust::authoring::PaintCtx::frame_time)) but
-//!    no application state, and the framework exposes no way for a
-//!    plugin-tier widget to queue a state-bearing callback onto the next
-//!    frame. So the open decision has to live in a widget, not in app state.
+//!    no application state. A plugin can raise
+//!    [`mark_pending_result_flush`](frust::authoring::mark_pending_result_flush)
+//!    from paint to get a `Housekeeping` broadcast carrying `&mut State` on
+//!    the next rebuild, but this component does not use it: the open decision
+//!    lives in a widget, not in app state, and `on_open_change` is delivered
+//!    on the first event pass after the transition
+//!    (`no-plugin-reachable-deferred-state-callback`).
 //! 2. **The trigger and the panel are two separately-mounted views.** An
 //!    [`OverlaySlot`](frust::authoring::OverlaySlot) anchors to a rect *an
 //!    app states explicitly* (`OverlayAnchor::Rect`), not to some other

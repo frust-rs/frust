@@ -40,7 +40,7 @@ docs.flutter.dev page. Frust paths are in this repository.
 | No partial repaint; each rendered frame re-rasterizes the surface | none (stated in the row) |
 | Residual render-model gaps (a parent on a dirty path still lays out; a non-default `BlendMode` on a layer is refused) | none (stated in the row) |
 | Retained pages are a budgeted, refusable cache; the ledger is process-global; an eviction between publish and the next scene can refuse a frame | `retained-pages-budget-refusals`, `retained-ledger-single-renderer`, `retained-stale-ledger-eviction-thrash` |
-| `BackdropBlur` has five limits; `PushClipPath` re-rasterizes its mask per push | `backdrop-blur-bound`, `path-clip-mask-rerasterized` |
+| `BackdropBlur` has five limits; `PushClipPath` re-rasterizes its mask per push | `backdrop-blur-bound` |
 | No `NestedScrollView`, no reverse growth, no snapping or stretching headers | `sliver-v1-scope` |
 | `ScrollView` and `ListView` are not built on the sliver viewport | none (stated in the row) |
 | Overlays are off by default on Android although the host passes its device leg | `android-overlays-opt-in-pending-device-leg` |
