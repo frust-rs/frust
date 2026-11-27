@@ -264,6 +264,21 @@ impl DiskCache {
         Ok(())
     }
 
+    /// Remove the entry for `url` under `scope`, if any. Returns whether one
+    /// was present. Crate-private: the loader evicts a body that will not decode.
+    pub(crate) fn remove_scoped(&self, url: &str, scope: Option<&[u8; 32]>) -> bool {
+        let key = hex_key(url, scope);
+        let mut st = self.lock();
+        let removed = st.entries.remove(&key);
+        if let Some(e) = &removed {
+            st.total = st.total.saturating_sub(e.size);
+            st.dirty = true;
+        }
+        let _ = fs::remove_file(data_path(&self.dir, &key));
+        self.flush_if_due(&mut st);
+        removed.is_some()
+    }
+
     /// Remove every cached file.
     pub fn clear(&self) -> io::Result<()> {
         let mut st = self.lock();
@@ -293,5 +308,42 @@ impl Drop for DiskCache {
         if st.dirty {
             let _ = self.flush(&mut st);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("frust-ni-rm-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn remove_scoped_drops_only_its_own_scope() {
+        let dir = temp("scope");
+        let cache = DiskCache::open(dir.clone(), 1 << 20).unwrap();
+        let scope = [7u8; 32];
+        cache.put_scoped("https://x/a", None, b"plain").unwrap();
+        cache
+            .put_scoped("https://x/a", Some(&scope), b"scoped")
+            .unwrap();
+
+        assert!(cache.remove_scoped("https://x/a", Some(&scope)));
+        assert!(cache.get_scoped("https://x/a", Some(&scope)).is_none());
+        assert_eq!(cache.get("https://x/a").unwrap(), b"plain");
+        let stats = cache.stats();
+        assert_eq!((stats.entries, stats.total_bytes), (1, 5));
+
+        assert!(
+            !cache.remove_scoped("https://x/a", Some(&scope)),
+            "already gone"
+        );
+        assert!(cache.remove_scoped("https://x/a", None));
+        assert_eq!(cache.stats().entries, 0);
+        drop(cache);
+        let _ = fs::remove_dir_all(dir);
     }
 }

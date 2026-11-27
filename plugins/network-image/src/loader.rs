@@ -103,7 +103,16 @@ type LoadResult = Result<ImageSource, LoadError>;
 type KeyedFuture = Shared<LoadFuture<LoadResult>>;
 /// Single-flight identity of a raw fetch: URL plus header scope.
 type RawKey = (String, Scope);
-type RawFuture = Shared<LoadFuture<Result<Arc<Vec<u8>>, FetchError>>>;
+type RawFuture = Shared<LoadFuture<Result<RawBody, FetchError>>>;
+
+/// Raw response bytes plus where they came from, so a body that fails to
+/// decode can be told apart: a disk one is evicted and fetched again, a
+/// network one is not retried.
+#[derive(Clone)]
+struct RawBody {
+    bytes: Arc<Vec<u8>>,
+    from_disk: bool,
+}
 
 /// One keyed load, alive while any [`Consumer`] of it is.
 struct InflightEntry {
@@ -132,8 +141,15 @@ struct Inner {
     /// one URL fetch once. Transient: removed when the last user releases,
     /// whether it finished or was dropped.
     raw: Mutex<HashMap<RawKey, RawEntry>>,
-    /// Opened once, lazily; `None` inside means memory-only.
+    /// Set once the cache directory is known, lazily; `None` inside means
+    /// memory-only (disabled, or a real open failure). Left unset while the
+    /// directory is not resolved yet, so a later load tries again.
     disk: OnceLock<Option<Arc<DiskCache>>>,
+    /// Serialises opens so two first loads never open the directory twice.
+    disk_open: Mutex<()>,
+    /// Test seam standing in for a late-arriving `frust_paths::cache_dir()`.
+    #[cfg(test)]
+    late_dir: Mutex<Option<PathBuf>>,
     /// Source of [`InflightEntry::id`] / [`RawEntry::id`].
     next_id: AtomicU64,
 }
@@ -230,31 +246,94 @@ async fn disk_handle(inner: Arc<Inner>) -> Option<Arc<DiskCache>> {
         return open.clone();
     }
     spawn_blocking(move || {
-        inner
-            .disk
-            .get_or_init(|| open_disk(&inner.config.disk))
-            .clone()
+        let _opening = lock(&inner.disk_open);
+        if let Some(open) = inner.disk.get() {
+            return open.clone();
+        }
+        match open_disk(&inner) {
+            // Not cached: the directory may arrive later (Android).
+            Opened::Unresolved => None,
+            Opened::Settled(cache) => inner.disk.get_or_init(|| cache).clone(),
+        }
     })
     .await
     .unwrap_or(None)
 }
 
-fn open_disk(cfg: &DiskCacheConfig) -> Option<Arc<DiskCache>> {
-    let dir = cfg
-        .dir_override
-        .clone()
-        .or_else(|| frust_paths::cache_dir().map(|d| d.join("frust-network-image")));
-    let Some(dir) = dir else {
-        log::info!("network-image: no cache directory available; memory-only");
-        return None;
+/// Outcome of one attempt to open the disk cache.
+enum Opened {
+    /// No cache directory is resolved yet; try again on a later miss.
+    Unresolved,
+    /// Final for this process: the cache, or `None` after a real open failure.
+    Settled(Option<Arc<DiskCache>>),
+}
+
+fn open_disk(inner: &Inner) -> Opened {
+    let cfg = &inner.config.disk;
+    #[cfg(test)]
+    let resolved = lock(&inner.late_dir).clone();
+    #[cfg(not(test))]
+    let resolved = frust_paths::cache_dir().map(|d| d.join("frust-network-image"));
+    let Some(dir) = cfg.dir_override.clone().or(resolved) else {
+        log::debug!("network-image: no cache directory available yet; memory-only for now");
+        return Opened::Unresolved;
     };
-    match DiskCache::open(dir, cfg.cap_bytes) {
+    Opened::Settled(match DiskCache::open(dir, cfg.cap_bytes) {
         Ok(cache) => Some(Arc::new(cache)),
         Err(e) => {
             warn_once(&format!("disk cache unavailable ({e}); memory-only"));
             None
         }
+    })
+}
+
+/// Fetch `url` from the network and write it through to `disk`.
+async fn fetch_network(
+    inner: &Inner,
+    url: String,
+    headers: Vec<(String, String)>,
+    scope: Scope,
+    disk: Option<Arc<DiskCache>>,
+) -> Result<Arc<Vec<u8>>, FetchError> {
+    let fetched = inner
+        .fetcher
+        .fetch(FetchRequest {
+            url: url.clone(),
+            headers,
+            max_bytes: inner.config.max_fetch_bytes,
+        })
+        .await?;
+    let bytes = Arc::new(fetched.bytes);
+    if let Some(disk) = disk {
+        let b = bytes.clone();
+        match spawn_blocking(move || disk.put_scoped(&url, scope.as_ref(), &b)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn_once(&format!("disk write failed ({e})")),
+            Err(e) => warn_once(&format!("disk write task failed ({e})")),
+        }
     }
+    Ok(bytes)
+}
+
+/// Drop the disk entry whose body failed to decode, then fetch and decode once
+/// more. A failure of that second body is returned as is, never retried.
+async fn retry_after_corrupt_disk(
+    inner: &Arc<Inner>,
+    url: String,
+    headers: Vec<(String, String)>,
+    scope: Scope,
+    target: Option<TargetPx>,
+    limits: DecodeLimits,
+) -> LoadResult {
+    let disk = disk_handle(inner.clone()).await;
+    if let Some(d) = disk.clone() {
+        let u = url.clone();
+        let _ = spawn_blocking(move || d.remove_scoped(&u, scope.as_ref())).await;
+    }
+    let bytes = fetch_network(inner, url, headers, scope, disk).await?;
+    decode_shared(bytes, target, limits)
+        .await
+        .map_err(LoadError::from)
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -277,6 +356,9 @@ impl ImageLoader {
                 inflight: Mutex::new(HashMap::new()),
                 raw: Mutex::new(HashMap::new()),
                 disk: OnceLock::new(),
+                disk_open: Mutex::new(()),
+                #[cfg(test)]
+                late_dir: Mutex::new(None),
                 next_id: AtomicU64::new(0),
             }),
         }
@@ -318,14 +400,26 @@ impl ImageLoader {
         let task_key = key.clone();
         let target = req.target;
         let limits = self.inner.config.decode_limits;
+        let url = req.url.clone();
+        let headers = req.headers.clone();
+        let scope = key.scope;
         // Dropping this body before `raw` resolves drops `release` with it.
         let fut: LoadFuture<LoadResult> = Box::pin(async move {
             let fetched = raw.await;
             drop(release);
             let result = match fetched {
-                Ok(bytes) => decode_shared(bytes, target, limits)
-                    .await
-                    .map_err(LoadError::from),
+                Ok(body) => {
+                    let first = decode_shared(body.bytes, target, limits).await;
+                    match first {
+                        // A corrupt disk entry: evict it and fetch once more.
+                        // The refetched body is final, whatever its source.
+                        Err(_) if body.from_disk => {
+                            retry_after_corrupt_disk(&inner, url, headers, scope, target, limits)
+                                .await
+                        }
+                        other => other.map_err(LoadError::from),
+                    }
+                }
                 Err(e) => Err(LoadError::Fetch(e)),
             };
             if let Ok(source) = &result {
@@ -380,7 +474,7 @@ impl ImageLoader {
         let headers = req.headers.clone();
         // Disk hop and fetch both run lazily on first poll, so a disk hit
         // never reaches the fetcher.
-        let boxed: LoadFuture<Result<Arc<Vec<u8>>, FetchError>> = Box::pin(async move {
+        let boxed: LoadFuture<Result<RawBody, FetchError>> = Box::pin(async move {
             let disk = disk_handle(inner.clone()).await;
             if let Some(disk) = &disk {
                 let (d, u) = (disk.clone(), url.clone());
@@ -388,27 +482,17 @@ impl ImageLoader {
                     spawn_blocking(move || d.get_scoped(&u, scope.as_ref())).await
                 {
                     log::debug!("network-image: disk hit");
-                    return Ok(Arc::new(bytes));
+                    return Ok(RawBody {
+                        bytes: Arc::new(bytes),
+                        from_disk: true,
+                    });
                 }
             }
-            let fetched = inner
-                .fetcher
-                .fetch(FetchRequest {
-                    url: url.clone(),
-                    headers,
-                    max_bytes: inner.config.max_fetch_bytes,
-                })
-                .await?;
-            let bytes = Arc::new(fetched.bytes);
-            if let Some(disk) = disk {
-                let b = bytes.clone();
-                match spawn_blocking(move || disk.put_scoped(&url, scope.as_ref(), &b)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => warn_once(&format!("disk write failed ({e})")),
-                    Err(e) => warn_once(&format!("disk write task failed ({e})")),
-                }
-            }
-            Ok(bytes)
+            let bytes = fetch_network(&inner, url, headers, scope, disk).await?;
+            Ok(RawBody {
+                bytes,
+                from_disk: false,
+            })
         });
         let fut = boxed.shared();
         // A replaced failed entry keeps serving the users that already hold it;
@@ -507,5 +591,171 @@ impl ImageLoader {
     #[doc(hidden)]
     pub fn raw_entry_count(&self) -> usize {
         lock(&self.inner.raw).len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+    use std::sync::atomic::AtomicUsize;
+
+    use frust_reactive::ReactiveRuntime;
+
+    use super::*;
+    use crate::fetch::{FetchFuture, FetchedBytes};
+
+    fn png() -> Vec<u8> {
+        let img = image::RgbImage::from_fn(8, 8, |x, y| image::Rgb([x as u8, y as u8, 90]));
+        let mut out = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// Counts fetches and answers every one with `body`.
+    struct Fetcher {
+        calls: AtomicUsize,
+        body: Vec<u8>,
+    }
+
+    impl Fetcher {
+        fn new(body: Vec<u8>) -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                body,
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ImageFetcher for Fetcher {
+        fn fetch(&self, _request: FetchRequest) -> FetchFuture {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let bytes = self.body.clone();
+            Box::pin(async move {
+                Ok(FetchedBytes {
+                    bytes,
+                    content_type: None,
+                })
+            })
+        }
+    }
+
+    fn run<F: Future>(fut: F) -> F::Output {
+        ReactiveRuntime::init(Arc::new(|| {}));
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
+    fn temp(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("frust-ni-loader-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn req(url: &str, side: u32) -> LoadRequest {
+        LoadRequest {
+            url: url.to_string(),
+            headers: Vec::new(),
+            target: Some(TargetPx {
+                width: side,
+                height: side,
+            }),
+        }
+    }
+
+    fn config(dir: Option<PathBuf>) -> LoaderConfig {
+        LoaderConfig {
+            disk: DiskCacheConfig {
+                dir_override: dir,
+                ..DiskCacheConfig::default()
+            },
+            ..LoaderConfig::default()
+        }
+    }
+
+    #[test]
+    fn disk_cache_opens_once_the_directory_resolves() {
+        let dir = temp("late");
+        let fetcher = Fetcher::new(png());
+        let loader = ImageLoader::new(fetcher.clone(), config(None));
+        run(async {
+            // No directory yet: memory-only, and that is not remembered.
+            loader.load(req("https://x/a", 4)).await.unwrap();
+            assert!(loader.disk_stats().is_none());
+
+            *lock(&loader.inner.late_dir) = Some(dir.clone());
+            loader.load(req("https://x/b", 4)).await.unwrap();
+            assert_eq!(loader.disk_stats().unwrap().entries, 1);
+
+            // A memory miss for the same URL is now served from disk.
+            loader.load(req("https://x/b", 6)).await.unwrap();
+            assert_eq!(fetcher.calls(), 2);
+        });
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_corrupt_disk_entry_is_evicted_and_fetched_once() {
+        let dir = temp("corrupt-disk");
+        DiskCache::open(dir.clone(), 1 << 20)
+            .unwrap()
+            .put("https://x/c", b"not an image")
+            .unwrap();
+        let fetcher = Fetcher::new(png());
+        let loader = ImageLoader::new(fetcher.clone(), config(Some(dir.clone())));
+        run(async {
+            loader.load(req("https://x/c", 4)).await.unwrap();
+            assert_eq!(fetcher.calls(), 1);
+            let disk = loader.inner.disk.get().unwrap().clone().unwrap();
+            assert_eq!(disk.get("https://x/c").unwrap(), png(), "entry replaced");
+
+            // The replaced entry now serves a memory miss without a fetch.
+            loader.load(req("https://x/c", 6)).await.unwrap();
+            assert_eq!(fetcher.calls(), 1);
+        });
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_corrupt_network_body_is_not_retried() {
+        let dir = temp("corrupt-net");
+        let fetcher = Fetcher::new(b"not an image".to_vec());
+        let loader = ImageLoader::new(fetcher.clone(), config(Some(dir.clone())));
+        run(async {
+            let err = loader.load(req("https://x/d", 4)).await.err().unwrap();
+            assert!(matches!(err, LoadError::Decode(_)));
+            assert_eq!(fetcher.calls(), 1);
+        });
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_corrupt_refetch_after_a_corrupt_disk_entry_fails_once() {
+        let dir = temp("corrupt-both");
+        DiskCache::open(dir.clone(), 1 << 20)
+            .unwrap()
+            .put("https://x/e", b"bad disk")
+            .unwrap();
+        let fetcher = Fetcher::new(b"bad network".to_vec());
+        let loader = ImageLoader::new(fetcher.clone(), config(Some(dir.clone())));
+        run(async {
+            let err = loader.load(req("https://x/e", 4)).await.err().unwrap();
+            assert!(matches!(err, LoadError::Decode(_)));
+            assert_eq!(fetcher.calls(), 1);
+        });
+        drop(loader);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
