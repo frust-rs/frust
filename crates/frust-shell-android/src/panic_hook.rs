@@ -11,6 +11,11 @@
 //! is the payload when it is a `&str` or `String`, else a fixed placeholder, and it is cut at
 //! [`MAX_PAYLOAD_BYTES`]. The formatting is pure and host-tested; [`install_once`] is called
 //! from `JNI_OnLoad`, right after the logger comes up.
+//!
+//! The hook logs the panic message as well as the location, in every build mode, so a panic
+//! message that embeds user data reaches the device log; apps should not put secrets in panic
+//! messages. The hook is installed once when the shell's logger is initialised; an app that
+//! later calls `std::panic::set_hook` replaces it unless it chains with `take_hook`.
 
 use std::any::Any;
 use std::panic::{self, PanicHookInfo};
@@ -148,7 +153,7 @@ mod tests {
     static SINK_HITS: AtomicUsize = AtomicUsize::new(0);
     static PREVIOUS_HITS: AtomicUsize = AtomicUsize::new(0);
     const MARKER: &str = "panic_hook-test-marker";
-    /// Serialises the one test that swaps the process-wide hook.
+    /// Serialises every test that swaps or triggers the process-wide hook.
     static HOOK_LOCK: Mutex<()> = Mutex::new(());
 
     fn sink(line: &str) {
@@ -157,26 +162,39 @@ mod tests {
         }
     }
 
+    /// Restores the original hook on drop, so a failed assertion cannot leak the fake one.
+    type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
+
+    struct RestoreHook(Option<Hook>);
+
+    impl Drop for RestoreHook {
+        fn drop(&mut self) {
+            if let Some(hook) = self.0.take() {
+                panic::set_hook(hook);
+            }
+        }
+    }
+
     #[test]
     fn installing_twice_chains_exactly_once() {
         let _lock = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let original = panic::take_hook();
+        SINK_HITS.store(0, Ordering::SeqCst);
+        PREVIOUS_HITS.store(0, Ordering::SeqCst);
+        let _restore = RestoreHook(Some(panic::take_hook()));
+        // The fake previous hook counts a marker panic whatever its payload type.
         panic::set_hook(Box::new(|info| {
-            if info
-                .payload()
-                .downcast_ref::<&str>()
-                .is_some_and(|m| m.contains(MARKER))
-            {
+            if payload_text(info.payload()).contains(MARKER) {
                 PREVIOUS_HITS.fetch_add(1, Ordering::SeqCst);
             }
         }));
         let guard = Once::new();
         install_into(&guard, sink);
         install_into(&guard, sink);
-        let _ = panic::catch_unwind(|| panic!("{}", MARKER));
-        let _ = panic::catch_unwind(|| std::panic::panic_any(MARKER));
-        panic::set_hook(original);
+        let _ = panic::catch_unwind(|| panic!("{}", MARKER)); // String payload
+        let _ = panic::catch_unwind(|| std::panic::panic_any(MARKER)); // &str payload
+        // One sink line per panic: the second install added no second layer.
         assert_eq!(SINK_HITS.load(Ordering::SeqCst), 2);
-        assert_eq!(PREVIOUS_HITS.load(Ordering::SeqCst), 1);
+        // The previous hook ran once per panic: chained, and not twice per panic.
+        assert_eq!(PREVIOUS_HITS.load(Ordering::SeqCst), 2);
     }
 }
