@@ -42,6 +42,10 @@ use crate::geometry::{grid_rule_ys, snap, y_for};
 use crate::{Tone, YDomain};
 
 const DEFAULT_RADIUS: f32 = 3.0;
+/// The most the data area is inset on one side, as a fraction of that axis's plot length. Two
+/// sides take at most half an axis, so the area always keeps at least half of each axis; a
+/// mark larger than the bounded inset is clipped by the widget at the range edge.
+const MAX_INSET_FRACTION: f64 = 0.25;
 const DEFAULT_HEIGHT: f64 = 160.0;
 const UNBOUNDED_WIDTH: f64 = 160.0;
 const FALLBACK_GRID: Color = Color::from_rgb8(0xd0, 0xd4, 0xda);
@@ -441,7 +445,8 @@ impl<S: 'static> ScatterChartView<S> {
     /// The radius, in logical pixels, of a point that sets none (default 3). A square's side
     /// is twice the radius and a cross's arms reach the radius from the centre. The data area
     /// is inset by the larger of this and every radius a stored point sets, so an edge point is
-    /// drawn whole.
+    /// drawn whole; the inset is capped at a quarter of each axis, so a larger mark is clipped
+    /// at the range edge.
     pub fn radius(mut self, radius: f32) -> Self {
         self.spec.radius = radius;
         self
@@ -633,9 +638,10 @@ impl ScatterChartWidget {
             ScatterShape::Circle => reach.ceil(),
             // Snapping to whole pixels can move a rectangle's far edge up to a pixel outward.
             ScatterShape::Square | ScatterShape::Cross => reach.ceil() + 1.0,
-        }
-        .min((plot.width().min(plot.height()) / 2.0).max(0.0));
-        plot.inset(-inset)
+        };
+        let dx = inset.min(plot.width() * MAX_INSET_FRACTION).max(0.0);
+        let dy = inset.min(plot.height() * MAX_INSET_FRACTION).max(0.0);
+        Rect::new(plot.x0 + dx, plot.y0 + dy, plot.x1 - dx, plot.y1 - dy)
     }
 
     fn build(&self, view: &PointsView<'_>, key: BuildKey) -> Built {
