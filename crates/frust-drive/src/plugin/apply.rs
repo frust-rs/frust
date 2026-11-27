@@ -2114,6 +2114,15 @@ pub(super) fn libcxx_shared_property_set(src: &str) -> bool {
     libcxx_shared_assignment(src).is_some_and(|(_, value)| value.eq_ignore_ascii_case("true"))
 }
 
+/// Whether the project's `android/gradle.properties` sets
+/// [`LIBCXX_SHARED_PROPERTY`], for a build that stages native libraries
+/// outside the `cargoNdkBuild` task (the hot-patch fat build). A project
+/// without the file, or one that cannot be read, does not set it.
+pub(crate) fn libcxx_shared_requested(project_root: &Path) -> bool {
+    std::fs::read_to_string(project_root.join(GRADLE_PROPERTIES_REL))
+        .is_ok_and(|properties| libcxx_shared_property_set(&properties))
+}
+
 /// Whether the project packages `libc++_shared.so`: its build script reads
 /// the property and its `gradle.properties` sets it. Both files are required.
 /// A project without an `android/` directory has nothing to package, so the
@@ -7195,6 +7204,8 @@ mod tests {
             "{properties}"
         );
         assert!(!libcxx_shared_present(&root).unwrap());
+        assert!(!libcxx_shared_requested(&root));
+        assert!(!libcxx_shared_requested(&root.join("no-such-project")));
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -7241,6 +7252,7 @@ mod tests {
         );
         assert_eq!(after.matches("linkLibcxxShared").count(), 1, "{after}");
         assert!(libcxx_shared_present(&root).unwrap());
+        assert!(libcxx_shared_requested(&root));
 
         let tree = snapshot_tree(&root);
         let again = add_plugin(&root, "onnx", &[]).unwrap();

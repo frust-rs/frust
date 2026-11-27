@@ -1189,6 +1189,9 @@ pub fn fingerprint_dir(target_dir: &Path, triple: Option<&str>, profile: &str) -
 /// hyphens normalised to underscores) and returns the removed paths. A
 /// missing fingerprint directory (a clean target) busts nothing.
 ///
+/// The per-unit layout of newer cargo is busted the same way
+/// ([`bust_unit_fingerprints`]), found beside `fingerprint_dir`.
+///
 /// This relies on cargo's fingerprint layout, which is not a stable
 /// interface; it stops working if cargo moves to content-based
 /// fingerprints.
@@ -1211,8 +1214,8 @@ pub fn bust_fingerprints(
         }
     }
     let entries = match std::fs::read_dir(fingerprint_dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Ok(entries) => Some(entries),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
         Err(err) => {
             return Err(HotpatchError::io(
                 format!("listing `{}`", fingerprint_dir.display()),
@@ -1221,7 +1224,7 @@ pub fn bust_fingerprints(
         }
     };
     let mut removed = Vec::new();
-    for entry in entries {
+    for entry in entries.into_iter().flatten() {
         let path = entry
             .map_err(|err| {
                 HotpatchError::io(format!("listing `{}`", fingerprint_dir.display()), err)
@@ -1240,8 +1243,59 @@ pub fn bust_fingerprints(
             removed.push(path);
         }
     }
+    if let Some(profile_dir) = fingerprint_dir.parent() {
+        bust_unit_fingerprints(&profile_dir.join("build"), &bust, &mut removed)?;
+    }
     removed.sort();
     Ok(removed)
+}
+
+/// The same bust for cargo's per-unit layout (cargo 1.100 writes
+/// `<profile dir>/build/<package>/<hash>/fingerprint` where older cargo
+/// wrote `<profile dir>/.fingerprint/<package>-<hash>`): removes the
+/// `fingerprint` directory of every unit of a package named in `bust`
+/// (normalised names), leaving the unit's outputs in place. A missing
+/// `build_dir` busts nothing.
+fn bust_unit_fingerprints(
+    build_dir: &Path,
+    bust: &[String],
+    removed: &mut Vec<PathBuf>,
+) -> Result<(), HotpatchError> {
+    let list = |dir: &Path| -> Result<Vec<PathBuf>, HotpatchError> {
+        match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<Result<_, _>>()
+                .map_err(|err| HotpatchError::io(format!("listing `{}`", dir.display()), err)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(err) => Err(HotpatchError::io(
+                format!("listing `{}`", dir.display()),
+                err,
+            )),
+        }
+    };
+    for package in list(build_dir)? {
+        let named = package
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| bust.contains(&name.replace('-', "_")));
+        if !named || !package.is_dir() {
+            continue;
+        }
+        for unit in list(&package)? {
+            let fingerprint = unit.join("fingerprint");
+            if fingerprint.is_dir() {
+                std::fs::remove_dir_all(&fingerprint).map_err(|err| {
+                    HotpatchError::io(
+                        format!("busting fingerprint `{}`", fingerprint.display()),
+                        err,
+                    )
+                })?;
+                removed.push(fingerprint);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2166,6 +2220,47 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// cargo 1.100 keeps a unit's fingerprint under
+    /// `build/<package>/<hash>/fingerprint`, with no `.fingerprint`
+    /// directory at all; the bust removes that directory and nothing else.
+    #[test]
+    fn the_per_unit_layout_is_busted_beside_a_missing_fingerprint_dir() {
+        let root = temp_dir("bust-units");
+        let scope = root.join("scope");
+        let build = root.join("build");
+        for unit in [
+            "my-app/1111",
+            "my-app/2222",
+            "core-ui/3333",
+            "captured/4444",
+            "serde/5555",
+        ] {
+            fs::create_dir_all(build.join(unit).join("fingerprint")).unwrap();
+            fs::create_dir_all(build.join(unit).join("out")).unwrap();
+        }
+        fs::create_dir_all(&scope).unwrap();
+        fs::write(scope.join("captured.lib.json"), "{}").unwrap();
+
+        let deps = strings(&["core_ui", "captured"]);
+        let removed =
+            bust_fingerprints(&root.join(".fingerprint"), &scope, "my_app", &deps).unwrap();
+        let names: Vec<PathBuf> = removed
+            .iter()
+            .map(|p| p.strip_prefix(&build).unwrap().to_path_buf())
+            .collect();
+        assert_eq!(
+            names,
+            ["core-ui/3333", "my-app/1111", "my-app/2222"]
+                .map(|unit| Path::new(unit).join("fingerprint"))
+        );
+        for unit in ["my-app/1111", "core-ui/3333"] {
+            assert!(build.join(unit).join("out").is_dir(), "outputs stay");
+        }
+        assert!(build.join("captured/4444/fingerprint").is_dir());
+        assert!(build.join("serde/5555/fingerprint").is_dir());
+        let _ = fs::remove_dir_all(&root);
     }
 
     fn non_members() -> NonMembers {
