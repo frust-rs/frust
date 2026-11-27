@@ -472,7 +472,8 @@ and Profile. `crates/frust-drive/src/plugin/apply.rs`'s `apply_ios_entitlement`.
 ### `plugin-theme-parent-built-in-only` — only a built-in plugin can set the app's Android theme parent
 
 **Observed**: `Contribution::AndroidThemeParent` (the `FrustAppTheme` parent that
-`frust plugin add native-widgets` writes) takes a `&'static str` parent, so only an entry of the
+`frust plugin add native-widgets` writes) takes a `&'static str` parent, unlike the plugin model's
+other string fields, which are `Cow<'static, str>` a manifest can fill, so only an entry of the
 built-in registry can carry it. The `[package.metadata.frust.plugin]` schema has no key for it, and
 an unknown key skips the whole plugin with a warning. A manifest-declared plugin whose Android views
 need a Material theme cannot ask for one.
@@ -2932,7 +2933,7 @@ and warns when fewer than 24 are free.
 
 **Evidence**: `scripts/ci/tls-key-count.sh`'s header; `examples/native-widgets-demo/src/pages/common.rs`'s
 `local_sig!` (the demo's page signals share one type-keyed map, now `frust::thread_slot!`'s, after which
-the demo no longer aborted on text-field focus); the OnePlus 9 (Android 15) chrome-additions row and the `Android (pthread keys)` row (2026-11-22) of `examples/native-widgets-demo/README.md` (every number above); `crates/frust/src/thread_slot.rs`; `crates/frust-shell-android/src/tls_keys.rs`.
+the demo no longer aborted on text-field focus); the OnePlus 9 (Android 15) chrome-additions row and the `Android (pthread keys)` row (2026-11-22) of `examples/native-widgets-demo/README.md` (every number above); `crates/frust/src/thread_slot.rs`; `crates/frust-shell-android/src/tls_keys.rs`; `crates/frust/tests/thread_local_budget.rs` and its per-crate lists (every `thread_local!` static listed, each list held to an Android-linked budget of one).
 
 ---
 
@@ -4363,7 +4364,7 @@ docs; `docs/WIDGETS_ARCHITECTURE.md` *Slivers and the viewport*.
 
 ---
 
-### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default although the host passes its device leg
+### `android-overlays-opt-in-pending-device-leg` — Android overlays are off by default although the host passed its Pixel 5 and OnePlus 9 device legs
 
 **Observed**: the Android overlay host (frust paint above a native view on an opaque surface) runs
 only when `FRUST_OVERLAYS` is set (runtime env, compile-time `--define`, or the
@@ -8960,9 +8961,9 @@ viewport-top row, so the gap does not apply while it is stuck.
 
 ---
 
-### `onnx-runtime-build-time-fetch` — `frust-onnx` downloads ONNX Runtime at build time on desktop and Android, and fails to link offline
+### `onnx-runtime-build-time-fetch` — `frust-onnx` downloads ONNX Runtime at build time on desktop, Android and iOS, and fails to link offline
 
-**Observed**: the desktop and Android builds of `frust-onnx` fetch a prebuilt ONNX Runtime archive from the `ort` distribution CDN while building (about 10.7 MB on Linux), and cache it under the user cache directory. `cargo --offline`, `ORT_SKIP_DOWNLOAD` and `ORT_OFFLINE` skip the download and the cache lookup together, so the link fails even when the archive is already cached.
+**Observed**: the desktop, Android, iOS device and arm64 iOS Simulator builds of `frust-onnx` fetch a prebuilt ONNX Runtime archive from the `ort` distribution CDN while building (about 10.7 MB on Linux), and cache it under the user cache directory. `cargo --offline`, `ORT_SKIP_DOWNLOAD` and `ORT_OFFLINE` skip the download and the cache lookup together, so the link fails even when the archive is already cached.
 
 **Applies to**: any build of an app that depends on `frust-onnx` on a host that has never fetched the archive, including a clean CI runner and an air-gapped build machine.
 
