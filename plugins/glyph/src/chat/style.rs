@@ -226,22 +226,51 @@ pub(crate) fn mix(base: Color, over: Color, t: f32) -> Color {
     ])
 }
 
-/// Whether `c` is hidden or reorders text: a control character other than
-/// newline and tab, a bidi embedding, override or isolate, or a zero-width
-/// character.
+/// Whether `c` is hidden or reorders body text: a control character other
+/// than newline and tab, a bidi embedding, override or isolate, or a
+/// zero-width character. The zero-width joiner and non-joiner are not hidden:
+/// emoji sequences and some scripts need them. A CR is judged here alone; the
+/// CR of a CRLF pair is kept by [`display_text`], which sees the next character.
 pub(crate) fn is_hidden_char(c: char) -> bool {
     (c.is_control() && c != '\n' && c != '\t')
         || matches!(
             c,
-            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}'..='\u{200F}' | '\u{FEFF}'
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200B}' | '\u{200E}'..='\u{200F}' | '\u{FEFF}'
         )
 }
 
-/// Untrusted `text` as displayed: every [`is_hidden_char`] becomes a visible
-/// `?`, so agent-supplied text cannot hide or reorder what the user reads.
+/// Whether `c` is hidden in a URL or a link's visible label: every
+/// [`is_hidden_char`] plus the zero-width non-joiner and joiner (U+200C,
+/// U+200D), which a URL never needs and which would let two different links
+/// read the same.
+pub(crate) fn is_hidden_url_char(c: char) -> bool {
+    is_hidden_char(c) || matches!(c, '\u{200C}' | '\u{200D}')
+}
+
+/// Untrusted body `text` as displayed: every [`is_hidden_char`] becomes a
+/// visible `?`, so agent-supplied text cannot hide or reorder what the user
+/// reads. A CR immediately followed by LF (a CRLF line ending) passes through
+/// unchanged; a lone CR is still replaced. Used for prose and code: approval
+/// titles, details and option labels. Never for a URL or a link label; those
+/// use [`display_url_text`].
 pub(crate) fn display_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        let crlf = c == '\r' && chars.peek() == Some(&'\n');
+        out.push(if is_hidden_char(c) && !crlf { '?' } else { c });
+    }
+    out
+}
+
+/// An untrusted URL or link label as displayed: every [`is_hidden_url_char`]
+/// becomes `?`, the zero-width joiner and non-joiner included, and every CR
+/// too (no CRLF exemption). Used for a markdown link's visible label and the
+/// URL shown after an untappable link, so a link cannot read the same as a
+/// different one.
+pub(crate) fn display_url_text(text: &str) -> String {
     text.chars()
-        .map(|c| if is_hidden_char(c) { '?' } else { c })
+        .map(|c| if is_hidden_url_char(c) { '?' } else { c })
         .collect()
 }
 
@@ -323,6 +352,49 @@ mod tests {
     fn contrast(a: Color, b: Color) -> f64 {
         let (la, lb) = (luminance(a), luminance(b));
         (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    #[test]
+    fn display_text_keeps_emoji_joiners_and_zwnj() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        assert_eq!(display_text(family), family);
+        let persian = "\u{0645}\u{06CC}\u{200C}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}";
+        assert_eq!(display_text(persian), persian);
+    }
+
+    #[test]
+    fn display_text_keeps_crlf_and_still_marks_a_lone_cr() {
+        assert_eq!(display_text("a\r\nb"), "a\r\nb");
+        assert_eq!(display_text("a\rb"), "a?b");
+        assert_eq!(display_text("a\r"), "a?");
+        assert_eq!(display_text("a\r\rb"), "a??b");
+    }
+
+    #[test]
+    fn display_text_still_hides_bidi_and_zero_width_characters() {
+        assert_eq!(display_text("a\u{202E}b"), "a?b");
+        assert_eq!(
+            display_text("a\u{200B}b\u{200E}c\u{200F}d\u{FEFF}e"),
+            "a?b?c?d?e"
+        );
+        assert_eq!(display_text("a\u{2066}b\u{2069}c"), "a?b?c");
+    }
+
+    #[test]
+    fn display_url_text_marks_joiners_and_every_cr() {
+        assert_eq!(display_url_text("exa\u{200D}mple"), "exa?mple");
+        assert_eq!(display_url_text("exa\u{200C}mple"), "exa?mple");
+        assert_ne!(display_url_text("docs\u{200D}"), display_url_text("docs"));
+        assert_eq!(display_url_text("a\r\nb"), "a?\nb");
+        assert_eq!(display_url_text("a\rb"), "a?b");
+        assert_eq!(display_url_text("a\tb\nc"), "a\tb\nc");
+    }
+
+    #[test]
+    fn both_strengths_mark_bidi_and_other_zero_width_characters() {
+        let raw = "a\u{202E}b\u{2066}c\u{200B}d\u{200E}e\u{200F}f\u{FEFF}g";
+        assert_eq!(display_text(raw), "a?b?c?d?e?f?g");
+        assert_eq!(display_url_text(raw), "a?b?c?d?e?f?g");
     }
 
     #[test]

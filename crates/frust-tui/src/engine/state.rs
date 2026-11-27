@@ -73,6 +73,32 @@ pub struct SearchState {
     pub filter: Option<String>,
 }
 
+/// A requested embedded-MCP-server stop that has not yet been confirmed by the
+/// server's own stopped report (see [`AppState::mcp_stopping`]).
+///
+/// The marker relies on that report always arriving, and it does: it is only
+/// ever set for the generation of the handle installed on the model, which
+/// only [`super::Engine::start_mcp`] installs, and that same call spawns the
+/// watcher task that awaits the server task's `JoinHandle` and sends
+/// `McpStopped` with *that* generation whether the server returned `Ok`,
+/// returned an error, or panicked (a `JoinError`). The stop effect is always
+/// applied by the runner right after the toggle, and the cancellation it fires
+/// starts the server's graceful shutdown, so the server task does resolve.
+/// The one way the send can fail is the engine's receiver being gone — the
+/// event loop has exited (or the runtime is shutting down and the watcher is
+/// dropped with it) — and then there is no model left to clear. The report
+/// can be *late* (graceful shutdown waits for in-flight requests) but never
+/// missing, so no timeout recovers the marker: a toggle meanwhile only flips
+/// [`Self::start_wanted`], which [`AppState::mcp_shown_status`] shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McpStopping {
+    /// The generation of the server being stopped.
+    pub generation: u64,
+    /// Whether the user toggled the server back on meanwhile; the stopped
+    /// report then emits the start.
+    pub start_wanted: bool,
+}
+
 /// The whole application model.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -260,6 +286,14 @@ pub struct AppState {
     /// start looking like a silent no-op. Cleared when the next start is
     /// requested.
     pub mcp_error: Option<String>,
+    /// The embedded MCP server whose stop has been requested but whose
+    /// listener is not yet known to be closed: set when the stop effect is
+    /// emitted, cleared when that server's own `McpStopped` report arrives.
+    /// While it is set a toggle-on does not start a server (the fixed port
+    /// may still be held); it records the wish in
+    /// [`McpStopping::start_wanted`] and the report emits the start. Why the
+    /// report is guaranteed to arrive is on [`McpStopping`].
+    pub mcp_stopping: Option<McpStopping>,
     /// The embedded DAP server, while one is running (`None` = stopped) —
     /// [`Self::mcp`]'s exact counterpart, with the same live-resource
     /// ownership rule: [`super::Engine::start_dap`]/`stop_dap` own its
@@ -380,6 +414,7 @@ impl AppState {
             mcp: None,
             mcp_panel_open: false,
             mcp_error: None,
+            mcp_stopping: None,
             dap: None,
             dap_error: None,
             dap_settings: DapSettings::default(),
@@ -428,6 +463,18 @@ impl AppState {
         match &self.mcp {
             Some(handle) => handle.status(),
             None => McpStatus::Stopped,
+        }
+    }
+
+    /// The server state every surface shows: [`Self::mcp_status`], except
+    /// that a start queued behind a stop still in flight reads as
+    /// [`McpStatus::Starting`]. The user has asked for a server and one is on
+    /// its way, so showing it as stopped would invite the press that cancels
+    /// it. The sidebar row and the MCP panel both read this, so they agree.
+    pub fn mcp_shown_status(&self) -> McpStatus {
+        match self.mcp_stopping {
+            Some(stopping) if stopping.start_wanted => McpStatus::Starting,
+            _ => self.mcp_status(),
         }
     }
 
@@ -736,6 +783,7 @@ impl Default for AppState {
             mcp: None,
             mcp_panel_open: false,
             mcp_error: None,
+            mcp_stopping: None,
             dap: None,
             dap_error: None,
             dap_settings: DapSettings::default(),

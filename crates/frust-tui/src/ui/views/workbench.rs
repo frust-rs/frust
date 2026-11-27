@@ -391,7 +391,8 @@ fn render_sidebar(
 /// `(0)` beside a listening server would read as a problem rather than as an
 /// idle server waiting for an agent.
 fn mcp_line(state: &AppState, theme: &Theme) -> Line<'static> {
-    let (text, color) = mcp_state_token(&state.mcp_status(), state.mcp_error.is_some(), theme);
+    let (text, color) =
+        mcp_state_token(&state.mcp_shown_status(), state.mcp_error.is_some(), theme);
     Line::from(vec![
         Span::styled("  MCP ", Style::default().fg(theme.muted())),
         Span::styled(text, Style::default().fg(color)),
@@ -763,6 +764,52 @@ mod tests {
             ),
             ":4848 (2)"
         );
+    }
+
+    /// While a stop is still closing the listener, the row reads `off` — unless
+    /// the user has already asked for the server back, when it reads the
+    /// starting state the same press would show on a stopped server. A second
+    /// press cancels the queued start, and the row says so.
+    #[test]
+    fn the_mcp_row_shows_a_start_queued_behind_a_stop_as_starting() {
+        use crate::engine::{McpStopping, update};
+
+        let theme = Theme::frust_dark();
+        let row = |state: &AppState| -> (String, Color) {
+            let line = mcp_line(state, &theme);
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect();
+            (text, line.spans[1].style.fg.expect("the token is colored"))
+        };
+        // The runner's `stop_mcp` has taken the handle, so nothing is installed.
+        let mut state = AppState {
+            mcp_stopping: Some(McpStopping {
+                generation: 0,
+                start_wanted: false,
+            }),
+            ..AppState::default()
+        };
+        assert_eq!(row(&state), ("  MCP off · M".to_string(), theme.muted()));
+
+        update(&mut state, Message::ToggleMcpServer);
+        assert_eq!(
+            row(&state),
+            ("  MCP start… · M".to_string(), theme.warn()),
+            "a queued start reads as starting, not off"
+        );
+        // The MCP panel is rendered from the same read, so it agrees.
+        assert_eq!(state.mcp_shown_status(), McpStatus::Starting);
+
+        update(&mut state, Message::ToggleMcpServer);
+        assert_eq!(
+            row(&state),
+            ("  MCP off · M".to_string(), theme.muted()),
+            "the second press cancelled the queued start"
+        );
+        assert_eq!(state.mcp_shown_status(), McpStatus::Stopped);
     }
 
     /// Every state's row still fits the *default* sidebar (26 columns, less

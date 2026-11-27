@@ -219,7 +219,7 @@ fn render_modal(
             views::mcp::render(
                 frame,
                 area,
-                &state.mcp_status(),
+                &state.mcp_shown_status(),
                 // One snapshot per frame: the registry is live, so every row
                 // in this panel must come from the same read.
                 &state.mcp_clients(),

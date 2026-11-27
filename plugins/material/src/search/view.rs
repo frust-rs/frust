@@ -39,13 +39,10 @@
 //! painted — *over* it, each centred in its own [`super::ACTION_SLOT`] (48dp)
 //! touch target, and the field's own left text inset clears the back slot.
 //!
-//! The back affordance fires [`SearchView::on_back`] **directly**, the same
-//! shape [`crate::dialog`]'s header close affordance takes: the host's staged
-//! dismiss seam (the back-press generation cell) is installed by
-//! [`crate::overlay::show_overlay_modal`] and is not reachable from panel
-//! content, so a header dismiss pops immediately while the system-back, Escape
-//! and scrim paths still ramp out. [`show_search_view`] wires `on_back` to
-//! `controller.pop()` for you; a docked view wires it to the same flag its
+//! The back affordance fires [`SearchView::on_back`] **directly**.
+//! [`show_search_view`] wires it to a [`ModalDismiss`] handle installed on the
+//! full-screen host, so the header back ramps out exactly like the system-back,
+//! Escape and scrim paths; a docked view wires it to the same flag its
 //! `on_dismiss` clears.
 //!
 //! # Query round trip
@@ -76,7 +73,7 @@ use super::{
 use crate::icon_button::icon_button;
 use crate::overlay::anchored::{AnchoredOverlayView, AnchoredOverlayWidget};
 use crate::overlay::{
-    OverlayAlign, OverlayAnchor, OverlayContainer, OverlayCorners, OverlayElevation,
+    ModalDismiss, OverlayAlign, OverlayAnchor, OverlayContainer, OverlayCorners, OverlayElevation,
     OverlayEntrance, OverlayExtent, OverlayLimit, OverlayModalConfig, OverlayModalContent,
     OverlayModalView, OverlayModalWidget, OverlayPlacement, OverlaySide, anchored_overlay,
     container, finite_or_zero, overlay_modal, radius, shadow, show_overlay_modal,
@@ -283,10 +280,9 @@ impl<State: 'static> SearchView<State> {
     }
 
     /// Set the header back affordance's handler. [`show_search_view`] wires
-    /// this to `controller.pop()`; a docked view falls back to its own
+    /// this to a staged [`ModalDismiss`]; a docked view falls back to its own
     /// [`on_dismiss`](Self::on_dismiss) when this is unset, since a docked
-    /// back press *is* a dismissal. See the [module docs](self)' header note
-    /// for why this dismissal is not staged.
+    /// back press *is* a dismissal.
     pub fn on_back<F: Fn(&mut State) + 'static>(mut self, on_back: F) -> Self {
         self.on_back = Some(Rc::new(on_back));
         self
@@ -872,6 +868,20 @@ impl<State: 'static> View<State> for SearchViewView<State> {
     }
 }
 
+impl<State: 'static> SearchViewView<State> {
+    /// Install the app-triggered staged-dismiss handle, so the header's back
+    /// affordance (or any control in the suggestions) closes the view through
+    /// the **same** exit ramp the scrim tap, `Escape`, and a back press take —
+    /// rather than the raw `controller.pop()` that dismisses on the spot. See
+    /// [`ModalDismiss`], and mint the handle outside [`show_search_view`]'s
+    /// page builder ([`show_search_view`] already wires one to the back
+    /// affordance).
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.0 = self.0.dismiss_handle(dismiss);
+        self
+    }
+}
+
 impl<State: 'static> OverlayModalContent<State> for SearchViewView<State> {
     fn on_modal_dismiss(mut self, on_dismiss: Rc<dyn Fn(&mut State)>) -> Self {
         self.0 = self.0.on_modal_dismiss(on_dismiss);
@@ -937,8 +947,8 @@ impl<State: 'static> View<State> for DockedSearchViewView<State> {
 ///
 /// The scrim tap, `Escape` and an Android back press are wired to
 /// `controller.pop()` for you, staged behind the host's exit ramp; the header's
-/// own back affordance is wired to the same pop, **unstaged** (see the [module
-/// docs](self)' header note).
+/// own back affordance takes the same staged exit through a
+/// [`ModalDismiss`] handle.
 pub fn show_search_view<State, B, R>(
     controller: &NavigatorController<State>,
     build: B,
@@ -948,14 +958,16 @@ pub fn show_search_view<State, B, R>(
     B: Fn() -> SearchView<State> + 'static,
     R: Fn(&mut State, PopResult) + 'static,
 {
-    let back_controller = controller.clone();
+    // Minted once, outside the page builder, which re-runs every rebuild.
+    let dismiss = ModalDismiss::new();
     show_overlay_modal(
         controller,
         move || {
-            let ctrl = back_controller.clone();
+            let back = dismiss.clone();
             build()
-                .on_back(move |_state: &mut State| ctrl.pop())
+                .on_back(move |_state: &mut State| back.dismiss())
                 .full_screen()
+                .dismiss_handle(dismiss.clone())
         },
         on_result,
     )
@@ -1345,6 +1357,76 @@ mod tests {
         root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
         assert_eq!(state.results, vec![None], "the back press dismissed it");
         assert_eq!(controller.depth(), 1);
+    }
+
+    #[test]
+    fn show_search_view_header_back_takes_the_staged_exit() {
+        let controller: NavigatorController<NavState> = NavigatorController::new();
+        let mut root: RenderRoot<NavState, NavigatorView<NavState>> = RenderRoot::new();
+        let mut app = {
+            let ctrl = controller.clone();
+            move |_: &mut NavState| {
+                navigator(&ctrl, || {
+                    core_any::<NavState, _>(BgPage {
+                        size: Size::new(COMPACT.width, COMPACT.height),
+                    })
+                })
+            }
+        };
+        let mut state = NavState::default();
+        root.rebuild(&mut app, &mut state);
+        let mut tcx = TextContext::new();
+        root.layout_with_text(COMPACT, &mut tcx as &mut dyn Any);
+        show_search_view(
+            &controller,
+            || search_view(String::new(), |s: &mut NavState, q| s.query = q).hint("Search"),
+            |state: &mut NavState, result: PopResult| {
+                state.results.push(result.take::<i32>());
+            },
+        );
+        root.rebuild(&mut app, &mut state);
+        root.layout_with_text(COMPACT, &mut tcx as &mut dyn Any);
+        for t in [0u64, 100, 800] {
+            root.paint(&mut Recorder::default(), ft(t));
+            root.layout_with_text(COMPACT, &mut tcx as &mut dyn Any);
+        }
+
+        let (hpad, _) = SearchViewMode::FullScreen.header_padding();
+        let (x, y) = (
+            hpad + ACTION_SLOT / 2.0,
+            super::super::FULL_SCREEN_HEADER_HEIGHT / 2.0,
+        );
+        root.event(&mut state, &ev(PointerPhase::Down, x, y));
+        root.event(&mut state, &ev(PointerPhase::Up, x, y));
+        root.rebuild(&mut app, &mut state);
+        assert_eq!(
+            controller.depth(),
+            2,
+            "the header back ramps out instead of popping on the spot"
+        );
+
+        let mut frames = 0u64;
+        loop {
+            root.rebuild(&mut app, &mut state);
+            root.layout_with_text(COMPACT, &mut tcx as &mut dyn Any);
+            let outcome = root.paint(&mut Recorder::default(), ft(1000 + frames * 100));
+            frames += 1;
+            assert!(frames < 30, "the staged exit settles in bounded frames");
+            if !outcome.needs_frame {
+                break;
+            }
+        }
+        root.event(&mut state, &ev(PointerPhase::Move, 5.0, 5.0));
+        assert_eq!(controller.depth(), 1);
+        assert_eq!(state.results, vec![None]);
+    }
+
+    #[test]
+    fn the_full_screen_view_forwards_an_installed_dismiss_handle_to_the_host() {
+        let dismiss = ModalDismiss::new();
+        let view = search_view(String::new(), |_: &mut App, _| {}).full_screen();
+        assert!(view.0.dismiss_handle.is_none(), "none is invented");
+        assert!(view.dismiss_handle(dismiss).0.dismiss_handle.is_some());
     }
 
     #[test]

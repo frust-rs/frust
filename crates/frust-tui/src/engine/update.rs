@@ -22,7 +22,7 @@ use super::devtools::{ConnEvent, ConnState, DevtoolsPhase, DevtoolsTab, Inspecto
 use super::message::{ContextTarget, DragKind, Message};
 use super::run_config::{DeviceRow, RunConfig};
 use super::session_view::{SessionTarget, SessionView, truncate_with_ellipsis};
-use super::state::{AppState, Screen};
+use super::state::{AppState, McpStopping, Screen};
 use super::toast::ToastKind;
 use crate::supervise::{DeviceTarget, SessionEvent, SessionEventKind, SessionId, SessionSpec};
 
@@ -1489,10 +1489,36 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                 // somebody else's, and neither clearing it nor reporting its
                 // predecessor's fate would be true of the running server.
                 Some(installed) if installed != generation => Outcome::idle(),
+                // Likewise with no handle installed but a stop in flight for
+                // another generation: the report is not the one that stop is
+                // waiting for, so it neither releases the queued start nor
+                // surfaces a reason against the server being stopped.
+                None if state
+                    .mcp_stopping
+                    .is_some_and(|stopping| stopping.generation != generation) =>
+                {
+                    Outcome::idle()
+                }
                 installed => {
                     let was_running = installed.is_some();
                     state.mcp = None;
-                    match error {
+                    // The stop this report confirms: the listener is closed
+                    // now, so a start the user asked for meanwhile is safe.
+                    let start_after = match state.mcp_stopping {
+                        Some(stopping) if stopping.generation == generation => {
+                            state.mcp_stopping = None;
+                            stopping.start_wanted
+                        }
+                        _ => false,
+                    };
+                    let failed = match error {
+                        // The user asked for this stop and for the start
+                        // queued behind it, so the old server is being
+                        // replaced, not failing: no toast, and no reason that
+                        // the start would only clear again. The error is
+                        // dropped: this reducer does no I/O, and the start
+                        // that follows reports its own failure.
+                        Some(_) if start_after => false,
                         Some(error) => {
                             // Two surfaces, deliberately: the toast catches the
                             // eye of someone looking elsewhere, and `mcp_error`
@@ -1503,15 +1529,33 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                                 .toasts
                                 .push(ToastKind::Error, format!("MCP server stopped: {error}"));
                             state.mcp_error = Some(error);
-                            Outcome::redraw()
+                            true
                         }
-                        None => Outcome::dirty(was_running),
+                        None => false,
+                    };
+                    if start_after {
+                        request_mcp_start(state)
+                    } else if failed {
+                        Outcome::redraw()
+                    } else {
+                        Outcome::dirty(was_running)
                     }
                 }
             }
         }
         Message::ToggleMcpServer => {
-            if state.mcp.is_some() {
+            if let Some(stopping) = state.mcp_stopping.as_mut() {
+                // A stop is still closing the listener, so the port may not be
+                // free: no start (and no second stop) goes out. The toggle
+                // flips whether a start is wanted once the stop is confirmed
+                // — a second toggle cancels the first.
+                stopping.start_wanted = !stopping.start_wanted;
+                Outcome::redraw()
+            } else if let Some(handle) = state.mcp.as_ref() {
+                state.mcp_stopping = Some(McpStopping {
+                    generation: handle.generation(),
+                    start_wanted: false,
+                });
                 // The handle is dropped by the runner's `stop_mcp`, not here:
                 // cancelling a live server is exactly the impure work the
                 // pure core pushes out as an effect.
@@ -1520,13 +1564,7 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
                     effect: Some(Effect::StopMcpServer),
                 }
             } else {
-                // A retry clears the previous failure first, so the panel
-                // shows "starting…" rather than the stale reason beside it.
-                state.mcp_error = None;
-                Outcome {
-                    redraw: true,
-                    effect: Some(Effect::StartMcpServer),
-                }
+                request_mcp_start(state)
             }
         }
         Message::OpenMcpPanel => {
@@ -1797,6 +1835,20 @@ pub fn update(state: &mut AppState, msg: Message) -> Outcome {
             state.toasts.push(level, text);
             Outcome::redraw()
         }
+    }
+}
+
+/// The one place an embedded-MCP-server start is requested — a toggle with no
+/// server and no stop in flight, or the stopped report releasing a start that
+/// was queued behind a stop.
+///
+/// A retry clears the previous failure first, so the row and the panel show
+/// "starting…" rather than the stale reason beside it.
+fn request_mcp_start(state: &mut AppState) -> Outcome {
+    state.mcp_error = None;
+    Outcome {
+        redraw: true,
+        effect: Some(Effect::StartMcpServer),
     }
 }
 
@@ -8001,6 +8053,59 @@ mod tests {
         assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
     }
 
+    /// The fast-rebind race: a toggle-on while the stop is still closing the
+    /// listener must wait for the server's own stopped report.
+    #[test]
+    fn a_toggle_on_while_stopping_starts_only_after_the_stopped_report() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        assert_eq!(
+            update(&mut st, Message::ToggleMcpServer).effect,
+            Some(Effect::StopMcpServer)
+        );
+        // The runner's `stop_mcp` takes the handle.
+        st.mcp = None;
+
+        let out = update(&mut st, Message::ToggleMcpServer);
+        assert!(out.redraw);
+        assert_eq!(out.effect, None, "no start while the listener may be open");
+
+        let out = update(&mut st, Message::McpStopped(0, None));
+        assert!(out.redraw);
+        assert_eq!(out.effect, Some(Effect::StartMcpServer));
+        assert_eq!(st.mcp_stopping, None);
+        // Exactly one: a repeat report starts nothing more.
+        assert_eq!(update(&mut st, Message::McpStopped(0, None)).effect, None);
+    }
+
+    #[test]
+    fn off_on_off_while_stopping_never_starts() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        update(&mut st, Message::ToggleMcpServer);
+        st.mcp = None;
+        assert_eq!(update(&mut st, Message::ToggleMcpServer).effect, None);
+        assert_eq!(update(&mut st, Message::ToggleMcpServer).effect, None);
+
+        let out = update(&mut st, Message::McpStopped(0, None));
+        assert_eq!(out.effect, None);
+        assert_eq!(st.mcp_stopping, None);
+        assert_eq!(st.mcp_status(), crate::supervise::McpStatus::Stopped);
+    }
+
+    #[test]
+    fn a_plain_off_then_on_after_the_stopped_report_starts_as_before() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        update(&mut st, Message::ToggleMcpServer);
+        st.mcp = None;
+        assert_eq!(update(&mut st, Message::McpStopped(0, None)).effect, None);
+        assert_eq!(
+            update(&mut st, Message::ToggleMcpServer).effect,
+            Some(Effect::StartMcpServer)
+        );
+    }
+
     /// A failed start stays visible until the next attempt — and the next
     /// attempt clears it, so a retry never renders "starting…" beside the
     /// previous run's reason.
@@ -8013,6 +8118,112 @@ mod tests {
 
         update(&mut st, Message::ToggleMcpServer);
         assert_eq!(st.mcp_error, None);
+    }
+
+    /// Stop a running generation-0 server and queue a start behind it, the
+    /// way the runner leaves the model: the stop effect took the handle.
+    fn stopping_with_a_queued_start() -> AppState {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        assert_eq!(
+            update(&mut st, Message::ToggleMcpServer).effect,
+            Some(Effect::StopMcpServer)
+        );
+        st.mcp = None;
+        assert_eq!(update(&mut st, Message::ToggleMcpServer).effect, None);
+        assert_eq!(
+            st.mcp_stopping,
+            Some(McpStopping {
+                generation: 0,
+                start_wanted: true
+            })
+        );
+        st
+    }
+
+    /// A stop the user asked for, with a start queued behind it, is a
+    /// replacement rather than a failure: an error from the old server's
+    /// shutdown neither toasts nor leaves a reason the start then clears.
+    #[test]
+    fn a_requested_stop_followed_by_the_queued_start_does_not_report_a_failure() {
+        let mut st = stopping_with_a_queued_start();
+
+        let out = update(&mut st, Message::McpStopped(0, Some("boom".to_string())));
+        assert!(out.redraw);
+        assert_eq!(out.effect, Some(Effect::StartMcpServer));
+        assert!(
+            st.toasts.items.is_empty(),
+            "no failure toast for a stop the user asked for"
+        );
+        assert_eq!(st.mcp_error, None);
+        assert_eq!(st.mcp_stopping, None);
+    }
+
+    /// With no start queued, a requested stop's error is reported exactly as
+    /// an unexpected one is.
+    #[test]
+    fn a_requested_stop_with_no_start_queued_still_reports_its_error() {
+        let mut st = welcome();
+        st.mcp = Some(mcp_handle(0));
+        update(&mut st, Message::ToggleMcpServer);
+        st.mcp = None;
+
+        let out = update(&mut st, Message::McpStopped(0, Some("boom".to_string())));
+        assert!(out.redraw);
+        assert_eq!(out.effect, None);
+        assert_eq!(st.toasts.items.len(), 1);
+        assert_eq!(st.toasts.items[0].kind, ToastKind::Error);
+        assert_eq!(st.mcp_error.as_deref(), Some("boom"));
+        assert_eq!(st.mcp_stopping, None);
+    }
+
+    /// Only the stopping server's own report releases the queued start: a
+    /// report naming any other generation leaves the marker set, starts
+    /// nothing, and surfaces nothing against the server being stopped.
+    #[test]
+    fn a_stopped_report_for_another_generation_leaves_the_stop_in_flight() {
+        let mut st = stopping_with_a_queued_start();
+
+        for error in [None, Some("boom".to_string())] {
+            let out = update(&mut st, Message::McpStopped(7, error));
+            assert!(!out.redraw);
+            assert_eq!(out.effect, None, "no start before the listener is closed");
+        }
+        assert_eq!(
+            st.mcp_stopping,
+            Some(McpStopping {
+                generation: 0,
+                start_wanted: true
+            })
+        );
+        assert!(st.toasts.items.is_empty());
+        assert_eq!(st.mcp_error, None);
+
+        // The matching report still releases it.
+        assert_eq!(
+            update(&mut st, Message::McpStopped(0, None)).effect,
+            Some(Effect::StartMcpServer)
+        );
+        assert_eq!(st.mcp_stopping, None);
+    }
+
+    /// A second press while a start is queued cancels it, and the stopped
+    /// report then starts nothing.
+    #[test]
+    fn a_second_toggle_cancels_the_queued_start() {
+        let mut st = stopping_with_a_queued_start();
+
+        let out = update(&mut st, Message::ToggleMcpServer);
+        assert!(out.redraw);
+        assert_eq!(out.effect, None);
+        assert_eq!(
+            st.mcp_stopping,
+            Some(McpStopping {
+                generation: 0,
+                start_wanted: false
+            })
+        );
+        assert_eq!(update(&mut st, Message::McpStopped(0, None)).effect, None);
     }
 
     // ── Embedded DAP server ───────────────────────────────────────────────────

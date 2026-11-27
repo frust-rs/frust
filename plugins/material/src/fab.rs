@@ -859,15 +859,17 @@ impl Widget for FabWidget {
     fn layout(&mut self, ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
         if !self.is_extended {
             let container = self.size.container();
+            // The size paint will use, so the icon is centred in what is drawn.
+            let size = bc.constrain(Size::new(container, container));
             if let Some(icon) = self.icon.as_mut() {
                 let dim = self.size.icon_size();
                 let icon_size = icon.layout_child(ctx, &BoxConstraints::tight(Size::new(dim, dim)));
                 icon.set_origin(Point::new(
-                    (container - icon_size.width) / 2.0,
-                    (container - icon_size.height) / 2.0,
+                    (size.width - icon_size.width) / 2.0,
+                    (size.height - icon_size.height) / 2.0,
                 ));
             }
-            return bc.constrain(Size::new(container, container));
+            return size;
         }
 
         let height = EXTENDED_HEIGHT;
@@ -1217,6 +1219,16 @@ mod tests {
         assert_eq!(icon.size(), Size::new(36.0, 36.0));
         // centered
         assert_eq!(icon.origin(), Point::new(30.0, 30.0));
+    }
+
+    #[test]
+    fn tight_constraints_centre_the_icon_in_the_constrained_size() {
+        let mut w = build_icon_fab(FabSize::Large);
+        let mut lctx = LayoutCtx::new();
+        let size = w.layout(&mut lctx, &BoxConstraints::tight(Size::new(80.0, 80.0)));
+        assert_eq!(size, Size::new(80.0, 80.0));
+        let icon = w.icon.as_ref().unwrap();
+        assert_eq!(icon.origin(), Point::new(22.0, 22.0));
     }
 
     #[test]

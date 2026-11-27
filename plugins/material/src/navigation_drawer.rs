@@ -190,8 +190,8 @@ use peniko::{Brush, Color};
 
 use crate::badge::locale_stamp;
 use crate::overlay::{
-    OverlayExtent, OverlayLimit, OverlayModalConfig, OverlayModalContent, OverlayModalView,
-    OverlayModalWidget, OverlaySide, overlay_modal, show_overlay_modal,
+    ModalDismiss, OverlayExtent, OverlayLimit, OverlayModalConfig, OverlayModalContent,
+    OverlayModalView, OverlayModalWidget, OverlaySide, overlay_modal, show_overlay_modal,
 };
 use crate::press::presses;
 use crate::strings::MaterialStrings;
@@ -1360,6 +1360,26 @@ impl<State: 'static> NavigationDrawerView<State> {
         self.0 = self.0.on_dismiss(on_dismiss);
         self
     }
+
+    /// Install the app-triggered staged-dismiss handle, so a destination's
+    /// `on_select` closes the drawer through the **same** slide-out ramp the
+    /// scrim tap, `Escape`, and a back press take — rather than the raw
+    /// `controller.pop()` that dismisses on the spot. See [`ModalDismiss`],
+    /// and mint the handle outside [`show_navigation_drawer`]'s page builder.
+    ///
+    /// ```ignore
+    /// let dismiss = ModalDismiss::new();
+    /// let select = dismiss.clone();
+    /// navigation_drawer(sections, selected, move |state: &mut State, i| {
+    ///     state.selected = i;
+    ///     select.dismiss();
+    /// })
+    /// .dismiss_handle(dismiss.clone())
+    /// ```
+    pub fn dismiss_handle(mut self, dismiss: ModalDismiss) -> Self {
+        self.0 = self.0.dismiss_handle(dismiss);
+        self
+    }
 }
 
 impl<State: 'static> View<State> for NavigationDrawerView<State> {
@@ -1835,6 +1855,14 @@ mod tests {
             .find(|(_, n)| n.label() == Some("Search"))
             .expect("the second destination carries its own label");
         assert_eq!(selected.1.is_selected(), Some(true));
+    }
+
+    #[test]
+    fn an_installed_dismiss_handle_reaches_the_host() {
+        let dismiss = ModalDismiss::new();
+        let view = navigation_drawer::<(), _>(Vec::new(), 0, |_: &mut (), _| {});
+        assert!(view.0.dismiss_handle.is_none(), "none is invented");
+        assert!(view.dismiss_handle(dismiss).0.dismiss_handle.is_some());
     }
 
     // ---- Modal push + staged scrim-tap dismiss. -----------------------------

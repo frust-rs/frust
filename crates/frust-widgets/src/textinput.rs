@@ -451,6 +451,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use frust_core::accesskit::{Action, CustomAction, Role};
+use frust_core::event::PointerSource;
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, CornerRadii, EditCommand, EditingState,
     EventCtx, EventResult, FocusHandle, FrameTime, ImeContentType, ImeEvent, ImeState, InputEvent,
@@ -3475,10 +3476,17 @@ impl TextInputWidget {
                             return EventResult::Handled;
                         }
                         self.last_tap = None;
-                        self.hold = Some(HoldState {
-                            started_at: None,
-                            elapsed: false,
-                        });
+                        // The long-press is a touch gesture: a held mouse button
+                        // selects nothing and raises no bar, as on every desktop
+                        // platform (the secondary press is the mouse's route).
+                        // Only `Touch` and `Mouse` exist as sources, so there is
+                        // no stylus case to place.
+                        if ctx.pointer_id().source == PointerSource::Touch {
+                            self.hold = Some(HoldState {
+                                started_at: None,
+                                elapsed: false,
+                            });
+                        }
                         // A press that lands *inside* an existing selection
                         // neither moves the caret nor collapses it: it is
                         // either the start of the toolbar toggle (resolved on
@@ -3833,6 +3841,19 @@ mod tests {
             position: Point::new(x, y),
             button: PointerButton::Primary,
         })
+    }
+
+    /// The primary-button event of a touch contact (slot 0): the source the
+    /// long-press hold arms for.
+    fn touch_pointer(phase: PointerPhase, x: f64, y: f64) -> InputEvent {
+        InputEvent::PointerContact {
+            pointer_id: frust_core::event::PointerId::touch(0),
+            event: PointerEvent {
+                phase,
+                position: Point::new(x, y),
+                button: PointerButton::Primary,
+            },
+        }
     }
 
     /// The same event on the secondary (right) button.
@@ -9022,6 +9043,35 @@ mod tests {
     }
 
     #[test]
+    fn a_held_mouse_press_selects_no_word_and_raises_no_toolbar() {
+        let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _log = install_probe_toolbar();
+        let mut state = AppState {
+            value: "hello world".to_string(),
+            ..Default::default()
+        };
+        let mut logic = options_logic(true, false, false);
+        let mut root = options_root(&mut logic, &mut state);
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+
+        root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 10.0));
+        assert!(
+            widget(&root).hold.is_none(),
+            "a mouse press arms no long-press"
+        );
+        toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
+        toolbar_frame(&mut root, &mut logic, &mut state, LONG_PRESS_MS + 50.0);
+        root.event(&mut state, &InputEvent::Housekeeping);
+
+        assert_eq!(selection(&root), None, "no word is selected by the hold");
+        assert!(!widget(&root).toolbar_open, "and no toolbar is asked for");
+        // The release is still an ordinary tap: the caret is placed.
+        root.event(&mut state, &pointer(PointerPhase::Up, 20.0, 10.0));
+        assert_eq!(selection(&root), None);
+        assert!(!widget(&root).toolbar_open);
+    }
+
+    #[test]
     fn a_stationary_long_press_selects_the_word_and_floats_the_toolbar() {
         let _guard = TOOLBAR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _log = install_probe_toolbar();
@@ -9034,7 +9084,7 @@ mod tests {
         toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
 
         // The press arms the hold; its first painted frame seeds the epoch.
-        root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 10.0));
+        root.event(&mut state, &touch_pointer(PointerPhase::Down, 20.0, 10.0));
         toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
         assert!(
             !widget(&root).toolbar_open,
@@ -9102,7 +9152,7 @@ mod tests {
     ) -> RenderRoot<AppState, TextInputView<AppState>> {
         let mut root = options_root(logic, state);
         toolbar_frame(&mut root, logic, state, 0.0);
-        root.event(state, &pointer(PointerPhase::Down, press_x, 10.0));
+        root.event(state, &touch_pointer(PointerPhase::Down, press_x, 10.0));
         toolbar_frame(&mut root, logic, state, 0.0);
         toolbar_frame(&mut root, logic, state, LONG_PRESS_MS + 50.0);
         root.event(state, &InputEvent::Housekeeping);
@@ -9143,7 +9193,10 @@ mod tests {
             (jitter - Point::new(30.0, 10.0)).hypot() <= TOUCH_SLOP,
             "the leg is only meaningful while the jitter stays in slop"
         );
-        root.event(&mut state, &pointer(PointerPhase::Move, jitter.x, jitter.y));
+        root.event(
+            &mut state,
+            &touch_pointer(PointerPhase::Move, jitter.x, jitter.y),
+        );
 
         assert_eq!(
             selection(&root).as_deref(),
@@ -9164,7 +9217,10 @@ mod tests {
 
         // The release must not resolve as a tap either: a long-press seeds no
         // double-tap window and toggles no toolbar.
-        root.event(&mut state, &pointer(PointerPhase::Up, jitter.x, jitter.y));
+        root.event(
+            &mut state,
+            &touch_pointer(PointerPhase::Up, jitter.x, jitter.y),
+        );
         assert!(
             widget(&root).last_tap.is_none(),
             "a long-press is not a tap"
@@ -9193,7 +9249,7 @@ mod tests {
         // engine that dropped it would truncate every long-press drag here
         // instead of failing loudly.
         let out = 30.0 + TOUCH_SLOP + 20.0;
-        root.event(&mut state, &pointer(PointerPhase::Move, out, 10.0));
+        root.event(&mut state, &touch_pointer(PointerPhase::Move, out, 10.0));
         assert_eq!(
             widget(&root).gesture,
             Gesture::Drag,
@@ -9208,7 +9264,7 @@ mod tests {
         // Dragging back toward the press point shrinks it again — the promotion
         // to `Drag` is what keeps the selection tracking the finger instead of
         // freezing at its widest.
-        root.event(&mut state, &pointer(PointerPhase::Move, 30.0, 10.0));
+        root.event(&mut state, &touch_pointer(PointerPhase::Move, 30.0, 10.0));
         assert_eq!(
             selection(&root).as_deref(),
             Some("hello"),
@@ -9228,12 +9284,12 @@ mod tests {
         let mut root = options_root(&mut logic, &mut state);
         toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
 
-        root.event(&mut state, &pointer(PointerPhase::Down, 20.0, 10.0));
+        root.event(&mut state, &touch_pointer(PointerPhase::Down, 20.0, 10.0));
         toolbar_frame(&mut root, &mut logic, &mut state, 0.0);
         // Past the slop well before the threshold: the gesture became a drag.
         root.event(
             &mut state,
-            &pointer(PointerPhase::Move, 20.0 + TOUCH_SLOP + 80.0, 10.0),
+            &touch_pointer(PointerPhase::Move, 20.0 + TOUCH_SLOP + 80.0, 10.0),
         );
         toolbar_frame(&mut root, &mut logic, &mut state, 200.0);
         toolbar_frame(&mut root, &mut logic, &mut state, LONG_PRESS_MS + 100.0);
@@ -9643,7 +9699,7 @@ mod tests {
         // stop a gesture from firing at all.
         let mut state = AppState::default();
         let mut root = harness(&mut state);
-        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &touch_pointer(PointerPhase::Down, 10.0, 10.0));
         let held = root.paint(&mut NullScene, ft_ms(0.0));
         assert!(held.needs_frame, "a live hold keeps the frames coming");
         assert!(
@@ -9652,7 +9708,7 @@ mod tests {
         );
 
         // Released: the hold is gone and only the caret's paced request is left.
-        root.event(&mut state, &pointer(PointerPhase::Up, 10.0, 10.0));
+        root.event(&mut state, &touch_pointer(PointerPhase::Up, 10.0, 10.0));
         let idle = root.paint(&mut NullScene, ft_ms(20.0));
         assert!(
             idle.needs_frame_paced_only,
@@ -9666,7 +9722,7 @@ mod tests {
         // Past the double-tap window, so the next press is an ordinary one that
         // arms a hold rather than a word-selecting second tap.
         root.paint(&mut NullScene, ft_ms(400.0));
-        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut state, &touch_pointer(PointerPhase::Down, 10.0, 10.0));
         let frozen = root.paint(&mut NullScene, ft_ms(420.0));
         assert!(
             frozen.needs_frame,
