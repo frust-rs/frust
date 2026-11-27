@@ -839,6 +839,45 @@ mod discovered_tests {
         assert_eq!(fx.tracked(), tracked);
     }
 
+    /// A Swift package the scaffolded `/ios/Frust*` line does not cover adds
+    /// a `.gitignore` row: the build's pending stop and the sync's applied
+    /// count name the same rows.
+    #[test]
+    fn sync_counts_the_rows_the_pending_stop_lists() {
+        let fx = Fixture::new("sync-count");
+        let runner = FakeProcessRunner::new().with(
+            fx.metadata_key(),
+            Output {
+                success: true,
+                stdout: fx.metadata().replace("FrustAcmeBle", "AcmeLink"),
+                stderr: String::new(),
+            },
+        );
+        let catalog = project_catalog(&CargoLocator::new(&runner), &fx.app)
+            .unwrap()
+            .catalog;
+        let stop = pending_stop(&fx.app, &catalog).unwrap();
+        let pending: Vec<&str> = stop
+            .lines()
+            .filter_map(|line| line.strip_prefix("  - "))
+            .collect();
+        assert_eq!(pending.len(), 5, "{stop}");
+        assert!(stop.contains(": 5 change(s) pending."), "{stop}");
+
+        let out = sync(&fx, &catalog);
+        assert!(out.starts_with("Plugin `acme-ble`: 5 applied\n"), "{out}");
+        let applied: Vec<&str> = out
+            .lines()
+            .filter_map(|line| line.strip_prefix("  [applied] "))
+            .collect();
+        assert_eq!(applied, pending);
+        assert!(
+            applied.contains(&".gitignore entry `/ios/AcmeLink`"),
+            "{out}"
+        );
+        assert_eq!(pending_stop(&fx.app, &catalog), None);
+    }
+
     #[test]
     fn sync_without_a_discovered_dependency_has_nothing_to_do() {
         let fx = Fixture::new("sync-none");
