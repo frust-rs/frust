@@ -42,6 +42,7 @@ const CAPS: &[(&str, f32)] = &[
     ("crates/frust-core/src/anim.rs", 25.0), // measured 22.5
     ("crates/frust-core/src/app/config.rs", 25.0), // measured 22.5
     ("crates/frust-core/src/app/dispatch.rs", 25.0), // measured 23.2
+    ("crates/frust-core/src/app/held_keys.rs", 13.4), // measured 10.4
     ("crates/frust-core/src/app/layout.rs", 21.1), // measured 18.1
     ("crates/frust-core/src/app/metrics.rs", 25.0), // measured 25.0
     ("crates/frust-core/src/app/mod.rs", 25.0), // measured 24.8
@@ -57,6 +58,7 @@ const CAPS: &[(&str, f32)] = &[
     ("crates/frust-core/src/app/tests/focus_ime.rs", 15.4), // measured 12.4
     ("crates/frust-core/src/app/tests/focus_return.rs", 5.7), // measured 2.7
     ("crates/frust-core/src/app/tests/hover.rs", 18.1), // measured 15.1
+    ("crates/frust-core/src/app/tests/key_release.rs", 5.4), // measured 2.4
     ("crates/frust-core/src/app/tests/lifecycle.rs", 11.7), // measured 8.7
     ("crates/frust-core/src/app/tests/modifiers.rs", 10.0), // measured 3.0
     ("crates/frust-core/src/app/tests/mod.rs", 16.8), // measured 13.8

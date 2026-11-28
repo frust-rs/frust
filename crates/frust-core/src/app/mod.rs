@@ -8,6 +8,7 @@
 
 mod config;
 mod dispatch;
+mod held_keys;
 mod layout;
 mod metrics;
 mod paint;
@@ -37,6 +38,7 @@ use crate::view::{ChangeFlags, View, WidgetId};
 use crate::widget::{ChildPod, PlatformViewFrame};
 
 pub use config::FocusRingPolicy;
+use held_keys::HeldKeys;
 use layout::LayoutAudit;
 pub use metrics::{Orientation, WindowMetrics};
 pub use semantics::FocusInfo;
@@ -108,6 +110,8 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     keyboard_focus: bool,
     /// Shell-pushed held modifiers.
     modifiers: Modifiers,
+    /// The keys delivered as pressed and not yet released.
+    held_keys: HeldKeys,
     focus_ring_policy: FocusRingPolicy,
     /// The handles the last paint bound, each with the stop it addresses (`crate::focus_handle`).
     focus_handles: Vec<crate::focus_handle::BoundHandle>,
@@ -211,6 +215,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             focus_grant: ShortcutId::next(),
             keyboard_focus: false,
             modifiers: Modifiers::NONE,
+            held_keys: HeldKeys::default(),
             focus_ring_policy: FocusRingPolicy::KeyboardOnly,
             focus_handles: Vec::new(),
             focus_notice: Vec::new(),

@@ -37,6 +37,8 @@ pub enum OverlayEventKind {
     OutsideDown,
     /// A shortcut the pod declared; the owner forwards it as [`InputEvent::Shortcut`].
     Shortcut(ShortcutId),
+    /// That shortcut's release; the owner forwards it as [`InputEvent::ShortcutReleased`].
+    ShortcutReleased(ShortcutId),
     /// A key the focus path declined (see [`crate::overlay`]); answer via `consume_overlay_key`.
     Key(KeyEvent),
 }
@@ -103,6 +105,10 @@ pub enum InputEvent {
     Scale(ScaleEvent),
     /// A keyboard key event, routed down the focus path.
     Key(KeyEvent),
+    /// The release of a key the root delivered as `Key`, focus-routed, at most once per press.
+    /// Also synthesized by `RenderRoot::cancel_held_keys` and by a fresh re-press: it means "no
+    /// longer down", not "press completed". `repeat` is false.
+    KeyUp(KeyEvent),
     /// An IME event, routed down the focus path.
     Ime(ImeEvent),
     /// A decoded clipboard/selection command, routed down the focus path; with nothing focused it
@@ -118,6 +124,8 @@ pub enum InputEvent {
     FileDrop(FileDropEvent),
     /// A broadcast naming the shortcut a key pressed (`crate::shortcuts`); the declarer answers.
     Shortcut(ShortcutId),
+    /// A broadcast naming the shortcut whose key was released or cancelled; never consumed.
+    ShortcutReleased(ShortcutId),
 }
 
 impl InputEvent {
@@ -131,11 +139,13 @@ impl InputEvent {
             InputEvent::FileDrop(drop) if drop.phase == FileDropPhase::Ended => Point::ZERO,
             InputEvent::FileDrop(drop) => drop.position,
             InputEvent::Key(_)
+            | InputEvent::KeyUp(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping
             | InputEvent::Overlay(_)
-            | InputEvent::Shortcut(_) => Point::ZERO,
+            | InputEvent::Shortcut(_)
+            | InputEvent::ShortcutReleased(_) => Point::ZERO,
         }
     }
 
@@ -169,11 +179,13 @@ impl InputEvent {
                 paths: drop.paths.clone(),
             }),
             InputEvent::Key(_)
+            | InputEvent::KeyUp(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping
             | InputEvent::Overlay(_)
-            | InputEvent::Shortcut(_) => self.clone(),
+            | InputEvent::Shortcut(_)
+            | InputEvent::ShortcutReleased(_) => self.clone(),
         }
     }
 
@@ -207,30 +219,36 @@ impl InputEvent {
                 paths: drop.paths.clone(),
             }),
             InputEvent::Key(_)
+            | InputEvent::KeyUp(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping
             | InputEvent::Overlay(_)
-            | InputEvent::Shortcut(_) => self.clone(),
+            | InputEvent::Shortcut(_)
+            | InputEvent::ShortcutReleased(_) => self.clone(),
         }
     }
 
-    /// Whether this event is focus-routed (key, IME, edit command) rather than hit-tested.
+    /// Whether this event is focus-routed (key, key release, IME, edit command), not hit-tested.
     pub fn is_focus_routed(&self) -> bool {
         matches!(
             self,
-            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_)
+            InputEvent::Key(_)
+                | InputEvent::KeyUp(_)
+                | InputEvent::Ime(_)
+                | InputEvent::EditCommand(_)
         )
     }
 
-    /// Whether this event is a broadcast — `Housekeeping`, `Overlay`, `Shortcut`, or a file drop's
-    /// `Ended` — forwarded to every child before any capture/focus/hit-test branch.
+    /// Whether this event is a broadcast — `Housekeeping`, `Overlay`, a shortcut or its release, or
+    /// a file drop's `Ended` — forwarded to every child before any capture/focus/hit-test branch.
     pub fn is_broadcast(&self) -> bool {
         matches!(
             self,
             InputEvent::Housekeeping
                 | InputEvent::Overlay(_)
                 | InputEvent::Shortcut(_)
+                | InputEvent::ShortcutReleased(_)
                 | InputEvent::FileDrop(FileDropEvent {
                     phase: FileDropPhase::Ended,
                     ..
