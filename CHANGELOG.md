@@ -13,29 +13,31 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 
 ## Unreleased
 
-A patch release (the 0.6.x line continues) with thirty-four source and behaviour breaks, each listed
+A patch release (the 0.6.x line continues) with thirty-five source and behaviour breaks, each listed
 under Breaking with its migration. The minimum supported Rust version is now 1.89 (`frust-onnx`
 alone needs 1.92). `frust-drive`'s plugin model changes (`PluginSpec` and `FeatureSpec` gain
 `min_ios` and `min_android_sdk`, `Contribution` and `PluginAddError` gain variants, the plugin types
 hold `Cow` data, reports and errors own their plugin ids, and `AppSection` gains `display_name`,
-`version` and `build_number`), and a newly generated Android app needs the pinned NDK. `AppTree` in
-`frust-shell-common` gains `repaint_pending` and `FrameInputs` gains `repaint_owed`,
-`accesskit::Tree` is now `TreeInfo`, `EngineError::InvalidGeometry` and `InvalidTransform` carry
-fields, and a `frust::testing::Tester` test that paints a frame the engine would refuse now fails.
-Behaviour changes to published APIs: an event handler runs under its component's owner,
-`NavigatorController::pop_with_result` is single-shot, an outside press blurs the focused widget
-when the tap ends, focus returns to the control that held it when a modal closes, a vertical
-`ScrollView` reveals the focused caret by default, a `text_input` publishes its placeholder as its
-label, a single-line `text_input` always clips, a held mouse button no longer opens the text
-toolbar, iOS Return submits a single-line field, and a deep link's `#fragment` no longer reaches the
+`version` and `build_number`), a newly generated Android app needs the pinned NDK, and an Android
+build now fails when `frust.toml` states an identifier that the app's `build.gradle.kts` does not
+read. `AppTree` in `frust-shell-common` gains `repaint_pending` and `FrameInputs` gains
+`repaint_owed`, `accesskit::Tree` is now `TreeInfo`, `EngineError::InvalidGeometry` and
+`InvalidTransform` carry fields, and a `frust::testing::Tester` test that paints a frame the engine
+would refuse now fails. Behaviour changes to published APIs: an event handler runs under its
+component's owner, `NavigatorController::pop_with_result` is single-shot, an outside press blurs the
+focused widget when the tap ends, focus returns to the control that held it when a modal closes, a
+vertical `ScrollView` reveals the focused caret by default, a `text_input` publishes its placeholder
+as its label, a single-line `text_input` always clips, a held mouse button no longer opens the text
+toolbar, iOS Return submits a text field, and a deep link's `#fragment` no longer reaches the
 router. `frust-i18n` typed keys take an args struct for two or more variables. In the plugins, a
 `frust-shadcn` modal plays its exit on a back press, `frust-beui` gains `ButtonTone::Destructive`
 and follows the OS text scale, Material's full-screen search view autofocuses,
 `frust-native-widgets` gains enum variants, draws a large title on Android, shows an alert above a
-sheet and refuses an activity theme outside Material 3, `frust-auth-session` replaces
-`callback_scheme` with `callback` and returns through Auth Tab on Android instead of a deep link,
-`FolderEntry::read_to_vec` returns `TooLarge`, the Android photo permission follows the declared
-`READ_MEDIA_*` lines, and `frust-mcp` refuses an https or `Origin: null` request.
+sheet, and adding the plugin refuses an activity theme outside Material3 and MaterialComponents,
+`frust-auth-session` replaces `callback_scheme` with `callback` and returns through Auth Tab on
+Android instead of a deep link, `FolderEntry::read_to_vec` returns `TooLarge`, the Android photo
+permission follows the declared `READ_MEDIA_*` lines, and `frust-mcp` refuses a request whose
+`Origin` is not a loopback http origin.
 
 The release adds three plugin crates, `frust-charts`, `frust-models` and `frust-onnx`, and `frust
 plugin add beui`. The facade gains `frust::request_repaint()` with a paint-only frame,
@@ -64,11 +66,11 @@ detaches.
   either enum adds an arm for each new variant.
 - `frust-drive`: the plugin model holds `Cow` data, so a plugin can be described at run time as well
   as in the static registry. In `PluginSpec`, `FeatureSpec`, `Contribution`, `NativeModule` and
-  `NativeKind`, every `&'static str` field is now `Cow<'static, str>` and every `&'static [T]` field
-  `Cow<'static, [T]>` (a string list is `Cow<'static, [Cow<'static, str>]>`), and none of these
-  types is `Copy` any more. Migration: wrap each literal in `Cow::Borrowed(..)` (it works in a
-  `const` or `static`), match on a reference (`match &contribution`), and `.clone()` where a value
-  was copied.
+  `NativeKind`, every `&'static str` field that existed in 0.6.6 is now `Cow<'static, str>` and
+  every `&'static [T]` field `Cow<'static, [T]>` (a string list is `Cow<'static, [Cow<'static,
+  str>]>`), and none of these types is `Copy` any more. Migration: wrap each literal in
+  `Cow::Borrowed(..)` (it works in a `const` or `static`), match on a reference (`match
+  &contribution`), and `.clone()` where a value was copied.
 - `frust-drive`: plugin ids in reports and errors are owned. `DesktopContribution` is no longer
   `Copy`: its `plugin_id` is `Cow<'static, str>` and its `contribution` an owned `Contribution` (was
   `&'static Contribution`). `platform_wiring::ModuleWiring::plugin_id`, the `plugin_id` of
@@ -87,12 +89,24 @@ detaches.
   were ignored before. Migration: add the three fields (`None`) to an `AppSection` literal, and
   correct or remove such a key in `frust.toml`.
 - A newly generated Android app now needs the pinned NDK installed under the Android SDK
-  (`<sdk>/ndk/28.2.13676358`): `cargoNdkBuild` resolves that directory and exports it as
-  `ANDROID_NDK_HOME`, so `frust run` / `frust build` no longer consult the caller's
-  `ANDROID_NDK_HOME` for Android, and the build fails with an `sdkmanager --install "ndk;<version>"`
-  hint when the directory is missing. Migration: `sdkmanager --install "ndk;28.2.13676358"`, or set
-  `FRUST_ANDROID_NDK_VERSION` to an installed r28+ version. An app generated earlier keeps its own
-  Gradle script.
+  (`<sdk>/ndk/28.2.13676358`): its Gradle `cargoNdkBuild` task resolves that directory and exports
+  it as `ANDROID_NDK_HOME`, so a `frust run` / `frust build` that builds through Gradle no longer
+  consults the caller's `ANDROID_NDK_HOME`, and the build fails with an `sdkmanager --install
+  "ndk;<version>"` hint when the directory is missing. A hot `frust run --watch` builds the Rust
+  library itself and still prefers `ANDROID_NDK_HOME`, then `ANDROID_NDK_ROOT`, then the newest NDK
+  under the SDK. An app generated earlier keeps its own Gradle script and builds as before.
+  Migration: `sdkmanager --install "ndk;28.2.13676358"`, or set `FRUST_ANDROID_NDK_VERSION` to an
+  installed r28+ version. `frust doctor` now checks `<sdk>/ndk/<that version>` instead of
+  `ANDROID_NDK_HOME`, and warns, without failing, when it is missing.
+- `frust build` and `frust run` for Android now apply `[android] identifier` of `frust.toml`
+  through the Gradle property `frust.applicationId` (and the new `[app] display-name` through
+  `frust.appLabel`; see Added), and stop before Gradle when `frust.toml` states one and
+  `android/app/build.gradle.kts` does not read it. `[android] identifier` was already a key frust
+  read, and the `build.gradle.kts` of an app generated by 0.6.6 never reads `frust.applicationId`,
+  so such an app now fails to build. Android only: the 0.6.6 iOS `Info.plist` already reads
+  `$(PRODUCT_BUNDLE_IDENTIFIER)`, so an iOS project builds as before. Migration: add the template
+  lines listed in `docs/CLI_DEVELOPMENT.md` (Migrating an existing project) to
+  `android/app/build.gradle.kts`, or remove the key from `frust.toml`.
 - `frust-shell-common`: `AppTree` gained the required method `repaint_pending`, and `FrameInputs`
   gained the public field `repaint_owed`. Migration: a type that implements `AppTree` forwards the
   new method to `RenderRoot::repaint_pending`; a `FrameInputs` literal that lists every field adds
@@ -122,7 +136,8 @@ detaches.
   under a focused text field keeps the keyboard up. A press on a focusable widget still moves focus
   at `Down`. Migration: code or tests that expect the blur right after a pointer `Down` must wait
   for the `Up`; an app that relied on a drag outside a field to dismiss the keyboard must dismiss it
-  explicitly, or opt in to `ScrollView::dismiss_keyboard_on_drag(true)` on its vertical scroll view.
+  explicitly, or opt in to `ScrollView::dismiss_keyboard_on_drag(true)` on its vertical scroll view
+  (it dismisses on a downward drag only).
   A custom container that routes pointer events by hand must follow the same rule: it ends a child's
   focus link only when the same dispatch records a focus claim through another child, never on a
   press that claims nothing, and it reads `holds_live_focus` where it read `is_focused`. The routers
@@ -133,7 +148,9 @@ detaches.
   a `frust-beui` / `frust-shadcn` modal (including the beUI command palette and the shadcn command
   dialog) closes. It is on by default; a session still held inside the closing surface is ended by
   the return, and on a phone the soft keyboard comes back with the focus. Migration: an app that
-  wants focus left where it ended up calls `return_focus(false)` on the modal host. One Escape still
+  wants focus left where it ended up calls `return_focus(false)` on the `frust-beui` or
+  `frust-shadcn` modal host; a surface built directly with `OverlayKeys::Modal` always returns focus
+  and has no switch. One Escape still
   closes a modal, even from a focused field; a dialog that holds a draft opts in to the veto
   (`on_dismiss_request`) or to `escape_leaves_field_first(true)` below.
 - A vertical `ScrollView` that contains the focused widget now scrolls the minimal distance that
@@ -145,7 +162,8 @@ detaches.
 - A `text_input` now publishes its placeholder as the accessibility node's placeholder, and as its
   label when no label is set, where a text field published no accessible name; a label or
   placeholder change repaints. The obscured value is unchanged. Migration: name a field with
-  `TextInput::label(text)`, which takes the place of the placeholder as the label; a test that
+  `.label(text)` on the `text_input` (`TextInputView::label`), which takes the place of the
+  placeholder as the label; a test that
   asserted the node has no label reads the placeholder instead.
 - A single-line `text_input` now always records a clip. It clips selection, text, placeholder and
   caret to its inner box, and scrolls horizontally to keep the caret in view; the placeholder is
@@ -155,9 +173,11 @@ detaches.
 - `frust-widgets` `text_input`: only a touch hold arms the long-press now. A held mouse button no
   longer selects a word or opens the selection toolbar, as it did before. Migration: none for a
   touch app; with a mouse, select a word with a double click and a range by dragging.
-- iOS: Return on a single-line text field now submits it (`on_submit`) instead of inserting a line
-  break; a multi-line field still gets a new line. Migration: an app that wants a line break in the
-  field uses a multi-line field, and one that has no `on_submit` on the field sees no change.
+- iOS: Return on a single-line text field now always submits it (`on_submit`, if the field has one)
+  instead of inserting a line break, and a multi-line field set to `submit_on_enter(true)` now
+  submits on Return too, where both got a line break. Migration: an app that wants a line break
+  uses a multi-line field; a single-line field without `on_submit` no longer gets a line break on
+  Return, and a multi-line field that should keep taking line breaks leaves `submit_on_enter` off.
 - A deep link's `#fragment` no longer ends up in the route the router sees, for every link form; the
   raw URL stays in `deep_links()`. Migration: an app that read a fragment from the route reads it
   from the raw URL in `deep_links()`.
@@ -207,21 +227,23 @@ detaches.
   alert is up are still refused `Busy`. Migration: code that treated `Busy` as the answer for an
   alert over a sheet (a retry or a fallback) no longer reaches it; an app that must not show an
   alert over a sheet does not request one while the sheet is up.
-- `frust plugin add native-widgets` now checks the Android activity theme and refuses
-  (`PluginAddError::AndroidAppThemeMissing`), before anything is written, an activity on any theme
-  outside the `Theme.Material3`, `Theme.Material3Expressive` and `Theme.MaterialComponents`
-  families, an app style of its own included; before, the add did not look at the theme. Migration:
-  make the two manual edits the error names, setting the parent of `FrustAppTheme` to
-  `Theme.Material3.DayNight.NoActionBar` and `android:theme="@style/FrustAppTheme"` on the
-  `<application>` and `<activity>` elements (see Changed), then run the add again. An activity theme
-  already in one of those families needs nothing.
+- Adding the native-widgets plugin (the TUI's Add Plugin action, and `frust plugin add`) now checks
+  the Android activity theme and refuses (`PluginAddError::AndroidAppThemeMissing`), before
+  anything is written, an activity on any theme outside the `Theme.Material3`,
+  `Theme.Material3Expressive` and `Theme.MaterialComponents` families, an app style of its own
+  included; before, the add did not look at the theme. Migration: add `<style
+  name="FrustAppTheme" parent="Theme.Material3.DayNight.NoActionBar" />` inside `<resources>` in
+  `android/app/src/main/res/values/themes.xml` (create the file), set
+  `android:theme="@style/FrustAppTheme"` on the `<application>` and `<activity>` elements of
+  `android/app/src/main/AndroidManifest.xml`, then add the plugin again. An activity theme already
+  in the Material3 or MaterialComponents families needs nothing.
 - `frust-auth-session`: `AuthSessionRequest` is `#[non_exhaustive]` and its public field
   `callback_scheme` is gone, replaced by `callback: AuthCallback` (`CustomScheme(String)` or `Https
   { host, path }`), so a struct literal no longer compiles. Migration: replace `AuthSessionRequest {
   url, callback_scheme: "myapp".into(), ephemeral: false }` with
   `AuthSessionRequest::custom_scheme(url, "myapp")`, and add `.ephemeral(true)` where it was set.
-  `AuthSessionError` gained the variant `HttpsCallbackUnsupported`, so an exhaustive `match` needs
-  the new arm.
+  `AuthSessionError` (already `#[non_exhaustive]`) gained the variant `HttpsCallbackUnsupported`, so
+  a wildcard arm catches it and no match stops compiling.
 - `frust-auth-session`: on Android, when the browser supports Auth Tab (Chrome 137 or later), the
   sign-in redirect is no longer also delivered to the app as a deep link, and leaving the app and
   coming back no longer resolves the session `Cancelled`. On browsers without Auth Tab the behaviour
@@ -232,7 +254,7 @@ detaches.
   size }` for a file longer than `max_bytes`, where it returned `Io`. On Android `size` is the
   entry's listed size, or `None` when the entry has none. `TooLarge` is a new variant of the enum.
   Migration: a caller that matched `Io` to detect an over-limit file matches `TooLarge` too; any
-  other failure is still `Io` or `AccessLost`.
+  other failure is still `Io`, `AccessLost` or, on a phone's UI thread, `UiThread`.
 - On Android 13+ the photo permission (`frust-permissions`' `Photos(ReadWrite)`, and so
   `frust-photo-library`'s browsing) now checks and requests the subset of `READ_MEDIA_IMAGES` and
   `READ_MEDIA_VIDEO` that the app manifest declares, where it needed both and answered `NotDeclared`
@@ -292,7 +314,9 @@ detaches.
   label or value, and stay a container over the child's nodes otherwise; an explicit `merged(bool)`
   wins in either call order. A click action lands positionally, at the centre of the node's bounds.
   `semantics_label(text)` is a zero-size leaf that only announces its text. Both are re-exported
-  from `frust`.
+  from `frust`. A change to a published value alone (a label, role, heading level, hidden flag or
+  announced text) reaches the accessibility tree on the next rebuild, and `role(..)` after
+  `heading(..)` drops the level.
 - `TextView::heading(level)` (the `text(..)` builder) publishes a text view as a heading, and
   `ImageView::label(text)` gives an image an accessible name.
 - `RenderRoot::focus_info` / `FocusInfo` and `Tester::focus_info` report the live focus, and
@@ -425,8 +449,12 @@ detaches.
 - `frust-beui` density: `BeuiMetrics`, a theme extension of size tokens selected by `Density`
   (`Comfortable`, the default and the sizes beUI had, or `Touch`: a 44 px minimum target on Apple
   targets, 48 px elsewhere, and larger type steps), through `theme_with_density(Density)` and
-  `install_with_density(Density)`. `theme()` and `install()` are unchanged. Only the parts listed
-  under Changed follow it (`beui-density-partial-coverage` in docs/LIMITATIONS.md).
+  `install_with_density(Density)`. `theme()` and `install()` are unchanged. Only the parts that read
+  `BeuiMetrics` follow it: the components `alert`, `animated_badge`, `animated_toast_stack`,
+  `button`, `card`, `chip`, `grouped_list`, `input` and `key_value`, and the agents `message`,
+  `message_bubble` and `prompt_input` (`beui-density-partial-coverage` in docs/LIMITATIONS.md).
+  Under the default density their sizes are unchanged, and `theme_toggle` keeps the live density
+  when it flips light and dark.
 - `frust-beui` parts for phone content under `frust_beui::components`, authored in this repository
   rather than ported: `card` (`card`, `hero_card`, `stat_tile`), `grouped_list` (`grouped_list`,
   `list_row`, `section_header`), `chip` (`chip`, `status_badge`, `StatusBadgeTone`), `avatar`
@@ -496,8 +524,8 @@ detaches.
   toast takes no presentation slot, is never refused `Busy`, and a new one replaces the current one.
   Android shows a Material `Snackbar` above the plugin's bottom bars and the keyboard (behind a
   sheet or alert dialog that is up, `native-toast-android-behind-dialog`); iOS a plugin-owned
-  capsule, with Liquid Glass on request; every other target answers `PresentError::Unsupported`. The
-  iOS arm has not yet been run on a device.
+  capsule above the on-screen keyboard, with Liquid Glass on request; every other target answers
+  `PresentError::Unsupported`. The iOS arm has not yet been run on a device.
 - `frust plugin add native-widgets` sets the parent of the app's `FrustAppTheme` style to
   `Theme.Material3.DayNight.NoActionBar` (`Contribution::AndroidThemeParent`), so the plugin's
   Material views work in a newly generated app. An activity theme already in the `Theme.Material3`,
@@ -628,7 +656,9 @@ detaches.
   (Android 15, release, CPU): subject mask 519 ms, faces 58 ms, depth 930 ms warm median, 458 MB
   with the three models loaded. Not done or not verified: the Windows build, Intel macOS, the x86_64
   Simulator and Mac Catalyst, anything on iOS 15, face detection on a real face; see the `onnx-*`
-  entries in docs/LIMITATIONS.md. `frust plugin add onnx` (registry id `onnx`) adds the dependency,
+  entries in docs/LIMITATIONS.md. `frust plugin add onnx` (registry id `onnx`) requires iOS 15.1 and
+  tells a project still at 15.0 to raise its deployment target (nothing is written until it does);
+  an app without `ios/` can add it. It adds the dependency,
   the Gradle property, `android.permission.INTERNET`, and `-lc++`, `-framework CoreML` and
   `-framework Foundation` in every `OTHER_LDFLAGS` list of the iOS project. `VisionHandle` writes
   its signals on the UI thread the same way (`on_status` runs there, and a request made on another
@@ -666,10 +696,10 @@ detaches.
   declared only in `[flavors]` builds the plain task with the suffixed identity, and one also
   declared as a Gradle flavor or an Xcode scheme is refused before the build runs. After a build,
   the APK or `.app` is compared with what `frust.toml` states: a different identifier is an error
-  and a different label a warning. A project created earlier needs the template lines listed in
-  `docs/CLI_DEVELOPMENT.md` (Migrating an existing project) before `frust.toml` can state an
-  identifier or a display name; `frust create` writes both `identifier` keys, a commented
-  `display-name` and a commented `[flavors.dev]`.
+  and a different label a warning. `frust create` writes both `identifier` keys, a
+  commented `display-name` and a commented `[flavors.dev]`. A project created earlier adds the
+  template lines of `docs/CLI_DEVELOPMENT.md` (Migrating an existing project) before it states a
+  display name.
 - `frust-drive` plugin contributions: `Contribution::IosEntitlement` (a key written to
   `ios/Runner/Runner.entitlements`, with `IosEntitlementValue` as Bool, String or StringArray),
   `Contribution::PlistArrayEntry` (a string array in `Info.plist`) and
@@ -725,7 +755,8 @@ detaches.
   serve the graph and every package directory from one `cargo metadata` document.
 - `frust plugin add <id> [--feature <f>]...`: adds a plugin to the project in the current directory
   with the same edits as the TUI's Add Plugin dialog. It is idempotent, and an unknown id or feature
-  lists the valid ones.
+  lists the valid ones. A `ManifestPermission` contribution on a project with no `android/`
+  directory is skipped, so `frust plugin add haptics` works on a desktop-only app.
 - `frust-drive`: `ProcessRunner::run_streaming_with_stderr`, which hands stderr lines to a second
   sink as they arrive.
 - `frust-drive`: a new plugin contribution kind, `Contribution::AndroidLibcxxShared` (manifest key
@@ -786,12 +817,11 @@ detaches.
   session id. Clients on any session version (2024-11-05 through 2025-11-25) keep their sessions
   unchanged, and the tool set is unchanged. See Breaking for the `Origin` rule.
 - New apps target iOS 15.1 (15.0 before), the minimum of the ONNX Runtime archive `frust-onnx`
-  links. `frust plugin add onnx` requires 15.1 and tells a project still at 15.0 to raise its
-  deployment target; nothing is written until it does.
+  links.
 - `Contribution::IosFramework` counts as already present in a project without an `ios/` directory,
-  so the iOS link lines no longer block an add there: an app without `ios/` can add `onnx`, and one
-  that has `android/` can add `auth-session` and the other plugins whose iOS side is only link
-  lines. A project with `ios/` but no `project.pbxproj` still fails.
+  so the iOS link lines no longer block an add there: an app that has `android/` but no `ios/` can
+  add `auth-session` and the other plugins whose iOS side is only link lines. A project with `ios/`
+  but no `project.pbxproj` still fails.
 - `frust-drive`: `Info.plist` keys and values written by a plugin add are now XML-escaped, and `--`
   in their comments is collapsed. No existing registry entry is affected.
 - `frust-drive` `add_plugin` and the other add entry points: an item for an `android/` or `ios/`
@@ -808,10 +838,6 @@ detaches.
   `Theme.Material3Expressive` or `Theme.MaterialComponents` family works as it is.
 - The plugin registry's `photo-library` `library` option now also links `ImageIO` on iOS, which
   `asset_metadata` reads through; a project that also enables `decode` links it once.
-- `frust-beui` parts that read `BeuiMetrics` and so follow `Density::Touch`: the components `alert`,
-  `animated_badge`, `animated_toast_stack`, `button`, `card`, `chip`, `grouped_list`, `input` and
-  `key_value`, and the agents `message`, `message_bubble` and `prompt_input`. Under the default
-  density their sizes are unchanged.
 - The chat message avatar's initials are upper-cased.
 - `examples/beui-demo` is a standalone workspace (its own `Cargo.lock`, excluded from the root
   workspace) with the package `beuidemo` and the Android and iOS identifier `it.f0x.beuidemo`. Run
@@ -820,6 +846,8 @@ detaches.
 
 ### Fixed
 
+- `frust-i18n` typed keys: a message whose variable is named `args` compiles and binds that
+  variable; the generated key functions no longer use names a variable can collide with.
 - A text field no longer fires `on_submit` while an IME composition is live. With a composing range
   the platform keyboard owns (Android, iOS), Enter ends the range and then submits or inserts a
   newline.
@@ -879,9 +907,6 @@ detaches.
   (`android-thread-local-key-limit` in docs/LIMITATIONS.md).
 - `frust run` on a physical iPhone prints the app's stderr as it arrives, where it used to appear
   only once the launch command exited.
-- `frust plugin add` satisfies a `ManifestPermission` contribution on a project with no `android/`
-  directory (it skips it), where it used to fail; this fixes `frust plugin add haptics` on a
-  desktop-only app.
 - `frust create --frust-path` with a relative path writes the checkout to the generated `Cargo.toml`
   relative to the new project's directory (the path is still found from the directory the command
   runs in), where the value was written as given and resolved against the project. The plugin path
