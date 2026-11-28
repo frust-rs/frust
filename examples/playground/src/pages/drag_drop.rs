@@ -42,14 +42,21 @@
 //! is appended to a running list. Untestable headlessly beyond construction
 //! and mounting: desktop shells are the only ones that ever publish
 //! `InputEvent::FileDrop` in the first place.
+//!
+//! # Modifier drag
+//!
+//! A fixed-size pad under a [`frust::GestureDetector`] pan. A plain drag
+//! pans the pad's offset, an Alt/Option drag adjusts a value instead, and
+//! Shift divides that step by ten. The pure reducer is [`apply_drag`]; the
+//! readout shows the offset, the value and the last chord seen.
 
 use std::path::PathBuf;
 
 use frust::{
-    Axis, ChildKey, Color, DragCoordinator, EdgeInsets, FlexChild, FlexView, Get, GetUntracked,
-    Padding, RwSignal, ScrollController, Set, SizedBox, SourceFeedback, Theme, Update, View,
-    auto_scroll_zone, column, container, drag_target, draggable, inflexible, reorderable_list,
-    scroll_view, text, use_context,
+    Axis, ChildKey, Color, Component, DragCoordinator, EdgeInsets, FlexChild, FlexView,
+    GestureDetector, Get, GetUntracked, Modifiers, Padding, RwSignal, ScrollController, Set,
+    SizedBox, SourceFeedback, Theme, Update, View, auto_scroll_zone, column, container,
+    drag_target, draggable, inflexible, reorderable_list, scroll_view, text, use_context,
 };
 
 use crate::PlaygroundState;
@@ -79,6 +86,108 @@ const REORDER_ROW_HEIGHT_PX: f64 = 40.0;
 
 /// The file-drop zone's fixed height, in logical px.
 const FILE_DROP_HEIGHT_PX: f64 = 96.0;
+
+/// The modifier-drag pad's fixed size, in logical px.
+const PAD_WIDTH_PX: f64 = 240.0;
+const PAD_HEIGHT_PX: f64 = 120.0;
+
+/// Value change per logical px of horizontal Alt-drag; Shift divides it by
+/// [`FINE_DIVISOR`].
+const VALUE_STEP: f64 = 1.0;
+const FINE_DIVISOR: f64 = 10.0;
+
+/// The modifier-drag block's model: the pan offset, the adjusted value, and
+/// the chord seen on the last update.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct DragModel {
+    offset: (f64, f64),
+    value: f64,
+    chord: Modifiers,
+}
+
+/// Apply one drag update (`delta` in logical px) to `model`. Plain drags pan
+/// the offset; Alt adjusts the value by `delta.0 * step` and leaves the
+/// offset alone; Shift divides the step by [`FINE_DIVISOR`].
+fn apply_drag(model: DragModel, delta: (f64, f64), modifiers: Modifiers) -> DragModel {
+    let mut next = model;
+    next.chord = modifiers;
+    if modifiers.alt {
+        let step = if modifiers.shift {
+            VALUE_STEP / FINE_DIVISOR
+        } else {
+            VALUE_STEP
+        };
+        next.value += delta.0 * step;
+    } else {
+        next.offset.0 += delta.0;
+        next.offset.1 += delta.1;
+    }
+    next
+}
+
+/// Render a chord as `alt+shift`, or `none`.
+fn chord_label(m: Modifiers) -> String {
+    let parts: Vec<&str> = [
+        (m.ctrl, "ctrl"),
+        (m.alt, "alt"),
+        (m.shift, "shift"),
+        (m.meta, "meta"),
+    ]
+    .into_iter()
+    .filter_map(|(on, name)| on.then_some(name))
+    .collect();
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join("+")
+    }
+}
+
+/// The modifier-drag block, hosted as its own [`Component`] so the pan
+/// callbacks mutate its private [`DragModel`] state.
+struct ModifierDrag {
+    accent: Color,
+    muted: Color,
+    fill: Color,
+}
+
+impl Component for ModifierDrag {
+    type State = DragModel;
+
+    fn init(&self) -> DragModel {
+        DragModel::default()
+    }
+
+    fn build(&self, state: &mut DragModel) -> impl View<DragModel> {
+        let model = *state;
+        let pad = SizedBox::<DragModel>(Some(PAD_WIDTH_PX), Some(PAD_HEIGHT_PX)).child(
+            container(Padding(
+                EdgeInsets::all(12.0),
+                text("Drag: pan. Alt/Option-drag: value. Shift: fine steps.")
+                    .size(11.0)
+                    .color(self.accent),
+            ))
+            .fill(self.fill),
+        );
+        let detector = GestureDetector(pad).on_pan_update(|state: &mut DragModel, d| {
+            *state = apply_drag(*state, (d.delta.x, d.delta.y), d.modifiers);
+        });
+        column()
+            .child(detector)
+            .child(SizedBox::<DragModel>(None, Some(8.0)))
+            .child(
+                text(format!(
+                    "offset ({:.0}, {:.0})  value {:.1}  chord {}",
+                    model.offset.0,
+                    model.offset.1,
+                    model.value,
+                    chord_label(model.chord)
+                ))
+                .size(12.0)
+                .color(self.muted),
+            )
+    }
+}
 
 /// One kanban card: a stable identity ([`KanbanCard::id`]) carried as the
 /// [`CardMove`] drag payload, and the label painted on its chip.
@@ -398,7 +507,15 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
             .child(SizedBox::<PlaygroundState>(None, Some(4.0)))
             .child(file_target)
             .child(SizedBox::<PlaygroundState>(None, Some(8.0)))
-            .child(FlexView::new(Axis::Vertical, dropped_lines)),
+            .child(FlexView::new(Axis::Vertical, dropped_lines))
+            .child(SizedBox::<PlaygroundState>(None, Some(16.0)))
+            .child(text("Modifier drag").size(12.0).color(muted))
+            .child(SizedBox::<PlaygroundState>(None, Some(4.0)))
+            .child(frust::component(ModifierDrag {
+                accent,
+                muted,
+                fill: scheme.surface_container,
+            })),
     )
 }
 
@@ -416,6 +533,37 @@ mod tests {
         let ambient = Owner::new();
         ambient.set();
         ambient
+    }
+
+    #[test]
+    fn plain_drag_pans() {
+        let m = apply_drag(DragModel::default(), (3.0, -2.0), Modifiers::NONE);
+        assert_eq!(m.offset, (3.0, -2.0));
+        assert_eq!(m.value, 0.0);
+    }
+
+    #[test]
+    fn alt_drag_adjusts_the_value_and_leaves_the_offset() {
+        let alt = Modifiers {
+            alt: true,
+            ..Modifiers::NONE
+        };
+        let m = apply_drag(DragModel::default(), (5.0, 7.0), alt);
+        assert_eq!(m.offset, (0.0, 0.0));
+        assert_eq!(m.value, 5.0 * VALUE_STEP);
+        assert_eq!(chord_label(m.chord), "alt");
+    }
+
+    #[test]
+    fn shift_makes_fine_steps() {
+        let both = Modifiers {
+            alt: true,
+            shift: true,
+            ..Modifiers::NONE
+        };
+        let m = apply_drag(DragModel::default(), (10.0, 0.0), both);
+        assert!((m.value - 10.0 * VALUE_STEP / FINE_DIVISOR).abs() < 1e-9);
+        assert_eq!(chord_label(m.chord), "alt+shift");
     }
 
     #[test]
