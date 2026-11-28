@@ -316,6 +316,16 @@ impl Keys {
         self.root.event(&mut (), &event)
     }
 
+    /// An auto-repeat of `key` with no modifiers, as a shell reports it once Shift has lifted.
+    fn repeat_key(&mut self, key: Key) -> EventOutcome {
+        let event = InputEvent::Key(KeyEvent {
+            key,
+            modifiers: Modifiers::NONE,
+            repeat: true,
+        });
+        self.root.event(&mut (), &event)
+    }
+
     fn release_key(&mut self, key: Key) -> EventOutcome {
         let event = InputEvent::KeyUp(KeyEvent {
             key,
@@ -516,6 +526,72 @@ fn a_repeat_redelivers_the_shortcut_and_keeps_one_held_entry() {
     keys.clear();
     keys.release("Ctrl+K");
     assert_eq!(keys.own_releases("global"), 1);
+}
+
+/// Shift+Backslash pressed as `|`, Shift lifted so the repeat reports `\`, released as `|`.
+fn press_pipe_repeat_backslash_release_pipe(keys: &mut Keys) {
+    keys.press_key(character("|"));
+    keys.repeat_key(character("\\"));
+    keys.release_key(character("|"));
+}
+
+#[test]
+fn a_repeat_of_a_key_not_held_opens_no_held_entry() {
+    let mut keys = Keys::new(vec![field("field")], vec![Child::Leaf("field")]);
+    keys.focus_row(0);
+    press_pipe_repeat_backslash_release_pipe(&mut keys);
+    assert!(keys.root.held_keys().is_empty());
+}
+
+#[test]
+fn a_repeat_of_a_key_not_held_fires_no_shortcut() {
+    let mut keys = Keys::new(
+        vec![global("global", "\\"), field("field")],
+        vec![Child::Leaf("global"), Child::Leaf("field")],
+    );
+    press_pipe_repeat_backslash_release_pipe(&mut keys);
+    let delivered = |seen: &Seen| matches!(seen, Seen::Shortcut(_) | Seen::Released(_));
+    assert!(
+        !keys.log().iter().any(|(_, seen)| delivered(seen)),
+        "no shortcut press or release was delivered: {:?}",
+        keys.log()
+    );
+    assert!(keys.root.held_keys().is_empty());
+}
+
+#[test]
+fn a_repeat_of_a_key_not_held_still_reaches_the_focused_widget() {
+    let mut keys = Keys::new(
+        vec![field("field"), global("global", "\\")],
+        vec![Child::Leaf("field"), Child::Leaf("global")],
+    );
+    keys.focus_row(0);
+    press_pipe_repeat_backslash_release_pipe(&mut keys);
+    assert_eq!(
+        keys.seen_by("field"),
+        vec![
+            Seen::Key(character("|"), false),
+            Seen::Key(character("\\"), true),
+            Seen::Up(character("|"), Modifiers::NONE),
+        ]
+    );
+}
+
+#[test]
+fn a_repeat_of_a_held_key_still_refires_its_shortcut() {
+    let mut keys = Keys::new(vec![global("global", "\\")], vec![Child::Leaf("global")]);
+    let id = keys.id("global");
+    assert!(keys.press_key(character("\\")).handled);
+    assert!(keys.repeat_key(character("\\")).handled);
+    assert_eq!(
+        keys.seen_by("global"),
+        vec![Seen::Shortcut(id), Seen::Shortcut(id)]
+    );
+
+    keys.clear();
+    keys.release_key(character("\\"));
+    assert_eq!(keys.seen_by("global"), vec![Seen::Released(id)]);
+    assert!(keys.root.held_keys().is_empty());
 }
 
 #[test]

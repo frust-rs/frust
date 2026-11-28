@@ -1,6 +1,8 @@
 //! The keys `RenderRoot` was told are down, and the release each one owes: an
 //! [`InputEvent::KeyUp`] down the focus path, then an [`InputEvent::ShortcutReleased`] for the
 //! shortcut that answered the press, addressed by its recorded id rather than a table re-match.
+//! Only a non-repeat press opens an entry, because a shell names the release by the key of the
+//! physical key's first press, which a repeat's own key need not match.
 
 use super::RenderRoot;
 use crate::event::{
@@ -63,7 +65,9 @@ fn fold_redraw(outcome: &mut EventOutcome, other: EventOutcome) {
 
 impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// A press: a fresh press of a held key releases it first, then the key is recorded (evicting
-    /// the oldest past the cap) and dispatched. `handled` is the press's own.
+    /// the oldest past the cap) and dispatched. A repeat is dispatched without touching the held
+    /// set: only a non-repeat press opens an entry, because the release is named by the key of
+    /// the first press, which a repeat's key need not match. `handled` is the press's own.
     pub(super) fn press_key(
         &mut self,
         state: &mut State,
@@ -71,19 +75,19 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         key: &KeyEvent,
     ) -> EventOutcome {
         let mut released = EventOutcome::default();
-        if !key.repeat
-            && let Some(entry) = self.held_keys.remove(&key.key)
-        {
-            fold_redraw(
-                &mut released,
-                self.release_held(state, entry, Modifiers::NONE),
-            );
-        }
-        if let Some(evicted) = self.held_keys.insert(&key.key) {
-            fold_redraw(
-                &mut released,
-                self.release_held(state, evicted, Modifiers::NONE),
-            );
+        if !key.repeat {
+            if let Some(entry) = self.held_keys.remove(&key.key) {
+                fold_redraw(
+                    &mut released,
+                    self.release_held(state, entry, Modifiers::NONE),
+                );
+            }
+            if let Some(evicted) = self.held_keys.insert(&key.key) {
+                fold_redraw(
+                    &mut released,
+                    self.release_held(state, evicted, Modifiers::NONE),
+                );
+            }
         }
         let mut outcome = self.dispatch_pass(state, event, None).0;
         fold_redraw(&mut outcome, released);
@@ -151,6 +155,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         if let Some(previous) = previous.filter(|(id, _)| *id != shortcut.0) {
             fold_redraw(carried, self.release_shortcut(state, previous));
         }
+        // Looked up again: `release_shortcut` dispatches, which can change the held set.
         if let Some(index) = self.held_keys.position(key) {
             self.held_keys.0[index].shortcut = Some(shortcut);
         }
@@ -170,6 +175,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             outcome.needs_redraw |= released.needs_redraw;
         }
         self.finish_event(state, outcome)
+    }
+
+    /// Whether `key` has a held entry a shortcut answering it can be recorded against.
+    pub(super) fn key_is_held(&self, key: &Key) -> bool {
+        self.held_keys.position(key).is_some()
     }
 
     /// The keys held down, oldest first.
