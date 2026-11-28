@@ -921,15 +921,6 @@ pub fn carried_key_event(
     })
 }
 
-// --- clipboard -----------------------------------------------------------
-
-/// The framework verb one overlay signal means, or `None` for a signal that
-/// carries no clipboard edit at all.
-///
-/// The two arms differ only in who decoded the gesture. A `paste` is read as
-/// text and named by this shell; a `cut` was already resolved to its verb by the
-/// listener that answered it, because the clipboard half of a cut has to happen
-/// inside the DOM callback and the delete half cannot.
 /// The release owed to a DOM-carried key press: the same key and modifiers,
 /// `repeat` false. `None` for anything that is not a key press. A carried key
 /// has no physical key and is never recorded in `PressedKeys`, so nothing else
@@ -945,6 +936,15 @@ pub fn dom_carried_release(event: &InputEvent) -> Option<InputEvent> {
     }))
 }
 
+// --- clipboard -----------------------------------------------------------
+
+/// The framework verb one overlay signal means, or `None` for a signal that
+/// carries no clipboard edit at all.
+///
+/// The two arms differ only in who decoded the gesture. A `paste` is read as
+/// text and named by this shell; a `cut` was already resolved to its verb by the
+/// listener that answered it, because the clipboard half of a cut has to happen
+/// inside the DOM callback and the delete half cannot.
 fn dom_edit_command(event: &crate::ime::DomEditEvent) -> Option<EditCommand> {
     match event {
         crate::ime::DomEditEvent::Paste(text) => Some(EditCommand::Paste(text.clone())),
