@@ -6,7 +6,7 @@
 
 use std::cell::Cell;
 
-use super::key::EditCommand;
+use super::key::{EditCommand, Modifiers};
 use super::pointer::CursorIcon;
 use crate::thread_state::{self, CoreLocals};
 
@@ -140,6 +140,56 @@ impl Drop for RequestPass {
         // Each `PassSlot` restores its own slot as it drops, right after this.
         thread_state::with(|t| t.request_pass_open.set(self.was_open));
     }
+}
+
+/// The bracket around one root dispatch's held modifiers. Only the outermost guard owns the slot:
+/// a nested root dispatch (the overlay pre-pass) inherits the open value and leaves it alone.
+pub(crate) struct ModifiersPass {
+    owns: bool,
+}
+
+impl ModifiersPass {
+    /// Open a pass reading `modifiers`, unless one is already open (then the guard is inert).
+    pub(crate) fn enter(modifiers: Modifiers) -> Self {
+        let owns = thread_state::with(|t| {
+            if t.modifiers_pass.get().is_some() {
+                false
+            } else {
+                t.modifiers_pass.set(Some(modifiers));
+                true
+            }
+        });
+        Self { owns }
+    }
+}
+
+impl Drop for ModifiersPass {
+    fn drop(&mut self) {
+        if self.owns {
+            thread_state::with(|t| t.modifiers_pass.set(None));
+        }
+    }
+}
+
+/// The modifiers the running pass reads; [`Modifiers::NONE`] outside any pass.
+pub(crate) fn current_modifiers() -> Modifiers {
+    thread_state::with(|t| t.modifiers_pass.get()).unwrap_or(Modifiers::NONE)
+}
+
+/// Run `f` with `modifiers` as the running pass's held modifiers, restoring the previous value on
+/// exit, unwind included.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_modifiers_for_test<R>(modifiers: Modifiers, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Modifiers>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            thread_state::with(|t| t.modifiers_pass.set(self.0));
+        }
+    }
+    let _restore = Restore(thread_state::with(|t| {
+        t.modifiers_pass.replace(Some(modifiers))
+    }));
+    f()
 }
 
 /// Test-only bare clear of the cursor slot, for a widget driven with no root above it.

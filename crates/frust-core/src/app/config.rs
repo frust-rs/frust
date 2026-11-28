@@ -4,6 +4,7 @@
 use std::any::Any;
 
 use super::RenderRoot;
+use crate::event::Modifiers;
 use crate::insets::WindowInsets;
 use crate::view::{ChangeFlags, View};
 
@@ -21,6 +22,22 @@ pub enum FocusRingPolicy {
 }
 
 impl<State: 'static, V: View<State>> RenderRoot<State, V> {
+    /// Store the modifiers the shell sees held; returns whether they changed. Dirties nothing,
+    /// requests no frame and dispatches no event.
+    pub fn set_modifiers(&mut self, modifiers: Modifiers) -> bool {
+        std::mem::replace(&mut self.modifiers, modifiers) != modifiers
+    }
+
+    /// The modifiers [`RenderRoot::set_modifiers`] last stored.
+    pub fn modifiers(&self) -> Modifiers {
+        self.modifiers
+    }
+
+    /// Forget every held modifier (window focus loss); returns whether any was held.
+    pub fn clear_modifiers(&mut self) -> bool {
+        self.set_modifiers(Modifiers::NONE)
+    }
+
     /// Choose when the focused widget draws a ring (default [`FocusRingPolicy::KeyboardOnly`]).
     pub fn set_focus_ring_policy(&mut self, policy: FocusRingPolicy) {
         let visible = self.focus_ring_visible();
