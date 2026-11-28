@@ -14,6 +14,7 @@ mod focus_ime;
 mod focus_return;
 mod focus_traversal;
 mod hover;
+mod key_release;
 mod lifecycle;
 mod modifiers;
 mod overlay;
@@ -421,6 +422,12 @@ impl crate::widget::Widget for OverlayOwnerWidget {
                     .pod
                     .borrow_mut()
                     .event_child(ctx, &InputEvent::Shortcut(*id));
+            }
+            OverlayEventKind::ShortcutReleased(id) => {
+                surface
+                    .pod
+                    .borrow_mut()
+                    .event_child(ctx, &InputEvent::ShortcutReleased(*id));
             }
             OverlayEventKind::Key(key) => {
                 surface

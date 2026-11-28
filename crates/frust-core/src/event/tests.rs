@@ -700,6 +700,37 @@ fn an_edit_command_is_focus_routed_with_zero_position() {
     );
 }
 
+#[test]
+fn a_key_up_is_focus_routed_with_zero_position() {
+    let up = InputEvent::KeyUp(KeyEvent {
+        key: Key::Character("k".into()),
+        modifiers: Modifiers::CTRL,
+        repeat: false,
+    });
+    assert!(
+        up.is_focus_routed(),
+        "a release follows the focus like its press"
+    );
+    assert!(!up.is_broadcast());
+    assert_eq!(up.position(), Point::ZERO);
+    assert_eq!(up.translated(Vec2::new(10.0, 20.0)), up);
+    assert_eq!(up.transformed(&Affine::scale(2.0)), up);
+}
+
+#[test]
+fn a_shortcut_release_is_a_broadcast() {
+    let id = crate::shortcuts::ShortcutId::next();
+    let released = InputEvent::ShortcutReleased(id);
+    assert!(released.is_broadcast(), "it reaches every mounted widget");
+    assert!(!released.is_focus_routed());
+    assert_eq!(released.position(), Point::ZERO);
+    assert_eq!(released.translated(Vec2::new(10.0, 20.0)), released);
+    assert_eq!(released.transformed(&Affine::scale(2.0)), released);
+    let routed = overlay(OverlayEventKind::ShortcutReleased(id));
+    assert!(routed.is_broadcast());
+    assert_eq!(routed.translated(Vec2::new(5.0, 5.0)), routed);
+}
+
 /// An overlay event standing in for one routed into a floated surface.
 fn overlay(kind: OverlayEventKind) -> InputEvent {
     InputEvent::Overlay(OverlayEvent {
@@ -740,6 +771,11 @@ fn overlay_is_a_broadcast_and_housekeeping_is_the_only_other_one() {
             delta: ScrollDelta::Lines(0.0, 1.0),
         },
         InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Enter),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        }),
+        InputEvent::KeyUp(KeyEvent {
             key: Key::Named(NamedKey::Enter),
             modifiers: Modifiers::default(),
             repeat: false,

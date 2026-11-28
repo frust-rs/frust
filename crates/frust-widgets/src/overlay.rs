@@ -941,6 +941,9 @@ impl<PodState: 'static> OverlaySlot<PodState> {
                     OverlayEventKind::Shortcut(id) => {
                         self.forward(ctx, &InputEvent::Shortcut(*id), substitute);
                     }
+                    OverlayEventKind::ShortcutReleased(id) => {
+                        self.forward(ctx, &InputEvent::ShortcutReleased(*id), substitute);
+                    }
                     // A key the focus path declined: offered to the pod first; an
                     // unconsumed Escape is left for the owner to close on.
                     OverlayEventKind::Key(key) => {
