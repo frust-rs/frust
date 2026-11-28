@@ -10,8 +10,8 @@ use kurbo::Point;
 use super::{FocusRun, OverlayRoute, RenderRoot, advance_focus_epoch_past};
 use crate::event::{
     ContactFrame, ContactPass, EventCtx, EventOutcome, EventResult, FileDropEvent, FileDropPhase,
-    ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, OverlayEvent, OverlayEventKind,
-    PointerButton, PointerId, PointerPhase, PointerSource, RequestPass,
+    ImeState, InputEvent, Key, KeyEvent, Modifiers, ModifiersPass, NamedKey, OverlayEvent,
+    OverlayEventKind, PointerButton, PointerId, PointerPhase, PointerSource, RequestPass,
 };
 use crate::focus_handle::{Deferral, Intent, PressPass};
 use crate::focus_scope::FocusTarget;
@@ -169,6 +169,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
     /// followed in the same call by a [`FileDropPhase::Ended`] broadcast to the
     /// whole tree; an unhandled `Key` goes on (`dispatch_declined_key`); the outcome folds all.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
+        let _modifiers = ModifiersPass::enter(pass_modifiers(event, self.modifiers));
         let mut outcome = self.dispatch_pass(state, event, None).0;
         // A return owed when an event beats the rebuild runs after it, so that event never
         // reaches the restored control; nested deliveries call `dispatch_pass`, never this.
@@ -1169,5 +1170,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         } else {
             OverlayRoute::Continue(carried)
         }
+    }
+}
+
+/// The modifiers a dispatch of `event` reads: a key's own chord, else the `held` set.
+fn pass_modifiers(event: &InputEvent, held: Modifiers) -> Modifiers {
+    match event {
+        InputEvent::Key(k) => k.modifiers,
+        InputEvent::Overlay(OverlayEvent {
+            kind: OverlayEventKind::Key(k),
+            ..
+        }) => k.modifiers,
+        _ => held,
     }
 }

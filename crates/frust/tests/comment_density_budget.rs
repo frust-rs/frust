@@ -58,6 +58,7 @@ const CAPS: &[(&str, f32)] = &[
     ("crates/frust-core/src/app/tests/focus_return.rs", 5.7), // measured 2.7
     ("crates/frust-core/src/app/tests/hover.rs", 18.1), // measured 15.1
     ("crates/frust-core/src/app/tests/lifecycle.rs", 11.7), // measured 8.7
+    ("crates/frust-core/src/app/tests/modifiers.rs", 10.0), // measured 3.0
     ("crates/frust-core/src/app/tests/mod.rs", 16.8), // measured 13.8
     ("crates/frust-core/src/app/tests/overlay.rs", 14.3), // measured 11.3
     ("crates/frust-core/src/app/tests/focus_traversal.rs", 6.4), // measured 3.4

@@ -1018,3 +1018,45 @@ fn function_key_tables_are_inverses_over_f1_to_f24() {
     assert!(NamedKey::function(0).is_none() && NamedKey::function(25).is_none());
     assert_eq!(NamedKey::Enter.function_number(), None);
 }
+
+#[test]
+fn modifiers_read_none_outside_a_pass() {
+    assert_eq!(current_modifiers(), Modifiers::NONE);
+    let mut count = 0u32;
+    let ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+    assert_eq!(ctx.modifiers(), Modifiers::NONE);
+}
+
+#[test]
+fn a_modifiers_pass_inherits_an_open_one_and_closes_with_its_owner() {
+    let outer = ModifiersPass::enter(Modifiers::ALT);
+    assert_eq!(current_modifiers(), Modifiers::ALT);
+    {
+        let _inner = ModifiersPass::enter(Modifiers::SHIFT);
+        assert_eq!(current_modifiers(), Modifiers::ALT, "the open pass wins");
+    }
+    assert_eq!(
+        current_modifiers(),
+        Modifiers::ALT,
+        "an inert guard resets nothing"
+    );
+    drop(outer);
+    assert_eq!(current_modifiers(), Modifiers::NONE);
+}
+
+#[test]
+fn with_modifiers_for_test_scopes_and_restores() {
+    with_modifiers_for_test(Modifiers::CTRL, || {
+        assert_eq!(current_modifiers(), Modifiers::CTRL);
+        with_modifiers_for_test(Modifiers::META, || {
+            assert_eq!(current_modifiers(), Modifiers::META);
+        });
+        assert_eq!(current_modifiers(), Modifiers::CTRL);
+    });
+    assert_eq!(current_modifiers(), Modifiers::NONE);
+    let unwound = std::panic::catch_unwind(|| {
+        with_modifiers_for_test(Modifiers::SHIFT, || panic!("boom"));
+    });
+    assert!(unwound.is_err());
+    assert_eq!(current_modifiers(), Modifiers::NONE);
+}

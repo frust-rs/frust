@@ -15,6 +15,7 @@ mod focus_return;
 mod focus_traversal;
 mod hover;
 mod lifecycle;
+mod modifiers;
 mod overlay;
 mod platform_views;
 /// [`InputEvent::Scale`]: hit-tested by [`ScaleEvent::focal`] exactly like

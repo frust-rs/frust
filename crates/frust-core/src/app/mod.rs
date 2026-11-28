@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use kurbo::{Rect, Size};
 
 use crate::anim::AnimationClock;
-use crate::event::{CursorIcon, EventOutcome, ImeState, PointerId};
+use crate::event::{CursorIcon, EventOutcome, ImeState, Modifiers, PointerId};
 use crate::focus_scope::FocusReturns;
 use crate::insets::WindowInsets;
 use crate::overlay::{OverlayHit, OverlayKey};
@@ -106,6 +106,8 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     focus_grant: ShortcutId,
     /// Whether traversal granted the live focus; any other claim, a release or a `Down` clears it.
     keyboard_focus: bool,
+    /// Shell-pushed held modifiers.
+    modifiers: Modifiers,
     focus_ring_policy: FocusRingPolicy,
     /// The handles the last paint bound, each with the stop it addresses (`crate::focus_handle`).
     focus_handles: Vec<crate::focus_handle::BoundHandle>,
@@ -208,6 +210,7 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             key_forward: None,
             focus_grant: ShortcutId::next(),
             keyboard_focus: false,
+            modifiers: Modifiers::NONE,
             focus_ring_policy: FocusRingPolicy::KeyboardOnly,
             focus_handles: Vec::new(),
             focus_notice: Vec::new(),

@@ -9,7 +9,8 @@ use super::contact::{
     current_pointer_id, note_capture_released, note_contacts_requested, under_contact_captor,
 };
 use super::ime::ImeState;
-use super::key::EditCommand;
+use super::key::{EditCommand, Modifiers};
+use super::pass::current_modifiers;
 use super::pointer::{CursorIcon, PointerId};
 use crate::overlay::OverlayKey;
 use crate::thread_state;
@@ -197,6 +198,12 @@ impl<'a> EventCtx<'a> {
     /// an [`InputEvent::PointerContact`](crate::event::InputEvent::PointerContact).
     pub fn pointer_id(&self) -> PointerId {
         self.pointer_id
+    }
+
+    /// The modifiers held for this dispatch: the key's own chord during a `Key`, else the set the
+    /// shell pushed ([`RenderRoot::set_modifiers`](crate::RenderRoot::set_modifiers)). `NONE` outside a pass.
+    pub fn modifiers(&self) -> Modifiers {
+        current_modifiers()
     }
 
     /// Opt into the gesture's other contacts: call on the `Down` that calls

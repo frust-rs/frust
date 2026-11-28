@@ -133,6 +133,36 @@ pub struct Modifiers {
     pub meta: bool,
 }
 
+impl Modifiers {
+    /// No modifier held; equal to `Modifiers::default()`.
+    pub const NONE: Modifiers = Modifiers {
+        shift: false,
+        ctrl: false,
+        alt: false,
+        meta: false,
+    };
+    /// Only Shift held.
+    pub const SHIFT: Modifiers = Modifiers {
+        shift: true,
+        ..Modifiers::NONE
+    };
+    /// Only Ctrl held.
+    pub const CTRL: Modifiers = Modifiers {
+        ctrl: true,
+        ..Modifiers::NONE
+    };
+    /// Only Alt held.
+    pub const ALT: Modifiers = Modifiers {
+        alt: true,
+        ..Modifiers::NONE
+    };
+    /// Only Meta (Command on macOS, Super elsewhere) held.
+    pub const META: Modifiers = Modifiers {
+        meta: true,
+        ..Modifiers::NONE
+    };
+}
+
 /// A keyboard key event, delivered down the focus path (never hit-tested).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyEvent {
