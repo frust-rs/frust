@@ -228,23 +228,31 @@ impl AndroidAppHandle {
     }
 
     /// Forward a soft-keyboard editor action (`nativeImeAction`, e.g.
-    /// `IME_ACTION_DONE`) as an [`NamedKey::Enter`] key press down the focus path.
+    /// `IME_ACTION_DONE`) as an [`NamedKey::Enter`] key press down the focus path,
+    /// followed at once by its [`InputEvent::KeyUp`]: the platform reports no key-up
+    /// for a soft-keyboard action, so the release is synthesized to keep the
+    /// tree's held-key set from retaining `Enter`.
     ///
     /// `action` is retained for future differentiation; v1 configures only
     /// `IME_ACTION_DONE`, so every action maps to `Enter`. Reuses the same
     /// focus-routed key path a hardware Enter would, so a widget's
     /// submit/newline handling stays in one place.
     pub(crate) fn ime_action(&mut self, _action: i32) {
-        let event = InputEvent::Key(KeyEvent {
+        let key = KeyEvent {
             key: Key::Named(NamedKey::Enter),
             modifiers: Modifiers::default(),
             repeat: false,
-        });
+        };
+        let press = InputEvent::Key(key.clone());
+        let release = InputEvent::KeyUp(key);
         // Frame-gate latch: a soft-keyboard action forces the next
         // frame to run (see `dispatch_touch`).
         self.events_since_last_frame = true;
         let app = &mut self.app;
-        let _ = under_root_owner(|| app.event(&event));
+        let _ = under_root_owner(|| {
+            app.event(&press);
+            app.event(&release)
+        });
     }
 }
 
