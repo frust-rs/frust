@@ -546,3 +546,92 @@ fn chords_drive_the_pane_and_the_tabs() {
     assert_eq!(h.press(ch("3"), Modifiers::default()).tab, 2);
     assert_eq!(h.press(ch("1"), Modifiers::default()).tab, 0);
 }
+
+const HOLD_KEY: &str = "\\";
+
+impl Harness {
+    fn key_event(key: Key, repeat: bool) -> KeyEvent {
+        KeyEvent {
+            key,
+            modifiers: Modifiers::default(),
+            repeat,
+        }
+    }
+
+    fn down(&mut self, key: Key, repeat: bool) -> bool {
+        let outcome = self.root.event(
+            &mut self.state,
+            &InputEvent::Key(Self::key_event(key, repeat)),
+        );
+        self.frame();
+        outcome.handled
+    }
+
+    fn up(&mut self, key: Key) {
+        self.root.event(
+            &mut self.state,
+            &InputEvent::KeyUp(Self::key_event(key, false)),
+        );
+        self.frame();
+    }
+
+    fn comparing(&self) -> bool {
+        self.state.shortcuts.comparing.get_untracked()
+    }
+
+    fn consumer(&self) -> String {
+        self.state.shortcuts.last_consumer.get_untracked()
+    }
+}
+
+/// Press sets the hold, release clears it, and the readout names each change.
+#[test]
+fn a_hold_chord_reports_held_then_released() {
+    let mut h = Harness::new();
+    assert!(!h.comparing());
+    assert!(h.down(ch(HOLD_KEY), false));
+    assert!(h.comparing());
+    assert_eq!(h.consumer(), "\\: comparing");
+    h.up(ch(HOLD_KEY));
+    assert!(!h.comparing());
+    assert_eq!(h.consumer(), "\\: released");
+}
+
+/// Auto-repeat neither re-fires the handler nor releases the hold.
+#[test]
+fn a_hold_chord_ignores_auto_repeat() {
+    let mut h = Harness::new();
+    h.down(ch(HOLD_KEY), false);
+    h.state.shortcuts.last_consumer.set("-".into());
+    assert!(h.down(ch(HOLD_KEY), true), "the repeat is still answered");
+    assert!(h.comparing());
+    assert_eq!(h.consumer(), "-", "the handler did not re-fire");
+    h.up(ch(HOLD_KEY));
+    assert!(!h.comparing());
+}
+
+/// Window focus loss cancels held keys, which releases the hold exactly once.
+#[test]
+fn cancel_held_keys_releases_the_hold() {
+    let mut h = Harness::new();
+    h.down(ch(HOLD_KEY), false);
+    assert!(h.comparing());
+    h.root.cancel_held_keys(&mut h.state);
+    h.frame();
+    assert!(!h.comparing());
+    assert_eq!(h.consumer(), "\\: released");
+    h.state.shortcuts.last_consumer.set("-".into());
+    h.root.cancel_held_keys(&mut h.state);
+    assert_eq!(h.consumer(), "-", "a second cancel is a no-op");
+}
+
+/// A focused text input types the key, so the hold never starts.
+#[test]
+fn a_focused_text_input_takes_the_key_before_the_hold() {
+    let mut h = Harness::new();
+    h.focus_page_input();
+    h.down(ch(HOLD_KEY), false);
+    assert!(!h.comparing());
+    assert_eq!(h.state.shortcuts.field.get_untracked(), HOLD_KEY);
+    assert_eq!(h.consumer(), "TextInput: typed text");
+}
