@@ -3800,16 +3800,15 @@ mod tests {
 
     #[test]
     fn winit_cursor_for_maps_every_named_shape() {
-        assert_eq!(winit_cursor_for(CursorIcon::Text), WinitCursorIcon::Text);
-        assert_eq!(
-            winit_cursor_for(CursorIcon::Grabbing),
-            WinitCursorIcon::Grabbing
-        );
-        assert_eq!(
-            winit_cursor_for(CursorIcon::NotAllowed),
-            WinitCursorIcon::NotAllowed
-        );
         for (ours, theirs) in [
+            (CursorIcon::Default, WinitCursorIcon::Default),
+            (CursorIcon::Pointer, WinitCursorIcon::Pointer),
+            (CursorIcon::Text, WinitCursorIcon::Text),
+            (CursorIcon::Grab, WinitCursorIcon::Grab),
+            (CursorIcon::Grabbing, WinitCursorIcon::Grabbing),
+            (CursorIcon::ColResize, WinitCursorIcon::ColResize),
+            (CursorIcon::RowResize, WinitCursorIcon::RowResize),
+            (CursorIcon::NotAllowed, WinitCursorIcon::NotAllowed),
             (CursorIcon::Crosshair, WinitCursorIcon::Crosshair),
             (CursorIcon::Move, WinitCursorIcon::Move),
             (CursorIcon::ZoomIn, WinitCursorIcon::ZoomIn),
@@ -3817,10 +3816,6 @@ mod tests {
         ] {
             assert_eq!(winit_cursor_for(ours), theirs);
         }
-        assert_eq!(
-            winit_cursor_for(CursorIcon::Default),
-            WinitCursorIcon::Default
-        );
     }
 
     #[test]
