@@ -119,6 +119,9 @@ loopback bind returns `ECONNREFUSED`, with `INTERNET` still granted and no SELin
   through each shell's real input path (never called directly against widget code), so it passes
   the same hit-testing, capture, and focus routing real input does; a mobile shell also marks the
   event as having occurred so its frame gate cannot skip the frame that should show its effect.
+  Injected text is a key press followed at once by its release, since the wire has no key-down/up
+  pair; an injected tap or scroll carries no modifiers of its own and reads whatever chord the
+  shell last pushed.
 - **Frame stats.** `FrameStats::record`'s existing per-frame hook publishes to the devtools
   broadcast bus *ahead of* the `perf::enabled()` gate — subscribing to devtools frame stats is
   its own opt-in, independent of `FRUST_TRACE` (see [CODE_STANDARDS.md](CODE_STANDARDS.md)). The

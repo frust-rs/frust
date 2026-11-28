@@ -154,22 +154,30 @@ impl IosAppHandle {
 
     /// Forward a soft-keyboard editor action (the Return/Done key, sent by the
     /// Swift bridge through `frust_ime_action`) as an [`NamedKey::Enter`] key
-    /// press down the focus path.
+    /// press down the focus path,
+    /// followed at once by its [`InputEvent::KeyUp`]: the platform reports no key-up
+    /// for a soft-keyboard action, so the release is synthesized to keep the
+    /// tree's held-key set from retaining `Enter`.
     ///
     /// `action` is retained for future differentiation; every action maps to
     /// `Enter`. Reuses the same focus-routed key path a hardware Enter would, so
     /// a widget's submit/newline handling stays in one place.
     pub(crate) fn ime_action(&mut self, _action: i32) {
-        let event = InputEvent::Key(KeyEvent {
+        let key = KeyEvent {
             key: Key::Named(NamedKey::Enter),
             modifiers: Modifiers::default(),
             repeat: false,
-        });
+        };
+        let press = InputEvent::Key(key.clone());
+        let release = InputEvent::KeyUp(key);
         // Frame-gate latch: a keyboard action forces the next frame to run
         // (see `dispatch_touch`).
         self.events_since_last_frame = true;
         let app = &mut self.app;
-        let _ = under_root_owner(|| app.event(&event));
+        let _ = under_root_owner(|| {
+            app.event(&press);
+            app.event(&release)
+        });
     }
 
     /// The IME surface the focused widget published (editing state + caret), for

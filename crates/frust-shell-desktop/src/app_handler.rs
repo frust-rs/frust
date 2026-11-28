@@ -66,6 +66,7 @@ use frust_reactive::{
 use frust_scene::{Scene, SceneBuilder};
 use frust_shell_common::font_registry::FontRegistryWatcher;
 use frust_shell_common::perf::UiSpans;
+use frust_shell_common::pressed_keys::PressedKeys;
 use frust_shell_common::{
     LocaleDefaultWatcher, SurfaceSize, ThemeOverrideWatcher, WindowMetricsPublisher, default_theme,
     effective_brightness_for_platform_change, render_thread_enabled,
@@ -77,7 +78,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
+use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey, PhysicalKey};
 use winit::window::{
     CursorIcon as WinitCursorIcon, ImePurpose, Theme as WinitTheme, Window, WindowAttributes,
     WindowId,
@@ -1051,6 +1052,7 @@ where
         file_hover: FileHoverLatch::default(),
         pending_dropped_files: FileDropAccumulator::default(),
         modifiers: Modifiers::default(),
+        pressed: PressedKeys::new(),
         secondary_down_delivered: false,
         compose: ComposeLatch::default(),
         ime_sync: ImeSync::default(),
@@ -1676,6 +1678,17 @@ fn brightness_from_winit(theme: Option<WinitTheme>) -> Brightness {
     }
 }
 
+/// Record the held chord in the shell's tracker and hand it to the root, so pointer, scroll and
+/// scale dispatches see it. Dispatches nothing and requests no frame.
+fn push_modifiers<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    tracked: &mut Modifiers,
+    now: Modifiers,
+) {
+    *tracked = now;
+    root.set_modifiers(now);
+}
+
 /// Map winit's [`ModifiersState`] bitflags to our [`Modifiers`] chord.
 fn map_modifiers(state: ModifiersState) -> Modifiers {
     Modifiers {
@@ -1706,7 +1719,7 @@ fn map_modifiers(state: ModifiersState) -> Modifiers {
 /// [`Ime::Preedit`] is active, `Ime::Commit` is the authoritative source for the
 /// composed text, not `KeyboardInput.text`). `repeat` passes through unfiltered
 /// — callers decide whether to honor auto-repeat. Only key-down (`Pressed`)
-/// events map; releases produce `None` (spec: `KeyEvent` has no up/down phase).
+/// events map; releases produce `None` here and go through [`map_key_release`].
 ///
 /// # The ctrl/meta `text`-less fallback
 ///
@@ -1777,6 +1790,23 @@ fn map_key_event(
         modifiers,
         repeat,
     })
+}
+
+/// Map a key release to [`InputEvent::KeyUp`], carrying the logical key
+/// recorded when the same physical key was pressed (the release's own text can
+/// differ, e.g. Shift changed mid-hold). `None` when no press was recorded: a
+/// press that was suppressed (composing), unmapped, or made before focus.
+fn map_key_release(
+    pressed: &mut PressedKeys<PhysicalKey>,
+    physical: PhysicalKey,
+    modifiers: Modifiers,
+) -> Option<InputEvent> {
+    let key = pressed.release(&physical)?;
+    Some(InputEvent::KeyUp(KeyEvent {
+        key,
+        modifiers,
+        repeat: false,
+    }))
 }
 
 /// Tracks whether an IME preedit (marked-text) composition is currently in
@@ -1884,6 +1914,10 @@ fn winit_cursor_for(icon: CursorIcon) -> WinitCursorIcon {
         CursorIcon::ColResize => WinitCursorIcon::ColResize,
         CursorIcon::RowResize => WinitCursorIcon::RowResize,
         CursorIcon::NotAllowed => WinitCursorIcon::NotAllowed,
+        CursorIcon::Crosshair => WinitCursorIcon::Crosshair,
+        CursorIcon::Move => WinitCursorIcon::Move,
+        CursorIcon::ZoomIn => WinitCursorIcon::ZoomIn,
+        CursorIcon::ZoomOut => WinitCursorIcon::ZoomOut,
         _ => WinitCursorIcon::Default,
     }
 }
@@ -2100,6 +2134,9 @@ struct ShellHandler<State: 'static, Build, V: View<State>, E> {
     /// delivers *before* the `KeyboardInput` that uses it, so this is always
     /// current by the time a key event is mapped.
     modifiers: Modifiers,
+    /// Logical key recorded at each dispatched press, so a release reports the
+    /// same key whatever its own text says.
+    pressed: PressedKeys<PhysicalKey>,
     /// Whether the last secondary (right) `Down` was actually dispatched to the
     /// tree — the latch [`mouse_button_should_dispatch`] pairs a secondary
     /// release against, so the tree never sees an unpaired one.
@@ -2380,6 +2417,22 @@ where
         self.sync_clipboard();
         // Inside the input dispatch, not only per frame: macOS starts a move drag from
         // the event being handled, and a drain outside one is ignored.
+        self.close_pending |= self.drain_window_commands();
+        if outcome.needs_redraw {
+            window.request_redraw();
+        }
+    }
+
+    /// Release every held key and shortcut in the tree (window focus lost), then run the same
+    /// post-dispatch syncs as [`dispatch`](Self::dispatch).
+    fn cancel_held_keys(&mut self, window: &Window) {
+        self.other_frame_cause = true;
+        let outcome = self
+            .runtime
+            .with_owner(|| self.root.cancel_held_keys(&mut self.state));
+        self.sync_ime(window);
+        self.sync_cursor(window);
+        self.sync_clipboard();
         self.close_pending |= self.drain_window_commands();
         if outcome.needs_redraw {
             window.request_redraw();
@@ -3479,7 +3532,8 @@ where
             // `wheel_zoom_chord_held`/`map_wheel_scale_delta`. The wheel's own
             // gesture bracket (`phase`, discarded on the plain-scroll arm
             // above a moment ago but read here) becomes the `Scale` event's
-            // phase via `map_gesture_phase`; the focal point is the last
+            // phase via `map_gesture_phase`. A widget therefore sees ctrl/Cmd plus wheel as
+            // `Scale` and Alt/Shift plus wheel as `Scroll`; the focal point is the last
             // known cursor position, exactly like the plain scroll's.
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 if wheel_zoom_chord_held(self.modifiers, cfg!(target_os = "macos")) {
@@ -3535,16 +3589,27 @@ where
             // that relies on it, so tracking it here keeps `self.modifiers`
             // current by the time a key event is mapped.
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.modifiers = map_modifiers(modifiers.state());
+                push_modifiers(
+                    &mut self.root,
+                    &mut self.modifiers,
+                    map_modifiers(modifiers.state()),
+                );
             }
 
             // Not repeat-filtered — `repeat` passes through to the framework
             // event so a widget can decide whether to honor
             // auto-repeat (e.g. held Backspace). Dropped entirely (`None`) on
-            // key-up, an unmapped named key, or a composing-suppressed
-            // character (see `map_key_event`'s dedupe rule).
+            // an unmapped named key, or a composing-suppressed character (see
+            // `map_key_event`'s dedupe rule). Releases go through `map_key_release`,
+            // which pairs them with the logical key recorded at the press.
             WindowEvent::KeyboardInput { event, .. } => {
-                if let Some(key_event) = map_key_event(
+                if event.state == ElementState::Released {
+                    if let Some(up) =
+                        map_key_release(&mut self.pressed, event.physical_key, self.modifiers)
+                    {
+                        self.dispatch(&window, up);
+                    }
+                } else if let Some(key_event) = map_key_event(
                     &event.logical_key,
                     event.text.as_deref(),
                     event.state,
@@ -3552,6 +3617,8 @@ where
                     self.modifiers,
                     self.compose.is_composing(),
                 ) {
+                    self.pressed
+                        .press(event.physical_key, key_event.key.clone(), self.modifiers);
                     self.dispatch(&window, InputEvent::Key(key_event));
                 }
             }
@@ -3969,6 +4036,14 @@ where
             // change produces no frame of its own.
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
+                // Losing focus drops the chord (the release may never arrive); gaining it needs
+                // nothing, winit re-reports the held chord.
+                if !focused {
+                    push_modifiers(&mut self.root, &mut self.modifiers, Modifiers::default());
+                    // Nothing stays held: forget the pairings and release what the tree holds.
+                    self.pressed.clear();
+                    self.cancel_held_keys(&window);
+                }
                 // A focus change flushes nothing by itself: losing focus is `Inactive`, and
                 // only a `Hidden` target (an already-minimized window) reaches the flush.
                 self.sync_app_lifecycle();
@@ -4277,6 +4352,8 @@ mod tests {
         );
     }
 
+    use super::PhysicalKey;
+    use super::PressedKeys;
     use super::WindowState;
     use super::{
         ClipboardAccess, ClipboardError, ClipboardFailure, ClipboardRequest, ClipboardWarnings,
@@ -4286,11 +4363,11 @@ mod tests {
         WinitNamedKey, WinitTheme, apply_window_size, base_theme, brightness_change_to_notify,
         brightness_from_winit, build_tree_update, clipboard_loop, clipboard_warning,
         cursor_change_to_apply, default_theme, finish, follow_platform_brightness, ime_purpose_for,
-        map_gesture_phase, map_key_event, map_modifiers, map_mouse_button, map_named_key,
-        map_scroll_delta, map_wheel_scale_delta, mouse_button_should_dispatch,
+        map_gesture_phase, map_key_event, map_key_release, map_modifiers, map_mouse_button,
+        map_named_key, map_scroll_delta, map_wheel_scale_delta, mouse_button_should_dispatch,
         parse_window_maximized, paste_answer_dispatch, paste_input_event, physical_to_logical,
-        resolved_window_knob, theme_after_override_poll, wheel_zoom_chord_held, window_attributes,
-        winit_cursor_for,
+        push_modifiers, resolved_window_knob, theme_after_override_poll, wheel_zoom_chord_held,
+        window_attributes, winit_cursor_for,
     };
     use crate::config::Decorations;
     use frust_core::SemanticsUpdate;
@@ -4300,6 +4377,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
+    use winit::keyboard::KeyCode;
     // `InputEvent` is deliberately absent: the event-dispatch section further
     // down already imports it from `super`, and this module is one scope.
     use frust_core::event::{
@@ -5172,6 +5250,105 @@ mod tests {
         assert_eq!(map_named_key(WinitNamedKey::CapsLock), None);
     }
 
+    // --- pushing the held chord to the root ---
+
+    /// Records `ctx.modifiers()` on every pointer press.
+    struct ChordProbe {
+        seen: Rc<RefCell<Vec<Modifiers>>>,
+    }
+
+    impl Widget for ChordProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+                self.seen.borrow_mut().push(ctx.modifiers());
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[derive(Clone)]
+    struct ChordProbeView {
+        seen: Rc<RefCell<Vec<Modifiers>>>,
+    }
+
+    impl View<()> for ChordProbeView {
+        type Element = ChordProbe;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ChordProbe {
+            ChordProbe {
+                seen: self.seen.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ChordProbe,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn chord_root() -> (RenderRoot<(), ChordProbeView>, Rc<RefCell<Vec<Modifiers>>>) {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let view = ChordProbeView { seen: seen.clone() };
+        let mut root: RenderRoot<(), ChordProbeView> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut move |_: &mut ()| view.clone(), &mut state);
+        root.layout(Size::new(100.0, 60.0));
+        (root, seen)
+    }
+
+    fn chord_press(root: &mut RenderRoot<(), ChordProbeView>) {
+        let press = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(20.0, 10.0),
+            button: PointerButton::Primary,
+        });
+        root.event(&mut (), &press);
+    }
+
+    fn shift_chord() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn push_modifiers_updates_the_tracked_chord_and_the_root() {
+        let (mut root, _) = chord_root();
+        let mut tracked = Modifiers::default();
+        push_modifiers(&mut root, &mut tracked, shift_chord());
+        assert_eq!(tracked, shift_chord());
+        assert_eq!(root.modifiers(), shift_chord());
+    }
+
+    #[test]
+    fn a_pushed_chord_is_visible_to_the_next_pointer_dispatch() {
+        let (mut root, seen) = chord_root();
+        let mut tracked = Modifiers::default();
+        push_modifiers(&mut root, &mut tracked, shift_chord());
+        chord_press(&mut root);
+        assert_eq!(*seen.borrow(), vec![shift_chord()]);
+    }
+
+    #[test]
+    fn focus_loss_clears_the_pushed_chord() {
+        let (mut root, seen) = chord_root();
+        let mut tracked = Modifiers::default();
+        push_modifiers(&mut root, &mut tracked, shift_chord());
+        // What the `Focused(false)` arm pushes.
+        push_modifiers(&mut root, &mut tracked, Modifiers::default());
+        chord_press(&mut root);
+        assert_eq!(tracked, Modifiers::default());
+        assert_eq!(*seen.borrow(), vec![Modifiers::default()]);
+    }
+
     // --- map_modifiers ---
 
     #[test]
@@ -5347,6 +5524,70 @@ mod tests {
             false,
         );
         assert!(event.expect("named key maps").repeat);
+    }
+
+    fn slash_press(repeat: bool, composing: bool) -> Option<KeyEvent> {
+        map_key_event(
+            &WinitKey::Character("/".into()),
+            Some("/"),
+            ElementState::Pressed,
+            repeat,
+            Modifiers::default(),
+            composing,
+        )
+    }
+
+    fn record(pressed: &mut PressedKeys<PhysicalKey>, physical: PhysicalKey, ev: &KeyEvent) {
+        pressed.press(physical, ev.key.clone(), Modifiers::default());
+    }
+
+    #[test]
+    fn a_release_maps_to_key_up_with_the_pressed_logical_key() {
+        let physical = PhysicalKey::Code(KeyCode::Slash);
+        let mut pressed = PressedKeys::new();
+        let ev = slash_press(false, false).unwrap();
+        record(&mut pressed, physical, &ev);
+        assert_eq!(
+            map_key_release(&mut pressed, physical, mods()),
+            Some(InputEvent::KeyUp(KeyEvent {
+                key: Key::Character("/".into()),
+                modifiers: mods(),
+                repeat: false,
+            }))
+        );
+        assert!(pressed.is_empty());
+    }
+
+    #[test]
+    fn a_release_without_a_recorded_press_maps_to_nothing() {
+        let mut pressed = PressedKeys::new();
+        let physical = PhysicalKey::Code(KeyCode::Slash);
+        assert_eq!(map_key_release(&mut pressed, physical, mods()), None);
+    }
+
+    #[test]
+    fn a_composing_suppressed_press_records_nothing_so_its_release_is_silent() {
+        let physical = PhysicalKey::Code(KeyCode::Slash);
+        let mut pressed = PressedKeys::new();
+        // The arm records only when the press maps; composing suppresses it.
+        if let Some(ev) = slash_press(false, true) {
+            record(&mut pressed, physical, &ev);
+        }
+        assert!(pressed.is_empty());
+        assert_eq!(map_key_release(&mut pressed, physical, mods()), None);
+    }
+
+    #[test]
+    fn a_repeat_does_not_duplicate_the_pressed_entry() {
+        let physical = PhysicalKey::Code(KeyCode::Slash);
+        let mut pressed = PressedKeys::new();
+        for repeat in [false, true, true] {
+            let ev = slash_press(repeat, false).unwrap();
+            record(&mut pressed, physical, &ev);
+        }
+        assert_eq!(pressed.len(), 1);
+        assert!(map_key_release(&mut pressed, physical, mods()).is_some());
+        assert_eq!(map_key_release(&mut pressed, physical, mods()), None);
     }
 
     #[test]
@@ -5608,6 +5849,10 @@ mod tests {
             (CursorIcon::ColResize, WinitCursorIcon::ColResize),
             (CursorIcon::RowResize, WinitCursorIcon::RowResize),
             (CursorIcon::NotAllowed, WinitCursorIcon::NotAllowed),
+            (CursorIcon::Crosshair, WinitCursorIcon::Crosshair),
+            (CursorIcon::Move, WinitCursorIcon::Move),
+            (CursorIcon::ZoomIn, WinitCursorIcon::ZoomIn),
+            (CursorIcon::ZoomOut, WinitCursorIcon::ZoomOut),
         ] {
             assert_eq!(
                 winit_cursor_for(ours),

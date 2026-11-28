@@ -10,8 +10,8 @@ use kurbo::Point;
 use super::{FocusRun, OverlayRoute, RenderRoot, advance_focus_epoch_past};
 use crate::event::{
     ContactFrame, ContactPass, EventCtx, EventOutcome, EventResult, FileDropEvent, FileDropPhase,
-    ImeState, InputEvent, Key, KeyEvent, Modifiers, NamedKey, OverlayEvent, OverlayEventKind,
-    PointerButton, PointerId, PointerPhase, PointerSource, RequestPass,
+    ImeState, InputEvent, Key, KeyEvent, Modifiers, ModifiersPass, NamedKey, OverlayEvent,
+    OverlayEventKind, PointerButton, PointerId, PointerPhase, PointerSource, RequestPass,
 };
 use crate::focus_handle::{Deferral, Intent, PressPass};
 use crate::focus_scope::FocusTarget;
@@ -156,41 +156,57 @@ fn unwrap_contact(event: &InputEvent) -> (Option<InputEvent>, PointerId) {
 }
 
 impl<State: 'static, V: View<State>> RenderRoot<State, V> {
-    /// Deliver an input event to the widget tree. The outcome's `handled` is the
-    /// dispatch's result; `needs_redraw` is set when a widget consumed the event
-    /// or asked for a redraw, and for a hover that ended with nothing taking it
-    /// (the one repaint no widget can request). The pass never rebuilds or
-    /// repaints: the shell runs [`RenderRoot::rebuild`] afterwards, which itself
-    /// calls this sequentially with [`InputEvent::Housekeeping`].
+    /// Deliver an input event to the widget tree. The outcome's `handled` is the dispatch's
+    /// result; `needs_redraw` is set when a widget consumed the event or asked for a redraw, and
+    /// for a hover that ended with nothing taking it (the one repaint no widget can request). The
+    /// pass never rebuilds or repaints: the shell runs [`RenderRoot::rebuild`] afterwards, which
+    /// itself calls this sequentially with [`InputEvent::Housekeeping`].
     ///
-    /// Beside the outcome it resolves the cursor ([`RenderRoot::cursor`], on a
-    /// pointer `Move`), the clipboard write and paste request (every pass), the
-    /// IME state and the focus epoch. A [`FileDropPhase::Drop`] or `Cancel` is
-    /// followed in the same call by a [`FileDropPhase::Ended`] broadcast to the
-    /// whole tree; an unhandled `Key` goes on (`dispatch_declined_key`); the outcome folds all.
+    /// Beside the outcome it resolves the cursor ([`RenderRoot::cursor`], on a pointer `Move`),
+    /// the clipboard write and paste request (every pass), the IME state and the focus epoch. A
+    /// [`FileDropPhase::Drop`]/`Cancel` is followed in the same call by a [`FileDropPhase::Ended`]
+    /// broadcast; an unhandled `Key` goes on (`dispatch_declined_key`); the outcome folds all. A
+    /// `Key` is held (`held_keys`) until its `KeyUp`, delivered with the release of the shortcut
+    /// that answered it; a `KeyUp` for a key not held is dropped.
     pub fn event(&mut self, state: &mut State, event: &InputEvent) -> EventOutcome {
-        let mut outcome = self.dispatch_pass(state, event, None).0;
+        let _modifiers = ModifiersPass::enter(pass_modifiers(event, self.modifiers));
+        let outcome = match event {
+            InputEvent::Key(key) => self.press_key(state, event, key),
+            InputEvent::KeyUp(key) => match self.release_key(state, key) {
+                Some(outcome) => outcome,
+                None => return EventOutcome::default(),
+            },
+            InputEvent::Housekeeping => return self.dispatch_pass(state, event, None).0,
+            _ => self.dispatch_pass(state, event, None).0,
+        };
+        self.finish_event(state, outcome)
+    }
+
+    /// The end of a non-`Housekeeping` event pass: owed focus returns and handle refreshes.
+    pub(super) fn finish_event(
+        &mut self,
+        state: &mut State,
+        mut outcome: EventOutcome,
+    ) -> EventOutcome {
         // A return owed when an event beats the rebuild runs after it, so that event never
         // reaches the restored control; nested deliveries call `dispatch_pass`, never this.
-        if !matches!(event, InputEvent::Housekeeping) {
-            // An explicit handle request wins over an owed return (`crate::focus_handle`).
-            if self.run_focus_handles(state, FocusRun::EventEnd) || self.run_focus_return(state) {
-                outcome.needs_redraw = true;
-            }
-            // A request kept for the rebuild needs that frame.
-            if self.focus_request_waiting() {
-                outcome.needs_redraw = true;
-            }
-            if self.refresh_focus_handles() {
-                outcome.needs_redraw = true;
-            }
+        // An explicit handle request wins over an owed return (`crate::focus_handle`).
+        if self.run_focus_handles(state, FocusRun::EventEnd) || self.run_focus_return(state) {
+            outcome.needs_redraw = true;
+        }
+        // A request kept for the rebuild needs that frame.
+        if self.focus_request_waiting() {
+            outcome.needs_redraw = true;
+        }
+        if self.refresh_focus_handles() {
+            outcome.needs_redraw = true;
         }
         outcome
     }
 
     /// `event`'s body, as a traversal grant pass when `grant` is `Some(root_is_target)`; also
     /// returns whether a focus claim was honoured.
-    fn dispatch_pass(
+    pub(super) fn dispatch_pass(
         &mut self,
         state: &mut State,
         event: &InputEvent,
@@ -455,9 +471,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             | InputEvent::Scale(_)
             | InputEvent::FileDrop(_)
             | InputEvent::Key(_)
+            | InputEvent::KeyUp(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
-            | InputEvent::Shortcut(_) => {
+            | InputEvent::Shortcut(_)
+            | InputEvent::ShortcutReleased(_) => {
                 focus_claim_honoured = self.commit_focus_request(root);
             }
             // A broadcast opens no gesture, claims no focus and blurs nothing; only
@@ -798,7 +816,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             let top = self.overlay_hits.iter().rev().find(interactive);
             top.map(|hit| hit.key)
         });
-        for (id, overlay) in self.shortcuts.candidates(key, top_overlay, modal.is_some()) {
+        // A repeat of a key not held has no entry to record a shortcut against, so is offered none.
+        let offered = !key.repeat || self.key_is_held(&key.key);
+        let candidates =
+            offered.then(|| self.shortcuts.candidates(key, top_overlay, modal.is_some()));
+        for (id, overlay) in candidates.into_iter().flatten() {
             // A floated pod is reached only through its owner's slot, never by a bare broadcast.
             let delivery = match overlay {
                 None => InputEvent::Shortcut(id),
@@ -808,6 +830,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
                 }),
             };
             if self.deliver_declined(state, &delivery, &mut carried) {
+                // Recorded for the key's release, which is delivered by this id, not a re-match.
+                self.record_held_shortcut(state, &key.key, (id, overlay), &mut carried);
                 return carried;
             }
         }
@@ -1104,11 +1128,13 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             ),
             InputEvent::FileDrop(_)
             | InputEvent::Key(_)
+            | InputEvent::KeyUp(_)
             | InputEvent::Ime(_)
             | InputEvent::EditCommand(_)
             | InputEvent::Housekeeping
             | InputEvent::Overlay(_)
-            | InputEvent::Shortcut(_) => {
+            | InputEvent::Shortcut(_)
+            | InputEvent::ShortcutReleased(_) => {
                 return OverlayRoute::Continue(EventOutcome::default());
             }
         };
@@ -1169,5 +1195,17 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
         } else {
             OverlayRoute::Continue(carried)
         }
+    }
+}
+
+/// The modifiers a dispatch of `event` reads: a key's own chord, else the `held` set.
+fn pass_modifiers(event: &InputEvent, held: Modifiers) -> Modifiers {
+    match event {
+        InputEvent::Key(k) | InputEvent::KeyUp(k) => k.modifiers,
+        InputEvent::Overlay(OverlayEvent {
+            kind: OverlayEventKind::Key(k),
+            ..
+        }) => k.modifiers,
+        _ => held,
     }
 }

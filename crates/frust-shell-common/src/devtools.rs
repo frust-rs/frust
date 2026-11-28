@@ -723,11 +723,18 @@ impl DevtoolsBackend for ShellBackend {
         // the same shape the desktop shell builds from winit's `KeyEvent.text`
         // — and is focus-routed, so an app with nothing focused simply ignores
         // it (not an error the client has to distinguish).
-        self.inject(vec![InputEvent::Key(KeyEvent {
+        //
+        // The press is always followed by its release, in the same batch: core
+        // tracks held keys (`KeyUp` pairs with the `Key` it answered), so a
+        // bare press would leave the text "held" forever. The wire has no
+        // key-down/key-up pair to map, so this is the only place the release
+        // is synthesized.
+        let key = KeyEvent {
             key: Key::Character(text.to_string()),
             modifiers: Modifiers::default(),
             repeat: false,
-        })])
+        };
+        self.inject(vec![InputEvent::Key(key.clone()), InputEvent::KeyUp(key)])
     }
 }
 
@@ -1536,6 +1543,38 @@ mod tests {
             #[cfg(feature = "hotpatch")]
             hot: HotState::default(),
         }
+    }
+
+    /// `inject_text` queues one press and then its release, in that order, in a
+    /// single batch. The queue is drained by hand: `pump` reads the process-wide
+    /// bridge, not this backend's.
+    #[test]
+    fn injected_text_is_a_press_then_its_release() {
+        let backend = plain_backend();
+        std::thread::scope(|s| {
+            let caller = s.spawn(|| backend.inject_text("a"));
+            let request = loop {
+                let next = backend.bridge.queue.lock().expect("queue lock").pop_front();
+                match next {
+                    Some(request) => break request,
+                    None => std::thread::yield_now(),
+                }
+            };
+            let UiRequest::Events(events, reply) = request else {
+                panic!("inject_text must queue an Events request");
+            };
+            let key = KeyEvent {
+                key: Key::Character("a".to_string()),
+                modifiers: Modifiers::default(),
+                repeat: false,
+            };
+            assert_eq!(
+                events,
+                vec![InputEvent::Key(key.clone()), InputEvent::KeyUp(key)]
+            );
+            reply.send(()).expect("caller is waiting for the ack");
+            assert_eq!(caller.join().expect("caller thread"), Ok(()));
+        });
     }
 
     #[test]

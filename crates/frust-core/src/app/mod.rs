@@ -8,6 +8,7 @@
 
 mod config;
 mod dispatch;
+mod held_keys;
 mod layout;
 mod metrics;
 mod paint;
@@ -26,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use kurbo::{Rect, Size};
 
 use crate::anim::AnimationClock;
-use crate::event::{CursorIcon, EventOutcome, ImeState, PointerId};
+use crate::event::{CursorIcon, EventOutcome, ImeState, Modifiers, PointerId};
 use crate::focus_scope::FocusReturns;
 use crate::insets::WindowInsets;
 use crate::overlay::{OverlayHit, OverlayKey};
@@ -37,6 +38,7 @@ use crate::view::{ChangeFlags, View, WidgetId};
 use crate::widget::{ChildPod, PlatformViewFrame};
 
 pub use config::FocusRingPolicy;
+use held_keys::HeldKeys;
 use layout::LayoutAudit;
 pub use metrics::{Orientation, WindowMetrics};
 pub use semantics::FocusInfo;
@@ -106,6 +108,10 @@ pub struct RenderRoot<State: 'static, V: View<State>> {
     focus_grant: ShortcutId,
     /// Whether traversal granted the live focus; any other claim, a release or a `Down` clears it.
     keyboard_focus: bool,
+    /// Shell-pushed held modifiers.
+    modifiers: Modifiers,
+    /// The keys delivered as pressed and not yet released.
+    held_keys: HeldKeys,
     focus_ring_policy: FocusRingPolicy,
     /// The handles the last paint bound, each with the stop it addresses (`crate::focus_handle`).
     focus_handles: Vec<crate::focus_handle::BoundHandle>,
@@ -208,6 +214,8 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             key_forward: None,
             focus_grant: ShortcutId::next(),
             keyboard_focus: false,
+            modifiers: Modifiers::NONE,
+            held_keys: HeldKeys::default(),
             focus_ring_policy: FocusRingPolicy::KeyboardOnly,
             focus_handles: Vec::new(),
             focus_notice: Vec::new(),

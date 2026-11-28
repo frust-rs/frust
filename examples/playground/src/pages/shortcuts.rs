@@ -10,6 +10,7 @@
 //! | `Mod+B`     | [`ShortcutScope::Local`]     | toggles the side pane                  |
 //! | `F2`        | [`ShortcutScope::Local`]     | toggles the `One*` rename of tab one   |
 //! | `1`/`2`/`3` | [`ShortcutScope::Local`]     | selects tab one, two or three          |
+//! | `\` (hold)  | [`ShortcutScope::Local`]     | shows "comparing" while held, "released" after |
 //!
 //! `Mod` is Command on macOS/iOS and Ctrl elsewhere. `Mod+B` stays the pane
 //! toggle, chosen before function keys existed; `F2` is the page's function-key
@@ -89,6 +90,8 @@ pub struct ShortcutsState {
     pub level: RwSignal<f64>,
     /// The focusable `TextInput` contents.
     pub field: RwSignal<String>,
+    /// Whether the `\` hold binding is down: the compare swatch shows "comparing".
+    pub comparing: RwSignal<bool>,
 }
 
 impl ShortcutsState {
@@ -106,6 +109,7 @@ impl ShortcutsState {
             radio_on: RwSignal::new(false),
             level: RwSignal::new(0.5),
             field: RwSignal::new(String::new()),
+            comparing: RwSignal::new(false),
         }
     }
 }
@@ -380,6 +384,25 @@ fn pane() -> impl View<PlaygroundState> + use<> {
     .size(PANE_W, 80.0)
 }
 
+/// The hold-to-compare readout: a swatch and a line that switch while `\` is held.
+fn compare(sc: ShortcutsState) -> impl View<PlaygroundState> + use<> {
+    let held = sc.comparing.get();
+    let (label, color) = if held {
+        ("comparing", accent())
+    } else {
+        ("released", muted())
+    };
+    row()
+        .child(
+            container(SizedBox::<PlaygroundState>(None, None))
+                .fill(color)
+                .radius(4.0)
+                .size(16.0, 16.0),
+        )
+        .child(SizedBox(Some(8.0), None))
+        .child(text(format!("Hold \\ to compare: {label}")).size(12.0))
+}
+
 /// The page body under the palette portal's header.
 fn body(sc: ShortcutsState) -> impl View<PlaygroundState> + use<> {
     let readout = format!("Last key consumer: {}", sc.last_consumer.get());
@@ -398,7 +421,9 @@ fn body(sc: ShortcutsState) -> impl View<PlaygroundState> + use<> {
         .child(SizedBox(None, Some(12.0)))
         .child(tab_area(sc))
         .child(SizedBox(None, Some(12.0)))
-        .child(text(readout).size(12.0));
+        .child(text(readout).size(12.0))
+        .child(SizedBox(None, Some(12.0)))
+        .child(compare(sc));
     row()
         .child(SizedBox(Some(560.0), None).child(main))
         .child(SizedBox(Some(12.0), None))
@@ -472,6 +497,21 @@ pub fn page(state: &PlaygroundState) -> impl View<PlaygroundState> {
             move |state: &mut PlaygroundState| {
                 sc.tab.set(2);
                 consumed(state, "3: tab three");
+            },
+        )
+        .on_hold(
+            "\\",
+            "Hold to compare",
+            move |state: &mut PlaygroundState, held: bool| {
+                sc.comparing.set(held);
+                consumed(
+                    state,
+                    if held {
+                        "\\: comparing"
+                    } else {
+                        "\\: released"
+                    },
+                );
             },
         )
         .on(

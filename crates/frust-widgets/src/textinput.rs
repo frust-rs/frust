@@ -3194,6 +3194,10 @@ impl Widget for TextInputWidget {
     }
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+        // A release is not input and must not end a held retraction.
+        if matches!(event, InputEvent::KeyUp(_)) {
+            return EventResult::Ignored;
+        }
         // A blur this field was never told about (a sibling took the focus):
         // the session the composition belonged to is over.
         if self.focused && !ctx.has_focus() {
@@ -3787,8 +3791,9 @@ impl TextInputWidget {
 mod tests {
     use super::*;
     use frust_core::{
-        FrameTime, KeyEvent, Modifiers, PointerButton, PointerEvent, RenderRoot, ScrollDelta,
-        SelectionToolbarBuilder, set_selection_toolbar_builder, set_selection_toolbar_policy,
+        FrameTime, KeyEvent, Modifiers, NamedKey, PointerButton, PointerEvent, RenderRoot,
+        ScrollDelta, SelectionToolbarBuilder, set_selection_toolbar_builder,
+        set_selection_toolbar_policy,
     };
     use std::any::Any;
     use std::sync::{Arc, Mutex};
@@ -4515,6 +4520,58 @@ mod tests {
             state.composing_log,
             ["composing:true", "change:ni", "composing:false"]
         );
+    }
+
+    fn key_up_event() -> InputEvent {
+        InputEvent::KeyUp(KeyEvent {
+            key: frust_core::Key::Named(NamedKey::ArrowLeft),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn a_key_up_is_ignored_and_leaves_text_focus_and_caret_alone() {
+        let mut state = AppState::default();
+        let mut root = composing_harness(&mut state);
+        root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+        commit(&mut root, &mut state, "ab");
+        let text = widget(&root).editor.text().to_string();
+        let caret = root.ime_state().and_then(|i| i.caret);
+        let log = state.composing_log.clone();
+
+        let outcome = root.event(&mut state, &key_up_event());
+
+        assert!(!outcome.handled, "a release is not consumed");
+        assert!(root.is_focus_active(), "focus untouched");
+        assert!(widget(&root).focused);
+        assert_eq!(widget(&root).editor.text(), text);
+        assert_eq!(root.ime_state().and_then(|i| i.caret), caret);
+        assert_eq!(state.composing_log, log, "no callback fired");
+    }
+
+    #[test]
+    fn a_key_up_between_a_retraction_and_its_commit_keeps_composing_reported() {
+        fn run(with_up: bool) -> Vec<String> {
+            let mut state = AppState::default();
+            let mut root = composing_harness(&mut state);
+            root.event(&mut state, &pointer(PointerPhase::Down, 10.0, 10.0));
+            compose(&mut root, &mut state, "ni");
+            compose(&mut root, &mut state, "");
+            if with_up {
+                root.event(&mut state, &key_up_event());
+            }
+            commit(&mut root, &mut state, "\u{4f60}");
+            state.composing_log
+        }
+        let with = run(true);
+        assert_eq!(with, run(false), "a release changes nothing");
+        let last_change = with.iter().rposition(|l| l.starts_with("change:")).unwrap();
+        let ends: Vec<usize> = (0..with.len())
+            .filter(|&n| with[n] == "composing:false")
+            .collect();
+        assert_eq!(ends, [with.len() - 1], "one end, after the last change");
+        assert!(with.len() - 1 > last_change);
     }
 
     #[test]

@@ -63,6 +63,12 @@
 //!   sample of its own, so its velocity spans the slop exactly as a
 //!   [`DragStartBehavior::Start`] drag's does and a release reports the same
 //!   velocity under both.
+//! - **Held modifiers.** Every details struct carries a `modifiers` field, the
+//!   chord held at the event that produced the callback. It is sampled per
+//!   event, not latched at the `Down`: a chord change mid-drag shows on the next
+//!   update, and [`DragEndDetails`] carries the chord at the `Up`. On desktop
+//!   ctrl (Cmd on macOS) plus wheel is turned into Scale by the shell, so wheel
+//!   chords meant for app use should be Alt or Shift.
 //! - **Exclusivity.** Moving past [`TOUCH_SLOP`] disarms tap, long-press and
 //!   hold-progress exactly as before, even when no drag slop has been crossed
 //!   yet; a drag recognizer can still start later in the same press. A
@@ -323,8 +329,9 @@ use std::rc::Rc;
 use frust_core::event::{OverlayEvent, OverlayEventKind, PointerId};
 use frust_core::{
     AnyView, BoxConstraints, BuildCtx, ChangeFlags, ChildPod, EventCtx, EventResult, FrameTime,
-    InputEvent, LayoutCtx, PaintCtx, PaintScene, PointerPhase, SemanticsCtx, SliverConstraints,
-    SliverGeometry, SliverWidget, TOUCH_SLOP, VelocityTracker, View, Widget, any,
+    InputEvent, LayoutCtx, Modifiers, PaintCtx, PaintScene, PointerPhase, SemanticsCtx,
+    SliverConstraints, SliverGeometry, SliverWidget, TOUCH_SLOP, VelocityTracker, View, Widget,
+    any,
 };
 use kurbo::{Point, Size, Vec2};
 
@@ -374,6 +381,9 @@ pub struct DragStartDetails {
     /// [`DragStartBehavior::Start`] (the default), the `Down` under
     /// [`DragStartBehavior::Down`].
     pub position: Point,
+
+    /// The modifier chord held at the event that produced this callback.
+    pub modifiers: Modifiers,
 }
 
 /// What a drag `update` callback receives for one `Move`.
@@ -392,6 +402,9 @@ pub struct DragUpdateDetails {
     /// The signed movement along the drag's axis — `delta.y` for a vertical
     /// drag, `delta.x` for a horizontal one; `None` for a pan.
     pub primary_delta: Option<f64>,
+
+    /// The modifier chord held at the event that produced this callback.
+    pub modifiers: Modifiers,
 }
 
 /// What a drag `end` callback receives on release.
@@ -405,6 +418,9 @@ pub struct DragEndDetails {
     pub velocity: Vec2,
     /// The signed velocity along the drag's axis; `None` for a pan.
     pub primary_velocity: Option<f64>,
+
+    /// The modifier chord held at the event that produced this callback.
+    pub modifiers: Modifiers,
 }
 
 /// What an `on_tap_down` callback receives: where the press began.
@@ -415,6 +431,9 @@ pub struct DragEndDetails {
 pub struct TapDownDetails {
     /// The pointer position, local to the detector, at the `Down`.
     pub local_position: Point,
+
+    /// The modifier chord held at the event that produced this callback.
+    pub modifiers: Modifiers,
 }
 
 /// What an `on_tap_up` callback receives: where the press was released.
@@ -425,6 +444,9 @@ pub struct TapDownDetails {
 pub struct TapUpDetails {
     /// The pointer position, local to the detector, at the `Up`.
     pub local_position: Point,
+
+    /// The modifier chord held at the event that produced this callback.
+    pub modifiers: Modifiers,
 }
 
 /// What an `on_double_tap` callback receives: where the second tap was
@@ -436,6 +458,9 @@ pub struct TapUpDetails {
 pub struct DoubleTapDetails {
     /// The pointer position, local to the detector, at the second tap's `Up`.
     pub local_position: Point,
+
+    /// The modifier chord held at the event that produced this callback.
+    pub modifiers: Modifiers,
 }
 
 /// What an `on_long_press_move_update` callback receives for one `Move` of a
@@ -452,6 +477,9 @@ pub struct LongPressMoveDetails {
     pub global_position: Point,
     /// The movement since the position at which the long press fired.
     pub offset_from_origin: Vec2,
+
+    /// The modifier chord held at the event that produced this callback.
+    pub modifiers: Modifiers,
 }
 
 /// What an `on_long_press_end` callback receives when the press whose
@@ -466,6 +494,9 @@ pub struct LongPressEndDetails {
     pub local_position: Point,
     /// The release position in window coordinates.
     pub global_position: Point,
+
+    /// The modifier chord held at the event that produced this callback.
+    pub modifiers: Modifiers,
 }
 
 /// Milliseconds from `earlier` to `now` on the paint clock, `0.0` if `now` is
@@ -1500,6 +1531,7 @@ impl Widget for GestureDetectorWidget {
 
     fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
         if let InputEvent::Pointer(p) = event {
+            let modifiers = ctx.modifiers();
             // A `Cancel` that ended a started drag owes its `cancel` callback;
             // any other pointer phase carries real state, so pay it first.
             if p.phase != PointerPhase::Cancel {
@@ -1546,6 +1578,7 @@ impl Widget for GestureDetectorWidget {
                                 ctx,
                                 TapDownDetails {
                                     local_position: p.position,
+                                    modifiers,
                                 },
                             );
                             ctx.request_redraw();
@@ -1599,6 +1632,7 @@ impl Widget for GestureDetectorWidget {
                                     local_position: p.position,
                                     global_position: global,
                                     offset_from_origin: p.position - origin,
+                                    modifiers,
                                 },
                             );
                         }
@@ -1702,6 +1736,7 @@ impl Widget for GestureDetectorWidget {
                                         ctx,
                                         DragStartDetails {
                                             position: if from_down { down_pos } else { p.position },
+                                            modifiers,
                                         },
                                     );
                                 }
@@ -1714,6 +1749,7 @@ impl Widget for GestureDetectorWidget {
                                             position: p.position,
                                             delta,
                                             primary_delta,
+                                            modifiers,
                                         },
                                     );
                                 }
@@ -1735,6 +1771,7 @@ impl Widget for GestureDetectorWidget {
                                         position: p.position,
                                         delta,
                                         primary_delta,
+                                        modifiers,
                                     },
                                 );
                             }
@@ -1830,6 +1867,7 @@ impl Widget for GestureDetectorWidget {
                             ctx,
                             TapUpDetails {
                                 local_position: p.position,
+                                modifiers,
                             },
                         );
                         ctx.request_redraw();
@@ -1853,6 +1891,7 @@ impl Widget for GestureDetectorWidget {
                                 ctx,
                                 DoubleTapDetails {
                                     local_position: p.position,
+                                    modifiers,
                                 },
                             );
                             ctx.request_redraw();
@@ -1874,6 +1913,7 @@ impl Widget for GestureDetectorWidget {
                             LongPressEndDetails {
                                 local_position: p.position,
                                 global_position: self.window_origin + p.position.to_vec2(),
+                                modifiers,
                             },
                         );
                         ctx.request_redraw();
@@ -1888,6 +1928,7 @@ impl Widget for GestureDetectorWidget {
                                 DragEndDetails {
                                     velocity,
                                     primary_velocity,
+                                    modifiers,
                                 },
                             );
                         }
@@ -4819,5 +4860,161 @@ mod tests {
         }
         root.event(&mut log, &touch(0, PointerPhase::Up, 100.0, 100.0));
         assert_eq!(log.events, ["end"], "no on_tap after the fired long-press");
+    }
+
+    // --- Held modifiers on details ---------------------------------------------
+
+    const ALT_SHIFT: Modifiers = Modifiers {
+        alt: true,
+        shift: true,
+        ..Modifiers::NONE
+    };
+
+    #[test]
+    fn drag_details_carry_the_held_modifiers() {
+        let mut root = drag_root(pan_logic);
+        let mut log = DragLog::default();
+        root.set_modifiers(Modifiers::ALT);
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 60.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 70.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 70.0, 10.0));
+        assert_eq!(log.starts.len(), 1);
+        assert_eq!(log.updates.len(), 1);
+        assert_eq!(log.ends.len(), 1);
+        assert_eq!(log.starts[0].1.modifiers, Modifiers::ALT);
+        assert_eq!(log.updates[0].1.modifiers, Modifiers::ALT);
+        assert_eq!(log.ends[0].1.modifiers, Modifiers::ALT);
+    }
+
+    #[test]
+    fn a_chord_change_mid_drag_shows_on_the_next_update() {
+        let mut root = drag_root(pan_logic);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 60.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 65.0, 10.0));
+        root.set_modifiers(Modifiers::ALT);
+        root.event(&mut log, &ev(PointerPhase::Move, 70.0, 10.0));
+        root.set_modifiers(ALT_SHIFT);
+        root.event(&mut log, &ev(PointerPhase::Up, 70.0, 10.0));
+        assert_eq!(log.starts[0].1.modifiers, Modifiers::NONE);
+        assert_eq!(log.updates.len(), 2);
+        assert_eq!(log.updates[0].1.modifiers, Modifiers::NONE);
+        assert_eq!(log.updates[1].1.modifiers, Modifiers::ALT);
+        assert_eq!(
+            log.ends[0].1.modifiers, ALT_SHIFT,
+            "the end carries the Up's chord"
+        );
+    }
+
+    #[derive(Default)]
+    struct ChordLog {
+        seen: Vec<(&'static str, Modifiers)>,
+    }
+
+    fn chord_logic(_: &mut ChordLog) -> GestureDetectorView<ChordLog> {
+        GestureDetector::<ChordLog, _>(Blank)
+            .on_tap_down(|s: &mut ChordLog, d| s.seen.push(("down", d.modifiers)))
+            .on_tap_up(|s: &mut ChordLog, d| s.seen.push(("up", d.modifiers)))
+            .on_double_tap(|s: &mut ChordLog, d| s.seen.push(("double", d.modifiers)))
+    }
+
+    fn chord_root() -> RenderRoot<ChordLog, GestureDetectorView<ChordLog>> {
+        let mut root = RenderRoot::new();
+        let mut log = ChordLog::default();
+        root.rebuild(&mut { chord_logic }, &mut log);
+        root.layout(Size::new(100.0, 100.0));
+        root
+    }
+
+    #[test]
+    fn tap_details_carry_the_held_modifiers() {
+        let mut root = chord_root();
+        let mut log = ChordLog::default();
+        root.set_modifiers(Modifiers::SHIFT);
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.set_modifiers(Modifiers::CTRL);
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            log.seen,
+            [("down", Modifiers::SHIFT), ("up", Modifiers::CTRL)]
+        );
+        log.seen.clear();
+        root.set_modifiers(Modifiers::ALT);
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert_eq!(
+            log.seen,
+            [
+                ("down", Modifiers::ALT),
+                ("up", Modifiers::ALT),
+                ("double", Modifiers::ALT)
+            ]
+        );
+    }
+
+    #[test]
+    fn long_press_follow_up_details_carry_the_held_modifiers() {
+        use PointerPhase::{Down, Move, Up};
+        fn logic(_: &mut ChordLog) -> GestureDetectorView<ChordLog> {
+            GestureDetector::<ChordLog, _>(Blank)
+                .on_long_press(|_: &mut ChordLog| {})
+                .on_long_press_move_update(|s: &mut ChordLog, d: LongPressMoveDetails| {
+                    s.seen.push(("move", d.modifiers))
+                })
+                .on_long_press_end(|s: &mut ChordLog, d: LongPressEndDetails| {
+                    s.seen.push(("end", d.modifiers))
+                })
+        }
+        let mut root = RenderRoot::new();
+        let mut log = ChordLog::default();
+        root.rebuild(&mut { logic }, &mut log);
+        root.layout(Size::new(400.0, 400.0));
+        let frame = |root: &mut RenderRoot<ChordLog, GestureDetectorView<ChordLog>>,
+                     log: &mut ChordLog,
+                     ms: f64| {
+            root.rebuild(&mut { logic }, log);
+            root.paint(&mut NullScene, ft(ms));
+        };
+        frame(&mut root, &mut log, 0.0);
+        root.event(&mut log, &touch(0, Down, 100.0, 100.0));
+        for ms in [16.0, 600.0, 616.0] {
+            frame(&mut root, &mut log, ms);
+        }
+        root.set_modifiers(Modifiers::ALT);
+        root.event(&mut log, &touch(0, Move, 110.0, 100.0));
+        root.set_modifiers(Modifiers::SHIFT);
+        root.event(&mut log, &touch(0, Up, 110.0, 100.0));
+        assert_eq!(
+            log.seen,
+            [("move", Modifiers::ALT), ("end", Modifiers::SHIFT)]
+        );
+    }
+
+    #[test]
+    fn details_report_no_modifiers_by_default() {
+        let mut root = drag_root(pan_logic);
+        let mut log = DragLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 60.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Move, 70.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 70.0, 10.0));
+        assert!(
+            log.starts
+                .iter()
+                .all(|(_, d)| d.modifiers == Modifiers::NONE)
+        );
+        assert!(
+            log.updates
+                .iter()
+                .all(|(_, d)| d.modifiers == Modifiers::NONE)
+        );
+        assert!(log.ends.iter().all(|(_, d)| d.modifiers == Modifiers::NONE));
+        let mut root = chord_root();
+        let mut log = ChordLog::default();
+        root.event(&mut log, &ev(PointerPhase::Down, 10.0, 10.0));
+        root.event(&mut log, &ev(PointerPhase::Up, 10.0, 10.0));
+        assert!(log.seen.iter().all(|(_, m)| *m == Modifiers::NONE));
     }
 }

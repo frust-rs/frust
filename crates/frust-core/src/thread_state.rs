@@ -5,7 +5,7 @@
 use std::cell::{Cell, RefCell};
 
 use crate::event::{
-    ContactFrameState, ContactPassState, CursorIcon, EditCommand, SecondaryWalkFrame,
+    ContactFrameState, ContactPassState, CursorIcon, EditCommand, Modifiers, SecondaryWalkFrame,
 };
 use crate::focus_handle::{Binding, Press};
 use crate::focus_scope::FocusScopeKey;
@@ -98,6 +98,9 @@ pub(crate) struct CoreLocals {
     /// The contact pass running on this thread, bracketed by `ContactPass`.
     pub(crate) contact_pass: Cell<ContactPassState>,
 
+    /// The held modifiers of the root dispatch in flight; `None` with no pass open.
+    pub(crate) modifiers_pass: Cell<Option<Modifiers>>,
+
     /// The innermost widget dispatch's opt-in bookkeeping, bracketed by `ContactFrame`.
     pub(crate) contact_frame: Cell<ContactFrameState>,
 
@@ -165,6 +168,7 @@ impl CoreLocals {
             request_pass_open: Cell::new(false),
             pointer_hit_area: Cell::new(None),
             contact_pass: Cell::new(ContactPassState::IDLE),
+            modifiers_pass: Cell::new(None),
             contact_frame: Cell::new(ContactFrameState::IDLE),
             secondary_walk_key: Cell::new(None),
             pending_result_flush: Cell::new(false),

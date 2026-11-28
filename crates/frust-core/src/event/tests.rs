@@ -700,6 +700,37 @@ fn an_edit_command_is_focus_routed_with_zero_position() {
     );
 }
 
+#[test]
+fn a_key_up_is_focus_routed_with_zero_position() {
+    let up = InputEvent::KeyUp(KeyEvent {
+        key: Key::Character("k".into()),
+        modifiers: Modifiers::CTRL,
+        repeat: false,
+    });
+    assert!(
+        up.is_focus_routed(),
+        "a release follows the focus like its press"
+    );
+    assert!(!up.is_broadcast());
+    assert_eq!(up.position(), Point::ZERO);
+    assert_eq!(up.translated(Vec2::new(10.0, 20.0)), up);
+    assert_eq!(up.transformed(&Affine::scale(2.0)), up);
+}
+
+#[test]
+fn a_shortcut_release_is_a_broadcast() {
+    let id = crate::shortcuts::ShortcutId::next();
+    let released = InputEvent::ShortcutReleased(id);
+    assert!(released.is_broadcast(), "it reaches every mounted widget");
+    assert!(!released.is_focus_routed());
+    assert_eq!(released.position(), Point::ZERO);
+    assert_eq!(released.translated(Vec2::new(10.0, 20.0)), released);
+    assert_eq!(released.transformed(&Affine::scale(2.0)), released);
+    let routed = overlay(OverlayEventKind::ShortcutReleased(id));
+    assert!(routed.is_broadcast());
+    assert_eq!(routed.translated(Vec2::new(5.0, 5.0)), routed);
+}
+
 /// An overlay event standing in for one routed into a floated surface.
 fn overlay(kind: OverlayEventKind) -> InputEvent {
     InputEvent::Overlay(OverlayEvent {
@@ -740,6 +771,11 @@ fn overlay_is_a_broadcast_and_housekeeping_is_the_only_other_one() {
             delta: ScrollDelta::Lines(0.0, 1.0),
         },
         InputEvent::Key(KeyEvent {
+            key: Key::Named(NamedKey::Enter),
+            modifiers: Modifiers::default(),
+            repeat: false,
+        }),
+        InputEvent::KeyUp(KeyEvent {
             key: Key::Named(NamedKey::Enter),
             modifiers: Modifiers::default(),
             repeat: false,
@@ -1017,4 +1053,46 @@ fn function_key_tables_are_inverses_over_f1_to_f24() {
     }
     assert!(NamedKey::function(0).is_none() && NamedKey::function(25).is_none());
     assert_eq!(NamedKey::Enter.function_number(), None);
+}
+
+#[test]
+fn modifiers_read_none_outside_a_pass() {
+    assert_eq!(current_modifiers(), Modifiers::NONE);
+    let mut count = 0u32;
+    let ctx = EventCtx::new(&mut count, Point::ZERO, Size::ZERO);
+    assert_eq!(ctx.modifiers(), Modifiers::NONE);
+}
+
+#[test]
+fn a_modifiers_pass_inherits_an_open_one_and_closes_with_its_owner() {
+    let outer = ModifiersPass::enter(Modifiers::ALT);
+    assert_eq!(current_modifiers(), Modifiers::ALT);
+    {
+        let _inner = ModifiersPass::enter(Modifiers::SHIFT);
+        assert_eq!(current_modifiers(), Modifiers::ALT, "the open pass wins");
+    }
+    assert_eq!(
+        current_modifiers(),
+        Modifiers::ALT,
+        "an inert guard resets nothing"
+    );
+    drop(outer);
+    assert_eq!(current_modifiers(), Modifiers::NONE);
+}
+
+#[test]
+fn with_modifiers_for_test_scopes_and_restores() {
+    with_modifiers_for_test(Modifiers::CTRL, || {
+        assert_eq!(current_modifiers(), Modifiers::CTRL);
+        with_modifiers_for_test(Modifiers::META, || {
+            assert_eq!(current_modifiers(), Modifiers::META);
+        });
+        assert_eq!(current_modifiers(), Modifiers::CTRL);
+    });
+    assert_eq!(current_modifiers(), Modifiers::NONE);
+    let unwound = std::panic::catch_unwind(|| {
+        with_modifiers_for_test(Modifiers::SHIFT, || panic!("boom"));
+    });
+    assert!(unwound.is_err());
+    assert_eq!(current_modifiers(), Modifiers::NONE);
 }

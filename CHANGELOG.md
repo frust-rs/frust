@@ -13,6 +13,44 @@ share one version. Or commit `Cargo.lock` and read the Breaking block before run
 
 ## Unreleased
 
+### Breaking
+
+- `InputEvent` gains `KeyUp(KeyEvent)`, a key's release routed down the focus path, and
+  `ShortcutReleased(ShortcutId)`, a broadcast naming the shortcut whose key was released;
+  `OverlayEventKind` gains `ShortcutReleased(ShortcutId)`. Neither enum is `#[non_exhaustive]`, so
+  an exhaustive `match` on either no longer compiles. Migration: add the arms. A container sends
+  `KeyUp` to its focused child (route on `InputEvent::is_focus_routed()`) and forwards
+  `ShortcutReleased` to every child like any other broadcast (`is_broadcast()`); an overlay owner
+  forwards `OverlayEventKind::ShortcutReleased(id)` into its pod as
+  `InputEvent::ShortcutReleased(id)`.
+- `frust-shell-web`: the public `InputState` no longer derives `Copy` or `PartialEq`, because it
+  now records the keys held. Migration: `.clone()` where a value was copied, and compare the
+  fields you need.
+
+### Added
+
+- Held modifiers: `EventCtx::modifiers()` reads the chord held for the event being handled — a key
+  event's own chord, otherwise the chord the desktop or web shell last saw (`Modifiers::NONE`
+  outside an event pass, and on Android and iOS). Every gesture details struct gains `modifiers`,
+  the chord at the event behind that callback, and `Modifiers` is re-exported flat as
+  `frust::Modifiers`, with `NONE`, `SHIFT`, `CTRL`, `ALT` and `META` constants. On desktop ctrl
+  (⌘ on macOS) plus the wheel is a `Scale` gesture, so use Alt or Shift for a wheel chord. Shells
+  push the chord with `RenderRoot::set_modifiers`.
+- Key release: the desktop and web shells deliver one `InputEvent::KeyUp` per press, naming the key
+  that went down, then `InputEvent::ShortcutReleased` for the shortcut that answered it. A window
+  losing focus releases every held key (`RenderRoot::cancel_held_keys`; `RenderRoot::held_keys`
+  lists them). The Android and iOS soft-keyboard action, keys the browser carries through the DOM
+  and devtools-injected text send their release right after the press, and the web shell releases
+  the keys pressed under Cmd when Cmd lifts, for a browser that sends no key-up there.
+- Hold bindings: `shortcuts(child).on_hold(spec, label, |state, held| ..)`, `.global_hold(..)` and
+  `.bind_hold(..)` report `true` when the chord goes down and `false` once when its key is released
+  or the window loses focus; auto-repeat does not call the handler again. A wrapper unmounted while
+  a hold is down gets no `false`, so keep it mounted above whatever the hold toggles.
+- Cursors: `CursorIcon::Crosshair`, `Move`, `ZoomIn` and `ZoomOut`, shown on desktop and web.
+- `frust::testing::Tester` gains `set_modifiers`, `modifiers` and `with_modifiers` (a held chord),
+  `hover` and `scroll_at`, `key_down`, `key_up`, `key_repeat` and `key` (chord specs such as
+  `"Mod+K"`), and `cancel_held_keys` (window focus loss).
+
 ## 0.6.7 — 2026-11-28
 
 A patch release (the 0.6.x line continues) with thirty-five source and behaviour breaks, each listed

@@ -16,6 +16,11 @@
 //! | `startGesture` / `createGesture` | [`Tester::start_gesture`] / [`Tester::start_touch`] |
 //! | `TestGesture.moveBy` / `moveTo` | [`Tester::move_by`] / [`Tester::move_to`] |
 //! | `TestGesture.up` / `cancel` | [`Tester::up`] / [`Tester::cancel`] |
+//! | `TestPointer.hover` | [`Tester::hover`] |
+//! | `PointerScrollEvent` | [`Tester::scroll_at`] |
+//! | `sendKeyDownEvent(shift..)` | [`Tester::set_modifiers`] / [`Tester::with_modifiers`] |
+//! | `sendKeyDownEvent` / `sendKeyUpEvent` | [`Tester::key_down`] / [`Tester::key_up`] |
+//! | `sendKeyRepeatEvent` / `sendKeyEvent` | [`Tester::key_repeat`] / [`Tester::key`] |
 //! | `find.text` / `find.byType` | [`find::text`] / [`find::by_type`] |
 //! | `getSemantics` | [`Tester::get_semantics`] |
 //!
@@ -42,6 +47,7 @@
 
 pub mod find;
 pub mod gesture;
+mod keys;
 mod tester;
 pub mod text;
 

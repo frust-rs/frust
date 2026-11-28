@@ -48,7 +48,11 @@ pub(crate) use flags::{
 pub use ime::{ImeContentType, ImeEvent, ImeState};
 pub use input::{FileDropEvent, FileDropPhase, InputEvent, OverlayEvent, OverlayEventKind};
 pub use key::{EditCommand, EditingState, Key, KeyEvent, Modifiers, NamedKey};
-pub(crate) use pass::{PassBracket, RequestPass};
+#[cfg(test)]
+pub(crate) use pass::current_modifiers;
+#[cfg(any(test, feature = "test-support"))]
+pub use pass::with_modifiers_for_test;
+pub(crate) use pass::{ModifiersPass, PassBracket, RequestPass};
 #[cfg(test)]
 pub(crate) use pass::{clear_cursor_request, take_cursor_request};
 pub use pointer::{
