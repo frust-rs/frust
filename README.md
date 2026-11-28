@@ -114,9 +114,14 @@ platform APIs directly through FFI (`jni` on Android, `objc2` on Apple) rather t
 per-plugin Kotlin/Swift bridge: `frust-shared-preferences`, `frust-secure-storage`,
 `frust-camera`, `frust-clipboard`, `frust-haptics`, `frust-url-launcher`, `frust-auth-session`,
 `frust-iap`, `frust-database`, `frust-i18n`, `frust-video-player`, `frust-background-task`,
-`frust-device-info`, `frust-permissions`, `frust-photo-library`, `frust-models` (an on-device model store with
-resumable downloads), `frust-onnx` (ONNX Runtime inference with vision tasks), and `frust-native-widgets` (real
-platform controls). The generated app shell itself still carries a thin native entry point
+`frust-device-info`, `frust-permissions`, `frust-photo-library`, `frust-connectivity` (network
+availability and change events), `frust-share` (the platform share sheet), `frust-file-dialogs`
+(native open, save and folder pickers), `frust-oauth-native` (the protocol half of a native-app
+OAuth sign-in), `frust-network-image` (URL images with a memory and disk cache), `frust-qr`
+(a scannable QR code view), `frust-charts` (live charts over shared data handles),
+`frust-models` (an on-device model store with resumable downloads), `frust-onnx` (ONNX Runtime
+inference with vision tasks), and `frust-native-widgets` (real platform controls). The generated
+app shell itself still carries a thin native entry point
 — Kotlin on Android, Swift on iOS — that the Rust core calls into. `frust create --arch
 clean-signals` scaffolds an opt-in clean-architecture variant wired to `clean-signals-frust`.
 
