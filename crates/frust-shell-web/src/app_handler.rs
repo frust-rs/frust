@@ -55,12 +55,13 @@ use frust_core::event::{
 use frust_core::insets::WindowInsets;
 use frust_core::view::View;
 use frust_reactive::{ReactiveRuntime, provide_context};
+use frust_shell_common::pressed_keys::PressedKeys;
 use frust_shell_common::{WindowMetricsPublisher, effective_brightness_for_platform_change};
 use frust_theme::{Brightness, Theme};
 use kurbo::Point;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta};
-use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey};
+use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey as WinitNamedKey, PhysicalKey};
 use winit::window::{CursorIcon as WinitCursorIcon, Theme as WinitTheme, Window};
 
 // --- input mapping -------------------------------------------------------
@@ -581,7 +582,7 @@ impl ComposeLatch {
 /// The methods intentionally *return* events rather than dispatching them: what
 /// to do with an event (dispatch under the root owner, request a redraw,
 /// re-sync the cursor) is the frame loop's decision, not the mapper's.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone)]
 pub struct InputState {
     cursor: Point,
     modifiers: Modifiers,
@@ -600,6 +601,9 @@ pub struct InputState {
     /// being added to it: counting it would carry a dead keystroke's mark onto
     /// a later signal, which is exactly the misattachment the bounds prevent.
     key_dropped: bool,
+    /// The keys held, by physical key, with the logical key reported at press,
+    /// so a release names the key that went down.
+    pressed: PressedKeys<PhysicalKey>,
 }
 
 impl InputState {
@@ -695,6 +699,56 @@ impl InputState {
     /// was unfocused would otherwise stay held.
     pub fn clear_modifiers(&mut self) {
         self.modifiers = Modifiers::default();
+    }
+
+    /// Record a delivered key press under its physical key so the release can
+    /// name the same logical key. Call it after [`InputState::keyboard_input`]
+    /// returned `Some(InputEvent::Key(..))`; any other event records nothing.
+    /// A key carried by the DOM (see [`carried_key_event`]) has no physical
+    /// key and is never recorded here.
+    pub fn key_pressed(&mut self, physical: PhysicalKey, event: &InputEvent) {
+        if let InputEvent::Key(key) = event {
+            self.pressed.press(physical, key.key.clone(), key.modifiers);
+        }
+    }
+
+    /// A key release: the [`InputEvent::KeyUp`] for the logical key recorded at
+    /// press, with the chord held now. `None` when no press was recorded (an
+    /// unmapped key, a DOM-carried key, or one already released by a Meta lift
+    /// or a blur).
+    pub fn key_released(&mut self, physical: PhysicalKey) -> Option<InputEvent> {
+        let key = self.pressed.release(&physical)?;
+        Some(InputEvent::KeyUp(KeyEvent {
+            key,
+            modifiers: self.modifiers,
+            repeat: false,
+        }))
+    }
+
+    /// Browsers send no key release for a key pressed under Meta once Meta is
+    /// lifted first. When the held chord has Meta and `next` does not, release
+    /// every key pressed under Meta (oldest first, no modifiers). Call it
+    /// before [`InputState::modifiers_changed`].
+    pub fn meta_lifted(&mut self, next: ModifiersState) -> Vec<InputEvent> {
+        if !(self.modifiers.meta && !next.super_key()) {
+            return Vec::new();
+        }
+        self.pressed
+            .release_pressed_with_meta()
+            .into_iter()
+            .map(|key| {
+                InputEvent::KeyUp(KeyEvent {
+                    key,
+                    modifiers: Modifiers::default(),
+                    repeat: false,
+                })
+            })
+            .collect()
+    }
+
+    /// Forget every recorded press (window blur, page hide).
+    pub fn release_all(&mut self) {
+        self.pressed.clear();
     }
 
     /// A `KeyboardInput`, taken as winit's own field set (see
@@ -1853,6 +1907,28 @@ mod browser_loop {
                 .needs_redraw
         }
 
+        /// Release every key the tree still holds, under the root `Owner`,
+        /// reporting whether the tree wants a repaint for it.
+        fn cancel_held_keys(&mut self) -> bool {
+            let runtime = self.runtime;
+            let root = &mut self.root;
+            let state = &mut self.state;
+            runtime
+                .with_owner(|| root.cancel_held_keys(state))
+                .needs_redraw
+        }
+
+        /// Forget the shell's recorded presses and cancel the tree's held keys
+        /// (window blur, page hide), requesting a redraw when one is owed.
+        fn cancel_all_keys(&mut self) {
+            self.input.release_all();
+            if self.cancel_held_keys()
+                && let Some(window) = self.window.as_ref()
+            {
+                window.request_redraw();
+            }
+        }
+
         /// Feed one DOM signal — queued or synthesized — through the latch and
         /// deliver whatever it maps to, preceded by the composition it displaces
         /// when it is a clipboard edit arriving on top of a live session (see
@@ -2206,6 +2282,7 @@ mod browser_loop {
                 }
                 ShellUserEvent::PageHidden => {
                     self.page_hidden = true;
+                    self.cancel_all_keys();
                     self.sync_app_lifecycle();
                     if super::has_persistent_font_cache(&self.text_ctx) {
                         self.background_flush
@@ -2228,6 +2305,7 @@ mod browser_loop {
                     // clears it for any path that skips that.
                     self.input.clear_modifiers();
                     self.root.clear_modifiers();
+                    self.cancel_all_keys();
                     self.sync_app_lifecycle();
                 }
             }
@@ -2427,6 +2505,9 @@ mod browser_loop {
                 // relies on it, so tracking it here keeps the chord current
                 // by the time a key event is mapped.
                 WindowEvent::ModifiersChanged(modifiers) => {
+                    for release in self.input.meta_lifted(modifiers.state()) {
+                        self.dispatch(&window, release);
+                    }
                     self.input.modifiers_changed(modifiers.state());
                     self.root.set_modifiers(self.input.modifiers());
                 }
@@ -2439,12 +2520,17 @@ mod browser_loop {
                 // focused: the overlay re-dispatches its own onto the canvas so
                 // this path stays the single keyboard route (`crate::ime`).
                 WindowEvent::KeyboardInput { event, .. } => {
-                    if let Some(input_event) = self.input.keyboard_input(
+                    if event.state == winit::event::ElementState::Released {
+                        if let Some(up) = self.input.key_released(event.physical_key) {
+                            self.dispatch(&window, up);
+                        }
+                    } else if let Some(input_event) = self.input.keyboard_input(
                         &event.logical_key,
                         event.text.as_deref(),
                         event.state,
                         event.repeat,
                     ) {
+                        self.input.key_pressed(event.physical_key, &input_event);
                         self.dispatch(&window, input_event);
                     }
                 }
@@ -2672,7 +2758,7 @@ mod tests {
     use kurbo::Point;
     use winit::dpi::{PhysicalPosition, PhysicalSize};
     use winit::event::MouseButton;
-    use winit::keyboard::ModifiersState;
+    use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 
     // --- physical_to_logical ---
 
@@ -3691,6 +3777,118 @@ mod tests {
             panic!("expected a key event");
         };
         assert!(key.modifiers.ctrl);
+    }
+
+    #[test]
+    fn a_key_release_pairs_with_the_pressed_logical_key() {
+        let mut input = InputState::new();
+        let physical = PhysicalKey::Code(KeyCode::KeyA);
+        let down = input
+            .keyboard_input(
+                &WinitKey::Character("a".into()),
+                Some("a"),
+                ElementState::Pressed,
+                false,
+            )
+            .expect("maps");
+        input.key_pressed(physical, &down);
+        input.modifiers_changed(ModifiersState::SHIFT);
+        let Some(InputEvent::KeyUp(up)) = input.key_released(physical) else {
+            panic!("expected a key up");
+        };
+        assert_eq!(up.key, Key::Character("a".into()));
+        assert!(up.modifiers.shift && !up.repeat);
+    }
+
+    #[test]
+    fn a_release_with_no_recorded_press_is_none() {
+        let mut input = InputState::new();
+        assert!(
+            input
+                .key_released(PhysicalKey::Code(KeyCode::KeyA))
+                .is_none()
+        );
+    }
+
+    fn press(input: &mut InputState, code: KeyCode, text: &str) {
+        let down = input
+            .keyboard_input(
+                &WinitKey::Character(text.into()),
+                Some(text),
+                ElementState::Pressed,
+                false,
+            )
+            .expect("maps");
+        input.key_pressed(PhysicalKey::Code(code), &down);
+    }
+
+    #[test]
+    fn lifting_meta_releases_only_keys_pressed_under_meta() {
+        let mut input = InputState::new();
+        press(&mut input, KeyCode::KeyB, "b");
+        input.modifiers_changed(ModifiersState::SUPER);
+        press(&mut input, KeyCode::KeyC, "c");
+        assert!(input.meta_lifted(ModifiersState::SUPER).is_empty());
+        let ups = input.meta_lifted(ModifiersState::empty());
+        assert_eq!(ups.len(), 1);
+        let InputEvent::KeyUp(up) = &ups[0] else {
+            panic!("expected a key up");
+        };
+        assert_eq!(up.key, Key::Character("c".into()));
+        assert_eq!(up.modifiers, Modifiers::default());
+        input.modifiers_changed(ModifiersState::empty());
+        // The key pressed before Meta is still held.
+        assert!(
+            input
+                .key_released(PhysicalKey::Code(KeyCode::KeyB))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_real_key_up_after_a_meta_lift_is_silent() {
+        let mut input = InputState::new();
+        input.modifiers_changed(ModifiersState::SUPER);
+        press(&mut input, KeyCode::KeyC, "c");
+        assert_eq!(input.meta_lifted(ModifiersState::empty()).len(), 1);
+        input.modifiers_changed(ModifiersState::empty());
+        assert!(
+            input
+                .key_released(PhysicalKey::Code(KeyCode::KeyC))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn release_all_forgets_every_press() {
+        let mut input = InputState::new();
+        press(&mut input, KeyCode::KeyA, "a");
+        press(&mut input, KeyCode::KeyB, "b");
+        input.release_all();
+        assert!(
+            input
+                .key_released(PhysicalKey::Code(KeyCode::KeyA))
+                .is_none()
+        );
+        assert!(
+            input
+                .key_released(PhysicalKey::Code(KeyCode::KeyB))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_dom_carried_key_records_no_press() {
+        let mut input = InputState::new();
+        // A DOM-carried key never reaches `key_pressed`; a stray physical
+        // release finds nothing.
+        assert!(
+            input
+                .key_released(PhysicalKey::Unidentified(
+                    winit::keyboard::NativeKeyCode::Unidentified
+                ))
+                .is_none()
+        );
     }
 
     #[test]
