@@ -16,6 +16,9 @@
 //! | `startGesture` / `createGesture` | [`Tester::start_gesture`] / [`Tester::start_touch`] |
 //! | `TestGesture.moveBy` / `moveTo` | [`Tester::move_by`] / [`Tester::move_to`] |
 //! | `TestGesture.up` / `cancel` | [`Tester::up`] / [`Tester::cancel`] |
+//! | `TestPointer.hover` | [`Tester::hover`] |
+//! | `PointerScrollEvent` | [`Tester::scroll_at`] |
+//! | `sendKeyDownEvent(shift..)` | [`Tester::set_modifiers`] / [`Tester::with_modifiers`] |
 //! | `find.text` / `find.byType` | [`find::text`] / [`find::by_type`] |
 //! | `getSemantics` | [`Tester::get_semantics`] |
 //!

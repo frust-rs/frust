@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use frust_core::accesskit::{Action, NodeId};
 use frust_core::{
-    EventOutcome, FocusInfo, FrameTime, InputEvent, InspectNode, PaintOutcome, RenderRoot,
-    SemanticsUpdate, View, WindowInsets, WindowMetrics,
+    EventOutcome, FocusInfo, FrameTime, InputEvent, InspectNode, Modifiers, PaintOutcome,
+    RenderRoot, SemanticsUpdate, View, WindowInsets, WindowMetrics,
 };
 use frust_reactive::time::test_support::{VirtualClockGuard, install_virtual_clock};
 use frust_reactive::{Owner, ReactiveRuntime, provide_context};
@@ -444,6 +444,28 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
             root, state, owner, ..
         } = self;
         owner.with(|| root.event(state, event))
+    }
+
+    /// Hold `modifiers` for every event sent after this, until changed (Flutter's
+    /// `sendKeyDownEvent` of a modifier key, held). Sends no event and needs no pump; a widget
+    /// reads the chord from `EventCtx::modifiers` and a gesture detector from its details'
+    /// `modifiers`.
+    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
+        self.root.set_modifiers(modifiers);
+    }
+
+    /// The modifiers currently held; see [`set_modifiers`](Self::set_modifiers).
+    pub fn modifiers(&self) -> Modifiers {
+        self.root.modifiers()
+    }
+
+    /// Run `f` with `modifiers` held, then restore the chord held before.
+    pub fn with_modifiers<R>(&mut self, modifiers: Modifiers, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.root.modifiers();
+        self.root.set_modifiers(modifiers);
+        let result = f(self);
+        self.root.set_modifiers(previous);
+        result
     }
 
     /// Perform an accessibility `action` on a semantics node under the Tester's owner, as a
