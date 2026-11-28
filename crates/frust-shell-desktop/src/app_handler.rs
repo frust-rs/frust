@@ -1884,6 +1884,10 @@ fn winit_cursor_for(icon: CursorIcon) -> WinitCursorIcon {
         CursorIcon::ColResize => WinitCursorIcon::ColResize,
         CursorIcon::RowResize => WinitCursorIcon::RowResize,
         CursorIcon::NotAllowed => WinitCursorIcon::NotAllowed,
+        CursorIcon::Crosshair => WinitCursorIcon::Crosshair,
+        CursorIcon::Move => WinitCursorIcon::Move,
+        CursorIcon::ZoomIn => WinitCursorIcon::ZoomIn,
+        CursorIcon::ZoomOut => WinitCursorIcon::ZoomOut,
         _ => WinitCursorIcon::Default,
     }
 }
@@ -5608,6 +5612,10 @@ mod tests {
             (CursorIcon::ColResize, WinitCursorIcon::ColResize),
             (CursorIcon::RowResize, WinitCursorIcon::RowResize),
             (CursorIcon::NotAllowed, WinitCursorIcon::NotAllowed),
+            (CursorIcon::Crosshair, WinitCursorIcon::Crosshair),
+            (CursorIcon::Move, WinitCursorIcon::Move),
+            (CursorIcon::ZoomIn, WinitCursorIcon::ZoomIn),
+            (CursorIcon::ZoomOut, WinitCursorIcon::ZoomOut),
         ] {
             assert_eq!(
                 winit_cursor_for(ours),

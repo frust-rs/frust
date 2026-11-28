@@ -79,6 +79,10 @@ pub enum CursorIcon {
     RowResize,
     /// A refused action: a disabled control, or a drop target rejecting the drag.
     NotAllowed,
+    Crosshair,
+    Move,
+    ZoomIn,
+    ZoomOut,
 }
 
 /// A scroll amount `(x, y)`: `Lines` from a mouse wheel, `Pixels` (logical) from a precision

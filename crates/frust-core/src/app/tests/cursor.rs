@@ -324,3 +324,40 @@ fn a_captured_drag_keeps_the_capturing_widgets_cursor() {
     h.move_over(Leaf::Bottom);
     assert_eq!(h.cursor(), CursorIcon::Text);
 }
+
+/// A single leaf asking for one fixed shape on hover.
+#[derive(Clone, Copy)]
+struct SoloCursorView(CursorIcon);
+
+impl View<()> for SoloCursorView {
+    type Element = CursorLeaf;
+    fn build(&self, _ctx: &mut BuildCtx<'_>) -> CursorLeaf {
+        CursorLeaf {
+            hover_icon: Some(self.0),
+            drag_icon: None,
+            captures: false,
+            captured: false,
+        }
+    }
+    fn rebuild(&self, _p: &Self, _e: &mut CursorLeaf, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+        ChangeFlags::NONE
+    }
+}
+
+#[test]
+fn a_new_shape_resolves_like_any_other() {
+    let mut root: RenderRoot<(), SoloCursorView> = RenderRoot::new();
+    let mut state = ();
+    root.rebuild(
+        &mut |_: &mut ()| SoloCursorView(CursorIcon::Crosshair),
+        &mut state,
+    );
+    root.layout(Size::new(100.0, 30.0));
+    let event = InputEvent::Pointer(PointerEvent {
+        phase: PointerPhase::Move,
+        position: Point::new(50.0, 15.0),
+        button: PointerButton::Primary,
+    });
+    root.event(&mut state, &event);
+    assert_eq!(root.cursor(), CursorIcon::Crosshair);
+}
