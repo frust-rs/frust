@@ -930,6 +930,21 @@ pub fn carried_key_event(
 /// text and named by this shell; a `cut` was already resolved to its verb by the
 /// listener that answered it, because the clipboard half of a cut has to happen
 /// inside the DOM callback and the delete half cannot.
+/// The release owed to a DOM-carried key press: the same key and modifiers,
+/// `repeat` false. `None` for anything that is not a key press. A carried key
+/// has no physical key and is never recorded in `PressedKeys`, so nothing else
+/// would ever send its [`InputEvent::KeyUp`].
+pub fn dom_carried_release(event: &InputEvent) -> Option<InputEvent> {
+    let InputEvent::Key(key) = event else {
+        return None;
+    };
+    Some(InputEvent::KeyUp(KeyEvent {
+        key: key.key.clone(),
+        modifiers: key.modifiers,
+        repeat: false,
+    }))
+}
+
 fn dom_edit_command(event: &crate::ime::DomEditEvent) -> Option<EditCommand> {
     match event {
         crate::ime::DomEditEvent::Paste(text) => Some(EditCommand::Paste(text.clone())),
@@ -1952,7 +1967,13 @@ mod browser_loop {
             let Some(event) = self.input.dom_edit(signal) else {
                 return false;
             };
-            self.deliver(&event)
+            let mut needs_redraw = self.deliver(&event);
+            // A DOM-carried key has no physical key, so no key-up will ever
+            // pair it: release it at once.
+            if let Some(release) = super::dom_carried_release(&event) {
+                needs_redraw |= self.deliver(&release);
+            }
+            needs_redraw
         }
 
         /// End the composition session an overlay teardown just took the
@@ -2745,7 +2766,7 @@ mod tests {
     use super::{
         ClipboardWrite, ComposeLatch, ElementState, Ime, InputState, MouseScrollDelta,
         WinitCursorIcon, WinitKey, WinitNamedKey, WinitTheme, base_theme, brightness_from_winit,
-        carried_key_event, clipboard_write_route, cursor_change_to_apply,
+        carried_key_event, clipboard_write_route, cursor_change_to_apply, dom_carried_release,
         follow_platform_brightness, map_key_event, map_modifiers, map_mouse_button, map_named_key,
         map_scroll_delta, mouse_button_should_dispatch, physical_to_logical, reverted_theme,
         theme_after_override_poll, winit_cursor_for,
@@ -3492,6 +3513,31 @@ mod tests {
         };
         assert!(input.dom_edit(&carried).is_some());
         assert_eq!(input.dom_edit(&carried), None);
+    }
+
+    #[test]
+    fn a_dom_carried_key_is_a_press_followed_by_its_release() {
+        let mut input = InputState::new();
+        input.dom_edit(&DomEditEvent::KeyDropped);
+        let carried = DomEditEvent::Input {
+            input_type: "insertText".to_string(),
+            data: Some("a".to_string()),
+            is_composing: false,
+        };
+        let press = input.dom_edit(&carried).expect("carried key press");
+        let InputEvent::Key(down) = &press else {
+            panic!("expected a key press, got {press:?}");
+        };
+        let release = dom_carried_release(&press).expect("a release");
+        assert_eq!(
+            release,
+            InputEvent::KeyUp(KeyEvent {
+                key: down.key.clone(),
+                modifiers: down.modifiers,
+                repeat: false,
+            })
+        );
+        assert_eq!(dom_carried_release(&release), None);
     }
 
     #[test]
