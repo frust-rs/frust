@@ -43,8 +43,9 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the release process.
 - Pre-releases are published as `X.Y.0-rc.N`.
 - There are no beta or development branches. Choose stable, a release candidate, or git `main`
   through the Cargo version requirement.
-- The minimum supported Rust version is the workspace `rust-version`. Raising it is a
-  minor-version change.
+- The minimum supported Rust version is the workspace `rust-version`. During the alpha
+  (until 0.7.0) a patch may raise it when the CHANGELOG lists the raise under Breaking; from 0.7.0 on,
+  raising it is a minor-version change (full rule: [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Pull request expectations
 

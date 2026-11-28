@@ -48,8 +48,10 @@ it also covers the standalone-workspace gates (e.g. `huddle`/`clean-signals-frus
   bump one independently. `wgpu` is frust-owned (no `vello` constraint above it); still bump it only
   with the engine gate suite (RENDER_DEVELOPMENT.md), never casually.
 - `examples/huddle`, `examples/shadertoy`, `examples/glyph-catalog`, `examples/playground`,
-  `examples/design-system-sample`, `examples/material3-demo`, `examples/beui-demo`, `examples/native-widgets-demo`,
-  `examples/onnx-vision`, `examples/hotpatch-spike`, `testing/hotpatch-canary`, and `plugins/clean-signals-frust` are
+  `examples/design-system-sample`, `examples/material3-demo`, `examples/beui-demo`,
+  `examples/native-widgets-demo`, `examples/onnx-vision`, `examples/hotpatch-spike`,
+  `examples/web-gallery`, `examples/web-spike`, `testing/hotpatch-canary`,
+  `benchmarks/frust_bench`, and `plugins/clean-signals-frust` are
   standalone workspaces excluded from the root graph — run their gates from their own directories.
 - `workflow/` is a separate nested repo — never commit it.
 - Doc edits must respect the budgets recorded in [docs/DOC_POLICY.md](docs/DOC_POLICY.md).

@@ -19,8 +19,10 @@ aggregate `ci-ok`).
   `frust-shell-common`'s `gpu` feature) may be reshaped in a patch, and a behaviour change to a
   published API may ship in a patch, when the CHANGELOG lists each under Breaking with its migration
   and the release summary names it.
-- The minimum supported Rust version is the workspace `rust-version`; raising it is a minor-version
-  change. The pinned development toolchain in `rust-toolchain.toml` is a separate, newer setting.
+- The minimum supported Rust version is the workspace `rust-version`. While the project is in its
+  alpha (which ends with 0.7.0) a patch may raise it when the CHANGELOG lists the raise under
+  Breaking and the release summary names it; from 0.7.0 on, raising it is a minor-version change.
+  The pinned development toolchain in `rust-toolchain.toml` is a separate, newer setting.
 - Version pins on third-party dependencies are governed by
   [DEVELOPMENT.md](DEVELOPMENT.md) § Version-Pin Policy and do not change as part of a release.
 
@@ -132,8 +134,9 @@ For each, from a `vX.Y.Z` checkout, the maintainer:
 
 Then re-run the failed `publish` job so `github-release` runs.
 
-`frust-models` and `frust-onnx` are new crates, so the first release that carries them stops here
-and needs this first publish for each (`frust-models` first: `frust-onnx` depends on it).
+`frust-charts`, `frust-models` and `frust-onnx` are new crates, so the first release that carries
+them stops here and needs this first publish for each (`frust-charts` and `frust-models` in either
+order; `frust-onnx` after `frust-models`, because it depends on it).
 
 ### Ownership
 
