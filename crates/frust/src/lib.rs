@@ -253,6 +253,13 @@ pub use frust_core::{OutsideTap, OverlayBand, OverlayInput};
 /// that text, since a paste payload can be a password or a token.
 pub use frust_core::EditCommand;
 
+/// The modifier chord (shift, ctrl, alt, meta) held at an input event, flat-re-exported
+/// from `frust-core::event` (and also available through [`authoring::Modifiers`]).
+///
+/// Lifted flat because app code reads it on the gesture details
+/// (`DragUpdateDetails::modifiers` and friends) without being a widget author.
+pub use frust_core::Modifiers;
+
 /// The file-drop vocabulary for handling file drops from the OS.
 /// [`InputEvent::FileDrop`] carries a [`FileDropEvent`], which embeds a
 /// [`FileDropPhase`] (`Hover`, `Drop`, `Cancel`, or the broadcast-only `Ended`
@@ -4662,5 +4669,26 @@ mod drag_reexport {
             position: Point::new(0.0, 0.0),
             paths: vec![],
         };
+    }
+}
+
+/// Facade-level check that [`Modifiers`] re-exports flat and through
+/// [`authoring`](crate::authoring) as one type, and that the gesture details carry it.
+#[cfg(test)]
+mod modifiers_reexport {
+    #[allow(dead_code)]
+    fn _same(flat: crate::Modifiers, nested: crate::authoring::Modifiers) {
+        let _a: crate::Modifiers = nested;
+        let _b: crate::authoring::Modifiers = flat;
+    }
+
+    #[allow(dead_code)]
+    fn _reads(d: crate::DragUpdateDetails) -> crate::Modifiers {
+        d.modifiers
+    }
+
+    #[test]
+    fn the_flat_export_is_the_default_chord_type() {
+        assert_eq!(crate::Modifiers::default(), crate::Modifiers::NONE);
     }
 }
