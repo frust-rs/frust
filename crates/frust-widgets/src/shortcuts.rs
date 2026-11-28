@@ -210,7 +210,7 @@ pub struct ShortcutsWidget<W> {
 }
 
 impl<State: 'static> Binding<State> {
-    /// An entry for this binding; a hold keeps `held` (its previous flag at this position).
+    /// An entry for this binding; a hold starts with `held` as given.
     fn entry(&self, id: ShortcutId, held: bool) -> Entry {
         Entry {
             decl: ShortcutDecl {
@@ -255,7 +255,15 @@ impl<State: 'static, V: View<State>> View<State> for ShortcutsView<State, V> {
         element.entries.truncate(self.bindings.len());
         for (i, binding) in self.bindings.iter().enumerate() {
             match element.entries.get_mut(i) {
-                Some(entry) => *entry = binding.entry(entry.decl.id, entry.handler.is_held()),
+                Some(entry) => {
+                    // The flag belongs to the binding, not the slot: keep it only when the
+                    // same chord and scope stays a hold here.
+                    let held = entry.handler.is_held()
+                        && matches!(binding.handler, Handler::Hold(_))
+                        && entry.decl.chord == binding.chord
+                        && entry.decl.scope == binding.scope;
+                    *entry = binding.entry(entry.decl.id, held);
+                }
                 None => element
                     .entries
                     .push(binding.entry(ShortcutId::next(), false)),
@@ -672,6 +680,37 @@ mod tests {
         assert_eq!(app.holds, [true], "the held flag survived the rebuild");
         root.event(&mut app, &key_up("k"));
         assert_eq!(app.holds, [true, false]);
+    }
+
+    #[test]
+    fn a_hold_binding_that_moves_into_a_held_slot_does_not_inherit_the_flag() {
+        let mut root: RenderRoot<App, ShortcutsView<App, crate::TextView>> = RenderRoot::new();
+        let both = std::cell::Cell::new(true);
+        let mut logic = |_: &mut App| {
+            let view = shortcuts(text("body"));
+            let view = if both.get() {
+                view.on_hold("Ctrl+K", "A", |app: &mut App, held| {
+                    app.opened += u32::from(held);
+                    app.closed += u32::from(!held);
+                })
+            } else {
+                view
+            };
+            view.on_hold("Ctrl+J", "B", |app: &mut App, held| app.holds.push(held))
+        };
+        frame(&mut root, &mut logic);
+        let mut app = App::default();
+        root.event(&mut app, &ctrl("k"));
+        assert_eq!(app.opened, 1, "A is held");
+        both.set(false);
+        frame(&mut root, &mut logic);
+        // A's release is delivered by A's recorded id, which B now holds by position; B was
+        // never pressed, so it gets nothing.
+        root.event(&mut app, &key_up("k"));
+        assert!(app.holds.is_empty(), "A's release never reaches B");
+        assert_eq!(app.closed, 0);
+        root.event(&mut app, &ctrl("j"));
+        assert_eq!(app.holds, [true], "B reports its own press");
     }
 
     #[test]
