@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use frust_core::event::PointerId;
 use frust_core::{
-    EventOutcome, InputEvent, PointerButton, PointerEvent, PointerPhase, TOUCH_SLOP, View,
+    EventOutcome, InputEvent, PointerButton, PointerEvent, PointerPhase, ScrollDelta, TOUCH_SLOP,
+    View,
 };
 use kurbo::{Point, Vec2};
 
@@ -151,6 +152,30 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
         let gesture = Gesture::new(PointerId::touch(slot), self.resolve_target(at.into()));
         self.send(&gesture.event(PointerPhase::Down));
         gesture
+    }
+
+    /// Send a wheel scroll of `delta` at `at`, with no pump.
+    ///
+    /// [`ScrollDelta::Lines`] is a wheel notch and [`ScrollDelta::Pixels`] a trackpad's pixel
+    /// delta. A scroll view's offset shows from the next pump.
+    pub fn scroll_at(&mut self, at: impl Into<Target>, delta: ScrollDelta) -> EventOutcome {
+        let position = self.resolve_target(at.into());
+        self.send(&InputEvent::Scroll { position, delta })
+    }
+
+    /// Move the mouse to `at` with no button down: a bare pointer `Move` (button primary), no
+    /// `Down` and no pump.
+    ///
+    /// Hover chrome is read at paint, so pump once before asserting on it. While a [`Gesture`]
+    /// is held the same event is a captured drag move rather than a hover. A later
+    /// [`tap`](Self::tap) or `Down` ends the hover.
+    pub fn hover(&mut self, at: impl Into<Target>) -> EventOutcome {
+        let position = self.resolve_target(at.into());
+        self.send(&InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Move,
+            position,
+            button: PointerButton::Primary,
+        }))
     }
 
     /// Move `gesture` by `delta` and send the `Move`.
@@ -308,7 +333,7 @@ mod tests {
     use frust_core::event::PointerId;
     use frust_core::{
         BoxConstraints, BuildCtx, ChangeFlags, EventCtx, EventResult, FrameTime, InputEvent,
-        LayoutCtx, PaintCtx, PaintScene, PointerPhase, View, Widget,
+        LayoutCtx, Modifiers, PaintCtx, PaintScene, PointerPhase, ScrollDelta, View, Widget,
     };
     use kurbo::{Point, Size, Vec2};
 
@@ -953,5 +978,165 @@ mod tests {
             [Point::new(70.0, 150.0), Point::new(90.0, 170.0)]
         );
         assert_eq!(tester.state().end, Some(Point::new(90.0, 170.0)));
+    }
+
+    /// One event the [`Recorder`] saw: its kind, the held modifiers and the hover flag.
+    type Seen = (String, Modifiers, bool);
+
+    /// A leaf that records every event with the modifiers held and `is_hovered`, and claims
+    /// hover on an uncaptured `Move`.
+    struct Recorder(Rc<RefCell<Vec<Seen>>>);
+
+    impl<S: 'static> View<S> for Recorder {
+        type Element = Recorder;
+
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> Recorder {
+            Recorder(Rc::clone(&self.0))
+        }
+
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _el: &mut Recorder,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    impl Widget for Recorder {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(200.0, 200.0))
+        }
+
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            let kind = match event {
+                InputEvent::Scroll { position, delta } => format!("scroll {position:?} {delta:?}"),
+                InputEvent::Pointer(p) => format!("{:?}", p.phase),
+                _ => return EventResult::Ignored,
+            };
+            self.0
+                .borrow_mut()
+                .push((kind, ctx.modifiers(), ctx.is_hovered()));
+            if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Move) {
+                ctx.claim_hover();
+            }
+            EventResult::Handled
+        }
+    }
+
+    fn recorder_tester() -> (Tester<(), impl View<()>>, Rc<RefCell<Vec<Seen>>>) {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let probe = Rc::clone(&seen);
+        let tester = Tester::new((), move |_: &mut ()| Recorder(Rc::clone(&probe)), SIZE);
+        (tester, seen)
+    }
+
+    #[test]
+    fn scroll_at_delivers_a_scroll_at_the_target_point() {
+        let (mut tester, seen) = recorder_tester();
+        let outcome = tester.scroll_at((30.0, 40.0), ScrollDelta::Lines(0.0, -3.0));
+        assert!(outcome.handled);
+        tester.scroll_at(Point::new(60.0, 70.0), ScrollDelta::Pixels(5.0, 12.5));
+        let (point, pixels) = {
+            let kinds: Vec<_> = seen.borrow().iter().map(|s| s.0.clone()).collect();
+            (kinds[0].clone(), kinds[1].clone())
+        };
+        assert_eq!(point, "scroll (30.0, 40.0) Lines(0.0, -3.0)");
+        assert_eq!(pixels, "scroll (60.0, 70.0) Pixels(5.0, 12.5)");
+
+        let (mut tester, seen) = recorder_tester();
+        let centre = tester.find(&find::by_type::<Recorder>());
+        let at = centre.first().map(|n| n.bounds.center()).unwrap();
+        tester.scroll_at(find::by_type::<Recorder>(), ScrollDelta::Lines(1.0, 0.0));
+        assert_eq!(
+            seen.borrow()[0].0,
+            format!("scroll {at:?} Lines(1.0, 0.0)"),
+            "a finder target scrolls at its centre"
+        );
+    }
+
+    #[test]
+    fn scroll_at_scrolls_a_scroll_view_after_a_pump() {
+        let controller = ScrollController::new();
+        let mut tester = Tester::new(
+            Scrolled::default(),
+            scrolled_detector(controller.clone(), false),
+            SIZE,
+        );
+        tester.scroll_at((100.0, 100.0), ScrollDelta::Pixels(0.0, 60.0));
+        tester.pump(FRAME);
+        assert!(controller.offset() > 0.0, "offset {}", controller.offset());
+    }
+
+    #[test]
+    fn hover_sends_an_uncaptured_move_that_can_claim_hover() {
+        let (mut tester, seen) = recorder_tester();
+        let outcome = tester.hover((50.0, 50.0));
+        assert!(outcome.handled);
+        tester.pump(FRAME);
+        tester.hover((60.0, 50.0));
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|s| s.0 == "Move"), "{seen:?}");
+        assert!(!seen[0].2, "not hovered before the first claim");
+        assert!(seen[1].2, "hovered after the claim painted");
+    }
+
+    #[test]
+    fn set_modifiers_holds_for_every_following_event() {
+        let (mut tester, seen) = recorder_tester();
+        assert_eq!(tester.modifiers(), Modifiers::default());
+        tester.set_modifiers(Modifiers::SHIFT);
+        assert_eq!(tester.modifiers(), Modifiers::SHIFT);
+        tester.hover((10.0, 10.0));
+        tester.scroll_at((10.0, 10.0), ScrollDelta::Lines(0.0, 1.0));
+        tester.tap((10.0, 10.0));
+        assert!(
+            seen.borrow().iter().all(|s| s.1 == Modifiers::SHIFT),
+            "{:?}",
+            seen.borrow()
+        );
+        tester.set_modifiers(Modifiers::default());
+        tester.hover((11.0, 10.0));
+        assert_eq!(seen.borrow().last().unwrap().1, Modifiers::default());
+    }
+
+    #[test]
+    fn with_modifiers_restores_the_previous_chord() {
+        let (mut tester, seen) = recorder_tester();
+        tester.set_modifiers(Modifiers::SHIFT);
+        let inner = tester.with_modifiers(Modifiers::ALT, |t| {
+            t.hover((10.0, 10.0));
+            t.modifiers()
+        });
+        assert_eq!(inner, Modifiers::ALT);
+        assert_eq!(tester.modifiers(), Modifiers::SHIFT);
+        tester.hover((12.0, 10.0));
+        let seen = seen.borrow();
+        assert_eq!(seen[0].1, Modifiers::ALT);
+        assert_eq!(seen[1].1, Modifiers::SHIFT);
+    }
+
+    #[test]
+    fn an_alt_drag_reports_alt_in_its_drag_details() {
+        #[derive(Default)]
+        struct Held(Vec<Modifiers>);
+        let mut tester = Tester::new(
+            Held::default(),
+            |_: &mut Held| {
+                crate::GestureDetector(pad(200.0))
+                    .on_pan_update(|s: &mut Held, d: DragUpdateDetails| s.0.push(d.modifiers))
+            },
+            SIZE,
+        );
+        tester.with_modifiers(Modifiers::ALT, |t| {
+            t.drag((100.0, 20.0), Vec2::new(0.0, 60.0))
+        });
+        let held = &tester.state().0;
+        assert!(!held.is_empty());
+        assert!(held.iter().all(|m| *m == Modifiers::ALT), "{held:?}");
     }
 }
