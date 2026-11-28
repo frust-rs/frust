@@ -82,6 +82,8 @@ mod locale_default;
 pub mod overlay;
 pub mod perf;
 pub mod platform_view;
+/// Pairs a key release with the logical key reported at press.
+pub mod pressed_keys;
 pub mod render_split;
 pub mod resample;
 mod surface_mode;
