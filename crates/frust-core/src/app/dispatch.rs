@@ -816,7 +816,11 @@ impl<State: 'static, V: View<State>> RenderRoot<State, V> {
             let top = self.overlay_hits.iter().rev().find(interactive);
             top.map(|hit| hit.key)
         });
-        for (id, overlay) in self.shortcuts.candidates(key, top_overlay, modal.is_some()) {
+        // A repeat of a key not held has no entry to record a shortcut against, so is offered none.
+        let offered = !key.repeat || self.key_is_held(&key.key);
+        let candidates =
+            offered.then(|| self.shortcuts.candidates(key, top_overlay, modal.is_some()));
+        for (id, overlay) in candidates.into_iter().flatten() {
             // A floated pod is reached only through its owner's slot, never by a bare broadcast.
             let delivery = match overlay {
                 None => InputEvent::Shortcut(id),
