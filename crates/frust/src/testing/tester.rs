@@ -446,6 +446,15 @@ impl<S: 'static, V: View<S>> Tester<S, V> {
         owner.with(|| root.event(state, event))
     }
 
+    /// Simulate window focus loss: release every held key and shortcut, delivering each pending
+    /// `KeyUp` and hold-binding `false` once. A no-op when nothing is held.
+    pub fn cancel_held_keys(&mut self) -> EventOutcome {
+        let Self {
+            root, state, owner, ..
+        } = self;
+        owner.with(|| root.cancel_held_keys(state))
+    }
+
     /// Hold `modifiers` for every event sent after this, until changed (Flutter's
     /// `sendKeyDownEvent` of a modifier key, held). Sends no event and needs no pump; a widget
     /// reads the chord from `EventCtx::modifiers` and a gesture detector from its details'
