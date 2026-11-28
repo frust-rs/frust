@@ -20,6 +20,10 @@
 //! `CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS` fallback is needed. The
 //! API level is the minSdk floor, 29, passed explicitly so the proxied
 //! linker and the cold `cargoNdkBuild` (`--platform <minSdk>`) link at the same level.
+//! A project whose `android/gradle.properties` sets
+//! `frust.cargoNdk.linkLibcxxShared` gets cargo-ndk's `--link-libcxx-shared`
+//! too ([`with_libcxx_shared`]), so the NDK's `libc++_shared.so` lands in
+//! `jniLibs` as it does on a cold build.
 //!
 //! **Fat link.** The builder re-links the captured line itself through the
 //! shared base-image half of a session start (`session::link_base`): Gnu
@@ -286,6 +290,27 @@ pub fn fat_build_command(
         args,
         env,
     }
+}
+
+/// cargo-ndk's flag that copies the NDK's `libc++_shared.so` into the
+/// `-o` directory beside the built library.
+const LINK_LIBCXX_SHARED: &str = "--link-libcxx-shared";
+
+/// `fat` with [`LINK_LIBCXX_SHARED`] among cargo-ndk's own options (before
+/// the `rustc` subcommand), so the fat build stages the NDK's
+/// `libc++_shared.so` into `jniLibs` the way the cold `cargoNdkBuild` task
+/// does for a project that sets `frust.cargoNdk.linkLibcxxShared`. The fat
+/// build is the only native staging step of a hot run (Gradle runs with `-x
+/// cargoNdkBuild`), and an app whose library needs that runtime does not
+/// load without it.
+pub fn with_libcxx_shared(mut fat: FatBuild) -> FatBuild {
+    let at = fat
+        .args
+        .iter()
+        .position(|arg| arg == "rustc")
+        .unwrap_or(fat.args.len());
+    fat.args.insert(at, LINK_LIBCXX_SHARED.to_string());
+    fat
 }
 
 /// Whether one item of a `-Wl,` list sets identical-code folding.
@@ -805,6 +830,11 @@ fn build_and_stage(
         },
         &link,
     );
+    let fat = if crate::plugin::apply::libcxx_shared_requested(start.root) {
+        with_libcxx_shared(fat)
+    } else {
+        fat
+    };
     session::run_fat_build(runner, &fat, start.root, on_line)?;
 
     let link_args = fat_image_link_args(read_link_args(&link.args_file)?);
@@ -1092,6 +1122,14 @@ mod tests {
              --features frust/devtools --features frust/hotpatch -- -Csave-temps=true \
              -Clink-dead-code -Clinker=/opt/frust/bin/frust"
         );
+        let shared = with_libcxx_shared(fat.clone());
+        assert_eq!(
+            shared.args[..9].join(" "),
+            "ndk -t arm64-v8a --platform 29 -o /w/my-app/build/android/jniLibs \
+             --link-libcxx-shared rustc"
+        );
+        assert_eq!(shared.args[9..], fat.args[8..]);
+        assert_eq!(shared.env, fat.env);
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
         assert_eq!(
             fat.env,

@@ -284,23 +284,20 @@ counter beside it stands still is pinned by `crates/frust-core/src/app/tests/foc
 cannot be starved behind a read that will not drain, but the one resolver
 thread can still be parked by a hung provider until it returns or a teardown
 discards the executor, so removing this entry needs a resolution path that can
-reclaim or replace that thread — a per-request cancel, or a bounded pool —
-plus a device run that actually watches a URI-backed paste land. The
+reclaim or replace that thread — a per-request cancel, or a bounded pool. The
+device run that watches a URI-backed paste land is done (below). The
 misdelivery half of this entry's earlier trigger is done: the per-session
 identity it asked for is exposed through `AppTree` and is what the guard
 compares.
 
-**NOT DEVICE-VERIFIED.** The 2026-09-12 Pixel 5 run exercised the clipboard
-legs but not this path: reaching it needs a clip whose first item has a `Uri`
-and no direct text — a photo, file or contact copied from another app, not
-text. Everything specific to this entry (the off-thread resolve, the
-focus-session guard, the two-second deadline) is therefore argued from the
-call graph and from the desktop shell's identical worker-thread precedent, and
-has never been watched happen. That run predates `nativeFocusEpoch`, so it
-carries no evidence about the export the guard now depends on either: this
-entry currently has **no** hardware evidence behind any part of it, and a
-device run should confirm the export resolves before reading anything else
-from the behaviour.
+**Device run** (2026-11-28, Pixel 5, Android 14, the playground Forms page built
+from `7b299d189`): with a URI-backed clip served by a helper app's content
+provider (a text payload behind a `content://` URI, no direct text), a paste
+landed when the provider answered at once and when it answered after 1.5
+seconds, and was dropped when it answered after 3 seconds. The drop shows
+nothing in the app; logcat carries one warning, `clipboard read answered too
+late; dropping the paste`. Not run: a photo, a file and a contact copied from
+other apps, and a focus move during the wait.
 
 ---
 
@@ -515,140 +512,58 @@ doc ("one the file cannot resolve is left to the app").
 
 ---
 
-### `ime-ios-content-type-unverified` — iOS secure-entry IME path is device-unverified
+### `ime-ios-content-type-unverified` — on iOS, a Return-key focus move and the Mode B sibling case of the IME path are not device-verified
 
-**Observed**: `FrustViewController.swift`'s IME reconcile path — the
-content-type application (suppressing the QuickType
-suggestion bar and keyboard learning on a `"password"`-classified field),
-the **mirror re-seed/reconcile** that keeps `FrustView.mirror` from carrying
-a previous field's text across a focus move (`syncImeFocus`'s `seedMirror`
-on the content-type branch and `FrustView.reconcileMirror(to:)` on the
-steady-active branch), and the **per-frame `syncImeFocus()` call from
-`renderFrame`** that makes non-touch focus moves (Return-to-next-field,
-programmatic focus) reach any of it — has been run on a device only in
-part. `cargo` cannot compile Swift, so no ordinary workspace gate touches
-this path. One device run has occurred (2026-11-12, iPhone 13 mini, iOS
-27.2, the playground built with Xcode 27.0 from `355d6f1a`, a third-party
-keyboard active): the path builds, links and runs, and typing, autocorrect
-and dictation reach the field. That run had no password-classified field,
-no page with two fields, and no Return-to-next-field move, so it verified
-none of the three behaviours named above in full: the password traits were
-not exercised at all, the mirror re-seed was seen only across a page change
-with a blur in between (the second field held only its own text), and the
-non-touch focus move was not exercised.
-A second run (2026-11-12, same phone, built from `f36a8cbd`, the Apple
-keyboard, XCUITest-driven) used a page with two fields and a password
-field: text typed in one field and then one character in the next left the
-second holding only that character, with no blur in between; on the
-password field typed text is drawn as dots, Dictate is disabled and the
-keyboard is left out of screenshots. Still not seen: whether the suggestion
-bar is empty on the password field, and any non-touch focus move.
-A separate channel was open on iOS: the view that is the `UITextInput`
-responder reported the focused field's real text as its accessibility value,
-a password field's included, although frust's own node for the field was
-masked (seen on the phone, 2026-11-12). `FrustView.swift` now overrides
-`accessibilityValue` (nil) and drops the keyboard-key trait, so the view
-reports no text. Verified on the same phone after the fix (2026-11-12,
-build `26a3dfb7`): the view has no value with a normal or a password field
-focused, the typed password is nowhere in the accessibility snapshot, and
-the field's own element shows bullets. What VoiceOver speaks was not run.
+**Observed**: `FrustViewController.swift`'s IME reconcile path is Swift-only,
+so no workspace gate compiles or runs it: the content-type traits for a
+`"password"` field, the mirror re-seed across a focus move, the per-frame
+`syncImeFocus()` call from `renderFrame`, and the bounded
+`becomeFirstResponder()` retry (`imeFocusSatisfied`). A device run covers
+most of it (2026-11-28, iPhone 13 mini, iOS 27.2, the playground Forms page
+built from `7b299d189`, XCUITest-driven, a third-party keyboard active):
 
-**Also covers**: `syncImeFocus`'s per-frame
-`becomeFirstResponder()` retry is **bounded** (`imeFocusSatisfied`)
-rather than fighting an intentional UIKit-originated resign (user swipe-
-dismiss, a sibling native control taking first responder) forever, because
-nothing on the Swift side can observe *why* first responder was resigned.
-A user touch on the Frust surface (`onTouch`, user-initiated) re-arms the
-bound — **but only while the surface is not already first responder**.
-That is what lets a user bring back a keyboard they dismissed
-themselves by re-tapping the field, since re-tapping an already-active field
-changes neither Rust's `active` nor `contentType` signal. The
-not-already-first-responder half is load-bearing: `imeFocusSatisfied` is set
-back to `true` only in the `!isFirstResponder` branch, so re-arming during a
-touch inside a *still-focused* field would leave it dangling at `false` and
-reassert the keyboard on the next UIKit-originated dismissal — reopening the
-very pop-back the bound exists to prevent. A touch inside a Mode B hosted slot never reaches `onTouch`
-(`FrustView.hitTest` returns `nil` there), so a sibling native control
-retaining first responder is unaffected by the per-frame tick. This
-mechanism is Swift-only. The 2026-11-12 device run saw one part of it: a
-keyboard dismissed by a tap outside the field came back on a re-tap of the
-field. Swipe-dismiss, the stay-down half and the Mode B sibling case were
-not run.
+- Moving focus from a normal field to the password field with the keyboard up
+  swaps in the system keyboard. Its prediction bar holds only the Passwords
+  key, Dictate is disabled, the field holds exactly the three characters
+  typed (as bullets), and they appear nowhere else in the accessibility
+  snapshot.
+- Text typed in one normal field does not carry into the next: one character
+  typed in the second field leaves it holding only that character.
+- A focus request made from a button handler (`FocusHandle::request`) raises
+  the keyboard, scrolls the field into view, and typing reaches it.
+- A keyboard dismissed by a downward drag stays down. A tap on the field
+  brings it back, also after a tap on plain text in between.
+- A tap inside the focused field followed by a drag dismissal leaves the
+  keyboard down.
 
-**Residual limitation, accepted** — the not-already-first-responder
-gating does **not** remove it: when a Mode B sibling holds first responder,
-`forgeView.isFirstResponder` is already `false`, so the
-not-already-first-responder condition is satisfied and a touch **elsewhere**
-on the Frust surface (e.g. scrolling non-editable content, outside the
-sibling's interactive slot) still re-arms the bound. Rust has no way to learn the sibling took first
-responder, so it still reports its own field as active, and the reconciler
-will attempt to take focus back. This is inherent to the "any surface touch
-re-arms" design, not an oversight; it is strictly better than the unbounded
-per-frame fight it replaces, and it only manifests when the Mode B
-native-widgets path is in play.
+Not run: a focus move made by the keyboard's Return or Next key with no touch
+on the surface (the page's fields have no focus wiring; Return on a
+single-line field submits and focus stays), and a Mode B sibling native
+control holding first responder. The per-frame reconcile costs one
+`frust_ime_state_json` FFI call and one JSON parse per display-link tick; that
+cost is not measured.
 
-**Applies to**: iOS only — the entire `FrustEmbedding` IME surface
+**Residual limitation, accepted**: nothing on the Swift side can observe why
+first responder was resigned, so the retry is bounded and a touch on the frust
+surface re-arms it while the surface is not first responder. When a Mode B
+sibling control holds first responder, a touch elsewhere on the frust surface
+therefore re-arms the retry and the reconciler tries to take focus back: Rust
+cannot learn that the sibling took it and still reports its own field as
+active. A touch inside the hosted slot never reaches `onTouch`
+(`FrustView.hitTest` returns `nil` there).
+
+**Applies to**: iOS only: the `FrustEmbedding` IME surface
 (`FrustViewController.swift`, `FrustView.swift`, `FrustTextInput.swift`).
-Android's mirror path (`FrustSurfaceView.pollImeAfterDispatch` +
-`FrustInputConnection.reconcileTo`, the model this path follows
-property-for-property) is likewise device-unverified, but is a materially different code path (`EditorInfo`/
-`restartInput`/`Editable` vs. UIKit `UITextInputTraits`/resign-become/
-`NSMutableString`) and this entry makes no claim about it. Android's
-`applyImeContentType` inputType/imeOptions flags have cleared `compileDebugKotlin`,
-and the iOS Swift side has been built with `xcodebuild` and run once (above).
-Neither is device verification of the content-type behaviour.
 
-**Why not closed**: the only proof is on-device verification, and the one
-run so far did not reach a password field. **The
-leak (apart from the accessibility channel above, which a device snapshot shows closed) is therefore not confirmed closed on any platform** — the Rust-side
-wire encoding (`content_type_wire`) has unit coverage, but nothing has
-exercised the UIKit trait application for a password field, the mirror
-re-seed on a direct field-to-field move, the per-frame reconcile on a
-non-touch focus move, or the swipe-dismiss half of the bounded retry
-against a real keyboard. The
-per-frame reconcile in particular has an unmeasured cost (one
-`frust_ime_state_json` FFI call plus one `JSONSerialization` parse per
-`CADisplayLink` tick, matching Android's per-frame `nativeImeState` budget)
-and an unobserved interaction with UIKit autocorrect/composition, both
-reasoned about but not instrumented. Treat the current implementation as
-the best-reasoned fix available, not as a verified fix.
+**Why accepted**: the verified runs cover the path apps use. The two open
+cases need a fixture with Return-to-next wiring and a hosted native control
+beside a field.
 
-**Device-gate observables, for whoever runs it** — five separate runs:
-1. *Traits across a focus move.* Focus a `"normal"` field, type a few
-   characters, then move focus directly to an obscured (`"password"`)
-   field **without dismissing the keyboard in between**. Confirm (a) no
-   QuickType suggestion bar appears while typing into the second field, and
-   (b) nothing typed there is echoed anywhere (suggestion strip, autofill
-   preview).
-2. *Mirror staleness.* Same two-field form, both fields **normal** so
-   no content-type change fires. Type `hello` into A, move focus to empty
-   field B without dismissing the keyboard, type one character. B must
-   contain exactly that one character — **not** `hello` + the character.
-   Repeat with the second field obscured to cover the content-type branch's
-   re-seed ordering.
-3. *Non-touch trigger.* Same as (1) and (2), but move focus with the
-   keyboard's **Return/Next key** rather than a tap, so no touch reaches the
-   surface. Both observables must still hold.
-4. *Bounded retry + touch re-arm.* Focus field A, let the keyboard
-   appear, then swipe-dismiss it — the keyboard must **stay down** (no
-   per-frame pop-back). Tap field A again — the keyboard must **reappear**.
-   With a Mode B sibling native control focused, confirm the per-frame tick
-   does not steal focus back from it. Dismiss field A by swipe, tap a
-   *different non-editable* part of the surface, then tap field A again — it
-   must still recover (exercises the clear-on-touch design point, and its
-   residual limitation above).
-5. *Touch inside an already-focused field, then dismiss.* Focus field
-   A, then **tap or drag inside A while it still holds the keyboard** —
-   caret repositioning or a selection drag. Now swipe-dismiss the keyboard
-   with **no further touch on the Frust surface**. It must **stay down**.
-   This is a distinct run from (4): the touch there happens *after* the
-   dismissal, this one *before* it. The re-arm is gated on `!isFirstResponder`,
-   but **that gating is reasoned, not device-measured** — this run is what
-   would catch a regression.
+**Trigger for removal**: both open cases run on a device.
 
-**Evidence**: `swiftc -typecheck` exit 0; one partial device run, 2026-11-12, recorded in
-[SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) under the safe-area / keyboard / back gate. Runs 1 to 5
-above have not been done as written: the playground lacks the two-field and password fixtures.
+**Evidence**: the run above, recorded in `examples/playground/README.md`
+(*Forms* rows); two partial runs on the same phone, 2026-11-12, recorded in
+[SHELLS_DEVELOPMENT.md](SHELLS_DEVELOPMENT.md) under the safe-area / keyboard / back gate.
 
 ---
 
@@ -2717,7 +2632,7 @@ class doc, `armed`, and `disarm()`.
 
 **Why accepted**: the arm is framework-only by decision (no AppCompat/Material theming), and `android.app.AlertDialog` offers no per-dialog brightness without a themed context this crate does not construct.
 
-**Evidence**: `plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativePresenter.kt` (`AlertDialog.Builder(activity)`); `plugins/native-widgets/src/present/android_alert.rs` module doc.
+**Evidence**: `plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativePresenter.kt` (`AlertDialog.Builder(activity)`); `plugins/native-widgets/src/present/android_alert.rs` module doc. Seen on a Pixel 5 (Android 14, `7b299d189`, 2026-11-28): with the system in dark mode and the demo set to its light theme, the three-role alert is drawn dark over the light page (`examples/native-widgets-demo/README.md`, *Device status*).
 
 ---
 
@@ -2795,8 +2710,9 @@ iOS/iPadOS (`apple_toast`, a plugin-owned capsule). Every other target, macOS in
 navigation bars only and which exists from iOS 26. The arm looks the API up at run time
 (`respondsToSelector`) and shows no badge where it is missing, logging that once at debug level. A
 badge on a toolbar entry is therefore not shown on iOS. Android (a Material badge on the top-bar
-item or the toolbar button) and the frust-drawn bars show both. This is read from the code and
-UIKit's documentation: the iOS arm has not yet been run on a device.
+item or the toolbar button) and the frust-drawn bars show both. The top-bar half is seen on a
+device (iPhone 13 mini, iOS 27.2): the bell's badge draws its count. A toolbar badge and a phone
+before iOS 26 are read from the code and UIKit's documentation.
 
 **Applies to**: `native_scaffold` on iOS/iPadOS: toolbar badges on every version, and every badge
 before iOS 26.
@@ -2805,7 +2721,7 @@ before iOS 26.
 system bar's layout.
 
 **Evidence**: `plugins/native-widgets/src/apple/chrome.rs`'s *Badges, prominence and icons*;
-`plugins/native-widgets/src/chrome/mod.rs`'s `ActionItem::badge` doc.
+`plugins/native-widgets/src/chrome/mod.rs`'s `ActionItem::badge` doc; the iPhone 13 mini rows of `examples/native-widgets-demo/README.md`'s *Device status* (2026-11-21 and 2026-11-28).
 
 ---
 
@@ -2829,14 +2745,15 @@ short").
 
 ---
 
-### `native-chrome-android-floating-toolbar-overflow` — the Android floating toolbar has no overflow, so several text items run past a narrow phone
+### `native-chrome-android-floating-toolbar-overflow` — the Android floating toolbar has no overflow, so several text items squeeze the last one and push the primary off a narrow phone
 
 **Observed**: with `ToolbarStyle::Floating`, the Android arm lays every secondary entry out in one
 horizontal row inside a Material 3 `FloatingToolbarLayout`, a text button per titled entry and an
-icon button per icon, each at its natural width, with no overflow menu and no scrolling. Several
-text items plus the primary beside the pill can be wider than a narrow phone, and nothing in the
-layout keeps the row inside the screen. This is read from the layout code, not observed: the demo's
-detail page (one item and a labelled primary) fits, and a wider set has not been run on a device.
+icon button per icon, each at its natural width, with no overflow menu and no scrolling. On a narrow
+phone the row does not fit: on a Pixel 5 (393 dp wide) with four titled items (Info, Reviewers,
+Changes, History) and a labelled primary, the pill spans the screen, the last item is squeezed to
+a few letters a line (`His` / `tor` / `y`), and the primary is not on screen at all. One item and
+a labelled primary fit.
 
 **Applies to**: `ToolbarSpec::style(ToolbarStyle::Floating)` on Android with several titled items.
 
@@ -2847,7 +2764,7 @@ top bar's own.
 `ToolbarStyle::Buttons`.
 
 **Evidence**: `plugins/native-widgets/platform/android/src/main/kotlin/dev/frust/nativewidgets/FrustNativeChrome.kt`'s
-`addFloatingToolbar`; the OnePlus 9 (Android 15) chrome-additions row of `examples/native-widgets-demo/README.md` (the floating toolbar with the labelled primary).
+`addFloatingToolbar`; the OnePlus 9 (Android 15) chrome-additions row of `examples/native-widgets-demo/README.md` (the floating toolbar with the labelled primary); the Pixel 5 (Android 14) row of 2026-11-28 in the same table (four titled items, a scratch build of the demo at `7b299d189`).
 
 ---
 
@@ -6061,7 +5978,7 @@ opt-in because no captured scene improved with hints on.
 
 ---
 
-### `android-frame-sync-latch-per-process` — the per-frame JNI sync keeps one latch per process, and the soft-keyboard typing check has not run with gated IME polls
+### `android-frame-sync-latch-per-process` — the per-frame JNI sync keeps one latch per process
 
 **Observed** (evidence: `crates/frust-shell-android/src/ffi_support.rs`'s `FrameSyncLatch`;
 `docs/PERFORMANCE_BASELINES.md` § Engine close-out per device): `nativeFrameSync` cut the per-frame
@@ -6069,16 +5986,15 @@ JNI poll cost on an idle page from 166 to 36 us (Pixel 4a) and 140 to 30 us (One
 Kotlin which polls have anything to report. Its latch is process-wide and remembers one handle: a
 sync from a second `FrustSurfaceView` resets it, so two views alternating report every bit each
 frame (the gate stops saving anything), and a clipboard value one view drained but had not yet
-taken is dropped by that reset. A manual soft-keyboard typing pass (IME composition, caret moves
-and field switches arriving only through the gated IME poll) has not been run on a device since the
-polls were gated.
+taken is dropped by that reset. A soft-keyboard typing pass with the gate on is recorded (Pixel 5,
+Android 14, `7b299d189`, 2026-11-28, `examples/playground/README.md`): words, backspaces, field
+switches and a caret move all stayed in step.
 
 **Accepted because**: the shell drives one `FrustSurfaceView` per process today, the IME bit is
 also raised on every IME-side input and on any published-state change, and `FRUST_NO_FRAME_SYNC=1`
 restores the ungated polls.
 
-**Trigger for removal**: a per-handle latch, and a recorded soft-keyboard typing pass with the gate
-on.
+**Trigger for removal**: a per-handle latch.
 
 ---
 
@@ -6319,7 +6235,7 @@ and reports what that player answers, so container/codec coverage is the
 platform's, not the plugin's. Media3's ExoPlayer extractor set covers
 Matroska/WebM (and the VP8/VP9 codecs usually inside them); AVFoundation's
 does not, so the same `.mkv`/`.webm` source that plays on Android publishes
-`VideoError::Decoder` on iOS and macOS. HLS runs the other way at the
+`VideoError::UnsupportedSource` on iOS and macOS (AVFoundation's "Cannot Open", code -11828). HLS runs the other way at the
 artifact level: it is native on Apple and needs Android's separately
 declared `media3-exoplayer-hls` artifact on the runtime classpath.
 
@@ -6330,13 +6246,16 @@ format set, not something this plugin gates.
 large dependency, a battery cost, and no hardware path) or silently
 transcoding — neither is a plugin-tier decision. MP4/H.264 and HLS are the
 intersection that plays everywhere; an app targeting both platforms should
-ship that and treat a `Decoder` error as a per-platform answer.
+ship that and treat an `UnsupportedSource` error as a per-platform answer.
 
 **Evidence**: platform format-matrix survey (Media3's extractor set vs
-AVFoundation's); the crate's own `Backends`/format-asymmetry note. Not yet
-reproduced on hardware — the device gate for this plugin is still owed. See
-also `video-web-windows-linux-unavailable-v1` below.
-
+AVFoundation's); the crate's own `Backends`/format-asymmetry note. Seen on
+hardware (2026-11-28, iPhone 13 mini on iOS 27.2 and a Mac on macOS 27.2.1,
+the playground Video page at `7b299d189` with its two URL sources pointed at
+an https `.webm` and an https `.mkv` for the run): both sources end in
+`State: Error` with the message above, on both systems. The Android half
+(that the same files play) was not run. See also
+`video-web-windows-linux-unavailable-v1` below.
 ---
 
 ### `video-web-windows-linux-unavailable-v1` — no video backend on the web, Windows, or Linux
@@ -9199,22 +9118,6 @@ viewport-top row, so the gap does not apply while it is stuck.
 **Trigger for removal**: a face fixture is added and the input is letterboxed.
 
 **Evidence**: `plugins/onnx/src/vision/`; `examples/onnx-vision` (the bundled sample is a generated image, not a photograph of a face).
-
----
-
-### `onnx-hot-run-libcxx-shared` — `frust run --hot` on Android may not package `libc++_shared.so`
-
-**Observed**: the app needs the NDK's `libc++_shared.so` in the APK when `frust-onnx` is linked statically. The `frust.cargoNdk.linkLibcxxShared` Gradle property makes the scaffold's `cargoNdkBuild` task add it, but the hot-run path has not been checked to go through that task.
-
-**Applies to**: Android apps that use `frust-onnx` run with `--hot`.
-
-**Workaround**: run without `--hot`.
-
-**Why accepted**: the hot path was not exercised.
-
-**Trigger for removal**: a hot run is checked with the property set.
-
-**Evidence**: `crates/frust-drive/src/plugin/registry.rs` (`AndroidLibcxxShared`).
 
 ---
 

@@ -325,8 +325,8 @@ if ((project.findProperty("frust.cargoNdk.linkLibcxxShared") as String?)?.trim()
 
 Setting `CARGO_NDK_LINK_LIBCXX_SHARED=true` in the environment of `frust build` does the same
 for one build (`1` is rejected; the value must be `true`). AGP strips the staged copy (9.2 MB in
-the NDK, 1.25 MB in the APK). A hot-patch `frust run --hot` session builds the app's `.so`
-outside Gradle and does not stage the library.
+the NDK, 1.25 MB in the APK). A hot `frust run --watch` session builds the app's `.so`
+outside Gradle and stages the library itself when the property is set.
 
 **Floors and ABIs.** minSdk 29: the scaffold's floor, and the archive links at API level 29.
 The NDK is the scaffold's r28 (28.2.13676358), which aligns every `.so` to 16 KB pages.

@@ -163,3 +163,9 @@ face on either image, as expected for images without a person: a check on a real
 Depth put the sample's ball and the photo's sharp foreground disc near (white) and the sky and
 the blurred backdrop far, which matches near-is-one. The iPhone, macOS and Linux desktop rows
 are owed (Apple hardware; a Linux display server).
+
+Hot run (Pixel 5, Android 14, 2026-11-28): `frust run --watch -d <device>` with
+`frust.cargoNdk.linkLibcxxShared=true` installs an APK whose `lib/arm64-v8a` holds
+`libonnxvision.so` and `libc++_shared.so`, and the app starts on the Models tab. Before the
+hot build staged the library the same run died at launch (`UnsatisfiedLinkError: dlopen
+failed: library "libc++_shared.so" not found`).
