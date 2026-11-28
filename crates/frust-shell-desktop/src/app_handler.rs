@@ -1676,6 +1676,17 @@ fn brightness_from_winit(theme: Option<WinitTheme>) -> Brightness {
     }
 }
 
+/// Record the held chord in the shell's tracker and hand it to the root, so pointer, scroll and
+/// scale dispatches see it. Dispatches nothing and requests no frame.
+fn push_modifiers<S: 'static, V: View<S>>(
+    root: &mut RenderRoot<S, V>,
+    tracked: &mut Modifiers,
+    now: Modifiers,
+) {
+    *tracked = now;
+    root.set_modifiers(now);
+}
+
 /// Map winit's [`ModifiersState`] bitflags to our [`Modifiers`] chord.
 fn map_modifiers(state: ModifiersState) -> Modifiers {
     Modifiers {
@@ -3483,7 +3494,8 @@ where
             // `wheel_zoom_chord_held`/`map_wheel_scale_delta`. The wheel's own
             // gesture bracket (`phase`, discarded on the plain-scroll arm
             // above a moment ago but read here) becomes the `Scale` event's
-            // phase via `map_gesture_phase`; the focal point is the last
+            // phase via `map_gesture_phase`. A widget therefore sees ctrl/Cmd plus wheel as
+            // `Scale` and Alt/Shift plus wheel as `Scroll`; the focal point is the last
             // known cursor position, exactly like the plain scroll's.
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 if wheel_zoom_chord_held(self.modifiers, cfg!(target_os = "macos")) {
@@ -3539,7 +3551,11 @@ where
             // that relies on it, so tracking it here keeps `self.modifiers`
             // current by the time a key event is mapped.
             WindowEvent::ModifiersChanged(modifiers) => {
-                self.modifiers = map_modifiers(modifiers.state());
+                push_modifiers(
+                    &mut self.root,
+                    &mut self.modifiers,
+                    map_modifiers(modifiers.state()),
+                );
             }
 
             // Not repeat-filtered — `repeat` passes through to the framework
@@ -3973,6 +3989,11 @@ where
             // change produces no frame of its own.
             WindowEvent::Focused(focused) => {
                 self.window_focused = focused;
+                // Losing focus drops the chord (the release may never arrive); gaining it needs
+                // nothing, winit re-reports the held chord.
+                if !focused {
+                    push_modifiers(&mut self.root, &mut self.modifiers, Modifiers::default());
+                }
                 // A focus change flushes nothing by itself: losing focus is `Inactive`, and
                 // only a `Hidden` target (an already-minimized window) reaches the flush.
                 self.sync_app_lifecycle();
@@ -4293,8 +4314,8 @@ mod tests {
         map_gesture_phase, map_key_event, map_modifiers, map_mouse_button, map_named_key,
         map_scroll_delta, map_wheel_scale_delta, mouse_button_should_dispatch,
         parse_window_maximized, paste_answer_dispatch, paste_input_event, physical_to_logical,
-        resolved_window_knob, theme_after_override_poll, wheel_zoom_chord_held, window_attributes,
-        winit_cursor_for,
+        push_modifiers, resolved_window_knob, theme_after_override_poll, wheel_zoom_chord_held,
+        window_attributes, winit_cursor_for,
     };
     use crate::config::Decorations;
     use frust_core::SemanticsUpdate;
@@ -5174,6 +5195,105 @@ mod tests {
         assert_eq!(map_named_key(WinitNamedKey::F25), None);
         assert_eq!(map_named_key(WinitNamedKey::Alt), None);
         assert_eq!(map_named_key(WinitNamedKey::CapsLock), None);
+    }
+
+    // --- pushing the held chord to the root ---
+
+    /// Records `ctx.modifiers()` on every pointer press.
+    struct ChordProbe {
+        seen: Rc<RefCell<Vec<Modifiers>>>,
+    }
+
+    impl Widget for ChordProbe {
+        fn layout(&mut self, _ctx: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(40.0, 20.0))
+        }
+        fn paint(&mut self, _ctx: &mut PaintCtx, _scene: &mut dyn PaintScene) {}
+        fn event(&mut self, ctx: &mut EventCtx, event: &InputEvent) -> EventResult {
+            if matches!(event, InputEvent::Pointer(p) if p.phase == PointerPhase::Down) {
+                self.seen.borrow_mut().push(ctx.modifiers());
+                return EventResult::Handled;
+            }
+            EventResult::Ignored
+        }
+    }
+
+    #[derive(Clone)]
+    struct ChordProbeView {
+        seen: Rc<RefCell<Vec<Modifiers>>>,
+    }
+
+    impl View<()> for ChordProbeView {
+        type Element = ChordProbe;
+        fn build(&self, _ctx: &mut BuildCtx<'_>) -> ChordProbe {
+            ChordProbe {
+                seen: self.seen.clone(),
+            }
+        }
+        fn rebuild(
+            &self,
+            _prev: &Self,
+            _element: &mut ChordProbe,
+            _ctx: &mut BuildCtx<'_>,
+        ) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+
+    fn chord_root() -> (RenderRoot<(), ChordProbeView>, Rc<RefCell<Vec<Modifiers>>>) {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let view = ChordProbeView { seen: seen.clone() };
+        let mut root: RenderRoot<(), ChordProbeView> = RenderRoot::new();
+        let mut state = ();
+        root.rebuild(&mut move |_: &mut ()| view.clone(), &mut state);
+        root.layout(Size::new(100.0, 60.0));
+        (root, seen)
+    }
+
+    fn chord_press(root: &mut RenderRoot<(), ChordProbeView>) {
+        let press = InputEvent::Pointer(PointerEvent {
+            phase: PointerPhase::Down,
+            position: Point::new(20.0, 10.0),
+            button: PointerButton::Primary,
+        });
+        root.event(&mut (), &press);
+    }
+
+    fn shift_chord() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn push_modifiers_updates_the_tracked_chord_and_the_root() {
+        let (mut root, _) = chord_root();
+        let mut tracked = Modifiers::default();
+        push_modifiers(&mut root, &mut tracked, shift_chord());
+        assert_eq!(tracked, shift_chord());
+        assert_eq!(root.modifiers(), shift_chord());
+    }
+
+    #[test]
+    fn a_pushed_chord_is_visible_to_the_next_pointer_dispatch() {
+        let (mut root, seen) = chord_root();
+        let mut tracked = Modifiers::default();
+        push_modifiers(&mut root, &mut tracked, shift_chord());
+        chord_press(&mut root);
+        assert_eq!(*seen.borrow(), vec![shift_chord()]);
+    }
+
+    #[test]
+    fn focus_loss_clears_the_pushed_chord() {
+        let (mut root, seen) = chord_root();
+        let mut tracked = Modifiers::default();
+        push_modifiers(&mut root, &mut tracked, shift_chord());
+        // What the `Focused(false)` arm pushes.
+        push_modifiers(&mut root, &mut tracked, Modifiers::default());
+        chord_press(&mut root);
+        assert_eq!(tracked, Modifiers::default());
+        assert_eq!(*seen.borrow(), vec![Modifiers::default()]);
     }
 
     // --- map_modifiers ---
