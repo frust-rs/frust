@@ -2027,7 +2027,10 @@ pub use frust_core::{Orientation, WindowMetrics};
 /// disabled control asking for [`CursorIcon::NotAllowed`]) without being a widget
 /// author itself. `#[non_exhaustive]`: match with a wildcard arm.
 ///
-/// Honoured on desktop only — the mobile shells never read the resolved value, so
+/// [`CursorIcon::Crosshair`] is for precise picking, [`CursorIcon::Move`] for a movable
+/// object, and [`CursorIcon::ZoomIn`] / [`CursorIcon::ZoomOut`] for a zoom tool.
+///
+/// Honoured on desktop and web — the mobile shells never read the resolved value, so
 /// setting a cursor unconditionally is safe on every platform.
 pub use frust_core::CursorIcon;
 
@@ -3943,6 +3946,10 @@ mod cursor_icon_reexport {
             CursorIcon::ColResize,
             CursorIcon::RowResize,
             CursorIcon::NotAllowed,
+            CursorIcon::Crosshair,
+            CursorIcon::Move,
+            CursorIcon::ZoomIn,
+            CursorIcon::ZoomOut,
         ];
         assert_ne!(shapes[1], CursorIcon::Default, "the shapes are distinct");
         // `#[non_exhaustive]`: an out-of-tree match must carry a wildcard arm, so
