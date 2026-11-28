@@ -61,18 +61,22 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
 | `tap` / `longPress` | `tap` / `long_press` |
 | `drag` / `timedDrag` | `drag` / `timed_drag` |
 | `startGesture` | `start_gesture` (mouse), `start_touch(slot, at)` (touch contact) |
+| `TestPointer.hover` / `PointerScrollEvent` | `hover(at)` / `scroll_at(at, delta)` |
+| a held modifier (`sendKeyDownEvent(shift)`) | `set_modifiers(m)` / `with_modifiers(m, f)` |
+| `sendKeyDownEvent` / `sendKeyUpEvent` / `sendKeyRepeatEvent` / `sendKeyEvent` | `key_down` / `key_up` / `key_repeat` / `key` (chord specs) |
+| window focus loss with keys held | `cancel_held_keys()` |
 | `find.text` / `find.byType` / `find.bySemanticsLabel` | `find::text` / `find::by_type::<W>()` / `find::label(role, s)` |
 | `getSemantics` / `getRect` | `get_semantics` / `bounds` |
 
 - The Tester installs a virtual `frust::time` clock before user code runs; Testers on one thread
   share it.
-- `pump(dt)` drains the local queue (registering anything armed since the last pump, at the current
-  virtual time), advances the clock by `dt`, drains again (firing what came due), then paints the
-  frame. A sleep takes its deadline at its first poll, so a timer armed before a pump is measured
-  from that pump's start. The advance steps through each deadline in order, draining the queue at
-  each, so a chain of sleeps or a re-armed timer inside `dt` fires at its own virtual time, and for
-  work on the local task queue `pump(a + b)` matches `pump(a); pump(b)`. A timer armed by a rebuild
-  depends on where the frames fall: each pump runs one frame, after its advance.
+- `pump(dt)` drains the local queue (registering anything armed since the last pump), advances the
+  clock by `dt`, drains again (firing what came due), then paints the frame. A sleep takes its
+  deadline at its first poll, so a timer armed before a pump is measured from that pump's start. The
+  advance steps through each deadline in order, draining at each, so a chain of sleeps or a re-armed
+  timer inside `dt` fires at its own virtual time and `pump(a + b)` matches `pump(a); pump(b)` for
+  local-queue work. A timer armed by a rebuild depends on where frames fall (one per pump, after
+  its advance).
 - A deferred callback delivered by the rebuild's housekeeping flush asks for its redraw on the
   frame after, so it still costs two pumps to settle (`pump_and_settle` waits for two quiet pumps).
 - `pump_until(what, timeout, predicate)` is the only real-time wait, for `spawn_blocking` or
@@ -89,6 +93,10 @@ the Tester's owner so signals and contexts it creates belong to that Tester.
   threshold plus one frame, then pumps once more before Up.
 - A touch in slot >= 1 reaches only a widget that captured and opted into the gesture's other
   contacts (`pan_zoom`, pinch); use it for multi-touch tests.
+- The key, hover and scroll helpers do not pump. `set_modifiers` sends no event; it holds a chord
+  later events read (`EventCtx::modifiers`, gesture details' `modifiers`), while a key helper's
+  event carries its own chord's. Type text with `send` of a `Key::Character` (`Chord::parse`
+  lowercases). `hover` is a bare `Move`: pump before asserting hover chrome.
 - `find::text` matches a label or a value; also `value`, `label_text`, `role`, `by_type_name`. A
   `Finder` or a `NodeId` is accepted by `perform_action` (the root honours Click and Focus) and as a
   gesture `Target`; `set_metrics` / `resize` support rotation tests; `scene`, `semantics`,
@@ -133,8 +141,9 @@ follows.
 | Run one frame at a clock value | `pump(dt)`; `pump_and_settle()` until idle; `pump_until(what, timeout, predicate)` for background work |
 | Change the window | `set_metrics(metrics)`, `resize(size)` |
 | Read or change app state | `state()`, `state_mut()` (shows from the next pump) |
-| Pointer events built by hand | `tap`, `press`, `long_press`, `drag`, `timed_drag`; `start_gesture` then `move_by`, `move_to`, `up`, `cancel` |
-| Any other `InputEvent`, such as a key | `send(&event)` |
+| Pointer events built by hand | `tap`, `press`, `long_press`, `drag`, `timed_drag`, `hover`, `scroll_at`; `start_gesture` then `move_by`, `move_to`, `up`, `cancel` |
+| Key presses, releases and held modifiers | `key_down`, `key_up`, `key_repeat`, `key`, `cancel_held_keys`; `set_modifiers`, `with_modifiers` |
+| Any other `InputEvent`, such as typed text | `send(&event)` |
 | Accessibility action | `perform_action(target, action)` |
 | Read the semantics tree | `semantics()`; `find(&finder)`, `get_semantics`, `bounds`, `texts` |
 | Read the recorded scene | `scene()` |
@@ -992,6 +1001,13 @@ changes still require surface create/configure/acquire/present, resize, DPI,
 focus, IME, input, background wake, and surface-loss coverage. A virtual
 display may automate window screenshots, but it is a separate T4 suite and
 must not replace T2/T3 headless rendering.
+
+Held input has a manual desktop check on each OS: a modifier held through a drag
+shows on its details; a hold binding ends on its key's release, through
+auto-repeat and across a window switch (released on focus loss); every
+`CursorIcon` shape shows; and wheel chords map as SHELLS_ARCHITECTURE.md's
+Desktop scale gestures and Modifiers bullets say. Synthetic input has passed it
+on macOS desktop, Chrome and Safari; Windows and Linux are not yet checked.
 
 ### iOS
 
