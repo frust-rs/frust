@@ -24,6 +24,15 @@ Features:
 - `frust-api` (default): the reactive handles described under "In a component". Turn it off
   with `default-features = false` (adding `features = ["hub"]` to keep the downloader) for a build with no `frust-ui` in its graph.
 
+## Platform support
+
+`frust-models` is pure Rust on every target. Its only platform code is the best-effort exclusion
+of the store from iOS and macOS device backups and the UI-thread check on Android and Apple. The
+registry entry sets no minimum iOS version or Android SDK; on Android a release build needs the
+`INTERNET` permission described above. Only the Android leg has been run, on one arm64 phone
+with downloads served from a host mirror; the iPhone, macOS and Linux desktop legs have not been
+run.
+
 ## Quick start
 
 ```rust,no_run

@@ -11,6 +11,12 @@ Live charts for Frust apps, fed from shared data handles (platform-free).
 
 <p align="center"><em>The playground's Charts page on a Pixel 5, every chart fed live from one background thread.</em></p>
 
+## Platform support
+
+`frust-charts` is platform-free: every chart is painted on the facade's canvas, with no native
+code, no manifest permission, no plist key and no setup call, so it sets no platform minimum. It
+has been run on a Pixel 5 (the screenshots above).
+
 ## Add the dependency
 
 ```toml
