@@ -3034,7 +3034,7 @@ impl ListViewWidget {
             // Focus-routed events — keyboard, IME, and the clipboard verbs an
             // `EditCommand` carries — reach the focused row through
             // `route_event`'s own focus branch, never a hit test.
-            InputEvent::Key(_) | InputEvent::Ime(_) | InputEvent::EditCommand(_) => {
+            event if event.is_focus_routed() => {
                 crate::authoring::route_event(&mut self.children, ctx, event)
             }
             // Wheel scrolling stays hard-clamped, matching `ScrollView`, and
@@ -8001,6 +8001,87 @@ mod tests {
             ballistic_frames < spline_frames / 2.0,
             "the pinned curve ran {ballistic_frames} frames of a {spline_frames}-frame spline"
         );
+    }
+
+    /// A child that takes the focus on a press and counts the `KeyUp`s it is
+    /// shown into a shared cell.
+    struct UpProbe(Rc<Cell<u32>>);
+    struct UpProbeW(Rc<Cell<u32>>);
+    impl View<()> for UpProbe {
+        type Element = UpProbeW;
+        fn build(&self, _c: &mut BuildCtx<'_>) -> UpProbeW {
+            UpProbeW(Rc::clone(&self.0))
+        }
+        fn rebuild(&self, _p: &Self, _e: &mut UpProbeW, _c: &mut BuildCtx<'_>) -> ChangeFlags {
+            ChangeFlags::NONE
+        }
+    }
+    impl Widget for UpProbeW {
+        fn layout(&mut self, _c: &mut LayoutCtx, bc: &BoxConstraints) -> Size {
+            bc.constrain(Size::new(200.0, 50.0))
+        }
+        fn paint(&mut self, _c: &mut PaintCtx, _s: &mut dyn PaintScene) {}
+        fn is_focusable(&self) -> bool {
+            true
+        }
+        fn event(&mut self, ctx: &mut EventCtx, e: &InputEvent) -> EventResult {
+            match e {
+                InputEvent::Pointer(p) if p.phase == PointerPhase::Down => {
+                    ctx.request_focus();
+                    EventResult::Handled
+                }
+                InputEvent::KeyUp(_) => {
+                    self.0.set(self.0.get() + 1);
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+    }
+
+    /// The press the app's held-key tracking needs before it forwards a release.
+    fn key_down() -> InputEvent {
+        InputEvent::Key(frust_core::KeyEvent {
+            key: frust_core::Key::Named(frust_core::NamedKey::ArrowLeft),
+            modifiers: frust_core::Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    fn key_up() -> InputEvent {
+        InputEvent::KeyUp(frust_core::KeyEvent {
+            key: frust_core::Key::Named(frust_core::NamedKey::ArrowLeft),
+            modifiers: frust_core::Modifiers::default(),
+            repeat: false,
+        })
+    }
+
+    #[test]
+    fn a_key_up_reaches_the_focused_row_only() {
+        let seen = Rc::new(Cell::new(0u32));
+        let probe = Rc::clone(&seen);
+        let mut state = ();
+        let mut root: RenderRoot<(), ListView<()>> = RenderRoot::new();
+        root.rebuild(
+            &mut |_: &mut ()| {
+                let probe = Rc::clone(&probe);
+                list_view(1, 50.0, move |_| any::<(), _>(UpProbe(Rc::clone(&probe))))
+            },
+            &mut state,
+        );
+        root.layout(Size::new(200.0, 100.0));
+
+        // Nothing holds the focus yet: a release reaches no child.
+        root.event(&mut state, &key_up());
+        assert_eq!(seen.get(), 0, "an unfocused child is never shown a KeyUp");
+
+        root.event(&mut state, &ev(PointerPhase::Down, 10.0));
+        root.event(&mut state, &ev(PointerPhase::Up, 10.0));
+        assert!(root.is_focus_active(), "the press focused the child");
+
+        root.event(&mut state, &key_down());
+        root.event(&mut state, &key_up());
+        assert_eq!(seen.get(), 1, "the focused child is shown the KeyUp");
     }
 
     /// The windowing list's mirror of `ScrollWidget`'s focus bypass: a clipboard
