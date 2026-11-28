@@ -691,6 +691,12 @@ impl InputState {
         self.modifiers = map_modifiers(state);
     }
 
+    /// Drop the held chord (window blur): a modifier released while the page
+    /// was unfocused would otherwise stay held.
+    pub fn clear_modifiers(&mut self) {
+        self.modifiers = Modifiers::default();
+    }
+
     /// A `KeyboardInput`, taken as winit's own field set (see
     /// [`map_key_event`] for why the struct itself cannot be passed). `None`
     /// on key-up, on an unmapped named key, or on a character suppressed by an
@@ -2217,6 +2223,11 @@ mod browser_loop {
                 }
                 ShellUserEvent::WindowBlurred => {
                     self.window_focused = false;
+                    // winit's canvas blur already emits `ModifiersChanged(empty)`
+                    // and the next pointer event re-reports the chord; this
+                    // clears it for any path that skips that.
+                    self.input.clear_modifiers();
+                    self.root.clear_modifiers();
                     self.sync_app_lifecycle();
                 }
             }
@@ -2417,6 +2428,7 @@ mod browser_loop {
                 // by the time a key event is mapped.
                 WindowEvent::ModifiersChanged(modifiers) => {
                     self.input.modifiers_changed(modifiers.state());
+                    self.root.set_modifiers(self.input.modifiers());
                 }
 
                 // Plain text entry only — `InputState::keyboard_input` drops
@@ -3679,6 +3691,27 @@ mod tests {
             panic!("expected a key event");
         };
         assert!(key.modifiers.ctrl);
+    }
+
+    #[test]
+    fn clear_modifiers_drops_the_held_chord() {
+        let mut input = InputState::new();
+        input.modifiers_changed(ModifiersState::CONTROL);
+        input.clear_modifiers();
+        assert_eq!(input.modifiers(), Modifiers::default());
+
+        let event = input
+            .keyboard_input(
+                &WinitKey::Character("c".into()),
+                Some("c"),
+                ElementState::Pressed,
+                false,
+            )
+            .expect("a pressed character maps");
+        let InputEvent::Key(key) = event else {
+            panic!("expected a key event");
+        };
+        assert!(!key.modifiers.ctrl);
     }
 
     #[test]
