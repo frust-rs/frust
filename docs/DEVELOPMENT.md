@@ -22,7 +22,7 @@ none — everything they need is here; AI's live in [AI_ARCHITECTURE.md](AI_ARCH
   headless Vulkan needs no display server. Other hosts build and run the non-GPU suite.
 - **Android** (only for `frust run`/`build`/`create`'s Android output): `rustup target add aarch64-linux-android`; `cargo install
   cargo-ndk`; JDK 17+ on `JAVA_HOME` (Android Studio's bundled JBR auto-detected on macOS); `ANDROID_HOME`/`ANDROID_SDK_ROOT`,
-  `ANDROID_NDK_HOME` set — `frust doctor` checks all of these (Rust targets only on macOS hosts).
+  the pinned NDK `28.2.13676358` under the SDK — `frust doctor` checks all of these (Rust targets only on macOS hosts).
 - **iOS** (only for `frust run`/`build`/`create`'s iOS output; macOS host only): Xcode 26+ resolved by `xcode-select -p`; `rustup target add
   aarch64-apple-ios-sim aarch64-apple-ios`. A booted Simulator suffices for a debug `frust run`; a signed build needs a codesigning identity
   (`frust` auto-detects `DEVELOPMENT_TEAM`, or set `FRUST_IOS_TEAM`/`[ios] team`), and a physical iPhone run needs iOS 17+,

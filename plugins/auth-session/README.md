@@ -86,6 +86,7 @@ match AuthSession::start(req).await {
         // ... verify PKCE challenge ...
     }
     Ok(AuthSessionOutcome::Cancelled) => { /* user dismissed the tab */ }
+    Ok(_) => { /* `AuthSessionOutcome` is `#[non_exhaustive]` */ }
     Err(err) => { /* AuthSessionError::{InvalidUrl,Busy,PlatformNotInitialized,NoHandler,HttpsCallbackUnsupported,TimedOut,Platform} */ }
 }
 ```
