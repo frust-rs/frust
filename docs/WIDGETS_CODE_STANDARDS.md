@@ -256,7 +256,21 @@ Semantics.
   wrapper's binding for the same chord wins; ids are allocated at build and kept by position.
   `.on`/`.global` panic on a spec that does not parse — use `.bind` for a spec read at runtime. A
   palette lists `BuildCtx::shortcut_hints()` (the previous frame's declarations) with
-  `Chord::display` labels.
+  `Chord::display` labels. A press binding fires on the press and on every auto-repeat of it; a
+  repeat of a key the root no longer holds (a focus-loss cancel released it) reaches no binding.
+- **A hold is a hold binding, not a press handler plus `KeyUp`.** `.on_hold(spec, label, |state,
+  held|)` (`.global_hold`, `.bind_hold` likewise) reports `true` once when the chord goes down and
+  `false` exactly once on the key's release (a modifier let go first does not matter) or a held-key
+  cancel (window focus loss); an auto-repeat is answered, so it falls to no lower tier, but never
+  re-fires. The chord needs a non-modifier key. Keep the wrapper mounted above whatever the hold
+  toggles: a wrapper unmounted while held gets no `false`, and a hold binding removed or turned into
+  a press binding while held drops its flag silently. A rebuild keeps the held flag only where the
+  binding at that position is the same hold (chord and scope); since ids follow position, removing a
+  held hold binding can send one stale release to a held hold binding that moves into its slot.
+- **A widget that answers `KeyUp` treats it as idempotent "no longer down", never as activation.**
+  It reaches whatever holds focus at delivery, so it may name a key this widget never saw pressed,
+  and the root also synthesizes one (no modifiers) on a held-key cancel or a re-press. `TextInput`
+  ignores it.
 - **`KeyEvent::is_activation` is the one activation predicate** (a bare, non-repeat Space or
   Enter). `frust-widgets` gates it on focus in its crate-private `activation(ctx, event)` helper and
   every shadcn control calls it; beUI's `press::is_activation_key` and material's split button still
@@ -292,7 +306,9 @@ Semantics.
   so a page can scroll under a focused field. A router ends another child's link only when the
   same dispatch records a focus claim through a different child. A hand-rolled router calls
   `authoring::retire_stale_focus_links` before it dispatches and detects the claim with
-  `event_child_reporting_claim` or `route_event_reporting_claim`. Any gate on "the content holds
+  `event_child_reporting_claim` or `route_event_reporting_claim`, and sends whatever
+  `InputEvent::is_focus_routed()` accepts (`KeyUp` included) to its focused child rather than
+  matching variants by hand. Any gate on "the content holds
   focus" (an Escape guard, a session check) reads `holds_live_focus`, never `is_focused`.
 
 ## See Also

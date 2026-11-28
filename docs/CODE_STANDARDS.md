@@ -329,15 +329,13 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   }
   ```
 
-- **Only `PointerButton::Primary` starts a press/capture/activation.** A secondary (or other
-  non-primary) press is a context gesture, not an activation — the sanctioned consumers are a
-  context-menu trigger and the baseline text input's selection toolbar (a secondary press on an
-  interactive `TextInput` claims focus, moves no caret, and toggles that toolbar), never the
-  widget's own `on_press`/`on_toggle`/`on_change`. A barrier or light-dismiss layer may still
-  consume any button to close, but must not enter press state from a non-primary one, while
-  focus/IME session re-claims stay button-agnostic. Every widget tree carries its own crate-private
-  predicate for the rule — `frust_widgets::authoring::presses`, `frust_shadcn::hit::presses`, and
-  `press::presses` in each catalog crate — no cross-crate dependency.
+- **Only `PointerButton::Primary` starts a press/capture/activation.** A secondary press is a
+  context gesture — for a context-menu trigger or the `TextInput` selection toolbar (it claims
+  focus, moves no caret, toggles the bar) — never the widget's own `on_press`/`on_toggle`/
+  `on_change`. A barrier or light-dismiss layer may consume any button to close but enters no press
+  state from a non-primary one; focus/IME re-claims stay button-agnostic. Each widget tree keeps its
+  own crate-private predicate (`frust_widgets::authoring::presses`, `frust_shadcn::hit::presses`,
+  each catalog's `press::presses`), no cross-crate dependency.
 
 - **Controlled components never self-mutate.** `Checkbox`/`Slider` report the *requested*
   value through `on_toggle`/`on_change` and leave `checked`/`value` untouched until the next
@@ -347,14 +345,14 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   value win next frame.
 
 - **A container checks `InputEvent::is_broadcast()` before anything else.** A broadcast
-  (`Housekeeping`, `Overlay`, `Shortcut`, a file drop's `Ended`) is not user input: routing helpers
-  forward it ahead of the capture/focus/hit-test branches below, never consume or short-circuit it,
-  and report `Ignored` whatever children returned. It reaches *every* child except a `Shortcut`,
+  (`Housekeeping`, `Overlay`, `Shortcut`, `ShortcutReleased`, a file drop's `Ended`) is not user
+  input: routing helpers forward it ahead of the capture/focus/hit-test branches below, never
+  consume or short-circuit it, and report `Ignored` whatever children returned. It reaches *every* child except a `Shortcut`,
   which a hidden or covered child must not receive; only the owner an `Overlay` quotes acts on it,
   and a declarer answers only its own `ShortcutId` `Handled`, never a blanket `Handled`
   (`docs/CORE_ARCHITECTURE.md`'s event-routing data flow).
 
-- **Focus routes by recorded path, like capture; `Key`/`Ime`/`EditCommand` events never hit-test.**
+- **Focus routes by recorded path, like capture; `Key`/`KeyUp`/`Ime`/`EditCommand` events never hit-test.**
   A container forwards them to its focused child; a `Down` that doesn't (re)claim focus on the child
   it hits blurs the chain. **A structural container rebuild clears capture and focus only where
   identity is actually lost** — stable-prefix/key-matched, not a blanket clear. A reconciler that
@@ -383,10 +381,9 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   (winit, JNI `nativeOnTouch`, the C `frust_dispatch_touch`) converts to logical pixels before
   building an `InputEvent` — widget/container code never divides by scale factor.
 
-- **Insets follow the same physical-at-FFI, logical-inside rule as coordinates.** A platform
-  delivers occlusion in physical px (Android `Insets`) or logical points (iOS `safeAreaInsets`);
-  the FFI-boundary `logical_insets` helper reconciles it — widget code only ever sees a resolved
-  `WindowInsets` in logical px (`docs/SHELLS_ARCHITECTURE.md`'s cross-cutting host-signal flow).
+- **Insets follow the same physical-at-FFI, logical-inside rule as coordinates.** Android's
+  physical `Insets` and iOS's logical `safeAreaInsets` meet in the FFI-boundary `logical_insets`
+  helper, so widget code only ever sees a resolved `WindowInsets` in logical px.
 
 - **A self-sizing chrome widget consumes its own window inset exactly once, in its own
   `layout`, never pre-inset by its container** (`Scaffold`'s R-B4-inset: `app_bar`/`bottom_bar`
@@ -397,6 +394,10 @@ Conventions for `Widget::event` implementations in every interactive `frust-widg
   (`self.pressed`/`self.captured`/`self.armed`) and request a redraw. A rebuild can synthesize a
   `Cancel` to a still-captured child over a throwaway `()` state (`docs/CORE_ARCHITECTURE.md`'s
   event-routing data flow) — reaching for real state there panics on the `()` downcast, a tripwire.
+
+- **Read `ctx.modifiers()` at the event that acts on it** — the `Down` that picks a mode, the
+  `Move` that applies one — never from a `Cancel` arm and never cached across events: it is
+  pass-scoped, so a stored chord goes stale on the next change and reads `NONE` outside `event`.
 
 - **A container that suppresses routing to its children must cancel their capture, clear their
   focus, and publish a cleared IME surface — in that order, with no bypass.** This binds any

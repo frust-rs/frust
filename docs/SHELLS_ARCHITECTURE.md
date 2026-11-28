@@ -22,9 +22,8 @@ platform-view differ, and a handful of signal-poll seams. Above it sit four host
   mapping, the reactive-owner event wrap, the `WindowMetrics` publish, brightness-follow) under a
   must-not-diverge contract (`crates/frust-shell-web/src/app_handler.rs`'s header).
 
-Every concrete shell drives rebuild → layout → paint → encode → present and translates
-platform-native input/lifecycle/theme/insets/IME/deep-link/back/platform-view signals into the
-framework's own vocabulary.
+Every concrete shell drives rebuild → layout → paint → encode → present and translates platform
+input/lifecycle/theme/insets/IME/deep-link/back/platform-view signals into the framework's vocabulary.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units.
 
@@ -38,6 +37,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for how SHELLS relates to the other units
 | `frust-shell-common::platform_view` | Differ turning per-paint platform-view frames into an idempotent create/update/dispose backlog for embedding native views |
 | `frust-shell-common::resample` | `PointerResampler` — one lane per `PointerId`, emitting a frame-boundary-interpolated `Move` per contact while passing `Down`/`Up`/`Cancel` through losslessly; shared by both mobile shells |
 | `frust-shell-common` (signal-poll seams) | Small process-global slot-plus-poll seams (surface mode, theme override, fonts, system UI) drained once per frame — surface mode and system UI on mobile only; theme override, fonts and the default locale on every shell, desktop included: a per-frame `LocaleDefaultWatcher`, polled beside `ThemeOverrideWatcher`, reports a change of `frust_text::default_locale_generation`, and the shell re-pushes the active theme so a layout + paint pass re-faces untagged text. `locale_default` also holds `BackgroundFlush` (atomic, one trigger per background transition, re-armed on foreground) and the `FontCacheFlush` trait `TextContext` implements, which flush the persisted font-oracle cache (`flush_font_cache`) once per lifecycle `Hidden` edge, never at focus loss or a pause that stays visible: iOS `frust_did_enter_background` after the `Paused` push (re-armed by `will_enter_foreground`/`frust_resume`), Android `native_on_stop` after the `Paused` push (re-armed by `native_on_start`/`native_on_resume` and by `native_sync_lifecycle` when the replayed facts say started), desktop `sync_app_lifecycle` when the derived target is `Hidden` (every window minimized or occluded, or suspended; re-armed on `Inactive`/`Resumed`) plus a separate once-per-exit flush (close `Exit` arm and `exiting()`, so menu Quit is covered); web flushes nothing (no persistent cache). The latch absorbs a repeated `Hidden` report; a report whose every flush failed leaves it unarmed so the next hide retries, and `went_to_background_outcome` returns the per-context `BackgroundFlushOutcome` (the first failure a hook sees logs at warn, later ones at debug). Also the process-global retained-ledger slot (`publish_retained_ledger`/`latest_retained_ledger`: `try_lock`, never blocks the UI thread, one-frame-stale by design) and the repaint-owed flag (`request_retained_repaint`/`take_retained_repaint`; Android/iOS frame gates OR it in, desktop/web redraw instead) |
+| `frust-shell-common::pressed_keys` | `PressedKeys<P>`, the winit-free pairing of each held physical key with the logical key reported at its press (64 at most, the oldest dropped past that), so a release names the key that went down; it also hands back the keys pressed under Meta for a host that sends them no release. Desktop and web use it (see Cross-cutting host signals) |
 | `frust-shell-common::devtools` (feature `devtools`) | Shell-side `DevtoolsBackend` implementation plus the per-frame UI-thread hop and pump each shell drives; see [DEVTOOLS_ARCHITECTURE.md](DEVTOOLS_ARCHITECTURE.md) |
 | `frust-shell-common::gpu` (feature `gpu`) | Replaceable, generation-tagged slot a shell publishes its live GPU device handle into through an RAII `GpuPublisher` (last writer wins; republishing the same generation is a no-op; `withdraw`/`Drop` compare-and-clear, so an older owner dying late never clears a newer device), read with `with_gpu_handle` (lock released before the closure runs) and `gpu_handle_generation`, and surfaced as `frust::gpu::with_context` (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)'s GPU Seam). Desktop, Android and iOS each publish after every successful surface install and withdraw when their render owner exits, so an Android Activity recreate publishes a new generation; on the mobile inline path a device-rebuilding re-install publishes on the next frame. The Android load-time pre-init device is never published before the first install, and is kept only if it already has every feature requested through `frust::gpu::request_optional_features` that its adapter offers, else rebuilt synchronously (`gpu-feature-request-forfeits-android-preinit`) |
 | `frust-shell-common::overlay` | The platform-neutral overlay core every overlay host shares: `OverlayTable<L, S>` (per overlay id a layer plus its surface; see Native-view hosting), the `OverlaySwitch` parser for `FRUST_OVERLAYS` (first non-blank source wins: runtime then compile-time `FRUST_OVERLAYS`, then the `FRUST_OVERLAY_SPIKE` alias the same way, so a runtime `FRUST_OVERLAY_SPIKE=0` switches off a baked-in alias), the `FrameRequest` latch, `assemble_overlay_cuts` and the `SkewWindow` present-skew report. Generic over layer and surface, no GPU or platform type, no `unsafe` |
@@ -263,13 +263,11 @@ render-split channel for the render thread to encode and present (or run the tai
 the `FRUST_NO_RENDER_THREAD` kill switch). The loop is dirty-driven, not continuous: a frame runs
 when something asks for one, and a paced request resolves its next wake from that paint's outcome.
 
-The desktop shell persists a pipeline cache through `frust-paths`, so later launches skip pipeline
-compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu 30.0.1 any Vulkan adapter
-(Linux, and Windows on the Vulkan backend), never Metal or DX12, so macOS never writes a cache.
-Loading is unconditional file I/O at startup on every desktop OS and reads through to a legacy
-macOS cache base when the current file is absent (inert: no save ever fires there). The whole
-path is best-effort: startup never fails on cache I/O. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
-It persists right after each surface install.
+The desktop shell persists a pipeline cache through `frust-paths` right after each surface install,
+so later launches skip pipeline compilation on adapters that advertise `PIPELINE_CACHE` — in wgpu
+30.0.1 any Vulkan adapter, never Metal or DX12, so macOS never writes one. Loading is best-effort file
+I/O at startup on every desktop OS (startup never fails on it), reading through to a legacy macOS
+cache base when the current file is absent. See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md).
 
 ### Mobile frame path
 
@@ -308,9 +306,8 @@ submit), a UIKit watchdog hazard. Once the startup line is emitted on the first 
 thread drops to a lock-free `Owned` handle. The threads race onto one line, so spans do not print
 in causal order — read each span's own delta, not its position.
 
-Frame pacing is unchanged: the surface's maximum frame latency stays constant (two frames in
-flight, `crates/frust-gpu/src/surface.rs`), and pre-acquiring a drawable ahead of its frame was
-measured and rejected — a drawable parked across a `Pause` is a UIKit watchdog hazard. Instead a
+Frame pacing is unchanged (two frames in flight, `crates/frust-gpu/src/surface.rs`); pre-acquiring
+a drawable was measured and rejected, as one parked across a `Pause` is a watchdog hazard. Instead a
 `perf-trace`-only `FRUST_PACE_TRACE` dial emits one `frust-perf ios-pace` line per rendered frame
 (wake/idle/acquire/submit/loop time plus `p2p_us`, the submit-to-submit cadence, `NA` for a frame
 that presented nothing; under armed present-sync the UI thread commits the drawable later than the
@@ -411,11 +408,10 @@ main. Each overlay view sits directly above its own slot's view, so interleaved 
   `NativeViewOps::sync_overlay_scale` re-applies the backing scale so overlays stay sharp across
   2x/1x moves. The main layer is a sublayer of winit's view, so hosted views and overlays sit above it.
 
-**Texture wake.** A push into a registered texture sink owes the shell a frame
-(`frust::texture::request_frame`; see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)). The mobile
-frame gates OR `texture_bus::take_frame_owed` beside `take_retained_repaint`; desktop installs
-`set_frame_request_hook` around its loop, posting `ShellUserEvent::TextureFrameOwed`. The web shell
-does not poll it yet, and the hook assumes one shell per process.
+**Texture wake.** A texture-sink push owes a frame (`frust::texture::request_frame`; see
+[RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)): mobile frame gates OR `texture_bus::take_frame_owed`
+beside `take_retained_repaint`, desktop's `set_frame_request_hook` posts `ShellUserEvent::TextureFrameOwed`
+(one shell per process assumed), and web does not poll it yet.
 
 **Repaint wake.** `frust_core::request_repaint` (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)) is woken the same way: desktop and web install `set_repaint_hook` posting `ShellUserEvent::RepaintOwed` (desktop clears it beside the texture hook), and `take_repaint_owed` runs at the top of the frame. Desktop pushes semantics again after paint on every frame whose paint moved the semantics generation, and runs a frame paint-only (no rebuild, IME re-sync, change-flag drain, layout or pre-paint semantics push) exactly when `FrameCauses::paint_only` holds: a repaint pending and no other cause — no window or user event other than the repaint wake, nor self-requested redraw, since the last completed frame (`other_frame_cause`), tracked scope clean, no pending change flags or result flush, the last paint asked for no further frame, layout current. Web wakes on it but its rebuild stays unconditional.
 
@@ -425,13 +421,11 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
 ### Cross-cutting host signals
 
 - **Event pass under root owner:** every shell routes input through `AppTree::event` inside a reactive
-  `Owner.with` wrap, so handlers see root-level contexts (`Theme`, `WindowMetrics`, root-component
-  `init`-installed values); inside a component, `ComponentWidget::event` enters that component's owner,
-  so a handler there also sees its context and registers owner-scoped work on it (see
-  [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). `frust-reactive` is a leaf crate and cannot wrap
-  itself. The pass is
-  deliberately **not tracked** — entering a tracked scope resets dependencies and clears the dirty flag,
-  which would unsubscribe the frame loop from pending wakes. Desktop forwards the secondary mouse button
+  `Owner.with` wrap (`frust-reactive`, a leaf, cannot wrap itself), so handlers see root-level contexts
+  (`Theme`, `WindowMetrics`, root-component `init`-installed values) and, through `ComponentWidget::event`,
+  their component's (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). The pass is deliberately **not
+  tracked** — entering a tracked scope resets dependencies and clears the dirty flag, which would
+  unsubscribe the frame loop from pending wakes. Desktop forwards the secondary mouse button
   as `PointerButton::Secondary` through a delivery-latched gate — an Up dispatches iff its Down did —
   guaranteeing every Down/Up pair reaches `AppTree` paired even under pointer capture.
 - **Touch contacts and resampling:** each mobile shell maps its platform's per-finger id onto a gesture-local
@@ -442,9 +436,22 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   `TouchSlotMap` (`frust-shell-android::ffi_support`), iOS `FrustView`'s `freeSlots` and the web `TouchTracker`'s
   `free_slots`. Entries: `nativeOnTouch` (Android), `frust_dispatch_touch` (iOS); web has no resampler.
 - **Desktop scale gestures:** ctrl+wheel (Linux/Windows) or ⌘+wheel (macOS) maps to `InputEvent::Scale` at the cursor,
-  `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE × lines)` (0.1, ~10% per notch); a plain wheel stays `Scroll`. Winit's
-  `PinchGesture` (macOS only at this pin) maps to the same stream with `scale_delta = 1.0 + delta`; see
-  `desktop-pinch-linux-windows-unavailable` in [LIMITATIONS.md](LIMITATIONS.md).
+  `scale_delta = exp(WHEEL_SCALE_RATE_PER_LINE × lines)` (0.1, ~10% per notch), so a widget never sees that chord as `Scroll`;
+  a plain, Alt or Shift wheel stays `Scroll`. Winit's `PinchGesture` (macOS only at this pin) maps to the same stream with
+  `scale_delta = 1.0 + delta`; see `desktop-pinch-linux-windows-unavailable` in [LIMITATIONS.md](LIMITATIONS.md).
+- **Modifiers:** desktop and web push the chord to the root on every `ModifiersChanged` (`RenderRoot::set_modifiers`, read as
+  `EventCtx::modifiers`) and clear it on window focus loss; mobile pushes none. Regaining focus pushes nothing, so a modifier
+  still down on return reads as not held until the OS reports a change (seen on macOS after a Cmd-Tab round trip). macOS itself
+  turns a Shift plus notch wheel horizontal (`Lines(n, 0)` with Shift held); a Shift pixel scroll is not swapped.
+- **Key release:** desktop and web record each delivered press's logical key under its physical key (`pressed_keys`) and send
+  `InputEvent::KeyUp` with that key when the same physical key lifts, so a release names the key that went down whatever its own
+  text says; a release with no recorded press (unmapped, composing-suppressed, pressed before focus) sends nothing. Window focus
+  loss forgets the pairings and calls `RenderRoot::cancel_held_keys`; web does so on the window `blur` and on page hide, not on the
+  canvas's `Focused(false)`, which fires whenever the IME overlay takes DOM focus while typing continues. A browser may send no
+  key-up for a key pressed under Meta (Safari sends none while Cmd is held), so on a Meta lift web releases every key still
+  recorded under it, so the release comes late but is never lost (macOS desktop sends it while Cmd is still held). A source with
+  no release path sends the press then its release at once: the Android and iOS soft-keyboard action (Enter), web's DOM-carried
+  keys and devtools-injected text.
 - **Desktop file drop:** winit's `HoveredFile`/`DroppedFile`/`HoveredFileCancelled` events map onto
   `InputEvent::FileDrop`'s three `FileDropPhase`s. Files arrive one event each with no "that's
   everything" signal, so only a hover's first arrival dispatches (`Hover`, empty `paths`) and a
@@ -461,14 +468,12 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   | Desktop | `app_handler.rs` `sync_app_lifecycle` | any window focused→Resumed; all occluded/minimized or `suspended`→Hidden; else Inactive; never Paused/Detached. Memory (macOS only): a libdispatch memory-pressure source installed in `on_window_created` (WARN→Moderate, CRITICAL→Critical) merges into an atomic slot drained in `pump`; reports only, trims no render caches. Windows, Linux and web report none |
   | Web | `frust-shell-web` `app_handler.rs` | document hidden→Hidden; window focused→Resumed; else Inactive. Hidden tabs throttle timers (`frust-shell-web` `pacing.rs`) |
 
-  **Cancelable exit** (`request_app_exit`): desktop `handle_close_requested` asks only when
-  `resolve_close_action` yields `CloseAction::Exit`; macOS app-menu Quit is the frust item
-  `frust.app.quit` (`QUIT_ID`); Windows menu Quit posts `WM_CLOSE`, becoming `CloseRequested`. Not
-  asked: macOS Dock Quit, logout/shutdown, force quit, Android, iOS, web.
-- **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published
-  from the points where the window's shape changes, guarded by `WindowMetricsPublisher` against
-  per-frame churn (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)). Desktop seeds insets as the
-  default, since winit 0.30 offers no cross-platform safe-area accessor. On iOS 26+,
+  **Cancelable exit** (`request_app_exit`): desktop `handle_close_requested` asks only when `resolve_close_action` yields
+  `CloseAction::Exit`; macOS app-menu Quit is the frust item `frust.app.quit` (`QUIT_ID`); Windows menu Quit posts
+  `WM_CLOSE`. Not asked: macOS Dock Quit, logout/shutdown, force quit, Android, iOS, web.
+- **Window metrics** (logical size, scale, derived orientation, insets snapshot) are published where the window's
+  shape changes, guarded by `WindowMetricsPublisher` (see [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)); desktop
+  seeds default insets (winit 0.30 has no cross-platform safe-area accessor). On iOS 26+,
   `FrustViewController` also pushes four **physical** window-control corner sizes through
   `frust_set_corner_insets` (beside `frust_set_insets`); the Rust handle merges both calls into one
   `WindowInsets` (zero elsewhere and below iOS 26). An app's `FrustSceneDelegate` subclass owns
@@ -484,14 +489,13 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   the resolved brightness actually moving so an override swapping one dark theme for another fires
   nothing. Android also reads the resolved brightness back over JNI after every appearance change and on
   any frame whose `nativeFrameSync` word reports a flip, so a Rust-forced theme reaches the status bar.
-- **Accessibility:** `frust-core` reports semantics `bounds` in logical pixels, accesskit wants physical: all three
-  shells push one assembly, `frust-shell-common`'s `build_tree_update` / `tree_update_from_parts`, whose root carries
-  `Affine::scale(sanitize_scale(scale))` (none at 1.0) — window scale factor on desktop, display scale on iOS, the
-  frame's density on Android (`accesskit_android`, `accesskit_ios` do the delivery).
-- **Reduced motion** is the one host signal whose sensor is not the appearance sensor: Android watches the animator
-  duration scale (`ContentObserver` plus an `onResume` re-read), iOS the UIKit notification plus an activation
-  re-read, desktop has no source. Delivery bypasses the theme-override path (it would latch an override and pin
-  brightness): each shell edits the motion field directly and marks appearance dirty so the gate cannot skip the tick.
+- **Accessibility:** semantics `bounds` are logical, accesskit wants physical: all three shells push one assembly
+  (`build_tree_update` / `tree_update_from_parts`) whose root carries `Affine::scale(sanitize_scale(scale))` (none at 1.0) —
+  window scale factor on desktop, display scale on iOS, the frame's density on Android.
+- **Reduced motion** has its own sensor: Android watches the animator duration scale (`ContentObserver` plus an
+  `onResume` re-read), iOS the UIKit notification plus an activation re-read, desktop nothing. Delivery bypasses the
+  theme-override path (which would latch an override and pin brightness): each shell edits the motion field directly
+  and marks appearance dirty so the gate cannot skip the tick.
 - **OS text scale** follows that shape. Android pushes the effective scale at body size (16sp through
   `displayMetrics` / 16dp, so Android 14+ nonlinear curves count) after `nativeInit`, in `onResume` and
   `onConfigurationChanged` (`fontScale` in `android:configChanges` keeps the activity). iOS pushes the
@@ -507,25 +511,20 @@ hidden slot) are in [LIMITATIONS.md](LIMITATIONS.md) § `apple-overlay-limits`.
   IME mirror on a per-frame poll behind a divergence guard. The iOS text-input view reports no text to accessibility (the
   field's node, masked for a password, is the source). The Swift half is device-checked for password-field traits and a
   programmatic focus move; a Return-key focus move is not — [LIMITATIONS.md](LIMITATIONS.md) `ime-ios-content-type-unverified`.
-- **Cursor:** desktop reads `RenderRoot::cursor()` after every event dispatch, beside `sync_ime`
-  (`ShellHandler::sync_cursor`), and applies it via winit's `Window::set_cursor` only when it differs from the shape
-  last pushed. `winit_cursor_for` (`frust-shell-desktop`) is the one platform touch point mapping the framework's
-  `CursorIcon` onto winit's own vocabulary; a mobile shell never reads the resolved value. Web carries the identical
-  request/resolve contract and a real implementation (winit's web backend writes the canvas's CSS `cursor` property), unlike its semantics/devtools seams below.
+- **Cursor:** desktop and web read `RenderRoot::cursor()` after every event dispatch (`sync_cursor`, beside `sync_ime`) and
+  apply it through winit's `Window::set_cursor` only when it differs from the shape last pushed (on web, the canvas's CSS
+  `cursor`); each shell's `winit_cursor_for` maps every `CursorIcon` shape onto winit's own, and a mobile shell never reads it.
   See [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md)'s Hover and Cursor section.
 - **Clipboard:** the framework side is two one-shot slots plus one inbound verb —
   `AppTree::take_clipboard_write`/`take_paste_request`, drained after a dispatch, and
   `InputEvent::EditCommand`, dispatched back. [CORE_ARCHITECTURE.md](CORE_ARCHITECTURE.md) owns
-  those slots and the rule an asynchronous read inherits: the answer is a later focus-routed
-  dispatch carrying no identity, so it is bound to the session (`focus_epoch`) recorded when the
-  paste request is drained and dropped when that session has gone. Desktop and Android read
-  asynchronously; iOS reads synchronously.
+  those slots and the rule an asynchronous read inherits: bind the answer to the session
+  (`focus_epoch`) recorded when the paste request is drained, and drop it once that session has gone.
+  Desktop and Android read asynchronously; iOS reads synchronously.
   **Desktop** serialises both operations on one lazily spawned worker thread owning the process's
-  single `arboard::Clipboard`, because on X11/Wayland a copy is served *live* by the process that
-  claimed the selection and a read can block for as long as that owner takes to answer — so the read
-  cannot run on the event loop. A finished read returns through the event-loop proxy as a fresh
-  top-level dispatch; an outstanding read absorbs a later request rather than queuing a second,
-  re-pointed at the most recent asker.
+  single `arboard::Clipboard`, because on X11/Wayland a read can block for as long as the selection's
+  owner process takes to answer. A finished read returns through the event-loop proxy as a fresh
+  top-level dispatch; an outstanding read absorbs a later request, re-pointed at the newest asker.
   **Web** cannot go through winit, because a browser grants clipboard access only to the focused
   editable: the hidden IME overlay (see Web IME bridge) carries the `copy`/`cut`/`paste`
   listeners. An app- or toolbar-driven access uses `navigator.clipboard`, undefined outside a

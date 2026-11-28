@@ -41,25 +41,22 @@ leaves (no dependency on any other CORE crate); `frust-scene` depends only on `k
 `reactive_graph`, plus an optional edge to `frust-hotpatch` (feature `hotpatch`, opt-in and never default; the feature chain is in [SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) § Layer Dependencies); the `frust` facade sits on top, depending on `frust-core`, `frust-reactive`, and
 (conditionally) the shell crates.
 
-`frust-core`'s dependency on `reactive_graph` is direct rather than routed through the
-`frust-reactive` wrapper — the one place a CORE crate other than `frust-reactive` itself touches
-the underlying reactive library. This keeps `frust-reactive` a true leaf while letting `frust-core`
-drive the tracked-scope machinery its render loop needs.
+`frust-core`'s dependency on `reactive_graph` is direct rather than routed through `frust-reactive`
+— the one CORE crate besides it touching the reactive library — keeping `frust-reactive` a true leaf
+while `frust-core` drives the tracked-scope machinery its render loop needs.
 
 `frust-scene` exposes only `kurbo`/`peniko` types in its public API; this is the CORE side of the
 scene-layer purity boundary enforced against `frust-render` (see
-[ARCHITECTURE.md](ARCHITECTURE.md)). `frust-paths` is consumed by shells and plugins outside CORE,
-and by apps through the facade's `paths` module, for directory resolution — its leaf charter and
-cross-unit callers are also covered in the index. On macOS, `data_dir()`/`cache_dir()` resolve under
-`~/Library` (XDG vars never override it) and read through, never migrating, to the legacy XDG
-location when only it holds the app's `app_stem()` directory; the two differently-shaped in-repo
-callers (`plugins/database`, the desktop pipeline cache) use the public
-`legacy_data_dir()`/`legacy_cache_dir()` for their own file-level read-through (only the database
-site has run against a real `~/Library` tree; the other read-through is unit-tested). On Android
-they resolve the slot the shell installs at `nativeInitPlatform` (`install_android_dirs`,
-first-wins, absolute paths only) and answer `None` before it; `HOME`/`XDG_*` are never consulted
-there. The facade's dependency on `frust-widgets`/`frust-theme` (WIDGETS) and the shell crates
-(SHELLS) is the facade/plugin boundary described in the index; CORE itself never depends on either.
+[ARCHITECTURE.md](ARCHITECTURE.md)). `frust-paths` is consumed by shells, plugins and (through the
+facade's `paths` module) apps; its leaf charter and cross-unit callers are in the index. On macOS,
+`data_dir()`/`cache_dir()` resolve under `~/Library` (XDG vars never override it) and read through,
+never migrating, to the legacy XDG location when only it holds the app's `app_stem()` directory;
+`plugins/database` and the desktop pipeline cache use `legacy_data_dir()`/`legacy_cache_dir()` for
+their own file-level read-through (only the database site has run against a real `~/Library`). On
+Android they resolve the slot the shell installs at `nativeInitPlatform` (`install_android_dirs`,
+first-wins, absolute paths only), answer `None` before it and never consult `HOME`/`XDG_*`. The
+facade's dependency on WIDGETS and SHELLS crates is the facade/plugin boundary described in the
+index; CORE itself never depends on either.
 
 ## Data Flow
 
@@ -168,15 +165,15 @@ there. The facade's dependency on `frust-widgets`/`frust-theme` (WIDGETS) and th
   surface on `PaintOutcome` (`needs_frame_paced_only`, `paced_interval`) for the shell's frame gate to resolve against the active
   theme's `cosmetic_loop_rate` (see SHELLS_ARCHITECTURE.md).
 - `RenderRoot::event` routes input through the retained tree, tracking capture/focus without a separate registry. Events fall into
-  three routing classes: hit-tested (pointer/scroll), focus-routed (`Key`/`Ime`/`EditCommand`, delivered down the recorded focus
-  path to whatever widget holds focus *at delivery* — a clipboard verb belongs here because it is *about the selection*, which
-  lives wherever focus is), and **broadcast** — `InputEvent::Housekeeping`, `InputEvent::Overlay`, `InputEvent::Shortcut` and a
-  file drop's `FileDropPhase::Ended` follow-up, events every container forwards ahead of its capture/focus/hit-test logic and
-  never consumes. A broadcast reaches every child except `Shortcut`, which a container narrows to the children that take input (a
-  navigator's Current page, an `IndexedStack`'s selected child) so a hidden declarer never answers. A `Key` the focus path leaves
-  unhandled goes on to the declined-key chain (see Keyboard Shortcuts and Traversal). Per pointer event, `ChildPod` records the
-  smallest hit-testing pod (`Widget::hit_test_self`; layout wrappers opt out) for `EventCtx::track_pointer_hits`, a pass-scoped
-  side channel.
+  three routing classes: hit-tested (pointer/scroll), focus-routed (`Key`/`KeyUp`/`Ime`/`EditCommand`, `is_focus_routed()`,
+  delivered down the recorded focus path to whatever widget holds focus *at delivery* — a clipboard verb belongs here because it
+  is *about the selection*, which lives wherever focus is), and **broadcast** — `Housekeeping`, `Overlay`, `Shortcut`,
+  `ShortcutReleased` and a file drop's `FileDropPhase::Ended` follow-up, events every container forwards ahead of its
+  capture/focus/hit-test logic and never consumes. A broadcast reaches every child except `Shortcut`, which a container narrows to
+  the children that take input (a navigator's Current page, an `IndexedStack`'s selected child) so a hidden declarer never
+  answers. An unhandled `Key` goes on to the declined-key chain (see Keyboard Shortcuts and Traversal). Per pointer event,
+  `ChildPod` records the smallest hit-testing pod (`Widget::hit_test_self`; layout wrappers opt out) for
+  `EventCtx::track_pointer_hits`, a pass-scoped side channel.
 - `RenderRoot::rebuild` dispatches a `Housekeeping` broadcast when a per-thread flag
   (`mark_pending_result_flush`/`take_pending_result_flush`) is set — the seam a widget uses to run a deferred callback that needs
   `&mut State` but was queued during the state-free view diff (a navigator's pop-result and `frust-widgets`' gesture long-press
@@ -290,10 +287,8 @@ context and its ancestors'. Owner-scoped work armed there (`Timer`, `on_cleanup`
 is disposed, not on rebuild; a disposed component dispatches without entering its owner. A child `frust::Owner` held in state
 cancels a group of that work earlier; work meant to outlive the component is armed under a longer-lived owner.
 
-**Orientation is derived, not platform-sourced:** no platform callback in either mobile shell carries an orientation enum — the
-shell furnishes only `(width, height, scale)`. `Orientation` is computed via `Orientation::from_size()` (portrait when `height >=
-width`, including exact squares as portrait) and never tracks a device orientation-lock. This is a stable guarantee pinned by
-tests.
+**Orientation is derived, not platform-sourced:** a shell furnishes only `(width, height, scale)`, and `Orientation::from_size()`
+answers portrait when `height >= width` (exact squares included), never tracking a device orientation-lock — a test-pinned rule.
 
 **Context is not reactive.** `provide_context` is a plain insert into the owner's context map — it notifies nothing — and
 `use_context` creates no subscription, so a metrics write neither marks the tracked scope dirty nor wakes a frame. A new value
@@ -302,10 +297,9 @@ is pull-on-next-frame, not push; do not write code that assumes writing a contex
 reactive path and do wake — but only `deep_link`, `back` and `app_lifecycle` are signals.) The app default locale is not a context
 either: it is a `frust-text` process value read on the shaping thread (see [RENDER_ARCHITECTURE.md](RENDER_ARCHITECTURE.md)).
 
-A shell must still re-provide only on actual change, guarded by `WindowMetricsPublisher`'s check. The reason is cost at the FFI
-boundary, not a rebuild storm: an unconditional per-frame re-provide would burn a lock write plus an allocation every frame on the
-mobile path. Separately, when a rebuild does run it rebuilds the whole app — there is no per-component skipping — which is
-affordable only because builds are cheap by construction.
+A shell must still re-provide only on actual change (`WindowMetricsPublisher`'s check), for FFI cost, not a rebuild storm: a
+per-frame re-provide would burn a lock write plus an allocation every mobile frame. A rebuild, when it runs, rebuilds the whole
+app (no per-component skipping), affordable only because builds are cheap by construction.
 
 ## Focus/IME Lifecycle
 
@@ -424,6 +418,25 @@ traversal grant; a pointer `Down`, any claim honoured outside a grant and any se
 `:focus-visible`. A ring change bumps the paint epoch, so retained pages
 re-record. The facade re-exports this vocabulary flat and under `frust::authoring`.
 
+## Held Modifiers and Key Release
+
+**Held modifiers.** A shell pushes the chord it sees held with `RenderRoot::set_modifiers` (`clear_modifiers` on focus loss); the
+store dirties nothing, requests no frame and dispatches no event, so a modifier change alone reaches no widget. Modifier keys are
+never `Key` events, only the chord. `EventCtx::modifiers()` is pass-scoped: a `Key`/`KeyUp` pass (and an overlay-forwarded key)
+reads the key's own chord, any other `RenderRoot::event` pass the pushed set, a nested root dispatch the open pass's value, and
+anything outside `event` (build, paint) `Modifiers::NONE`. `Modifiers` has `NONE`/`SHIFT`/`CTRL`/`ALT`/`META` constants.
+
+**Key release.** The root holds each key delivered as a non-repeat `Key` (characters compared case-insensitively; 64 at most, a
+press past that releasing the oldest). A shell reports the release as `InputEvent::KeyUp`, focus-routed to whatever holds focus at
+delivery and never offered on the declined-key chain (a pod fed by `forward_declined_keys_to` sees only the press); a `KeyUp` for a
+key not held is dropped, so a press is released at most once. Then, handled or not, the shortcut that answered the press gets
+`ShortcutReleased(id)` (through the owner's slot for a pod-stamped one) by the id recorded at the press, not a table re-match, so
+letting a modifier go first strands nothing; containers forward it to every child. `KeyUp` means "no longer down", not "press
+completed": the root synthesizes one, with no modifiers, for a fresh press of a key still held (a lost release self-heals) and for
+every held key, oldest first, on `RenderRoot::cancel_held_keys` (window focus loss). An auto-repeat never opens an entry: a repeat
+of a held key is offered to shortcuts as usual, one of a key not held reaches the focus path and forward target but no shortcut.
+A source with no release path sends the press and its release at once (SHELLS_ARCHITECTURE.md's Cross-cutting host signals).
+
 ## Hover and Cursor
 
 Hover has no Enter/Leave phase; it is an opt-in claim a widget records from its own uncaptured
@@ -435,11 +448,9 @@ chain, and a link counts as hovered only while its stamp still matches the live 
 the chain exactly like focus. `RenderRoot::event` advances the epoch once per hover pass — an
 uncaptured `Move` (which may record a claim) or the `Down`/`Up`/`Cancel` that ends a hover outright
 — which strands the previous claimant's stamp with no leave event or explicit clearing required. A
-structural rebuild that drops the pod holding the *live* claim (not merely a stale, already-stranded
-one) has no hover pass to strand it with — `RenderRoot::rebuild` releases it explicitly instead, via
-the same per-thread mark/drain shape (`mark_hover_orphaned`/`take_hover_orphaned`) as the
-focus-orphan release above, so an unmounted claimant can never leave the root's hover mirror standing
-on a widget that no longer exists.
+structural rebuild that drops the pod holding the *live* claim has no hover pass to strand it with,
+so `RenderRoot::rebuild` releases it through the focus-orphan mark/drain shape
+(`mark_hover_orphaned`/`take_hover_orphaned`) and the mirror never outlives its claimant.
 
 What is recorded is a **path**, so `EventCtx::is_hovered`/`PaintCtx::is_hovered` answer "this
 widget or a descendant of it holds the link" (CSS `:hover` semantics — an enclosing container reads
@@ -456,12 +467,10 @@ The cursor is hover's sibling channel and deliberately not derived from it: `Eve
 writes a per-pass, per-thread request that `RenderRoot::event` resolves into the cached `cursor`
 field on any pointer `Move` (captured included, so a drag keeps its own shape), last writer wins,
 and absence resolves to `CursorIcon::Default`. Every other pass leaves `cursor` standing. The request
-slot is bracketed per pass by the shared `RequestPass` guard rather than a bare clear/take pair, so a
-dispatch that re-enters `RenderRoot::event` (nothing in this workspace does today, but the guard
-makes it safe regardless) resolves its own nested pass independently and hands the slot back to the
-enclosing one on exit, instead of the inner pass clobbering a request the outer pass had already
-collected. A shell reads the resolved cursor via `RenderRoot::cursor()` — see
-[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) for the desktop-only apply path.
+slot is bracketed per pass by the shared `RequestPass` guard, so a dispatch that re-enters
+`RenderRoot::event` resolves its own nested pass and hands the slot back to the enclosing one intact.
+A shell reads the resolved cursor via `RenderRoot::cursor()` — see
+[SHELLS_ARCHITECTURE.md](SHELLS_ARCHITECTURE.md) for the desktop and web apply paths.
 
 The clipboard write and the paste request are the cursor's siblings in that same guard — one bracket
 over every pass-scoped request channel, opened and closed per dispatch. `EventCtx::write_clipboard`
@@ -524,13 +533,11 @@ primary press outside *every* registered rect produces: `OutsideTap::Notify { co
 surface, where consuming closes the surface without also activating what sits under it and
 non-consuming lets the press continue into the main tree.
 
-Entries live exactly one paint pass — the registry is cleared when `RenderRoot::paint` opens and
-drained once the main tree has painted. A surface stays alive only while its owner keeps
-registering, so a kept-mounted exit animation is just "keep registering while it runs", an owner
-that stops (or is unmounted) drops out of the routing table after the next paint, and there is
-nothing to unregister and no way to leak an entry. Between passes the root retains the routing half
-only — key, band, input class, outside-tap policy, rect — never the pod, so a pod's lifetime stays
-exactly its owner's.
+Entries live exactly one paint pass (cleared when `RenderRoot::paint` opens, drained once the main
+tree has painted): a kept-mounted exit animation keeps registering while it runs, an owner that stops
+or unmounts drops out of routing after the next paint, and nothing can leak. Between passes the root
+keeps the routing half only — key, band, input class, outside-tap policy, rect — never the pod, so a
+pod's lifetime stays exactly its owner's.
 
 An entry's `OverlayKeys` (default `Pass`) says whether it claims declined keys (see Keyboard Shortcuts and Traversal).
 v1 deliberately excludes three things: no auto-focus (a modal pod masks shortcuts, confines traversal and ends a
@@ -561,20 +568,20 @@ one binary cannot fight over it and an app's explicit choice survives a catalog 
 | `Component` / `ComponentView` / `ComponentWidget` | Stateful widget analog with a per-instance reactive `Owner`; `build` returns `impl View<Self::State>` |
 | `AnyView<State>` / `any()` | Type-erased `View` (`Element = Box<dyn Widget>`); construction is idempotent, so erasure happens once at an API boundary |
 | `ViewSeq<State, M>` / `views()` | Child-sequence trait a container's list parameter takes (`impl ViewSeq<State, M>`, `M` an inference marker): a `View`, a tuple ≤ 12, `Vec`, array, `Option`, or `views(iter)`; `extend_views` erases each element once into the container's `Vec<AnyView>` |
-| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including the broadcast variants (`Housekeeping`, `Overlay`, `Shortcut`; a file drop's `Ended` phase also broadcasts) and the focus-routed `EditCommand` (see Data Flow), declined-key forwarding (`forward_declined_keys_to`/`consume_overlay_key`), opt-in hover claiming (`claim_hover`/`is_hovered`), the multi-contact pair (`pointer_id`/`capture_contacts`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
+| `EventCtx` / `EventOutcome` / `InputEvent` | Event-pass context, result, and input vocabulary — including the broadcast variants (`Housekeeping`, `Overlay`, `Shortcut`, `ShortcutReleased`; a file drop's `Ended` phase also broadcasts) and the focus-routed `KeyUp` and `EditCommand` (see Data Flow), the pass-scoped `modifiers()` (see Held Modifiers and Key Release), declined-key forwarding (`forward_declined_keys_to`/`consume_overlay_key`), opt-in hover claiming (`claim_hover`/`is_hovered`), the multi-contact pair (`pointer_id`/`capture_contacts`), and the per-pass request channels (`set_cursor`, `write_clipboard`, `request_paste`, `dispatch_edit_command`) |
 | `PointerId` / `PointerSource` | A pointer contact's identity (device plus slot), riding beside a `PointerEvent` and read via `EventCtx::pointer_id()` — see Data Flow's Multi-contact pointer routing |
 | `ScaleEvent` / `ScalePhase` | A pinch/zoom gesture event, hit-tested and bubbling like `Scroll` — see Data Flow's Scale gestures |
 | `FileDropEvent` / `FileDropPhase` | A desktop OS file-drag event (`Hover`/`Drop`/`Cancel`), hit-tested and bubbling like `Scroll`, bypassing the overlay pre-pass, plus the root's broadcast-only `Ended` follow-up to every `Drop`/`Cancel` — see Data Flow's Desktop file drop |
 | `frust_core::hit::point_in_transformed_rect` / `checked_inverse` | Hit-testing helpers for content drawn under an arbitrary `Affine` — what `ChildPod::set_transform` uses internally, exposed for a canvas hit closure or pan/zoom container |
 | `EditCommand` | The four clipboard/selection verbs a shell or a floated toolbar hands the focused editable: `Copy`/`Cut` carry nothing (the widget owns the selection and answers into the clipboard slot), `Paste(text)` carries text already read by the shell, `SelectAll` is pure selection. `Debug` redacts the paste payload |
 | `OverlayEntry` / `OverlayKey` / `OverlayBand` / `OverlayInput` / `OutsideTap` / `OverlayKeys` | One floated surface's registration and the five rules the root reads back from it — owner identity, z-band, whether it hit-tests at all, what a press outside every surface delivers (see Overlay Portal), and whether it is modal for keys |
-| `OverlayEvent` / `OverlayEventKind` | What a routed overlay broadcast carries, always in absolute window space: `Pointer`, `Scroll`, `Scale`, the positionless `OutsideDown` light-dismiss notification, and the key-side `Shortcut`/`Key` deliveries (see Keyboard Shortcuts and Traversal) |
-| `Chord` / `ShortcutDecl` / `ShortcutId` / `ShortcutScope` / `ShortcutHint` / `FocusRingPolicy` | The shortcut vocabulary (a key plus its exact modifiers, one declaration, its identity, its tier, and the read-only listing a palette shows) and when the focused widget draws a ring — see Keyboard Shortcuts and Traversal |
+| `OverlayEvent` / `OverlayEventKind` | What a routed overlay broadcast carries, always in absolute window space: `Pointer`, `Scroll`, `Scale`, the positionless `OutsideDown` light-dismiss notification, and the key-side `Shortcut`/`ShortcutReleased`/`Key` deliveries (see Keyboard Shortcuts and Traversal) |
+| `Modifiers` / `Chord` / `ShortcutDecl` / `ShortcutId` / `ShortcutScope` / `ShortcutHint` / `FocusRingPolicy` | The held chord (flat in the facade too), the shortcut vocabulary (a key plus its exact modifiers, one declaration, its identity, its tier, and the read-only listing a palette shows) and when the focused widget draws a ring — see Keyboard Shortcuts and Traversal |
 | `SelectionToolbarRequest` / `SelectionToolbarActions` / `SelectionToolbarPolicy` | What a field with a selection publishes each paint (window-space anchor plus the enabled verb set) and who draws the bar for it — a `Framework` pod or the platform's `Native` menu |
 | `PaintCtx` / `PaintScene` / `PaintOutcome` | Paint-pass context and the renderer-agnostic paint target; `PaintCtx::is_hovered` is the authoritative hover read, `PaintCtx::origin` the absolute window-space origin (see Data Flow). `PaintScene` additionally carries `fill_rounded_rect_radii`/`push_clip_rounded_radii`/`stroke_path_dashed` — default, delegating methods, so no third-party sink is forced to implement per-corner rounding or dashing itself. `draw_scene_texture(id, dest)` composites an externally bound texture, `id` a `SceneTextureId::get()` from the `frust::gpu` `ExternalPass` seam (see RENDER_ARCHITECTURE.md); an unbound id draws nothing and is warned once by the engine, the paint is always blended, and the method is itself defaulted to a no-op. The retained and Phase 3 methods default too: `push_retained`/`pop_retained`/`draw_retained` (the default pair emulates a bracket as transform plus layer; `SceneBuilder` records `PushRetained`/`PopRetained`/`DrawRetained`), `current_transform()` (`None` unless the sink tracks one; `SceneBuilder` answers its own), `push_clip_path(origin, &BezPath)` (default: the path's bbox as a rect clip) and `backdrop_blur(origin, size, radius)` (default no-op). Contract: a renderer that does not retain and never publishes a ledger paints every `PushRetained` body inline and is never sent `DrawRetained`; a renderer that publishes a ledger must serve every key it lists or refuse the frame |
 | `DiscardScene` | frust-core's all-no-op `PaintScene` sink: runs a subtree's paint pass purely for its side effects (hero-rect capture through `PaintCtx::with_hero_registry`, paint-time widget state) with no scene command emitted — see WIDGETS_ARCHITECTURE.md's "Alpha-zero paint redirect" for the consumer-side detail |
 | `CornerRadii` / `DashPattern` / `TextAlign` / `TextOverflow` | Re-exported through `frust-core` and `frust::authoring`; the per-corner-rounding, dashed-stroke, and text-overflow vocabulary `PaintScene`/`frust-text` consume (see RENDER_ARCHITECTURE.md) |
-| `CursorIcon` | Non-exhaustive pointer-shape request vocabulary (`Default`/`Pointer`/`Text`/`Grab`/`Grabbing`/`ColResize`/`RowResize`/`NotAllowed`) a widget asks for via `EventCtx::set_cursor`, resolved into `RenderRoot::cursor()` |
+| `CursorIcon` | Non-exhaustive pointer-shape request vocabulary of twelve shapes (`Default`/`Pointer`/`Text`/`Grab`/`Grabbing`/`ColResize`/`RowResize`/`NotAllowed`/`Crosshair`/`Move`/`ZoomIn`/`ZoomOut`) a widget asks for via `EventCtx::set_cursor`, resolved into `RenderRoot::cursor()` |
 | `Scene` / `SceneBuilder` / `Command` | The renderer-agnostic vector display list |
 | `GlyphRun` / `ShaderProgram` | Shaped-text carrier and opaque shader handle riding through `Scene` |
 | `ReactiveRuntime` / `TrackedScope` / `FrameWaker` | Process-wide reactive substrate and its rebuild-wake bridge |
