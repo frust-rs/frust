@@ -7,11 +7,13 @@ from the section for the tag (see [docs/RELEASING.md](docs/RELEASING.md)).
 **Versioning.** Frust is pre-1.0 and in alpha. A 0.x.y patch may contain source-breaking and
 behaviour-changing entries. Every such entry is listed under Breaking in that release's section,
 with its migration, and named in the release summary. To avoid surprises, pin an exact version
-(`version = "=0.6.6"`, the version you tested) on the facade and on every frust plugin crate, which
+(`version = "=0.6.7"`, the version you tested) on the facade and on every frust plugin crate, which
 share one version. Or commit `Cargo.lock` and read the Breaking block before running
 `cargo update`. The full rule is in [docs/RELEASING.md](docs/RELEASING.md) § Versioning.
 
 ## Unreleased
+
+## 0.6.7 — 2026-11-28
 
 A patch release (the 0.6.x line continues) with thirty-five source and behaviour breaks, each listed
 under Breaking with its migration. The minimum supported Rust version is now 1.89 (`frust-onnx`

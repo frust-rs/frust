@@ -13,13 +13,13 @@ readme = "README.md"
 
 [dependencies]
 # Facade-tier plugin (no OS arm). Published as frust-ui, imported as frust (crates.io `frust` is taken).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.6", default-features = false }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.7", default-features = false }
 
 [dev-dependencies]
 # Test-only: tests drive a real `RenderRoot` and widget fixtures (not re-exported by the facade).
 frust-core = { workspace = true }
 frust-reactive = { workspace = true }
-frust-widgets = { path = "../../crates/frust-widgets", version = "0.6.6", features = ["test-support"] }
+frust-widgets = { path = "../../crates/frust-widgets", version = "0.6.7", features = ["test-support"] }
 # Test-only: `frust-testing` is `publish = false`, so it is a path-only dev-dependency (cargo drops it from the
 # packaged manifest). It runs the CPU golden corpus in `tests/goldens.rs`.
 frust-testing = { path = "../../crates/frust-testing" }

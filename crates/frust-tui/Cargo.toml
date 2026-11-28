@@ -17,12 +17,12 @@ name = "frust_tui"
 path = "src/lib.rs"
 
 [dependencies]
-frust-drive = { path = "../frust-drive", version = "0.6.6" }
-frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.6.6" }
+frust-drive = { path = "../frust-drive", version = "0.6.7" }
+frust-devtools-protocol = { path = "../frust-devtools-protocol", version = "0.6.7" }
 # Embedded MCP server over shared session backend (tooling-only, docs/ARCHITECTURE.md).
-frust-mcp = { path = "../frust-mcp", version = "0.6.6" }
+frust-mcp = { path = "../frust-mcp", version = "0.6.7" }
 # Embedded DAP server over same `TuiSessionBackend` (tooling-only, docs/ARCHITECTURE.md).
-frust-dap = { path = "../frust-dap", version = "0.6.6" }
+frust-dap = { path = "../frust-dap", version = "0.6.7" }
 anyhow.workspace = true
 thiserror.workspace = true
 ratatui.workspace = true
@@ -53,4 +53,4 @@ arboard = { workspace = true }
 
 [dev-dependencies]
 insta.workspace = true
-frust-drive = { path = "../frust-drive", version = "0.6.6", features = ["test-util"] }
+frust-drive = { path = "../frust-drive", version = "0.6.7", features = ["test-util"] }

@@ -29,9 +29,9 @@ required-features = ["frust-api", "vision"]
 log = { workspace = true }
 thiserror = { workspace = true }
 # The downloader only: `hub` keeps `frust-ui` out of the tree.
-frust-models = { path = "../models", version = "0.6.6", default-features = false, features = ["hub"], optional = true }
+frust-models = { path = "../models", version = "0.6.7", default-features = false, features = ["hub"], optional = true }
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project.
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.6", default-features = false, optional = true }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.7", default-features = false, optional = true }
 
 [dev-dependencies]
 # Dev-only: the facade does not re-export `ReactiveRuntime`, whose UI-thread queue the api tests

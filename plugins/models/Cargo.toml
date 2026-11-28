@@ -23,14 +23,14 @@ name = "download_component"
 required-features = ["frust-api", "hub"]
 
 [dependencies]
-frust-paths = { path = "../../crates/frust-paths", version = "0.6.6" }
+frust-paths = { path = "../../crates/frust-paths", version = "0.6.7" }
 log = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # `default-features = false`: a library never turns on the facade's defaults; the app decides.
 # Published as frust-ui, imported as frust: crates.io `frust` belongs to another project (https://github.com/lloydmeta/frunk/issues/258).
-frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.6", default-features = false, optional = true }
+frust = { package = "frust-ui", path = "../../crates/frust", version = "0.6.7", default-features = false, optional = true }
 ureq = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
@@ -56,4 +56,4 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
 # calls the same Looper check as the sibling plugins; Android-only, behind `hub`.
 [target.'cfg(target_os = "android")'.dependencies]
 jni = { workspace = true, optional = true }
-frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.6", optional = true }
+frust-plugin = { path = "../../crates/frust-plugin", version = "0.6.7", optional = true }

@@ -131,7 +131,7 @@ Pre-1.0. APIs are unstable and may change without notice between commits.
 
 A patch release (0.x.y) may contain source-breaking and behaviour-changing entries. Each is listed
 under Breaking in the [CHANGELOG](CHANGELOG.md) with its migration. To avoid surprises, pin the
-exact version you tested, for example `frust-ui = "=0.6.6"`, on the facade and on every frust plugin
+exact version you tested, for example `frust-ui = "=0.6.7"`, on the facade and on every frust plugin
 crate, or commit `Cargo.lock` and read the Breaking block before `cargo update`.
 
 > [!WARNING]
